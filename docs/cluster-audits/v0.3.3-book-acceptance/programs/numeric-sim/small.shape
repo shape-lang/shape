@@ -1,0 +1,61 @@
+// numeric-sim small program -- Monte Carlo + ODE, book-primary.
+// Book sources:
+//   stdlib/core/monte_carlo.mdx  (monte_carlo, monte_carlo_stats)
+//   stdlib/core/ode.mdx          (euler, rk4)
+//   stdlib/core/random.mdx       (random, random_seed)  [referenced by monte_carlo]
+//
+// Determinism: seed the RNG with random_seed(42) before the MC run (random.mdx
+// states "Calling random_seed with the same value resets the generator ...
+// subsequent calls to random produce identical results").
+//
+// ODE check is seed-free: exponential decay dy/dt = -y, y0 = 1.
+//   Analytic solution y(t) = e^{-t}, so y(5) = e^{-5} = 0.006737947...
+//   The book (ode.mdx) itself annotates euler's y(5) as "~0.0067".
+//   RK4 is 4th-order so it should be very close to the analytic value.
+
+use std::core::ode
+use std::core::monte_carlo
+from std::core::random use { random, random_seed }
+
+fn approx(a: number, b: number, tol: number) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    ad < tol
+}
+
+// --- ODE: exponential decay, assert against analytic e^{-5} ---
+let decay = |t: number, y: number| 0.0 - y
+
+let euler_traj = ode::euler(decay, 1.0, 0.0, 5.0, 0.01)
+let euler_y = euler_traj[euler_traj.length - 1].y
+// Euler with dt=0.01 is only 1st-order; book says ~0.0067. Loose tol.
+let euler_ok = approx(euler_y, 0.006737947, 0.001)
+
+let rk4_traj = ode::rk4(decay, 1.0, 0.0, 5.0, 0.01)
+let rk4_y = rk4_traj[rk4_traj.length - 1].y
+// RK4 4th-order: should match analytic e^{-5} to ~1e-6.
+let rk4_ok = approx(rk4_y, 0.0067379469990855, 0.00001)
+
+// --- Monte Carlo: estimate P(U < 0.5) = 0.5 with a seeded run ---
+random_seed(42)
+let report = monte_carlo::monte_carlo(2000, |i, cfg| {
+    let u = random()
+    if u < 0.5 { 1.0 } else { 0.0 }
+})
+let stats = monte_carlo::monte_carlo_stats(report.results)
+// Mean of Bernoulli(0.5) indicator ~ 0.5; with 2000 draws within ~0.05.
+let mc_ok = approx(stats.mean, 0.5, 0.05)
+let sims_ok = report.simulations == 2000
+
+print(f"euler_y={euler_y} ok={euler_ok}")
+print(f"rk4_y={rk4_y} ok={rk4_ok}")
+print(f"mc_mean={stats.mean} sims={report.simulations} ok={mc_ok}")
+
+if euler_ok && rk4_ok && mc_ok && sims_ok {
+    print("ALL_CHECKS_PASSED")
+} else {
+    if !euler_ok { print(f"CHECK_FAILED: euler expected=0.006737947 got={euler_y}") }
+    if !rk4_ok { print(f"CHECK_FAILED: rk4 expected=0.0067379469990855 got={rk4_y}") }
+    if !mc_ok { print(f"CHECK_FAILED: mc_mean expected=0.5 got={stats.mean}") }
+    if !sims_ok { print(f"CHECK_FAILED: sims expected=2000 got={report.simulations}") }
+}

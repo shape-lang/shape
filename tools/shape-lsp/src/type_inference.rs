@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use shape_ast::ast::{
-    Expr, TraitMemberSignature, Item, Literal, ObjectEntry, ObjectTypeField, Pattern, Program,
-    Statement, TraitMember, TypeAnnotation, VariableDecl,
+    Expr, Item, Literal, ObjectEntry, ObjectTypeField, Pattern, Program, Statement, TraitMember,
+    TraitMemberSignature, TypeAnnotation, VariableDecl,
 };
 use shape_runtime::metadata::UnifiedMetadata;
 use shape_runtime::schema_cache::{
@@ -38,6 +38,13 @@ pub fn type_annotation_to_string(ta: &TypeAnnotation) -> Option<String> {
             type_annotation_to_string(inner).map(|s| format!("{}[]", s))
         }
         TypeAnnotation::Reference(s) => Some(s.to_string()),
+        TypeAnnotation::Borrow { mutable, inner } => type_annotation_to_string(inner).map(|s| {
+            if *mutable {
+                format!("&mut {}", s)
+            } else {
+                format!("&{}", s)
+            }
+        }),
         TypeAnnotation::Generic { name, args } => {
             let arg_strs: Vec<String> = args.iter().filter_map(type_annotation_to_string).collect();
             Some(format!("{}<{}>", name, arg_strs.join(", ")))
@@ -85,7 +92,9 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
         Expr::Literal(lit, _) => Some(infer_literal_type(lit)),
         Expr::FunctionCall { name, .. } => infer_function_return_type(name),
         Expr::QualifiedFunctionCall {
-            namespace, function, ..
+            namespace,
+            function,
+            ..
         } => infer_function_return_type(&format!("{}::{}", namespace, function)),
         Expr::EnumConstructor { enum_name, .. } => Some(enum_name.to_string()),
         Expr::MethodCall {
@@ -218,7 +227,12 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
             return_type,
             body,
             ..
-        } => Some(render_closure_signature(params, return_type.as_ref(), body, env)),
+        } => Some(render_closure_signature(
+            params,
+            return_type.as_ref(),
+            body,
+            env,
+        )),
         Expr::Duration(_, _) => Some("Duration".to_string()),
         Expr::Spread(_, _) => None,
         Expr::If(_, _) => None,
@@ -396,11 +410,7 @@ pub fn array_element_type(ty: &str) -> Option<&str> {
 /// receiver's array shape when the closure body cannot be inferred (preserves
 /// chain-hint type-prop through unannotated identity closures), and bare
 /// `Array` only as a last resort.
-fn infer_map_result_type(
-    receiver: &Expr,
-    args: &[Expr],
-    env: &HashMap<String, String>,
-) -> String {
+fn infer_map_result_type(receiver: &Expr, args: &[Expr], env: &HashMap<String, String>) -> String {
     let receiver_ty = infer_expr_type_with_env(receiver, env);
     let elem_ty: Option<String> = args.first().and_then(|arg| match arg {
         Expr::FunctionExpr {
@@ -453,7 +463,10 @@ fn infer_flat_map_result_type(
 ) -> String {
     let mapped = infer_map_result_type(receiver, args, env);
     // Strip one `Array<...>` layer if doubled.
-    if let Some(inner) = mapped.strip_prefix("Array<").and_then(|s| s.strip_suffix('>')) {
+    if let Some(inner) = mapped
+        .strip_prefix("Array<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
         if let Some(_) = array_element_type(inner) {
             return inner.to_string();
         }
@@ -658,6 +671,7 @@ fn collect_typed_pattern_bindings(pattern: &Pattern, env: &mut HashMap<String, S
         Pattern::Typed {
             name,
             type_annotation,
+            ..
         } => {
             if let Some(type_name) = type_annotation_to_string(type_annotation) {
                 env.insert(name.clone(), type_name);
@@ -686,7 +700,7 @@ fn collect_typed_pattern_bindings(pattern: &Pattern, env: &mut HashMap<String, S
             }
             shape_ast::ast::PatternConstructorFields::Unit => {}
         },
-        Pattern::Identifier(_) | Pattern::Literal(_) | Pattern::Wildcard => {}
+        Pattern::Identifier { .. } | Pattern::Literal(_) | Pattern::Wildcard => {}
     }
 }
 
@@ -871,11 +885,10 @@ pub fn resolve_struct_field_type(
                     // `default_type()` returns `None` for const generics
                     // (their default is an expression, not a type). B.3
                     // will route const defaults through a value-level path.
-                    let bound = generic_args.get(idx).cloned().or_else(|| {
-                        param
-                            .default_type()
-                            .and_then(type_annotation_to_string)
-                    });
+                    let bound = generic_args
+                        .get(idx)
+                        .cloned()
+                        .or_else(|| param.default_type().and_then(type_annotation_to_string));
                     if let Some(bound) = bound {
                         bindings.insert(param.name().to_string(), bound);
                     }
@@ -919,7 +932,13 @@ pub fn type_to_string(ty: &Type) -> String {
 /// Returns `None` when inference fails or resolves to unknown.
 pub fn infer_expr_type_via_engine(expr: &Expr) -> Option<String> {
     let mut engine = TypeInferenceEngine::new();
-    match engine.infer_expr(expr) {
+    // `infer_expr_finalized` solves the expression's constraints and grounds a
+    // DEFERRED `Ok`/`Err`/`Some` bare-int-literal payload var to its natural
+    // `int` before substitution — so `let r = Ok(1)?` displays `: int` rather
+    // than the unresolved `: T` that bare `infer_expr` would leak (the
+    // payload-deferral introduced for ROOT-B never runs its post-solve default
+    // on the single-expr path otherwise).
+    match engine.infer_expr_finalized(expr) {
         Ok(ty) => {
             let s = type_to_string(&ty);
             if s == "unknown" { None } else { Some(s) }
@@ -1350,20 +1369,24 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
             let Some(param_name) = ast_param.simple_name() else {
                 continue;
             };
-            let compiler_mode = param_modes
-                .get(idx)
-                .copied()
-                .unwrap_or(if ast_param.is_reference {
-                    ParamPassMode::ByRefShared
-                } else {
-                    ParamPassMode::ByValue
-                });
+            let compiler_mode =
+                param_modes
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(if ast_param.is_reference {
+                        ParamPassMode::ByRefShared
+                    } else {
+                        ParamPassMode::ByValue
+                    });
             let mode_from_compiler = match compiler_mode {
                 ParamPassMode::ByRefExclusive => Some(ParamReferenceMode::Exclusive),
                 ParamPassMode::ByRefShared => Some(ParamReferenceMode::Shared),
                 ParamPassMode::ByValue => None,
             };
-            let mode = match (mode_from_compiler, lsp_display_modes.get(idx).copied().flatten()) {
+            let mode = match (
+                mode_from_compiler,
+                lsp_display_modes.get(idx).copied().flatten(),
+            ) {
                 (Some(m), _) => m,
                 (None, Some(m)) => m,
                 (None, None) => continue,
@@ -1396,8 +1419,14 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
                 return_type: None,
             });
 
-        if func_def.return_type.is_none() && info.return_type.is_none() {
-            info.return_type = infer_function_return_from_body_via_engine(func_def);
+        if func_def.return_type.is_none() {
+            if let Some(body_return) = infer_function_return_from_body_via_engine(func_def) {
+                // A tail `Err(...)` can leave the success type unresolved; keep
+                // the whole-function engine result when it knows more.
+                if !body_return.contains("unknown") {
+                    info.return_type = Some(body_return);
+                }
+            }
         }
 
         // Fully annotated signatures don't need inferred hints.
@@ -2289,7 +2318,9 @@ fn interface_member_doc(member: &TraitMemberSignature) -> Option<String> {
     match member {
         TraitMemberSignature::Method { doc_comment, .. }
         | TraitMemberSignature::Property { doc_comment, .. }
-        | TraitMemberSignature::IndexSignature { doc_comment, .. } => method_doc(doc_comment.as_ref()),
+        | TraitMemberSignature::IndexSignature { doc_comment, .. } => {
+            method_doc(doc_comment.as_ref())
+        }
     }
 }
 

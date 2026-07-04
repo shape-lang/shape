@@ -152,8 +152,7 @@ r
 "#,
     );
     assert!(
-        err.to_lowercase().contains("out of bounds")
-            || err.to_lowercase().contains("index"),
+        err.to_lowercase().contains("out of bounds") || err.to_lowercase().contains("index"),
         "expected an out-of-bounds runtime error, got: {}",
         err
     );

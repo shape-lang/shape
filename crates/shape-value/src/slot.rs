@@ -26,11 +26,11 @@
 // `TypedArray<T>` per-element-kind constructor rebuild in a downstream
 // wave (e.g. `from_typed_array_f64(Arc<TypedArray<f64>>)` /
 // `from_typed_array_i64(...)` per the new monomorphic carrier shape).
-use crate::heap_value::{
-    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapValue, IoHandleData,
-    LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData, TypedObjectStorage,
-};
 use crate::datatable::DataTable;
+use crate::heap_value::{
+    AtomicData, ChannelData, DequeData, HashSetData, HeapValue, IoHandleData, LazyData, MutexData,
+    NativeViewData, PriorityQueueData, RangeData, TypedObjectStorage,
+};
 use std::sync::Arc;
 
 /// A raw 8-byte value slot for TypedObject field storage.
@@ -83,16 +83,14 @@ impl ValueSlot {
     // forbidden (ADR-006 §13, Q6 ruling): per-FieldType constructors only.
     // See docs/adr/006-value-and-memory-model.md.
     #[cfg(not(feature = "gc"))]
-    #[deprecated(
-        note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
+    #[deprecated(note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
                 (`from_string_arc`, `from_typed_object`, \
                 `from_decimal`, `from_bigint`, `from_hashmap`, ...). \
                 Array fields: V3-S5 ckpt-4 deleted `from_typed_array` along \
                 with the `TypedArrayData` enum; per-element-kind \
                 `from_typed_array_<T>(Arc<TypedArray<T>>)` constructors \
                 are the v2-raw replacement (downstream wave rebuild). \
-                See ADR-006 §2.4 + W12 audit §3.5/§B."
-    )]
+                See ADR-006 §2.4 + W12 audit §3.5/§B.")]
     pub fn from_heap(value: HeapValue) -> Self {
         let ptr = Box::into_raw(Box::new(value)) as u64;
         Self(ptr)
@@ -100,16 +98,14 @@ impl ValueSlot {
 
     /// Store any HeapValue on the GC heap.
     #[cfg(feature = "gc")]
-    #[deprecated(
-        note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
+    #[deprecated(note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
                 (`from_string_arc`, `from_typed_object`, \
                 `from_decimal`, `from_bigint`, `from_hashmap`, ...). \
                 Array fields: V3-S5 ckpt-4 deleted `from_typed_array` along \
                 with the `TypedArrayData` enum; per-element-kind \
                 `from_typed_array_<T>(Arc<TypedArray<T>>)` constructors \
                 are the v2-raw replacement (downstream wave rebuild). \
-                See ADR-006 §2.4 + W12 audit §3.5/§B."
-    )]
+                See ADR-006 §2.4 + W12 audit §3.5/§B.")]
     pub fn from_heap(value: HeapValue) -> Self {
         let heap = shape_gc::thread_gc_heap();
         let ptr = heap.alloc(value) as u64;
@@ -365,9 +361,7 @@ impl ValueSlot {
     /// in E's Round 2 scope per dispatch contract; D2's lockstep flip
     /// handles the inner shift to `*mut TypedObjectStorage` once the
     /// TypedObjectStorage Arc-path retires.
-    pub fn from_trait_object_raw(
-        ptr: *const crate::heap_value::TraitObjectStorage,
-    ) -> Self {
+    pub fn from_trait_object_raw(ptr: *const crate::heap_value::TraitObjectStorage) -> Self {
         Self(ptr as u64)
     }
 
@@ -501,6 +495,8 @@ impl std::fmt::Debug for ValueSlot {
 }
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -548,14 +544,12 @@ mod tests {
     /// boundary.
     #[test]
     fn test_from_decimal_roundtrip() {
-        let d: Arc<rust_decimal::Decimal> =
-            Arc::new(rust_decimal::Decimal::new(123, 2));
+        let d: Arc<rust_decimal::Decimal> = Arc::new(rust_decimal::Decimal::new(123, 2));
         let raw_before = Arc::as_ptr(&d) as u64;
         let slot = ValueSlot::from_decimal(d);
         assert_eq!(slot.raw(), raw_before);
         unsafe {
-            let _ =
-                Arc::<rust_decimal::Decimal>::from_raw(slot.raw() as *const _);
+            let _ = Arc::<rust_decimal::Decimal>::from_raw(slot.raw() as *const _);
         }
     }
 

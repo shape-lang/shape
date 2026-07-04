@@ -754,6 +754,13 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             format!("{}<{}>", name, parts.join(", "))
         }
         TypeAnnotation::Reference(name) => name.to_string(),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            if *mutable {
+                format!("&mut {}", format_type_annotation(inner))
+            } else {
+                format!("&{}", format_type_annotation(inner))
+            }
+        }
         TypeAnnotation::Void => "void".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "null".to_string(),

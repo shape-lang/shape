@@ -338,7 +338,7 @@ fn test_nested_map_flatten() {
     ShapeTest::new(
         r#"
         {
-            let arr = [[1, 2], [3, 4], [5, 6]].flatMap(|arr| arr)
+            let arr: Array<int> = [[1, 2], [3, 4], [5, 6]].flatMap(|arr| arr)
             arr[0] + arr[5]
         }
     "#,
@@ -366,7 +366,7 @@ fn test_flatten_then_filter() {
     ShapeTest::new(
         r#"
         {
-            let arr = [[1, 2], [3, 4], [5, 6]].flatMap(|arr| arr).filter(|x| x > 3)
+            let arr: Array<int> = [[1, 2], [3, 4], [5, 6]].flatMap(|arr| arr).filter(|x| x > 3)
             arr[0] + arr[1] + arr[2]
         }
     "#,

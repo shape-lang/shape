@@ -1,7 +1,6 @@
 //! TypedObject field access operations
 
 use super::{TYPED_OBJECT_HEADER_SIZE, TypedObject};
-use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
 impl TypedObject {

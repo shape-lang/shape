@@ -185,10 +185,8 @@ pub fn collect_document_links(
     });
 
     links.sort_by(|a, b| {
-        (a.range.start.line, a.range.start.character).cmp(&(
-            b.range.start.line,
-            b.range.start.character,
-        ))
+        (a.range.start.line, a.range.start.character)
+            .cmp(&(b.range.start.line, b.range.start.character))
     });
 
     links

@@ -1,0 +1,5 @@
+let v: Result<int, string> = Ok(42)
+match v {
+  Some(n) => print(n + 1),
+  None => print(-1),
+}

@@ -109,6 +109,11 @@ impl Unifier {
             };
         }
         match ann {
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable: *mutable,
+                inner: Box::new(self.apply_to_annotation(inner)),
+            },
+
             TypeAnnotation::Array(elem) => {
                 TypeAnnotation::Array(Box::new(self.apply_to_annotation(elem)))
             }
@@ -177,15 +182,6 @@ impl Unifier {
         }
     }
 
-    /// Merge another unifier's substitutions
-    pub fn merge(&mut self, other: &Unifier) {
-        for (var, ty) in &other.substitutions {
-            if !self.substitutions.contains_key(var) {
-                self.bind(var.clone(), ty.clone());
-            }
-        }
-    }
-
     /// Clear all substitutions
     pub fn clear(&mut self) {
         self.substitutions.clear();
@@ -194,75 +190,5 @@ impl Unifier {
     /// Get all substitutions
     pub fn substitutions(&self) -> &HashMap<TypeVar, Type> {
         &self.substitutions
-    }
-
-    /// Try to unify two types without modifying this unifier's state
-    ///
-    /// Returns Ok(()) if the types can be unified, Err otherwise.
-    /// This is useful for soft constraints in bidirectional type checking.
-    pub fn try_unify(&self, t1: &Type, t2: &Type) -> Result<(), ()> {
-        use crate::type_system::unification::types_equal;
-
-        // Apply existing substitutions first
-        let t1 = self.apply_substitutions(t1);
-        let t2 = self.apply_substitutions(t2);
-
-        // Check if types are structurally equal after substitution
-        if types_equal(&t1, &t2) {
-            return Ok(());
-        }
-
-        // If either is a type variable, they can potentially unify
-        match (&t1, &t2) {
-            (Type::Variable(_), _) | (_, Type::Variable(_)) => Ok(()),
-            (Type::Generic { base: b1, args: a1 }, Type::Generic { base: b2, args: a2 }) => {
-                let is_result_base = |base: &Type| match base {
-                    Type::Concrete(TypeAnnotation::Reference(name)) => name == "Result",
-                    Type::Concrete(TypeAnnotation::Basic(name)) => name == "Result",
-                    _ => false,
-                };
-
-                self.try_unify(b1, b2)?;
-                if a1.len() != a2.len() {
-                    if is_result_base(b1) && is_result_base(b2) {
-                        if (a1.len() == 1 && a2.len() == 2) || (a1.len() == 2 && a2.len() == 1) {
-                            return self.try_unify(&a1[0], &a2[0]);
-                        }
-                        return Err(());
-                    }
-                    return Err(());
-                }
-                for (arg1, arg2) in a1.iter().zip(a2.iter()) {
-                    self.try_unify(arg1, arg2)?;
-                }
-                Ok(())
-            }
-            (Type::Concrete(ann1), Type::Concrete(ann2)) => {
-                if crate::type_system::unification::annotations_equal(ann1, ann2) {
-                    Ok(())
-                } else {
-                    Err(())
-                }
-            }
-            (
-                Type::Function {
-                    params: p1,
-                    returns: r1,
-                },
-                Type::Function {
-                    params: p2,
-                    returns: r2,
-                },
-            ) => {
-                if p1.len() != p2.len() {
-                    return Err(());
-                }
-                for (a, b) in p1.iter().zip(p2.iter()) {
-                    self.try_unify(a, b)?;
-                }
-                self.try_unify(r1, r2)
-            }
-            _ => Err(()),
-        }
     }
 }

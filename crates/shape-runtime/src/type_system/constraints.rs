@@ -34,6 +34,42 @@ use super::*;
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
 
+/// The exactly-representable value domain of a fixed-width numeric type, used
+/// by the §2 lossless-implicit lattice (numeric-conversion-spec).
+///
+/// Integers carry their full `[lo, hi]` value range as `i128` (wide enough for
+/// the `u64`/`i64` extremes). Floats (`number`/f64, `f32`) carry their
+/// exact-integer range (`[-2^53, 2^53]` / `[-2^24, 2^24]`) and set `is_float`.
+///
+/// `src` is LOSSLESS-IMPLICIT into `dst` iff `src`'s range is a subset of
+/// `dst`'s exactly-representable range AND the source/destination float-ness is
+/// compatible (an integer source may widen into a float destination whose
+/// exact-integer range contains it; a float source may only flow into another
+/// float — never silently into an integer).
+#[derive(Clone, Copy)]
+struct NumericDomain {
+    lo: i128,
+    hi: i128,
+    is_float: bool,
+}
+
+impl NumericDomain {
+    /// Whether every value of `self` is exactly representable in `dst`.
+    fn is_subset_of(&self, dst: &NumericDomain) -> bool {
+        if self.is_float && !dst.is_float {
+            // A float source is never silently an integer (number -> int is
+            // CAST-required in both the spec and THE RULE).
+            return false;
+        }
+        // Integer -> float (dst.is_float, !self.is_float): legal iff the whole
+        // integer range fits the float exact-integer range. Float -> float and
+        // integer -> integer: legal iff the range is a subset. The single
+        // range-subset test covers all three cases since the float domain's
+        // `[lo, hi]` IS its exact-integer range.
+        dst.lo <= self.lo && self.hi <= dst.hi
+    }
+}
+
 /// Check if a Type::Generic base is "Array" or "Vec".
 fn is_array_or_vec_base(base: &Type) -> bool {
     match base {
@@ -43,6 +79,27 @@ fn is_array_or_vec_base(base: &Type) -> bool {
     }
 }
 
+/// Collapse a degenerate `Union` to a single member when all its members are
+/// structurally equal (which includes the single-element `Union([T])` case).
+///
+/// Match arms whose branches all yield the same type combine into a
+/// `Union([T])` / `Union([T, T, ...])` during inference (e.g. `match { Some(v)
+/// => v, None => 0 }` where both arms are `int`). Such a union is just `T`, but
+/// the trait-bound check would otherwise stringify it (`Union([Basic("int")])`)
+/// and fail `Numeric`. A genuinely heterogeneous union (`Union([int, string])`)
+/// is left intact and continues to fail single-type trait bounds correctly.
+fn collapse_degenerate_union(ann: &TypeAnnotation) -> &TypeAnnotation {
+    if let TypeAnnotation::Union(members) = ann {
+        if let Some(first) = members.first() {
+            if members.iter().all(|m| m == first) {
+                return first;
+            }
+        }
+    }
+    ann
+}
+
+#[derive(Clone)]
 pub struct ConstraintSolver {
     /// Type unifier
     unifier: Unifier,
@@ -55,6 +112,10 @@ pub struct ConstraintSolver {
     method_table: Option<MethodTable>,
     /// Trait implementation registry: set of "TraitName::TypeName" keys
     trait_impls: HashSet<String>,
+    /// Named-struct field schemas: struct name → its structural object fields.
+    /// Lets the solver unify a nominal struct type (`Point`) with the
+    /// structural object type that flows in (`{ x: number, y: number }`).
+    struct_schemas: HashMap<String, Vec<ObjectTypeField>>,
 }
 
 impl Default for ConstraintSolver {
@@ -71,6 +132,7 @@ impl ConstraintSolver {
             bounds: HashMap::new(),
             method_table: None,
             trait_impls: HashSet::new(),
+            struct_schemas: HashMap::new(),
         }
     }
 
@@ -85,6 +147,43 @@ impl ConstraintSolver {
     /// Each entry is a "TraitName::TypeName" key indicating that TypeName implements TraitName.
     pub fn set_trait_impls(&mut self, impls: HashSet<String>) {
         self.trait_impls = impls;
+    }
+
+    /// Register named-struct field schemas so a nominal struct type can unify
+    /// with the structural object type that flows into it (and vice versa).
+    /// Each entry maps a struct name to its declared fields as
+    /// `ObjectTypeField`s — the same shape produced for an object literal.
+    pub fn set_struct_schemas(&mut self, schemas: HashMap<String, Vec<ObjectTypeField>>) {
+        self.struct_schemas = schemas;
+    }
+
+    /// Resolve a named struct's structural fields, if it is a registered
+    /// struct schema. Returns `None` for non-struct names (builtins, enums,
+    /// type aliases, unknown types) so those keep their existing behaviour.
+    fn struct_fields(&self, name: &str) -> Option<&[ObjectTypeField]> {
+        self.struct_schemas.get(name).map(|v| v.as_slice())
+    }
+
+    /// Unify a structural object's fields against a named struct's declared
+    /// fields. Only succeeds when `name` is a *registered struct schema*;
+    /// otherwise returns `Ok(false)` so non-struct references keep their
+    /// existing (non-unifying) behaviour. Field comparison is exact
+    /// (`object_fields_compatible`), so a structurally wrong object still
+    /// fails to unify and the program is still correctly rejected.
+    fn unify_object_with_named_struct(
+        &self,
+        obj_fields: &[ObjectTypeField],
+        name: &str,
+    ) -> TypeResult<bool> {
+        match self.struct_fields(name) {
+            Some(struct_fields) => {
+                // Clone the resolved fields to drop the borrow on `self`
+                // before the recursive `&self` call in object_fields_compatible.
+                let struct_fields = struct_fields.to_vec();
+                self.object_fields_compatible(obj_fields, &struct_fields)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Solve all type constraints
@@ -127,13 +226,86 @@ impl ConstraintSolver {
         Ok(())
     }
 
+    /// The SINGLE type-equivalence relation (U1).
+    ///
+    /// This is EQUIVALENCE, not unifiability: it answers "are these two types
+    /// the same type" for union/match-arm dedup, as-cast identity, and the soft
+    /// bidirectional hint-adoption probe. It replaces BOTH deleted procedures —
+    /// the standalone structural `types_equal` (which could not follow the
+    /// substitution chain and could not see two `Array<T>` encodings as equal,
+    /// STRUCTURAL-AUDIT SB-3/SB-4) AND `Unifier::try_unify` (which over-merged by
+    /// treating `Variable ~ anything` as "equal", wrongly collapsing distinct
+    /// union members).
+    ///
+    /// The relation is: resolve both sides through the live substitution store,
+    /// `canonicalize()` (folding every collection/generic encoding to the single
+    /// `Type::Generic` form), then compare structurally for EXACT equality. A
+    /// free `Type::Variable` is equal only to the same variable — it is NOT
+    /// bound, so this never mutates `self` and never collapses two concrete
+    /// members. Numeric widening / `AnyError` subsumption are *unifiability*
+    /// concerns handled by `solve_constraint` on the hard constraint path; they
+    /// are deliberately NOT part of equivalence (an `int` member and a `number`
+    /// member of a union stay distinct).
+    pub fn probe_equal(&self, t1: &Type, t2: &Type) -> bool {
+        let a = self.unifier.apply_substitutions(t1).canonicalize();
+        let b = self.unifier.apply_substitutions(t2).canonicalize();
+        Self::types_equivalent(&a, &b)
+    }
+
+    /// Structural EXACT equality over already-substituted, already-canonicalized
+    /// types — the comparison core of `probe_equal` (U1). The single source of
+    /// truth for type sameness; do not add a parallel structural comparison.
+    fn types_equivalent(a: &Type, b: &Type) -> bool {
+        match (a, b) {
+            (Type::Variable(v1), Type::Variable(v2)) => v1 == v2,
+            (Type::Concrete(ann1), Type::Concrete(ann2)) => {
+                crate::type_system::unification::annotations_equal(ann1, ann2)
+            }
+            (Type::Generic { base: b1, args: a1 }, Type::Generic { base: b2, args: a2 }) => {
+                a1.len() == a2.len()
+                    && Self::types_equivalent(b1, b2)
+                    && a1
+                        .iter()
+                        .zip(a2.iter())
+                        .all(|(x, y)| Self::types_equivalent(x, y))
+            }
+            (Type::Constrained { var: v1, .. }, Type::Constrained { var: v2, .. }) => v1 == v2,
+            (
+                Type::Function {
+                    params: p1,
+                    returns: r1,
+                },
+                Type::Function {
+                    params: p2,
+                    returns: r2,
+                },
+            ) => {
+                p1.len() == p2.len()
+                    && p1
+                        .iter()
+                        .zip(p2.iter())
+                        .all(|(x, y)| Self::types_equivalent(x, y))
+                    && Self::types_equivalent(r1, r2)
+            }
+            _ => false,
+        }
+    }
+
     /// Solve a single constraint
     fn solve_constraint(&mut self, t1: Type, t2: Type) -> TypeResult<()> {
         // Apply current substitutions before matching to avoid overwriting
         // existing bindings (e.g., T17=string overwritten by T17=T19 during
         // Function param/return pairwise unification).
-        let t1 = self.unifier.apply_substitutions(&t1);
-        let t2 = self.unifier.apply_substitutions(&t2);
+        //
+        // U1: canonicalize AFTER substitution so every residual encoding of a
+        // parametric collection / generic (`Concrete(Array(..))`,
+        // `Concrete(Generic{name:"Array"})`) — including any re-introduced by a
+        // stored binding — is folded to the single `Type::Generic{..}` form
+        // before matching. With this, no `Concrete(Array(..))` can reach the
+        // match arms; the former cross-form `Generic ~ Concrete(Array)` patch is
+        // deleted rather than kept as a parallel reconciliation arm.
+        let t1 = self.unifier.apply_substitutions(&t1).canonicalize();
+        let t2 = self.unifier.apply_substitutions(&t2).canonicalize();
 
         match (&t1, &t2) {
             // Variable constraints
@@ -161,12 +333,32 @@ impl ConstraintSolver {
                 Ok(())
             }
 
+            // Never is the BOTTOM type: a diverging branch
+            // (`return`/`break`/`continue`) produces no value, so its type
+            // unifies with anything. The if/else + match-arm inference already
+            // EXCLUDES a diverging branch from forming the expression type, but
+            // an all-diverging if/match yields `Never` directly; when that
+            // result lands in a value position (e.g. `let x = if c { return }
+            // else { return }`) the constraint against the expected type must
+            // succeed rather than mismatch.
+            (Type::Concrete(TypeAnnotation::Never), _)
+            | (_, Type::Concrete(TypeAnnotation::Never)) => Ok(()),
+
             // Concrete type constraints
             (Type::Concrete(ann1), Type::Concrete(ann2)) => {
                 if self.unify_annotations(ann1, ann2)? {
+                    // `unify_annotations` accepts identity plus the directional
+                    // §2 lossless-widening lattice (`lossless_implicit(ann1=src,
+                    // ann2=dst)`). Every non-subset numeric pair — int<->number
+                    // both ways, lossy narrowing, sign reinterpretation,
+                    // int(i64)/u64 -> number — falls through to the mismatch.
                     Ok(())
-                } else if Self::can_numeric_widen(ann1, ann2) {
-                    // Implicit numeric promotion (int → number/float)
+                } else if Self::is_any_error(ann1) || Self::is_any_error(ann2) {
+                    // `AnyError` is the top of the error lattice: the default `E`
+                    // for bare `Ok(..)`/`?`. It unifies with any concrete error
+                    // type (e.g. `Result<int, AnyError> ~ Result<T, string>`).
+                    // Bounded to `AnyError` so two distinct concrete named error
+                    // types still mismatch.
                     Ok(())
                 } else {
                     Err(TypeError::TypeMismatch(
@@ -209,6 +401,24 @@ impl ConstraintSolver {
                 Ok(())
             }
 
+            // Bare collection/concurrency annotations are accepted as the
+            // erased shorthand for the same structural generic carrier. This
+            // keeps `fn mk() -> Deque { return Deque().pushBack("x") }`
+            // statically typed without widening the rule to arbitrary nominal
+            // types.
+            (Type::Generic { base, .. }, Type::Concrete(TypeAnnotation::Reference(name)))
+            | (Type::Concrete(TypeAnnotation::Reference(name)), Type::Generic { base, .. })
+                if Self::is_erased_structural_carrier(base.as_ref(), name.as_str()) =>
+            {
+                Ok(())
+            }
+            (Type::Generic { base, .. }, Type::Concrete(TypeAnnotation::Basic(name)))
+            | (Type::Concrete(TypeAnnotation::Basic(name)), Type::Generic { base, .. })
+                if Self::is_erased_structural_carrier(base.as_ref(), name.as_str()) =>
+            {
+                Ok(())
+            }
+
             // Function ~ Function: pairwise unify params + returns
             (
                 Type::Function {
@@ -232,47 +442,20 @@ impl ConstraintSolver {
                 self.solve_constraint(*r1.clone(), *r2.clone())
             }
 
-            // Cross-compatibility: Type::Function ~ Concrete(TypeAnnotation::Function)
-            (
-                Type::Function {
-                    params: fp,
-                    returns: fr,
-                },
-                Type::Concrete(TypeAnnotation::Function {
-                    params: cp,
-                    returns: cr,
-                }),
-            )
-            | (
-                Type::Concrete(TypeAnnotation::Function {
-                    params: cp,
-                    returns: cr,
-                }),
-                Type::Function {
-                    params: fp,
-                    returns: fr,
-                },
-            ) => {
-                if fp.len() != cp.len() {
-                    return Err(TypeError::ArityMismatch(fp.len(), cp.len()));
-                }
-                for (f_param, c_param) in fp.iter().zip(cp.iter()) {
-                    self.solve_constraint(
-                        f_param.clone(),
-                        Type::Concrete(c_param.type_annotation.clone()),
-                    )?;
-                }
-                self.solve_constraint(*fr.clone(), Type::Concrete(*cr.clone()))
-            }
+            // SB-2: the former `Type::Function ~ Concrete(TypeAnnotation::Function)`
+            // cross-form arm is DELETED. `canonicalize()` (run at the top of every
+            // `solve_constraint` call) folds `Concrete(Function{..})` into
+            // `Type::Function{..}`, so a function on either side is always
+            // `Function ~ Function` and handled by the pairwise arm above. Keeping
+            // the cross-form arm would re-create the split-brain this unifies —
+            // exactly as the Array fold deleted its own cross-form arm below.
 
-            // Array<T> (Type::Generic with base "Array" or "Vec") ~ Concrete(Array(T))
-            (Type::Generic { base, args }, Type::Concrete(TypeAnnotation::Array(elem)))
-            | (Type::Concrete(TypeAnnotation::Array(elem)), Type::Generic { base, args })
-                if args.len() == 1 && is_array_or_vec_base(base) =>
-            {
-                self.solve_constraint(args[0].clone(), Type::Concrete((**elem).clone()))
-            }
-
+            // U1: the former `Generic ~ Concrete(Array(T))` cross-form arm is
+            // DELETED. `canonicalize()` (run at the top of every
+            // `solve_constraint` call) folds `Concrete(Array(..))` into
+            // `Type::Generic{Array, [..]}`, so an array on either side is always
+            // `Generic ~ Generic` and handled by the generic arm above. Keeping
+            // the cross-form arm would re-create the split-brain this unifies.
             _ => Err(TypeError::TypeMismatch(
                 format!("{:?}", t1),
                 format!("{:?}", t2),
@@ -295,44 +478,204 @@ impl ConstraintSolver {
         }
     }
 
-    /// Check if a numeric type can widen to another (directional).
-    ///
-    /// Integer-family types (`int`, `i16`, `u32`, `byte`, ...) can widen to
-    /// number-family types (`number`, `f32`, `f64`, ...).
-    /// `number → int` does NOT widen (lossy). `decimal → number` does NOT widen
-    /// (different precision semantics).
-    fn can_numeric_widen(from: &TypeAnnotation, to: &TypeAnnotation) -> bool {
-        let from_name = match from {
-            TypeAnnotation::Basic(name) => Some(name.as_str()),
-            TypeAnnotation::Reference(name) => Some(name.as_str()),
-            _ => None,
+    fn is_erased_structural_carrier(base: &Type, name: &str) -> bool {
+        let Type::Concrete(TypeAnnotation::Reference(base_name)) = base else {
+            return false;
         };
-        let to_name = match to {
-            TypeAnnotation::Basic(name) => Some(name.as_str()),
-            TypeAnnotation::Reference(name) => Some(name.as_str()),
-            _ => None,
-        };
+        let base_name = base_name.as_str();
+        base_name == name
+            && matches!(
+                name,
+                "Set"
+                    | "HashSet"
+                    | "HashMap"
+                    | "Map"
+                    | "Deque"
+                    | "PriorityQueue"
+                    | "Channel"
+                    | "Mutex"
+                    | "Lazy"
+            )
+    }
 
-        match (from_name, to_name) {
-            (Some(f), Some(t)) => {
-                BuiltinTypes::is_integer_type_name(f) && BuiltinTypes::is_number_type_name(t)
-            }
+    /// The numeric-conversion lossless lattice (numeric-conversion-spec §2).
+    ///
+    /// An ordered pair `(src, dst)` is **LOSSLESS-IMPLICIT** iff the entire
+    /// value range of `src` is a subset of the values exactly representable in
+    /// `dst`. This is the *only* implicit numeric conversion THE RULE (user
+    /// 2026-06-01) permits: every non-subset pair — `int <-> number` both
+    /// directions, lossy width narrowing (`u16 -> u8`, `i64 -> i32`), sign
+    /// reinterpretation (`i16 -> u16`, `u8 -> i8`), `int(i64) -> number`,
+    /// `u64 -> number`, `number -> int` — is CAST-REQUIRED.
+    ///
+    /// This replaces the two prior loose relaxations:
+    /// - `can_numeric_widen` (accepted *every* integer -> *any* float, so the
+    ///   lossy `int(i64) -> number` value-promotion silently passed), and
+    /// - `same_canonical_numeric_type` (collapsed all integer widths to a single
+    ///   `"int"` alias, so `u16 ~ u8` unified with no cast and silently wrapped
+    ///   300 -> 44).
+    ///
+    /// Identity (`src == dst`, after canonicalization) is trivially lossless.
+    ///
+    /// `decimal`/`bigint` are arbitrary/exact-precision heap types, NOT part of
+    /// the fixed-width lossless lattice: conversions to/from them are always an
+    /// explicit `as`-cast and are not accepted here (returns `false`).
+    fn lossless_implicit_names(src: &str, dst: &str) -> bool {
+        match (Self::numeric_domain(src), Self::numeric_domain(dst)) {
+            (Some(s), Some(d)) => s.is_subset_of(&d),
             _ => false,
         }
     }
 
+    /// Directional lossless-implicit check on annotations (src widens to dst).
+    fn lossless_implicit(src: &TypeAnnotation, dst: &TypeAnnotation) -> bool {
+        match (Self::annotation_name(src), Self::annotation_name(dst)) {
+            (Some(s), Some(d)) => Self::lossless_implicit_names(s, d),
+            _ => false,
+        }
+    }
+
+    /// Resolve a numeric type name to its exactly-representable value domain.
+    ///
+    /// Integers carry their `[lo, hi]` value range (as `i128`, wide enough for
+    /// the full `u64`/`i64` range). `number`/`f32` carry the f64/f32
+    /// exact-integer range `[-2^53, 2^53]` / `[-2^24, 2^24]` plus a `float`
+    /// flag (a float domain is a *strict superset destination* only for integer
+    /// sources whose whole range fits — and for float->float widening). Returns
+    /// `None` for non-fixed-width-numeric names (`decimal`, named types, ...).
+    fn numeric_domain(name: &str) -> Option<NumericDomain> {
+        // Width names with a concrete [min, max] range.
+        if let Some(w) = shape_ast::IntWidth::from_name(name) {
+            let (lo, hi) = if w.is_signed() {
+                (w.min_value() as i128, w.max_value() as i128)
+            } else {
+                (0i128, w.max_unsigned() as i128)
+            };
+            return Some(NumericDomain {
+                lo,
+                hi,
+                is_float: false,
+            });
+        }
+        // The script primitives + aliases not covered by IntWidth.
+        match BuiltinTypes::canonical_numeric_runtime_name(name) {
+            // int / i64 — the default 64-bit signed integer.
+            Some("i64") => Some(NumericDomain {
+                lo: i64::MIN as i128,
+                hi: i64::MAX as i128,
+                is_float: false,
+            }),
+            // isize/usize are platform-width; treat as i64/u64 on 64-bit
+            // targets (spec §7 OD-4, convention adopted).
+            Some("isize") => Some(NumericDomain {
+                lo: i64::MIN as i128,
+                hi: i64::MAX as i128,
+                is_float: false,
+            }),
+            Some("usize") => Some(NumericDomain {
+                lo: 0,
+                hi: u64::MAX as i128,
+                is_float: false,
+            }),
+            // number / f64 — exactly represents every integer in [-2^53, 2^53].
+            Some("f64") => Some(NumericDomain {
+                lo: -(1i128 << 53),
+                hi: 1i128 << 53,
+                is_float: true,
+            }),
+            // f32 — exactly represents every integer in [-2^24, 2^24].
+            Some("f32") => Some(NumericDomain {
+                lo: -(1i128 << 24),
+                hi: 1i128 << 24,
+                is_float: true,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Extract the bare name from a `Basic` / `Reference` annotation (the only
+    /// shapes a primitive numeric alias can take). Returns `None` for compound
+    /// annotations.
+    fn annotation_name(ann: &TypeAnnotation) -> Option<&str> {
+        match ann {
+            TypeAnnotation::Basic(n) => Some(n.as_str()),
+            // `TypePath` derefs to its qualified string; numeric aliases are
+            // always single-segment, so this yields e.g. `"i8"`.
+            TypeAnnotation::Reference(p) => Some(&**p),
+            _ => None,
+        }
+    }
+
+    /// Whether an annotation is the `AnyError` top of the error lattice.
+    ///
+    /// `AnyError` is the default error type the compiler stamps for bare
+    /// `Ok(..)`/`?` (env/mod.rs and operators.rs) when no concrete error type
+    /// is in scope. It is the top of the error sub-lattice: it unifies with any
+    /// concrete error type in the error-arg position of `Result<T, E>`. This is
+    /// bounded to the `AnyError` name specifically — two *distinct concrete*
+    /// named error types still mismatch (no broad suppression).
+    fn is_any_error(ann: &TypeAnnotation) -> bool {
+        matches!(Self::annotation_name(ann), Some("AnyError"))
+    }
+
+    /// Whether `ann1` losslessly widens to `ann2` per the §2 numeric lattice
+    /// (directional, `(src, dst)`-ordered). Identity is handled by the caller's
+    /// `ann1 == ann2` check; this is purely the proper-widening relation.
+    fn annotations_same_numeric(ann1: &TypeAnnotation, ann2: &TypeAnnotation) -> bool {
+        Self::lossless_implicit(ann1, ann2)
+    }
+
     /// Unify two type annotations
     fn unify_annotations(&self, ann1: &TypeAnnotation, ann2: &TypeAnnotation) -> TypeResult<bool> {
+        // `AnyError` is the top of the error lattice (see `is_any_error`): it
+        // unifies with any type in the error-arg position. Bounded to the
+        // `AnyError` name so two distinct concrete named error types still fail.
+        if Self::is_any_error(ann1) || Self::is_any_error(ann2) {
+            return Ok(true);
+        }
         match (ann1, ann2) {
-            // Basic types
+            // Basic types. Numeric pairs unify implicitly ONLY when `ann1`
+            // (the src/value side) losslessly widens to `ann2` (the dst side)
+            // per the §2 lattice — `annotations_same_numeric` is now exactly
+            // `lossless_implicit(ann1, ann2)`. Identity stays `ann1 == ann2`.
             (TypeAnnotation::Basic(_), TypeAnnotation::Basic(_)) => {
-                Ok(ann1 == ann2 || Self::can_numeric_widen(ann1, ann2))
+                Ok(ann1 == ann2 || Self::annotations_same_numeric(ann1, ann2))
             }
-            (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => Ok(n1 == n2),
+            (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => {
+                Ok(n1 == n2 || Self::annotations_same_numeric(ann1, ann2))
+            }
+            // Combined (merge r3 enum-nominal + r5 width-int): a `Basic` name
+            // and a `Reference` path denote the same nominal type when their
+            // names agree (`Color` carried as Basic at decl vs Reference at call
+            // site); OR `ann1` losslessly widens to `ann2` per the §2 lattice.
+            // Distinct names (`Color` vs `Dir`) still fail.
             (TypeAnnotation::Basic(_), TypeAnnotation::Reference(_))
             | (TypeAnnotation::Reference(_), TypeAnnotation::Basic(_)) => {
-                Ok(ann1 == ann2 || Self::can_numeric_widen(ann1, ann2))
+                let names_match = matches!(
+                    (ann1.as_type_name_str(), ann2.as_type_name_str()),
+                    (Some(n1), Some(n2)) if n1 == n2
+                );
+                Ok(names_match || Self::annotations_same_numeric(ann1, ann2))
             }
+
+            // Borrow types (R1/GAP-2): `&T` / `&mut T`. A distinct constructor:
+            // never unwrapped on one side (a bare `int` does NOT unify with
+            // `&int`, which keeps the value/reference distinction intact).
+            // Mutability must match exactly, and the inner annotation must be
+            // structurally equal — references do NOT participate in the §2
+            // numeric-widening lattice (`&int` is not a `&number`), so the
+            // inner is compared via exact `annotations_equal`, mirroring the
+            // unifier's `try_unify` Borrow path.
+            (
+                TypeAnnotation::Borrow {
+                    mutable: m1,
+                    inner: i1,
+                },
+                TypeAnnotation::Borrow {
+                    mutable: m2,
+                    inner: i2,
+                },
+            ) => Ok(m1 == m2 && crate::type_system::unification::annotations_equal(i1, i2)),
 
             // Array types
             (TypeAnnotation::Array(e1), TypeAnnotation::Array(e2)) => {
@@ -450,6 +793,44 @@ impl ConstraintSolver {
                 self.unify_annotations(&args[0], elem)
             }
 
+            // Nominal struct ~ structural object: a named struct type (`Point`)
+            // unifies with the structural object type its instances carry
+            // (`{ x: number, y: number }`), in both directions. Resolution is
+            // gated on the name being a *registered struct schema* — builtins,
+            // enums, and unknown names fall through to `_ => Ok(false)`, so this
+            // never broadens unification for non-struct references. Field
+            // comparison reuses the exact-match `object_fields_compatible`
+            // (equal field set + per-field unification), so a structurally
+            // wrong object (missing/extra/mistyped field) still fails to unify.
+            (TypeAnnotation::Object(obj_fields), TypeAnnotation::Basic(name))
+            | (TypeAnnotation::Basic(name), TypeAnnotation::Object(obj_fields)) => {
+                self.unify_object_with_named_struct(obj_fields, name)
+            }
+            (TypeAnnotation::Object(obj_fields), TypeAnnotation::Reference(path))
+            | (TypeAnnotation::Reference(path), TypeAnnotation::Object(obj_fields)) => {
+                self.unify_object_with_named_struct(obj_fields, path.as_str())
+            }
+
+            // Concrete nominal type coerces into a trait object iff it
+            // implements every trait in the dyn set (standard trait-object
+            // upcast). STRICT-FLIP (v0.3.3, SMOKE-s5): `let arr: Array<dyn
+            // HasX> = [Bar { .. }]` decomposes the element constraint to
+            // `Bar ~ dyn HasX`; without these arms it fell through to
+            // `_ => Ok(false)` and surfaced an unsolved-constraint error.
+            // Sound: succeeds ONLY when the impl is actually registered
+            // (`has_trait_impl` over `self.trait_impls`, keyed `"Trait::Type"`);
+            // a type that does not implement the trait still correctly rejects.
+            // Both `Basic` and `Reference` because a struct/enum name may infer
+            // as either (`format_annotation` renders them identically).
+            (TypeAnnotation::Basic(name), TypeAnnotation::Dyn(traits))
+            | (TypeAnnotation::Dyn(traits), TypeAnnotation::Basic(name)) => {
+                Ok(traits.iter().all(|t| self.has_trait_impl(t.as_str(), name)))
+            }
+            (TypeAnnotation::Reference(path), TypeAnnotation::Dyn(traits))
+            | (TypeAnnotation::Dyn(traits), TypeAnnotation::Reference(path)) => Ok(traits
+                .iter()
+                .all(|t| self.has_trait_impl(t.as_str(), path.as_str()))),
+
             // Different types don't unify
             _ => Ok(false),
         }
@@ -565,6 +946,21 @@ impl ConstraintSolver {
                         .unifier
                         .apply_substitutions(&Type::Variable(elem_var.clone()));
                     if let Type::Variable(_) = &elem_resolved {
+                        // RefDispatch (v0.3.3): `r[i]` on `r: &Array<T>` carries
+                        // an `Indexable` constraint on the `Borrow`-typed
+                        // variable. Deref the `Borrow { inner }` to its referent
+                        // before extracting the element type, so the carried
+                        // element var binds to the referent's element (mirrors
+                        // the `infer_index_access` Borrow arm for the eager path,
+                        // and the field-access auto-deref). Without this, an
+                        // index through a ref inside a function (`r[1] + 5`)
+                        // leaves the element `unknown` and strict typing rejects.
+                        let resolved = match &resolved {
+                            Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => {
+                                Type::Concrete((**inner).clone())
+                            }
+                            other => other.clone(),
+                        };
                         let actual_elem: Option<Type> = match &resolved {
                             Type::Concrete(TypeAnnotation::Array(elem)) => {
                                 Some(Type::Concrete((**elem).clone()))
@@ -575,9 +971,7 @@ impl ConstraintSolver {
                                 Some(args[0].clone())
                             }
                             // String indexing yields a single-character string.
-                            Type::Concrete(TypeAnnotation::Basic(name))
-                                if name == "string" =>
-                            {
+                            Type::Concrete(TypeAnnotation::Basic(name)) if name == "string" => {
                                 Some(BuiltinTypes::string())
                             }
                             _ => None,
@@ -604,12 +998,27 @@ impl ConstraintSolver {
     fn check_constraint(&self, ty: &Type, constraint: &TypeConstraint) -> TypeResult<()> {
         match constraint {
             TypeConstraint::Comparable => match ty {
-                Type::Concrete(TypeAnnotation::Basic(name))
-                    if BuiltinTypes::is_numeric_type_name(name)
-                        || name == "string"
-                        || name == "bool" =>
-                {
-                    Ok(())
+                Type::Concrete(ann) => {
+                    // A match-accumulate union whose arms all yield the same
+                    // type (`Union([int])`) is just that type — collapse it
+                    // before the comparability check (mirrors the
+                    // ImplementsTrait arm at constraints.rs:991). A genuinely
+                    // heterogeneous union is left intact and still fails below.
+                    // A-final ROOT G.
+                    let ann = collapse_degenerate_union(ann);
+                    match ann {
+                        TypeAnnotation::Basic(name)
+                            if BuiltinTypes::is_numeric_type_name(name)
+                                || name == "string"
+                                || name == "bool" =>
+                        {
+                            Ok(())
+                        }
+                        _ => Err(TypeError::ConstraintViolation(format!(
+                            "{:?} is not comparable",
+                            ty
+                        ))),
+                    }
                 }
                 _ => Err(TypeError::ConstraintViolation(format!(
                     "{:?} is not comparable",
@@ -633,11 +1042,9 @@ impl ConstraintSolver {
             // `obj[i]` index access. The carried element type is bound by
             // `apply_bounds` backward propagation (mirrors `HasField`); here
             // we only validate that the resolved type supports indexing.
-            TypeConstraint::Indexable(_) => match ty {
+            TypeConstraint::Indexable(elem) => match ty {
                 Type::Concrete(TypeAnnotation::Array(_)) => Ok(()),
-                Type::Generic { base, args }
-                    if args.len() == 1 && is_array_or_vec_base(base) =>
-                {
+                Type::Generic { base, args } if args.len() == 1 && is_array_or_vec_base(base) => {
                     Ok(())
                 }
                 Type::Concrete(TypeAnnotation::Basic(name))
@@ -645,6 +1052,17 @@ impl ConstraintSolver {
                 {
                     Ok(())
                 }
+                // Index access through a reference (v0.3.3 RefDispatch): a
+                // `Borrow { inner }` indexes THROUGH the reference — deref to its
+                // referent and re-check (mirrors the field-access auto-deref in
+                // `infer_property_access_internal`). Inference normally resolves
+                // the element type via `infer_index_access`'s Borrow arm before
+                // this constraint check runs; this arm covers the case where a
+                // constrained variable only resolves to a `Borrow` at check time.
+                Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => self.check_constraint(
+                    &Type::Concrete((**inner).clone()),
+                    &TypeConstraint::Indexable(elem.clone()),
+                ),
                 _ => Err(TypeError::ConstraintViolation(format!(
                     "{:?} does not support index access",
                     ty
@@ -690,6 +1108,94 @@ impl ConstraintSolver {
                         // Note: Previously this hardcoded "row" with OHLCV fields.
                         // Now schema validation happens in TypeInferenceEngine::infer_property_access.
                         Ok(())
+                    }
+                    // T1 sub-case (a) (strict-flip, 2026-06-20): a field access on
+                    // a value whose type resolved to a NAMED struct `Reference`
+                    // (e.g. `rs[0].len` where `rs: Vec<Run>` flows through the
+                    // `let mut rs = []; rs = rs.push(Run{..})` element-type
+                    // back-propagation, leaving the element type as
+                    // `Concrete(Reference(Run))` rather than the structural
+                    // `Object(..)` form). Resolve the struct's declared fields and
+                    // validate the named field — same registry the structural
+                    // `Object(..)` arm consults, mirroring the `Basic(name)`
+                    // tentative-accept for an unregistered name. A registered
+                    // struct missing the field is a real error; an unregistered
+                    // reference is accepted tentatively (runtime validates).
+                    Type::Concrete(TypeAnnotation::Reference(path)) => {
+                        match self.struct_fields(path.name()) {
+                            Some(struct_fields) => {
+                                match struct_fields.iter().find(|f| f.name == *field) {
+                                    Some(found_field) => {
+                                        if let Some(expected_ann) =
+                                            expected_field_type.to_annotation()
+                                        {
+                                            if self.unify_annotations(
+                                                &found_field.type_annotation,
+                                                &expected_ann,
+                                            )? {
+                                                Ok(())
+                                            } else {
+                                                Err(TypeError::ConstraintViolation(format!(
+                                                    "field '{}' has type {:?}, expected {:?}",
+                                                    field,
+                                                    found_field.type_annotation,
+                                                    expected_ann
+                                                )))
+                                            }
+                                        } else {
+                                            // STAGE F1 (strict-flip, 2026-06-20):
+                                            // the field RESULT is an unresolved type
+                                            // variable. This arm is reached ONLY by a
+                                            // field read on a value whose element type
+                                            // was back-propagated to a bare named
+                                            // struct `Reference` — i.e. the unannotated
+                                            // empty-`[]` accumulator grown by `push`
+                                            // (`let mut rs = []; rs = rs.push(Run{..})`,
+                                            // then `rs[0].field` / `for r in rs { r.field }`).
+                                            // The annotated (`let rs: Array<Run> = …`)
+                                            // and non-empty-literal (`let rs = [Run{..}]`)
+                                            // paths resolve the element STRUCTURALLY
+                                            // (`Object(..)`) and validate + carry the
+                                            // field type directly in `infer_property_access`,
+                                            // never reaching this arm. Accepting "any
+                                            // field type" here makes the field result an
+                                            // UNCONSTRAINED `any`: an ill-typed program
+                                            // (`let x: bool = rs[0].n` where `n: int`, or
+                                            // `rs[0].n + y` with `y: number`) is wrongly
+                                            // accepted, and `int`/`number` would silently
+                                            // unify (CLAUDE.md §Type-System-Rules / no
+                                            // `any` type / int != number). Per the
+                                            // no-untyped-array rule, an unannotated
+                                            // empty-`[]` accumulator has no DECLARED
+                                            // element type, so a field read off its
+                                            // element is unprovable WITHOUT annotation —
+                                            // surface the existing "annotate the array"
+                                            // guidance as a CLEAN compile-error rather
+                                            // than sink to `any`.
+                                            Err(TypeError::ConstraintViolation(format!(
+                                                "cannot infer the type of field '{}' read \
+                                                 off an element of `{}`: its element type \
+                                                 is only known from a `push` into an \
+                                                 unannotated empty array (`[]`), which has \
+                                                 no declared element type. Strict typing \
+                                                 requires a known element type — annotate \
+                                                 the array (`let rs: Array<{}> = []`).",
+                                                field,
+                                                path.name(),
+                                                path.name()
+                                            )))
+                                        }
+                                    }
+                                    None => Err(TypeError::ConstraintViolation(format!(
+                                        "{:?} does not have field '{}'",
+                                        ty, field
+                                    ))),
+                                }
+                            }
+                            // Not a registered struct (enum / alias / builtin) —
+                            // accept tentatively, parity with the Basic(name) arm.
+                            None => Ok(()),
+                        }
                     }
                     _ => Err(TypeError::ConstraintViolation(format!(
                         "{:?} cannot have fields",
@@ -820,6 +1326,10 @@ impl ConstraintSolver {
                         })
                     }
                     Type::Concrete(ann) => {
+                        // A match-accumulate union whose arms all yield the same
+                        // type (`Union([int])`) is just that type — collapse it
+                        // before extracting the name so `Numeric`/etc. resolve.
+                        let ann = collapse_degenerate_union(ann);
                         let type_name = match ann {
                             TypeAnnotation::Basic(n) => n.clone(),
                             TypeAnnotation::Reference(n) => n.to_string(),
@@ -1062,6 +1572,13 @@ impl ConstraintSolver {
     pub fn unifier(&self) -> &Unifier {
         &self.unifier
     }
+
+    /// Mutable access to the solver's unifier — the SINGLE substitution store.
+    /// SB-2: the inference engine no longer keeps a parallel unifier; engine
+    /// `bind` writes land directly here so a subsequent `solve` sees them.
+    pub fn unifier_mut(&mut self) -> &mut Unifier {
+        &mut self.unifier
+    }
 }
 
 #[cfg(test)]
@@ -1079,6 +1596,222 @@ mod tests {
 
     fn fresh_type(tvgen: &mut TypeVarGen) -> Type {
         tvgen.fresh_type()
+    }
+
+    /// U1 ISOLATION GATE (STRUCTURAL-AUDIT §U1 regression test).
+    ///
+    /// The single type-equivalence relation (`ConstraintSolver::probe_equal`)
+    /// must agree that ALL FOUR historical `Array<int>` encodings are the same
+    /// type, and that BOTH `Function` encodings are the same type — and must
+    /// still keep genuinely-distinct types (`Array<int>` vs `Array<number>`,
+    /// `int` vs `number`) distinct. Before U1, three different procedures over
+    /// these encodings could disagree (SB-3/SB-4). This pins the unification.
+    #[test]
+    fn u1_single_relation_agrees_on_all_array_and_function_encodings() {
+        use shape_ast::ast::{FunctionParam, TypeAnnotation};
+
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".to_string()));
+        let number = || Type::Concrete(TypeAnnotation::Basic("number".to_string()));
+
+        // The 4 Array<int> encodings (SB-4 Enc 1/2/3 + the Vec alias).
+        let array_generic = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+            args: vec![int()],
+        };
+        let vec_generic = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
+            args: vec![int()],
+        };
+        let array_concrete = Type::Concrete(TypeAnnotation::Array(Box::new(
+            TypeAnnotation::Basic("int".to_string()),
+        )));
+        let array_concrete_generic = Type::Concrete(TypeAnnotation::Generic {
+            name: "Array".into(),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        });
+        let array_encodings = [
+            &array_generic,
+            &vec_generic,
+            &array_concrete,
+            &array_concrete_generic,
+        ];
+
+        let solver = ConstraintSolver::new();
+
+        // Every pair of the 4 Array<int> encodings is equivalent (the single
+        // relation sees through the encoding split).
+        for a in array_encodings.iter() {
+            for b in array_encodings.iter() {
+                assert!(
+                    solver.probe_equal(a, b),
+                    "U1: array encodings must be equal: {:?} vs {:?}",
+                    a,
+                    b
+                );
+            }
+        }
+
+        // Distinct element type stays distinct.
+        let array_number = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+            args: vec![number()],
+        };
+        for a in array_encodings.iter() {
+            assert!(
+                !solver.probe_equal(a, &array_number),
+                "U1: Array<int> must NOT equal Array<number>: {:?}",
+                a
+            );
+        }
+
+        // The 2 Function encodings: `(int) -> int`.
+        let fn_inference = Type::Function {
+            params: vec![int()],
+            returns: Box::new(int()),
+        };
+        let fn_concrete = Type::Concrete(TypeAnnotation::Function {
+            params: vec![FunctionParam {
+                name: None,
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("int".to_string()),
+            }],
+            returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+        });
+        // SB-2: the two Function encodings now FOLD to the single canonical
+        // `Type::Function` carrier (exactly as the 4 Array encodings fold), so
+        // cross-carrier equality holds — `canonicalize` rewrites
+        // `Concrete(TypeAnnotation::Function{..})` to `Type::Function{..}` before
+        // comparison. The former "distinct carriers by design" split is gone.
+        assert!(solver.probe_equal(&fn_inference, &fn_inference));
+        assert!(solver.probe_equal(&fn_concrete, &fn_concrete));
+        assert!(
+            solver.probe_equal(&fn_inference, &fn_concrete),
+            "SB-2: the two (int)->int Function encodings must be equal after the fold"
+        );
+        assert!(
+            solver.probe_equal(&fn_concrete, &fn_inference),
+            "SB-2: Function fold is symmetric"
+        );
+
+        // A distinct Function return type stays distinct after the fold.
+        let fn_concrete_ret_number = Type::Concrete(TypeAnnotation::Function {
+            params: vec![FunctionParam {
+                name: None,
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("int".to_string()),
+            }],
+            returns: Box::new(TypeAnnotation::Basic("number".to_string())),
+        });
+        assert!(
+            !solver.probe_equal(&fn_inference, &fn_concrete_ret_number),
+            "SB-2: (int)->int must NOT equal (int)->number after the fold"
+        );
+
+        // int and number are NOT equal (strict typing — the core finding).
+        assert!(!solver.probe_equal(&int(), &number()));
+    }
+
+    /// U1: identical function types over identical Array<int> encodings unify —
+    /// the `(Vec<int>) -> int != (Vec<int>) -> int` finding is GONE. Two
+    /// function types whose single param uses *different* Array encodings are
+    /// equivalent because canonicalize folds the params.
+    #[test]
+    fn u1_identical_function_types_over_array_encodings_unify() {
+        use shape_ast::ast::TypeAnnotation;
+
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".to_string()));
+        let array_generic = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+            args: vec![int()],
+        };
+        let array_concrete = Type::Concrete(TypeAnnotation::Array(Box::new(
+            TypeAnnotation::Basic("int".to_string()),
+        )));
+
+        let f1 = Type::Function {
+            params: vec![array_generic.clone()],
+            returns: Box::new(int()),
+        };
+        let f2 = Type::Function {
+            params: vec![array_concrete.clone()],
+            returns: Box::new(int()),
+        };
+
+        let solver = ConstraintSolver::new();
+        assert!(
+            solver.probe_equal(&f1, &f2),
+            "U1: (Array<int>)->int with different element encodings must be equal"
+        );
+    }
+
+    /// SB-2 isolation gate (Function fold): the two Function encodings agree
+    /// after `canonicalize`, exactly as the Array gate proves the Array
+    /// encodings agree. `Concrete(TypeAnnotation::Function{..})` folds to the
+    /// canonical `Type::Function{..}` carrier, so equality, nested-Function
+    /// equality, and a return-type discriminator all hold over the single
+    /// carrier — and the deleted solver cross-form `Function ~ Concrete(Function)`
+    /// patch arm is unreachable.
+    #[test]
+    fn sb2_function_encodings_fold_and_agree() {
+        use shape_ast::ast::{FunctionParam, TypeAnnotation};
+
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".to_string()));
+        let concrete_fn = |ret: &str| {
+            Type::Concrete(TypeAnnotation::Function {
+                params: vec![FunctionParam {
+                    name: None,
+                    optional: false,
+                    type_annotation: TypeAnnotation::Basic("int".to_string()),
+                }],
+                returns: Box::new(TypeAnnotation::Basic(ret.to_string())),
+            })
+        };
+        let inference_fn = |ret: Type| Type::Function {
+            params: vec![int()],
+            returns: Box::new(ret),
+        };
+
+        // The Concrete(Function) encoding canonicalizes to Type::Function.
+        assert_eq!(
+            concrete_fn("int").canonicalize(),
+            inference_fn(int()),
+            "SB-2: Concrete(Function) must fold to Type::Function"
+        );
+
+        let solver = ConstraintSolver::new();
+
+        // Both directions of cross-carrier equality.
+        assert!(solver.probe_equal(&concrete_fn("int"), &inference_fn(int())));
+        assert!(solver.probe_equal(&inference_fn(int()), &concrete_fn("int")));
+
+        // Nested function (a (int)->int parameter) folds recursively.
+        let concrete_hof = Type::Concrete(TypeAnnotation::Function {
+            params: vec![FunctionParam {
+                name: None,
+                optional: false,
+                type_annotation: TypeAnnotation::Function {
+                    params: vec![FunctionParam {
+                        name: None,
+                        optional: false,
+                        type_annotation: TypeAnnotation::Basic("int".to_string()),
+                    }],
+                    returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+                },
+            }],
+            returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+        });
+        let inference_hof = inference_fn(int());
+        let inference_hof = Type::Function {
+            params: vec![inference_hof],
+            returns: Box::new(int()),
+        };
+        assert!(
+            solver.probe_equal(&concrete_hof, &inference_hof),
+            "SB-2: nested ((int)->int)->int folds recursively"
+        );
+
+        // Return-type discriminator: int!=number is preserved after the fold.
+        assert!(!solver.probe_equal(&concrete_fn("number"), &inference_fn(int())));
     }
 
     #[test]
@@ -1218,11 +1951,23 @@ mod tests {
         let mut solver = ConstraintSolver::new();
         // Inject Numeric trait impls (same as TypeEnvironment registers)
         let trait_impls: std::collections::HashSet<String> = [
-            "Numeric::int", "Numeric::number", "Numeric::decimal",
-            "Numeric::i8", "Numeric::i16", "Numeric::i32", "Numeric::i64",
-            "Numeric::u8", "Numeric::u16", "Numeric::u32", "Numeric::u64",
-            "Numeric::f32", "Numeric::f64",
-        ].iter().map(|s| s.to_string()).collect();
+            "Numeric::int",
+            "Numeric::number",
+            "Numeric::decimal",
+            "Numeric::i8",
+            "Numeric::i16",
+            "Numeric::i32",
+            "Numeric::i64",
+            "Numeric::u8",
+            "Numeric::u16",
+            "Numeric::u32",
+            "Numeric::u64",
+            "Numeric::f32",
+            "Numeric::f64",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         solver.set_trait_impls(trait_impls);
         let mut tvgen = TypeVarGen::new();
         let bound_var = fresh_var(&mut tvgen);
@@ -1239,14 +1984,21 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_widening_int_to_number() {
-        // (Concrete(int), Concrete(number)) should succeed via widening
+    fn test_int_to_number_is_cast_required() {
+        // TP-REBASELINE (numeric-conversion GREEN Stage 2, THE RULE user
+        // 2026-06-01 / spec §2): `int(i64) -> number` is CAST-REQUIRED, NOT an
+        // implicit widening — not every i64 is exactly representable in f64
+        // (e.g. 2^53+1). The prior test pinned the now-deleted loose
+        // `can_numeric_widen` (every integer -> any float). Value-level
+        // `let n: number = int_value` must reject and demand `int_value as
+        // number`. (`i32 -> number` stays IMPL because EVERY i32 fits — see
+        // `test_numeric_widening_width_aware_integer_to_float_family`.)
         let mut solver = ConstraintSolver::new();
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("int".to_string())),
             Type::Concrete(TypeAnnotation::Basic("number".to_string())),
         )];
-        assert!(solver.solve(&mut constraints).is_ok());
+        assert!(solver.solve(&mut constraints).is_err());
     }
 
     #[test]
@@ -1271,14 +2023,107 @@ mod tests {
     }
 
     #[test]
+    fn test_width_int_widens_to_int_directionally() {
+        // TP-REBASELINE (numeric-conversion GREEN Stage 2, THE RULE / spec §2):
+        // the prior "both directions unify" premise is no longer correct — the
+        // §2 lattice is DIRECTIONAL `(src, dst)`. A narrower-or-cross-sign-fit
+        // integer widens INTO `int(i64)` (IMPL), but `int` does NOT implicitly
+        // narrow / sign-reinterpret back (CAST-REQUIRED). The prior test pinned
+        // the now-deleted width-collapse (`canonical_script_alias` -> single
+        // `"int"`) that let `int -> i8` and `int -> u64` silently pass.
+        //
+        // Widening INTO int (subset of i64) — IMPL (accept):
+        for (src, dst) in [
+            ("i8", "int"),
+            ("u16", "int"),
+            ("i32", "int"),
+            ("u32", "int"),
+        ] {
+            let mut solver = ConstraintSolver::new();
+            let mut constraints = vec![(
+                Type::Concrete(TypeAnnotation::Basic(src.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(dst.to_string())),
+            )];
+            assert!(
+                solver.solve(&mut constraints).is_ok(),
+                "{src} should losslessly widen to {dst}"
+            );
+        }
+        // `int` narrowing / sign-reinterpreting back — CAST-REQUIRED (reject):
+        for (src, dst) in [
+            ("int", "i8"),
+            ("int", "u64"),
+            ("int", "i32"),
+            ("int", "u16"),
+        ] {
+            let mut solver = ConstraintSolver::new();
+            let mut constraints = vec![(
+                Type::Concrete(TypeAnnotation::Basic(src.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(dst.to_string())),
+            )];
+            assert!(
+                solver.solve(&mut constraints).is_err(),
+                "{src} must NOT implicitly convert to {dst} (cast required)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_distinct_width_ints_unify() {
+        // Different integer widths share the `int` script type, so `i8 + i16`
+        // (a mixed-width add) must type-check.
+        let mut solver = ConstraintSolver::new();
+        let mut constraints = vec![(
+            Type::Concrete(TypeAnnotation::Basic("i8".to_string())),
+            Type::Concrete(TypeAnnotation::Basic("i16".to_string())),
+        )];
+        assert!(solver.solve(&mut constraints).is_ok());
+    }
+
+    #[test]
+    fn test_width_int_does_not_collapse_into_number_or_bool() {
+        // The R5 fix must NOT collapse `int` and `number` (they stay distinct
+        // script types), and must never make an integer unify with `bool`.
+        // `number → int` (lossy) must still fail; `bool` vs `i8` must fail.
+        for (a, b) in [
+            ("number", "i8"),
+            ("f64", "i32"),
+            ("bool", "i8"),
+            ("i8", "bool"),
+        ] {
+            let mut solver = ConstraintSolver::new();
+            let mut constraints = vec![(
+                Type::Concrete(TypeAnnotation::Basic(a.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(b.to_string())),
+            )];
+            assert!(
+                solver.solve(&mut constraints).is_err(),
+                "{a} must NOT unify with {b}"
+            );
+        }
+    }
+
+    #[test]
     fn test_decimal_constrained_numeric_succeeds() {
         let mut solver = ConstraintSolver::new();
         let trait_impls: std::collections::HashSet<String> = [
-            "Numeric::int", "Numeric::number", "Numeric::decimal",
-            "Numeric::i8", "Numeric::i16", "Numeric::i32", "Numeric::i64",
-            "Numeric::u8", "Numeric::u16", "Numeric::u32", "Numeric::u64",
-            "Numeric::f32", "Numeric::f64",
-        ].iter().map(|s| s.to_string()).collect();
+            "Numeric::int",
+            "Numeric::number",
+            "Numeric::decimal",
+            "Numeric::i8",
+            "Numeric::i16",
+            "Numeric::i32",
+            "Numeric::i64",
+            "Numeric::u8",
+            "Numeric::u16",
+            "Numeric::u32",
+            "Numeric::u64",
+            "Numeric::f32",
+            "Numeric::f64",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         solver.set_trait_impls(trait_impls);
         let mut tvgen = TypeVarGen::new();
         let bound_var = fresh_var(&mut tvgen);
@@ -1422,6 +2267,90 @@ mod tests {
         assert!(solver.solve(&mut constraints).is_ok());
     }
 
+    /// R4: a named struct type (`Point`) unifies with the structural object
+    /// type its instances carry (`{ x: number, y: number }`), in both
+    /// directions — but only when registered as a struct schema, and only
+    /// when the fields match exactly. This mirrors the call-site constraint
+    /// `({ x: number, y: number }) -> number ~ (Point) -> number`.
+    #[test]
+    fn test_named_struct_unifies_with_structural_object() {
+        let point_fields = vec![
+            ObjectTypeField {
+                name: "x".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("number".to_string()),
+                annotations: vec![],
+            },
+            ObjectTypeField {
+                name: "y".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("number".to_string()),
+                annotations: vec![],
+            },
+        ];
+        let mut schemas = HashMap::new();
+        schemas.insert("Point".to_string(), point_fields.clone());
+
+        // Positive: structural object ~ nominal Point (both Basic and Reference
+        // spellings of the named struct), and the reverse direction.
+        for (obj_first, named) in [
+            (true, TypeAnnotation::Basic("Point".to_string())),
+            (false, TypeAnnotation::Basic("Point".to_string())),
+            (
+                true,
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("Point")),
+            ),
+            (
+                false,
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("Point")),
+            ),
+        ] {
+            let mut solver = ConstraintSolver::new();
+            solver.set_struct_schemas(schemas.clone());
+            let obj = Type::Concrete(TypeAnnotation::Object(point_fields.clone()));
+            let nom = Type::Concrete(named);
+            let pair = if obj_first { (obj, nom) } else { (nom, obj) };
+            let mut constraints = vec![pair];
+            assert!(
+                solver.solve(&mut constraints).is_ok(),
+                "named struct must unify with matching structural object"
+            );
+        }
+
+        // Negative 1: a structurally-wrong object (extra/mismatched field) must
+        // STILL fail — the fix must not blanket-suppress the error.
+        let mut solver = ConstraintSolver::new();
+        solver.set_struct_schemas(schemas.clone());
+        let wrong_obj = Type::Concrete(TypeAnnotation::Object(vec![ObjectTypeField {
+            name: "x".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("number".to_string()),
+            annotations: vec![],
+        }]));
+        let mut constraints = vec![(
+            wrong_obj,
+            Type::Concrete(TypeAnnotation::Basic("Point".to_string())),
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "object with missing field must NOT unify with named struct"
+        );
+
+        // Negative 2: a name that is NOT a registered struct schema must keep
+        // its existing (non-unifying) behaviour.
+        let mut solver = ConstraintSolver::new();
+        solver.set_struct_schemas(schemas);
+        let obj = Type::Concrete(TypeAnnotation::Object(point_fields));
+        let mut constraints = vec![(
+            obj,
+            Type::Concrete(TypeAnnotation::Basic("NotAStruct".to_string())),
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "unregistered name must not unify with a structural object"
+        );
+    }
+
     #[test]
     fn test_intersection_annotations_unify_order_independent() {
         let mut solver = ConstraintSolver::new();
@@ -1508,6 +2437,65 @@ mod tests {
         }
     }
 
+    /// A degenerate `Union([T])` (all arms of a match yield the same type)
+    /// collapses to `T` and satisfies the trait `T` implements. Mirrors
+    /// `match { Some(v) => v, None => 0 }` inferring `Union([int])`.
+    #[test]
+    fn test_implements_trait_single_member_union_collapses() {
+        let mut solver = ConstraintSolver::new();
+        let mut impls = std::collections::HashSet::new();
+        impls.insert("Numeric::number".to_string());
+        solver.set_trait_impls(impls);
+
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
+        let mut constraints = vec![(
+            Type::Concrete(TypeAnnotation::Union(vec![TypeAnnotation::Basic(
+                "number".to_string(),
+            )])),
+            Type::Constrained {
+                var: bound_var,
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
+            },
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_ok(),
+            "Union([number]) should collapse to number and satisfy Numeric"
+        );
+    }
+
+    /// NOT-BROAD-SUPPRESSION: a genuinely heterogeneous union is left intact
+    /// and must still FAIL a single-type trait bound. The collapse only fires
+    /// when every member is structurally equal.
+    #[test]
+    fn test_implements_trait_heterogeneous_union_still_violates() {
+        let mut solver = ConstraintSolver::new();
+        let mut impls = std::collections::HashSet::new();
+        impls.insert("Numeric::number".to_string());
+        solver.set_trait_impls(impls);
+
+        let mut tvgen = TypeVarGen::new();
+        let bound_var = fresh_var(&mut tvgen);
+        let mut constraints = vec![(
+            Type::Concrete(TypeAnnotation::Union(vec![
+                TypeAnnotation::Basic("number".to_string()),
+                TypeAnnotation::Basic("string".to_string()),
+            ])),
+            Type::Constrained {
+                var: bound_var,
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
+            },
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "Union([number, string]) is heterogeneous and must NOT satisfy Numeric"
+        );
+    }
+
     #[test]
     fn test_implements_trait_via_variable_resolution() {
         let mut solver = ConstraintSolver::new();
@@ -1539,6 +2527,67 @@ mod tests {
         assert!(
             solver.solve(&mut constraints).is_ok(),
             "T resolved to number which implements Sortable"
+        );
+    }
+
+    /// Build `Result<ok, err>` as a Generic with a Result base.
+    fn make_result(ok: TypeAnnotation, err: TypeAnnotation) -> Type {
+        Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                shape_ast::ast::TypePath::simple("Result"),
+            ))),
+            args: vec![Type::Concrete(ok), Type::Concrete(err)],
+        }
+    }
+
+    #[test]
+    fn any_error_is_top_of_error_lattice() {
+        // `Result<int, AnyError> ~ Result<T, string>`: AnyError is the default
+        // error type for bare Ok(..)/? and must unify with any concrete error
+        // type in the error-arg position.
+        let mut solver = ConstraintSolver::new();
+        let mut tvgen = TypeVarGen::new();
+        let t = fresh_var(&mut tvgen);
+
+        let mut constraints = vec![(
+            make_result(
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("AnyError")),
+            ),
+            Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                    shape_ast::ast::TypePath::simple("Result"),
+                ))),
+                args: vec![
+                    Type::Variable(t),
+                    Type::Concrete(TypeAnnotation::Basic("string".to_string())),
+                ],
+            },
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_ok(),
+            "Result<int, AnyError> should unify with Result<T, string>"
+        );
+    }
+
+    #[test]
+    fn any_error_top_is_bounded_distinct_concrete_errors_still_mismatch() {
+        // NOT broad suppression: two DISTINCT concrete named error types must
+        // still mismatch in the error-arg position. AnyError is the only top.
+        let mut solver = ConstraintSolver::new();
+        let mut constraints = vec![(
+            make_result(
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("FooErr")),
+            ),
+            make_result(
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Reference(shape_ast::ast::TypePath::simple("BarErr")),
+            ),
+        )];
+        assert!(
+            solver.solve(&mut constraints).is_err(),
+            "Result<int, FooErr> must NOT unify with Result<int, BarErr> (distinct concrete error types)"
         );
     }
 }

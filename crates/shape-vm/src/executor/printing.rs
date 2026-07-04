@@ -26,12 +26,16 @@
 //! §2.7.4")` placeholders rather than papering over with ValueWord-shape
 //! recovery, per the playbook's surface-and-stop discipline.
 
-use shape_runtime::type_schema::{EnumVariantKind, TypeSchema, TypeSchemaRegistry};
-use shape_value::heap_value::{
-    HeapKind, HeapValue, TypedObjectStorage,
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
+use shape_runtime::type_schema::{
+    EnumVariantKind, TypeSchema, TypeSchemaRegistry,
+    builtin_schemas::{
+        OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_PAYLOAD,
+        RESULT_VARIANT, RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
+    },
 };
+use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
-use std::sync::Arc;
 
 // Re-export the runtime-tier `PrintResult`/`PrintSpan` carriers for
 // formatter consumers — keeps the post-§2.7.4 import path coherent for
@@ -114,10 +118,10 @@ impl<'a> ValueFormatter<'a> {
             // ── Inline scalars ──────────────────────────────────────────
             // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
             // §2.7.7/Q9, 2026-05-19): canonical absence-of-value
-            // discriminator — prints as `null` (mirror of the
-            // pre-disposition `(0, NativeKind::Bool)` sentinel's
-            // intended display surface).
-            NativeKind::Null => "null".to_string(),
+            // discriminator. Shape has no user-facing null sentinel;
+            // display renders absence as `None`. JSON/wire null remains
+            // a serialization-layer concern (`slot_to_wire`).
+            NativeKind::Null => "None".to_string(),
             NativeKind::Bool => slot.slot.as_bool().to_string(),
             NativeKind::Int8
             | NativeKind::NullableInt8
@@ -137,9 +141,7 @@ impl<'a> ValueFormatter<'a> {
             // `as_v2_typed_array(bits, UInt64)` probe dereferenced an
             // arbitrary scalar `u64` value (e.g. `u64::MAX`) as a
             // `*const HeapHeader` → SIGSEGV on `print(x)`. Render directly.
-            NativeKind::UInt64 | NativeKind::NullableUInt64 => {
-                slot.slot.as_u64().to_string()
-            }
+            NativeKind::UInt64 | NativeKind::NullableUInt64 => slot.slot.as_u64().to_string(),
             NativeKind::UInt8
             | NativeKind::NullableUInt8
             | NativeKind::UInt16
@@ -148,9 +150,7 @@ impl<'a> ValueFormatter<'a> {
             | NativeKind::NullableUInt32
             | NativeKind::UIntSize
             | NativeKind::NullableUIntSize => slot.slot.as_u64().to_string(),
-            NativeKind::Float64 | NativeKind::NullableFloat64 => {
-                format_number(slot.slot.as_f64())
-            }
+            NativeKind::Float64 | NativeKind::NullableFloat64 => format_number(slot.slot.as_f64()),
             // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
             // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte scalar
             // variants. F32 prints via `format_number(f64::from(f32))`
@@ -212,7 +212,9 @@ impl<'a> ValueFormatter<'a> {
                 // `DecimalObj` with bumped refcount.
                 let ptr = bits as *const shape_value::v2::decimal_obj::DecimalObj;
                 let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
-                value.to_string()
+                // Render with the same `D` suffix as the `Ptr(HeapKind::Decimal)`
+                // carrier (printing.rs:245) — both carriers are `decimal` values.
+                format!("{}D", value)
             }
             // ── Heap-pointer kinds: dispatch via HeapKind ───────────────
             NativeKind::Ptr(hk) => self.format_heap_kind(bits, hk, depth, quote_strings),
@@ -247,8 +249,7 @@ impl<'a> ValueFormatter<'a> {
                 }
             }
             HeapKind::Decimal => {
-                let d: &rust_decimal::Decimal =
-                    unsafe { &*(bits as *const rust_decimal::Decimal) };
+                let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
                 format!("{}D", d)
             }
             HeapKind::BigInt => {
@@ -292,8 +293,7 @@ impl<'a> ValueFormatter<'a> {
                 // resolve field names via the schema registry. SAFETY:
                 // construction-side contract on `KindedSlot::from_typed_object`
                 // — `TypedObject`-kind bits are `Arc::into_raw(Arc<TypedObjectStorage>)`.
-                let storage: &TypedObjectStorage =
-                    unsafe { &*(bits as *const TypedObjectStorage) };
+                let storage: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
                 self.format_typed_object(storage, depth)
             }
             HeapKind::HashMap => {
@@ -365,8 +365,7 @@ impl<'a> ValueFormatter<'a> {
                 renderer.render(node)
             }
             HeapKind::Instant => {
-                let t: &std::time::Instant =
-                    unsafe { &*(bits as *const std::time::Instant) };
+                let t: &std::time::Instant = unsafe { &*(bits as *const std::time::Instant) };
                 format!("<instant:{:?}>", t.elapsed())
             }
             HeapKind::IoHandle => {
@@ -614,9 +613,8 @@ impl<'a> ValueFormatter<'a> {
             // `KindedSlot::from_trait_object` — TraitObject-kind
             // bits are `Arc::into_raw(Arc<TraitObjectStorage>)`.
             HeapKind::TraitObject => {
-                let t: &shape_value::heap_value::TraitObjectStorage = unsafe {
-                    &*(bits as *const shape_value::heap_value::TraitObjectStorage)
-                };
+                let t: &shape_value::heap_value::TraitObjectStorage =
+                    unsafe { &*(bits as *const shape_value::heap_value::TraitObjectStorage) };
                 let trait_name = t
                     .vtable
                     .trait_names
@@ -654,8 +652,7 @@ impl<'a> ValueFormatter<'a> {
                 let s: &shape_value::heap_value::MatrixSliceData =
                     unsafe { &*(bits as *const shape_value::heap_value::MatrixSliceData) };
                 let slice = s.as_slice();
-                let elems: Vec<String> =
-                    slice.iter().map(|v| format_array_float(*v)).collect();
+                let elems: Vec<String> = slice.iter().map(|v| format_array_float(*v)).collect();
                 format!("[{}]", elems.join(", "))
             }
         }
@@ -681,10 +678,25 @@ impl<'a> ValueFormatter<'a> {
             // Float64 / Int64 / Int32 / Bool per the v2 typed-array
             // contract. Format each through the canonical scalar arms.
             if let Some((bits, kind)) = read_element(view, i) {
-                let elem_slot =
-                    KindedSlot::new(ValueSlot::from_raw(bits), kind);
+                let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
                 out.push_str(&self.format_kinded_inner(&elem_slot, 0, true));
-                std::mem::forget(elem_slot);
+                // CaptureCarrier Array<string>-leak fix (ADR-006 §2.7.7,
+                // 2026-06-18): `read_element` RETAINS one share for the
+                // heap-element kinds (`StringV2` / `DecimalV2` /
+                // `Ptr(TypedObject)` / `Ptr(TypedArray)` — it calls
+                // `v2_retain` on the element header per the §4.1.B.4
+                // migration recipe). `format_kinded_inner` only BORROWS the
+                // slot, so the retained share must be released when the
+                // transient `elem_slot` is done. The previous
+                // `std::mem::forget(elem_slot)` leaked that share for every
+                // heap element (valgrind "N bytes definitely lost" on
+                // `print(arr_of_strings)`). Letting `elem_slot` drop here
+                // routes through `KindedSlot::Drop` → `drop_with_kind`,
+                // which retires exactly the share `read_element` acquired
+                // (a no-op for inline-scalar element kinds). No bare
+                // `vw_drop`, no Bool-default — the kind on the slot is the
+                // one `read_element` stamped.
+                drop(elem_slot);
             } else {
                 out.push_str("?");
             }
@@ -745,11 +757,14 @@ impl<'a> ValueFormatter<'a> {
         // schema lookup genuinely fails (rare — runtime-built objects
         // without registered schema).
         if let Some(s) = schema {
+            if let Some(rendered) = self.format_result_option_typed_object(s, storage, depth) {
+                return rendered;
+            }
             if s.is_enum() {
                 return self.format_enum_typed_object(s, storage, depth);
             }
         }
-        let n = storage.slots.len().min(storage.field_kinds.len());
+        let n = storage.slots().len().min(storage.field_kinds.len());
         let mut out = String::with_capacity(2 + n * 8);
         out.push('{');
         for i in 0..n {
@@ -772,7 +787,7 @@ impl<'a> ValueFormatter<'a> {
             // formatter call. This carrier never owns a strong-count share
             // — it is dropped via `mem::forget` at the end of the loop
             // iteration so the parent storage retains every payload.
-            let slot = ValueSlot::from_raw(storage.slots[i].raw());
+            let slot = ValueSlot::from_raw(storage.slots()[i].raw());
             let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
             let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
             out.push_str(&rendered);
@@ -780,6 +795,77 @@ impl<'a> ValueFormatter<'a> {
         }
         out.push('}');
         out
+    }
+
+    /// Format the schema-backed fixed-layout `__Option` / `__Result`
+    /// TypedObject carriers as their source-level wrapper forms while the
+    /// legacy HeapKind carriers continue to use their own heap arms.
+    fn format_result_option_typed_object(
+        &self,
+        schema: &TypeSchema,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> Option<String> {
+        match schema.name.as_str() {
+            "__Option" => self.format_option_typed_object(storage, depth),
+            "__Result" => self.format_result_typed_object(storage, depth),
+            _ => None,
+        }
+    }
+
+    fn format_option_typed_object(
+        &self,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> Option<String> {
+        match self.read_variant_tag(storage, OPTION_VARIANT)? {
+            OPTION_VARIANT_SOME => {
+                let inner = self.format_typed_object_payload(storage, OPTION_PAYLOAD, depth)?;
+                Some(format!("Some({})", inner))
+            }
+            OPTION_VARIANT_NONE => Some("None".to_string()),
+            _ => None,
+        }
+    }
+
+    fn format_result_typed_object(
+        &self,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> Option<String> {
+        let tag = self.read_variant_tag(storage, RESULT_VARIANT)?;
+        let inner = self.format_typed_object_payload(storage, RESULT_PAYLOAD, depth)?;
+        match tag {
+            RESULT_VARIANT_OK => Some(format!("Ok({})", inner)),
+            RESULT_VARIANT_ERR => Some(format!("Err({})", inner)),
+            _ => None,
+        }
+    }
+
+    fn read_variant_tag(&self, storage: &TypedObjectStorage, idx: usize) -> Option<i64> {
+        if storage.slots().len() != 2
+            || storage.field_kinds.len() != 2
+            || storage.field_kinds.get(idx).copied()? != NativeKind::Int64
+        {
+            return None;
+        }
+        Some(storage.slots()[idx].as_i64())
+    }
+
+    fn format_typed_object_payload(
+        &self,
+        storage: &TypedObjectStorage,
+        idx: usize,
+        depth: usize,
+    ) -> Option<String> {
+        if storage.slots().len() != 2 || storage.field_kinds.len() != 2 {
+            return None;
+        }
+        let slot = ValueSlot::from_raw(storage.slots().get(idx)?.raw());
+        let kinded = KindedSlot::new(slot, *storage.field_kinds.get(idx)?);
+        let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
+        std::mem::forget(kinded);
+        Some(rendered)
     }
 
     /// Format an enum-typed `TypedObjectStorage` as `Variant(payload)` /
@@ -805,12 +891,12 @@ impl<'a> ValueFormatter<'a> {
         storage: &TypedObjectStorage,
         depth: usize,
     ) -> String {
-        let n = storage.slots.len().min(storage.field_kinds.len());
+        let n = storage.slots().len().min(storage.field_kinds.len());
         // Slot 0 is `__variant` (I64) per `new_enum`'s layout.
         if n == 0 {
             return schema.name.clone();
         }
-        let variant_id = storage.slots[0].raw() as i64;
+        let variant_id = storage.slots()[0].raw() as i64;
         let info = schema
             .get_enum_info()
             .and_then(|ei| ei.variant_by_id(variant_id as u16));
@@ -829,7 +915,7 @@ impl<'a> ValueFormatter<'a> {
                 out.push_str("?");
                 return;
             }
-            let slot = ValueSlot::from_raw(storage.slots[slot_idx].raw());
+            let slot = ValueSlot::from_raw(storage.slots()[slot_idx].raw());
             let kinded = KindedSlot::new(slot, storage.field_kinds[slot_idx]);
             let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
             out.push_str(&rendered);
@@ -885,25 +971,21 @@ impl<'a> ValueFormatter<'a> {
         storage: &TypedObjectStorage,
         depth: usize,
     ) -> String {
-        let n = storage.slots.len().min(storage.field_kinds.len());
+        let n = storage.slots().len().min(storage.field_kinds.len());
         let mut out = String::with_capacity(2 + n * 8);
         out.push('{');
         for i in 0..n {
             if i > 0 {
                 out.push_str(", ");
             }
-            let name: &str = schema
-                .fields
-                .get(i)
-                .map(|f| f.name.as_str())
-                .unwrap_or("_");
+            let name: &str = schema.fields.get(i).map(|f| f.name.as_str()).unwrap_or("_");
             if name == "_" {
                 out.push_str(&format!("_{}", i));
             } else {
                 out.push_str(name);
             }
             out.push_str(": ");
-            let slot = ValueSlot::from_raw(storage.slots[i].raw());
+            let slot = ValueSlot::from_raw(storage.slots()[i].raw());
             let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
             let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
             out.push_str(&rendered);
@@ -918,10 +1000,7 @@ impl<'a> ValueFormatter<'a> {
     /// Q19) — i64-priority min-heap render shape (mirror of HashSet's
     /// render shape with the values column carrying i64 instead of
     /// quoted strings).
-    fn format_priority_queue(
-        &self,
-        pq: &shape_value::heap_value::PriorityQueueData,
-    ) -> String {
+    fn format_priority_queue(&self, pq: &shape_value::heap_value::PriorityQueueData) -> String {
         let n = pq.heap.len();
         let mut out = String::with_capacity(16 + n * 4);
         out.push_str("PriorityQueue[");
@@ -935,18 +1014,30 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
-    /// Format a `HashSetData` as `{"a", "b", ...}`. Wave 13
-    /// W13-hashset-rebuild (ADR-006 §2.7.15) — one-keyspace mirror of
-    /// HashMap's render shape with the values column dropped.
+    /// Format a `HashSetData` as `{...}`. Strings are quoted; ints render as
+    /// scalars. Mirrors the active `HashSetElementKind` arm.
     fn format_hashset(&self, set: &shape_value::heap_value::HashSetData) -> String {
-        let n = set.keys.len();
+        use shape_value::heap_value::HashSetElementKind;
+        let n = set.len();
         let mut out = String::with_capacity(2 + n * 6);
         out.push('{');
-        for (i, k) in set.keys.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
+        match set.element_kind() {
+            HashSetElementKind::String => {
+                for (i, k) in set.string_keys().iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&format!("\"{}\"", k));
+                }
             }
-            out.push_str(&format!("\"{}\"", k));
+            HashSetElementKind::I64 => {
+                for (i, k) in set.i64_keys().iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&k.to_string());
+                }
+            }
         }
         out.push('}');
         out
@@ -1099,6 +1190,15 @@ impl<'a> ValueFormatter<'a> {
                         out.push_str(&format!("<trait_object:{:p}>", v_ref.as_ptr()));
                     }
                 }
+                HashMapKindedRef::Callable(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ref: &shape_value::heap_value::CallablePtr =
+                            &*(*arc.values).data.add(i);
+                        out.push_str(&format!("<function:{:p}>", v_ref.as_ptr()));
+                    }
+                }
                 HashMapKindedRef::HashMap(arc) => {
                     // Recursive carrier (Wave N hashmap-value-v-arm
                     // follow-up, cluster-2 closure-wave-C, 2026-05-16).
@@ -1156,8 +1256,7 @@ impl<'a> ValueFormatter<'a> {
                 // TerminalRenderer per the TERMINAL-as-default
                 // print() dispatch.
                 use shape_runtime::content_renderer::ContentRenderer;
-                let renderer =
-                    shape_runtime::renderers::terminal::TerminalRenderer::new();
+                let renderer = shape_runtime::renderers::terminal::TerminalRenderer::new();
                 renderer.render(n)
             }
             HeapValue::Instant(t) => format!("<instant:{:?}>", t.elapsed()),
@@ -1261,8 +1360,7 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::Matrix(m) => format!("<Mat<number>:{}x{}>", m.rows, m.cols),
             HeapValue::MatrixSlice(s) => {
                 let slice = s.as_slice();
-                let elems: Vec<String> =
-                    slice.iter().map(|v| format_array_float(*v)).collect();
+                let elems: Vec<String> = slice.iter().map(|v| format_array_float(*v)).collect();
                 format!("[{}]", elems.join(", "))
             }
         }
@@ -1307,19 +1405,23 @@ mod tests {
         TypeSchemaRegistry::new()
     }
 
+    fn create_builtin_test_registry() -> (
+        TypeSchemaRegistry,
+        shape_runtime::type_schema::builtin_schemas::BuiltinSchemaIds,
+    ) {
+        let mut registry = TypeSchemaRegistry::new();
+        let ids =
+            shape_runtime::type_schema::builtin_schemas::register_builtin_schemas(&mut registry);
+        (registry, ids)
+    }
+
     #[test]
     fn test_format_inline_scalars() {
         let reg = create_test_registry();
         let formatter = ValueFormatter::new(&reg);
 
-        assert_eq!(
-            formatter.format_kinded(&KindedSlot::from_int(42)),
-            "42"
-        );
-        assert_eq!(
-            formatter.format_kinded(&KindedSlot::from_int(-100)),
-            "-100"
-        );
+        assert_eq!(formatter.format_kinded(&KindedSlot::from_int(42)), "42");
+        assert_eq!(formatter.format_kinded(&KindedSlot::from_int(-100)), "-100");
         assert_eq!(
             formatter.format_kinded(&KindedSlot::from_bool(true)),
             "true"
@@ -1401,6 +1503,77 @@ mod tests {
         assert_eq!(formatter.format_kinded(&c2), "λ");
     }
 
+    #[test]
+    fn test_format_bare_none_slot_renders_none() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let none = KindedSlot::none();
+        assert_eq!(formatter.format_kinded(&none), "None");
+    }
+
+    #[test]
+    fn test_format_schema_backed_option_carriers() {
+        let (reg, ids) = create_builtin_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let some = crate::executor::result_option_carrier::build_some(
+            &ids,
+            KindedSlot::from_string_arc(Arc::new("value".to_string())),
+        );
+        assert_eq!(formatter.format_kinded(&some), "Some(\"value\")");
+        drop(some);
+
+        let none = crate::executor::result_option_carrier::build_none(&ids);
+        assert_eq!(formatter.format_kinded(&none), "None");
+        drop(none);
+    }
+
+    #[test]
+    fn test_format_schema_backed_result_carriers() {
+        let (reg, ids) = create_builtin_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let ok = crate::executor::result_option_carrier::build_ok(&ids, KindedSlot::from_int(42));
+        assert_eq!(formatter.format_kinded(&ok), "Ok(42)");
+        drop(ok);
+
+        let err = crate::executor::result_option_carrier::build_err(
+            &ids,
+            KindedSlot::from_string_arc(Arc::new("boom".to_string())),
+        );
+        assert_eq!(formatter.format_kinded(&err), "Err(\"boom\")");
+        drop(err);
+    }
+
+    #[test]
+    fn test_format_legacy_option_result_carriers_still_use_heap_arms() {
+        use shape_value::heap_value::{OptionData, ResultData};
+
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let legacy_some = KindedSlot::from_option(Arc::new(OptionData::some(
+            KindedSlot::from_string_arc(Arc::new("old".to_string())),
+        )));
+        assert_eq!(formatter.format_kinded(&legacy_some), "Some(\"old\")");
+        drop(legacy_some);
+
+        let legacy_none = KindedSlot::from_option(Arc::new(OptionData::none()));
+        assert_eq!(formatter.format_kinded(&legacy_none), "None");
+        drop(legacy_none);
+
+        let legacy_ok = KindedSlot::from_result(Arc::new(ResultData::ok(KindedSlot::from_int(7))));
+        assert_eq!(formatter.format_kinded(&legacy_ok), "Ok(7)");
+        drop(legacy_ok);
+
+        let legacy_err = KindedSlot::from_result(Arc::new(ResultData::err(
+            KindedSlot::from_string_arc(Arc::new("legacy".to_string())),
+        )));
+        assert_eq!(formatter.format_kinded(&legacy_err), "Err(\"legacy\")");
+        drop(legacy_err);
+    }
+
     /// r5c-2-β-CKPT-C u64-carrier-disambiguation regression guard.
     ///
     /// A `NativeKind::UInt64` slot is a genuine scalar `u64` — the
@@ -1417,10 +1590,7 @@ mod tests {
         let formatter = ValueFormatter::new(&reg);
 
         for &v in &[0u64, 42u64, 1000u64, u64::MAX, u64::MAX - 1] {
-            let slot = KindedSlot::new(
-                ValueSlot::from_raw(v),
-                NativeKind::UInt64,
-            );
+            let slot = KindedSlot::new(ValueSlot::from_raw(v), NativeKind::UInt64);
             assert_eq!(formatter.format_kinded(&slot), v.to_string());
             std::mem::forget(slot);
         }
@@ -1433,8 +1603,8 @@ mod tests {
     /// element-type byte and renders the elements.
     #[test]
     fn test_format_typed_array_via_ptr_carrier() {
-        use shape_value::v2::typed_array::{TypedArray, ELEM_TYPE_I64};
         use crate::executor::v2_handlers::v2_array_detect::stamp_elem_type;
+        use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray};
 
         let reg = create_test_registry();
         let formatter = ValueFormatter::new(&reg);
@@ -1486,9 +1656,7 @@ mod tests {
         );
         std::mem::forget(slot);
         unsafe {
-            let _ = std::sync::Arc::from_raw(
-                bits as *const shape_value::content::ContentNode,
-            );
+            let _ = std::sync::Arc::from_raw(bits as *const shape_value::content::ContentNode);
         }
 
         // Styled Content node — TerminalRenderer should emit ANSI
@@ -1514,9 +1682,7 @@ mod tests {
         assert!(styled_out.contains("hi"));
         std::mem::forget(slot2);
         unsafe {
-            let _ = std::sync::Arc::from_raw(
-                bits2 as *const shape_value::content::ContentNode,
-            );
+            let _ = std::sync::Arc::from_raw(bits2 as *const shape_value::content::ContentNode);
         }
     }
 }

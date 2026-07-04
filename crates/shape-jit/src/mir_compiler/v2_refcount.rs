@@ -43,6 +43,9 @@ use cranelift::prelude::*;
 ///
 /// The v2 `HeapHeader` layout places `refcount: AtomicU32` at offset 0,
 /// followed by `kind: u16` at offset 4, `flags: u8` at offset 6, etc.
+// Future-use: consumed by V2RefcountEmitter once v2 refcount emission is wired
+// into the MIR-to-IR path; currently exercised only by this module's tests.
+#[allow(dead_code)]
 pub const V2_REFCOUNT_OFFSET: i32 = 0;
 
 /// Inline v2 refcount operations for Cranelift IR emission.
@@ -51,10 +54,14 @@ pub const V2_REFCOUNT_OFFSET: i32 = 0;
 /// atomic refcount instructions directly into the current block. The caller
 /// is responsible for ensuring `ptr` is a valid pointer to a v2 heap object
 /// (i.e., the refcount `AtomicU32` is at `ptr + V2_REFCOUNT_OFFSET`).
+// Future-use: v2 inline refcount IR emitter, not yet wired into MIR-to-IR;
+// exercised only by this module's tests pending v2-raw-heap JIT integration.
+#[allow(dead_code)]
 pub struct V2RefcountEmitter<'a, 'b> {
     builder: &'a mut FunctionBuilder<'b>,
 }
 
+#[allow(dead_code)]
 impl<'a, 'b> V2RefcountEmitter<'a, 'b> {
     /// Create a new emitter wrapping the given function builder.
     pub fn new(builder: &'a mut FunctionBuilder<'b>) -> Self {
@@ -257,8 +264,7 @@ mod tests {
         let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
 
         // Declare the dealloc func ref
-        let dealloc_name =
-            cranelift::codegen::ir::ExternalName::testcase("jit_v2_dealloc");
+        let dealloc_name = cranelift::codegen::ir::ExternalName::testcase("jit_v2_dealloc");
         let dealloc_func_ref = builder.import_function(cranelift::codegen::ir::ExtFuncData {
             name: dealloc_name,
             signature: dealloc_sig_ref,
@@ -325,20 +331,11 @@ mod tests {
             "drop should emit atomic_rmw sub. IR:\n{ir}"
         );
         // Should contain an icmp for old == 1
-        assert!(
-            ir.contains("icmp"),
-            "drop should emit icmp. IR:\n{ir}"
-        );
+        assert!(ir.contains("icmp"), "drop should emit icmp. IR:\n{ir}");
         // Should contain a brif (conditional branch)
-        assert!(
-            ir.contains("brif"),
-            "drop should emit brif. IR:\n{ir}"
-        );
+        assert!(ir.contains("brif"), "drop should emit brif. IR:\n{ir}");
         // Should contain a fence instruction
-        assert!(
-            ir.contains("fence"),
-            "drop should emit fence. IR:\n{ir}"
-        );
+        assert!(ir.contains("fence"), "drop should emit fence. IR:\n{ir}");
         // Should contain a call to the free function
         assert!(
             ir.contains("call"),

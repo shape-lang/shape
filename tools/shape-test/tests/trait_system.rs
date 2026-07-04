@@ -26,7 +26,7 @@ fn trait_with_type_param_bounds_parses() {
 
 #[test]
 fn trait_with_default_method_parses() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    method execute() {\n        return self\n    }\n}";
+    let code = "trait Queryable {\n    method filter(pred) -> any;\n    method execute() {\n        return self\n    }\n}";
     ShapeTest::new(code).expect_parse_ok();
 }
 
@@ -68,7 +68,8 @@ fn where_clause_multiple_bounds_parses() {
 fn associated_type_parses() {
     // Associated type declarations parse; Self.Item syntax is not yet supported,
     // so we test the type declaration itself with a simple return type.
-    ShapeTest::new("trait Iterator {\n    type Item;\n    method next() -> any\n}").expect_parse_ok();
+    ShapeTest::new("trait Iterator {\n    type Item;\n    method next() -> any\n}")
+        .expect_parse_ok();
 }
 
 // -- Trait semantic tokens --------------------------------------------------
@@ -103,7 +104,7 @@ fn hover_on_trait_name_shows_trait_info() {
 fn hover_on_impl_method_shows_trait_info() {
     // Hover on method in impl block. The method name "apply_query" avoids
     // clashing with builtin "filter". Currently returns function hover.
-    let code = "trait Queryable {\n    apply_query(pred): any\n}\nimpl Queryable for MyTable {\n    method apply_query(pred) { self }\n}";
+    let code = "trait Queryable {\n    method apply_query(pred) -> any\n}\nimpl Queryable for MyTable {\n    method apply_query(pred) { self }\n}";
     ShapeTest::new(code)
         .at(pos(4, 11))
         .expect_hover_contains("apply_query");
@@ -113,7 +114,7 @@ fn hover_on_impl_method_shows_trait_info() {
 
 #[test]
 fn completion_inside_impl_suggests_methods() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    select(cols): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}";
+    let code = "trait Queryable {\n    method filter(pred) -> any;\n    method select(cols) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}";
     ShapeTest::new(code)
         .at(pos(6, 4))
         .expect_completion("select");
@@ -121,7 +122,7 @@ fn completion_inside_impl_suggests_methods() {
 
 #[test]
 fn completion_excludes_already_implemented() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    select(cols): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}";
+    let code = "trait Queryable {\n    method filter(pred) -> any;\n    method select(cols) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}";
     ShapeTest::new(code)
         .at(pos(6, 4))
         .expect_no_completion("filter");
@@ -131,13 +132,13 @@ fn completion_excludes_already_implemented() {
 
 #[test]
 fn definition_from_trait_name_in_impl() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}";
+    let code = "trait Queryable {\n    method filter(pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}";
     ShapeTest::new(code).at(pos(3, 5)).expect_definition();
 }
 
 #[test]
 fn definition_from_method_in_impl() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}";
+    let code = "trait Queryable {\n    method filter(pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}";
     ShapeTest::new(code).at(pos(4, 11)).expect_definition();
 }
 
@@ -145,7 +146,7 @@ fn definition_from_method_in_impl() {
 
 #[test]
 fn code_lens_on_trait_definition() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}";
+    let code = "trait Queryable {\n    method filter(pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}";
     ShapeTest::new(code)
         .expect_code_lens_not_empty()
         .expect_code_lens_at_line(0);
@@ -155,7 +156,7 @@ fn code_lens_on_trait_definition() {
 
 #[test]
 fn trait_bound_completion_suggests_traits() {
-    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}";
+    let code = "trait Comparable {\n    method compare(other) -> number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}";
     ShapeTest::new(code)
         .at(pos(6, 10))
         .expect_completion("Comparable")
@@ -164,7 +165,7 @@ fn trait_bound_completion_suggests_traits() {
 
 #[test]
 fn hover_on_bounded_type_param() {
-    let code = "trait Comparable {\n    compare(other): number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}";
+    let code = "trait Comparable {\n    method compare(other) -> number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}";
     ShapeTest::new(code)
         .at(pos(3, 7))
         .expect_hover_contains("Type Parameter");

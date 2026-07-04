@@ -19,26 +19,77 @@
 //! sub-clusters (W17-array-typed-receiver, W17-typed-carrier-monomorphization).
 //! Those are unblocked once their respective sub-clusters land.
 
-use super::test_utils::{eval, eval_typed_i64};
+use super::test_utils::{eval, eval_result, eval_typed_i64, eval_with_prelude};
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2ElemType, V2TypedArrayView, as_v2_typed_array, read_element,
+};
+use shape_value::{HeapKind, KindedSlot, NativeKind};
+
+fn typed_array_view(slot: &KindedSlot) -> V2TypedArrayView {
+    assert_eq!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray));
+    as_v2_typed_array(slot.slot.raw(), slot.kind).expect("expected v2 typed-array carrier")
+}
+
+fn assert_i64_array(source: &str, expected: &[i64]) {
+    let result = eval(source);
+    let view = typed_array_view(&result);
+    assert_eq!(view.elem_type, V2ElemType::I64);
+    assert_eq!(view.len as usize, expected.len());
+    for (i, value) in expected.iter().enumerate() {
+        let (bits, kind) = read_element(&view, i as u32).expect("element");
+        assert_eq!(kind, NativeKind::Int64);
+        assert_eq!(bits as i64, *value);
+    }
+}
+
+fn assert_f64_array(source: &str, expected: &[f64]) {
+    let result = eval(source);
+    let view = typed_array_view(&result);
+    assert_eq!(view.elem_type, V2ElemType::F64);
+    assert_eq!(view.len as usize, expected.len());
+    for (i, value) in expected.iter().enumerate() {
+        let (bits, kind) = read_element(&view, i as u32).expect("element");
+        assert_eq!(kind, NativeKind::Float64);
+        assert_eq!(f64::from_bits(bits), *value);
+    }
+}
+
+fn assert_bool_array(source: &str, expected: &[bool]) {
+    let result = eval(source);
+    let view = typed_array_view(&result);
+    assert_eq!(view.elem_type, V2ElemType::Bool);
+    assert_eq!(view.len as usize, expected.len());
+    for (i, value) in expected.iter().enumerate() {
+        let (bits, kind) = read_element(&view, i as u32).expect("element");
+        assert_eq!(kind, NativeKind::Bool);
+        assert_eq!(bits != 0, *value);
+    }
+}
 
 #[test]
 fn test_new_typed_array_ints() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_i64_array("[1, 2, 3]", &[1, 2, 3]);
 }
 
 #[test]
 fn test_new_typed_array_floats() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_f64_array("[1.5, 2.5, 3.5]", &[1.5, 2.5, 3.5]);
 }
 
 #[test]
 fn test_new_typed_array_bools() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_bool_array("[true, false, true]", &[true, false, true]);
 }
 
 #[test]
-fn test_new_typed_array_mixed_falls_back() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+fn test_new_typed_array_mixed_is_clean_compile_error() {
+    let err = eval_result("[1, \"hello\"]").expect_err("mixed arrays must not compile");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Could not solve type constraints")
+            && msg.contains("int is not compatible with string"),
+        "mixed array error must cite incompatible element types; got: {msg}"
+    );
 }
 
 #[test]
@@ -83,32 +134,34 @@ fn test_float_array_len() {
 
 #[test]
 fn test_float_array_dot_product() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let result = eval("[1.0, 2.0, 3.0].dot([4.0, 5.0, 6.0])");
+    assert_eq!(result.as_f64(), Some(32.0));
 }
 
 #[test]
 fn test_float_array_norm() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let result = eval("[3.0, 4.0].norm()");
+    assert_eq!(result.as_f64(), Some(5.0));
 }
 
 #[test]
 fn test_float_array_cumsum() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_f64_array("[1.0, 2.0, 3.0, 4.0].cumsum()", &[1.0, 3.0, 6.0, 10.0]);
 }
 
 #[test]
 fn test_float_array_diff() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_f64_array("[1.0, 3.0, 6.0, 10.0].diff()", &[2.0, 3.0, 4.0]);
 }
 
 #[test]
 fn test_float_array_abs() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_f64_array("[-1.0, 2.0, -3.0].abs()", &[1.0, 2.0, 3.0]);
 }
 
 #[test]
 fn test_float_array_to_array() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_f64_array("[1.0, 2.0, 3.0].toArray()", &[1.0, 2.0, 3.0]);
 }
 
 #[test]
@@ -158,57 +211,86 @@ fn test_int_array_len() {
 
 #[test]
 fn test_int_array_abs() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_i64_array("[-1, 2, -3].abs()", &[1, 2, 3]);
 }
 
 #[test]
 fn test_int_array_to_array() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_i64_array("[1, 2, 3].toArray()", &[1, 2, 3]);
+}
+
+#[test]
+fn test_int_array_clone_keyword_prefers_native_method_with_prelude() {
+    let result = eval_with_prelude(
+        "let c = [4, 5, 6]\n\
+         let d = clone c\n\
+         c[0] + d[0]",
+    );
+    assert_eq!(result.as_i64(), Some(8));
 }
 
 #[test]
 fn test_bool_array_count() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let result = eval("[true, false, true, true].count()");
+    assert_eq!(result.as_i64(), Some(3));
 }
 
 #[test]
 fn test_bool_array_any() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let result = eval("[false, false, true].any()");
+    assert_eq!(result.as_bool(), Some(true));
 }
 
 #[test]
 fn test_bool_array_any_all_false() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let result = eval("[false, false, false].any()");
+    assert_eq!(result.as_bool(), Some(false));
 }
 
 #[test]
 fn test_bool_array_all() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let result = eval("[true, true, true].all()");
+    assert_eq!(result.as_bool(), Some(true));
 }
 
 #[test]
 fn test_bool_array_all_with_false() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let result = eval("[true, false, true].all()");
+    assert_eq!(result.as_bool(), Some(false));
 }
 
 #[test]
 fn test_bool_array_len() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_eq!(eval_typed_i64("[true, false, true].len()"), 3);
 }
 
 #[test]
 fn test_bool_array_to_array() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    assert_bool_array("[true, false, true].toArray()", &[true, false, true]);
 }
 
 #[test]
 fn test_float_array_unknown_method_errors() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let err = eval_result("[1.0, 2.0].notAMethod()").expect_err("unknown method must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("notAMethod")
+            && (msg.contains("Method 'notAMethod' not found")
+                || msg.contains("cannot have fields")),
+        "unknown method error should remain a clean compile error; got: {msg}"
+    );
 }
 
 #[test]
 fn test_int_array_unknown_method_errors() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    let err = eval_result("[1, 2].notAMethod()").expect_err("unknown method must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("notAMethod")
+            && (msg.contains("Method 'notAMethod' not found")
+                || msg.contains("cannot have fields")),
+        "unknown method error should remain a clean compile error; got: {msg}"
+    );
 }
 
 // =========================================================================
@@ -367,9 +449,7 @@ fn test_lang9_spin_2c_reduce_chained_map_wrong_order_is_clean_error() {
     // compile-time error surfaced by the arg-kind guard in
     // `install_pending_closure_param_types_for_hof`.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1,2,3,4,5].map(|x| x * 2).reduce(0, |a, b| a + b)",
-    );
+    let result = compile_with_prelude("let _ = [1,2,3,4,5].map(|x| x * 2).reduce(0, |a, b| a + b)");
     let err = result.expect_err(
         "wrong-order reduce(init, closure) must be a clean compile error, not a miscompile",
     );
@@ -388,9 +468,7 @@ fn test_lang9_spin_2c_reduce_callback_first_compiles() {
     // so hint indexing is identical regardless of the closure's index in
     // the call's arg list.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1,2,3,4,5].map(|x| x * 2).reduce(|a, b| a + b, 0)",
-    );
+    let result = compile_with_prelude("let _ = [1,2,3,4,5].map(|x| x * 2).reduce(|a, b| a + b, 0)");
     assert!(
         result.is_ok(),
         "callback-first reduce must compile; got: {:?}",
@@ -423,9 +501,7 @@ fn test_lang9_spin_2c_reduce_direct_array_compiles() {
     // `compile_expr_array`), then `install_pending_closure_param_types_
     // for_hof`'s is_reduce branch seeds both `acc` and `x` as `int`.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)");
     assert!(
         result.is_ok(),
         "direct array.reduce must compile; got: {:?}",
@@ -449,9 +525,7 @@ fn test_reduce_correct_order_compiles() {
     // The exact close-gate input: callback first, init second — the
     // correct order for Shape's `reduce(f, init)` signature.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)");
     assert!(
         result.is_ok(),
         "correct-order reduce(closure, init) must compile; got: {:?}",
@@ -466,17 +540,11 @@ fn test_reduce_wrong_order_int_first_is_clean_error() {
     // Pre-fix: re-entrant `main` miscompile (infinite loop, ec=124).
     // Post-fix: clean compile-time `SemanticError`.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(0, |acc, x| acc + x)",
-    );
-    let err = result.expect_err(
-        "wrong-order reduce(int, closure) must be a clean compile error",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(0, |acc, x| acc + x)");
+    let err = result.expect_err("wrong-order reduce(int, closure) must be a clean compile error");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("reduce")
-            && msg.contains("first argument")
-            && msg.contains("int"),
+        msg.contains("reduce") && msg.contains("first argument") && msg.contains("int"),
         "error must name `reduce`, the first-argument problem, and `int`; got: {msg}"
     );
 }
@@ -486,12 +554,8 @@ fn test_reduce_non_closure_first_arg_string_is_clean_error() {
     // A string literal as `reduce`'s first argument is equally
     // ill-typed and must surface a clean compile error.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(\"seed\", |acc, x| acc + x)",
-    );
-    let err = result.expect_err(
-        "reduce with a string first arg must be a clean compile error",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(\"seed\", |acc, x| acc + x)");
+    let err = result.expect_err("reduce with a string first arg must be a clean compile error");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("reduce") && msg.contains("string"),
@@ -506,8 +570,7 @@ fn test_map_non_closure_arg_is_clean_error() {
     // likewise be a clean compile error, not a miscompile.
     use super::test_utils::compile_with_prelude;
     let result = compile_with_prelude("let _ = [1, 2, 3].map(7)");
-    let err = result
-        .expect_err("map with a non-closure arg must be a clean compile error");
+    let err = result.expect_err("map with a non-closure arg must be a clean compile error");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("map") && msg.contains("first argument"),
@@ -523,9 +586,8 @@ fn test_filter_named_function_arg_still_allowed() {
     // may still fail for other reasons, but it must NOT be rejected
     // with the arg-order/arg-kind diagnostic.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "fn keep(n: int) -> bool { n > 1 }\nlet _ = [1, 2, 3].filter(keep)",
-    );
+    let result =
+        compile_with_prelude("fn keep(n: int) -> bool { n > 1 }\nlet _ = [1, 2, 3].filter(keep)");
     if let Err(err) = &result {
         let msg = format!("{err:?}");
         assert!(
@@ -534,7 +596,6 @@ fn test_filter_named_function_arg_still_allowed() {
         );
     }
 }
-
 
 // ──────────────────────────────────────────────────────────────────────
 // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18)
@@ -612,6 +673,242 @@ fn test_typed_object_array_struct_with_number_field() {
          arr[1].x",
     );
     assert_eq!(result.as_f64(), Some(3.5));
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// STAGE C2 op_new_array-enum-element (2026-06-17)
+//
+// `Array<EnumType>` was unconstructable even with an explicit annotation:
+// the literal surfaced "cannot infer the element type of this array
+// literal" because the annotation resolver (`resolve_typed_array_kind_from_
+// annotation`) only recognized registered STRUCT inner types, and the
+// inference helper (`should_use_typed_array`) had no `ConcreteType::Enum`
+// arm. Enum values are TypedObjects at runtime — `compile_expr_enum_
+// constructor` (collections.rs) emits `NewTypedObject` carrying
+// `NativeKind::Ptr(HeapKind::TypedObject)` for unit / tuple-payload /
+// struct-payload variants alike. So an enum-element array REUSES the
+// W16.2-A `TypedArray<*const TypedObjectStorage>` carrier — no new HeapKind,
+// no new ELEM_TYPE discriminant (V3-S5 element-carrier binders: per-T
+// monomorphization only). Per ADR-006 §2.7.5 the producer-side proof is the
+// explicit annotation + the registered enum schema; the enum-vs-struct
+// distinction is irrelevant to the runtime carrier.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_enum_array_unit_variant_iterate_match() {
+    // Unit-variant array: construct, iterate, match each element. The match
+    // returns a per-variant int so a wrong element / carrier mismatch surfaces.
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         let mut sum = 0\n\
+         for c in colors {\n\
+           sum = sum + match c { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }\n\
+         }\n\
+         sum",
+    );
+    assert_eq!(result.as_i64(), Some(6));
+}
+
+#[test]
+fn test_enum_array_tuple_payload_variant_match() {
+    // Tuple-payload-variant array: each element carries a payload destructured
+    // in the match. `Shape::Circle(2.0)` / `Shape::Rect(3.0, 4.0)`.
+    let result = eval(
+        "enum Shape { Circle(number), Rect(number, number) }\n\
+         let shapes: Array<Shape> = [Shape::Circle(2.0), Shape::Rect(3.0, 4.0)]\n\
+         let mut total = 0.0\n\
+         for s in shapes {\n\
+           total = total + match s { Shape::Circle(r) => r, Shape::Rect(w, h) => w + h }\n\
+         }\n\
+         total",
+    );
+    assert_eq!(result.as_f64(), Some(9.0));
+}
+
+#[test]
+fn test_enum_array_struct_payload_variant_match() {
+    // Struct-payload-variant array: `Msg::Move { x, y }` destructured by field.
+    let result = eval(
+        "enum Msg { Quit, Move { x: int, y: int } }\n\
+         let msgs: Array<Msg> = [Msg::Quit, Msg::Move { x: 3, y: 4 }]\n\
+         let mut acc = 0\n\
+         for m in msgs {\n\
+           acc = acc + match m { Msg::Quit => 100, Msg::Move { x, y } => x + y }\n\
+         }\n\
+         acc",
+    );
+    // 100 (Quit) + 7 (Move{3,4}) = 107
+    assert_eq!(result.as_i64(), Some(107));
+}
+
+#[test]
+fn test_enum_array_index_access() {
+    // Index access round-trip through the TypedObject carrier (TypedArrayGet).
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         match colors[1] { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }",
+    );
+    assert_eq!(result.as_i64(), Some(2));
+}
+
+#[test]
+fn test_enum_array_map_over_elements() {
+    // `.map` over Array<enum> with an annotated int result carrier.
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         let nums: Array<int> = colors.map(|c| match c { Color::Red => 10, Color::Green => 20, Color::Blue => 30 })\n\
+         nums[2]",
+    );
+    assert_eq!(result.as_i64(), Some(30));
+}
+
+#[test]
+fn test_enum_array_filter_over_elements() {
+    // `.filter` over Array<enum> returning an Array<enum> result carrier. This
+    // exercises the `Vec.filter` body's `result.push(item)` accumulator where
+    // `item: Color` — the path that needed the `ConcreteType::Enum` arm in
+    // `should_use_typed_array` to resolve the result element kind.
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         let reds: Array<Color> = colors.filter(|c| match c { Color::Red => true, _ => false })\n\
+         reds.len()",
+    );
+    assert_eq!(result.as_i64(), Some(1));
+}
+
+#[test]
+fn test_enum_array_emits_typed_object_carrier() {
+    // Producer-side proof: `Array<Color>` MUST emit the v2-raw
+    // `TypedArray<*const TypedObjectStorage>` carrier (`NewTypedArrayTypedObject`
+    // + per-element `TypedArrayPushTypedObject`), the SAME carrier as the
+    // W16.2-A struct case — NOT an untyped `NewArray`. Per the V3-S5
+    // element-carrier binders, enum elements reuse the TypedObject carrier
+    // (no new HeapKind / ELEM_TYPE discriminant).
+    use crate::bytecode::OpCode;
+    use crate::executor::tests::test_utils::compile_with_prelude;
+    let prog = compile_with_prelude(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         colors.len()",
+    )
+    .expect("compile failed");
+    let has = |op: OpCode| prog.instructions.iter().any(|i| i.opcode == op);
+    assert!(
+        has(OpCode::NewTypedArrayTypedObject),
+        "Array<EnumType> must emit NewTypedArrayTypedObject (TypedObject carrier), not an untyped NewArray"
+    );
+    assert!(
+        has(OpCode::TypedArrayPushTypedObject),
+        "Array<EnumType> elements must push via TypedArrayPushTypedObject"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05)
+//
+// Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.C (TraitObject
+// re-introduction, all-traits-dyn-able). Verifies that `Array<dyn Trait>`
+// literals route through the v2-raw `TypedArray<*const TraitObjectStorage>`
+// carrier (`NewTypedArrayTraitObject` + per-element `BoxTraitObject` +
+// `TypedArrayPushTraitObject` + `TypedArrayGetTraitObject`), and that
+// `arr[i].method()` dispatches through the vtable (`DynMethodCall`), NOT
+// through a concrete struct method on a TypedObject carrier. This is the
+// distinguishing property: the elements MUST be boxed trait objects so
+// vtable dispatch is exercised — a coincidental TypedObject-carrier fix
+// would not box and would dispatch on the concrete type directly.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_trait_object_array_dyn_method_dispatch() {
+    // The s5 smoke-fixture shape: `Array<dyn HasX>` of struct literals,
+    // index-access + trait-method call. The method MUST dispatch via the
+    // vtable on a boxed TraitObject element.
+    let result = eval(
+        "trait HasX { method x_str() -> string; }\n\
+         type Bar { v: int }\n\
+         impl HasX for Bar { method x_str() -> string { \"x\" } }\n\
+         let arr: Array<dyn HasX> = [Bar { v: 1 }, Bar { v: 2 }]\n\
+         arr[0].x_str()",
+    );
+    assert_eq!(result.as_str(), Some("x"));
+}
+
+#[test]
+fn test_trait_object_array_index_one_dispatch() {
+    // Index 1 round-trip — distinct element, same trait dispatch. The
+    // method body returns a per-instance value so a wrong element or a
+    // missing box would surface.
+    let result = eval(
+        "trait Label { method tag() -> string; }\n\
+         type A { v: int }\n\
+         type B { v: int }\n\
+         impl Label for A { method tag() -> string { \"a\" } }\n\
+         impl Label for B { method tag() -> string { \"b\" } }\n\
+         let arr: Array<dyn Label> = [A { v: 1 }, B { v: 2 }]\n\
+         arr[1].tag()",
+    );
+    // Per-type vtable dispatch: arr[1] is a `B`, so `tag()` returns "b".
+    // This is the load-bearing assertion that the element is BOXED with
+    // its own vtable — a TypedObject carrier would still pick the right
+    // concrete method here, but `test_trait_object_array_emits_trait_carrier`
+    // below pins the carrier opcode directly.
+    assert_eq!(result.as_str(), Some("b"));
+}
+
+#[test]
+fn test_trait_object_array_field_returning_method() {
+    // The trait method reads a struct field — exercises self.field access
+    // through the boxed TraitObject's inner TypedObject value.
+    let result = eval(
+        "trait Named { method name() -> string; }\n\
+         type Person { name: string }\n\
+         impl Named for Person { method name() -> string { self.name } }\n\
+         let arr: Array<dyn Named> = [Person { name: \"alice\" }, Person { name: \"bob\" }]\n\
+         arr[1].name()",
+    );
+    assert_eq!(result.as_str(), Some("bob"));
+}
+
+#[test]
+fn test_trait_object_array_emits_trait_carrier() {
+    // Producer-side proof: `Array<dyn Trait>` MUST emit the v2-raw
+    // `TypedArray<*const TraitObjectStorage>` carrier (NewTypedArrayTraitObject
+    // + per-element BoxTraitObject + TypedArrayPushTraitObject), NOT the
+    // TypedObject carrier (NewTypedArrayTypedObject). This is the load-bearing
+    // distinction from W16.2-A's coincidental bare-struct-literal path.
+    use crate::bytecode::OpCode;
+    use crate::executor::tests::test_utils::compile_with_prelude;
+    let prog = compile_with_prelude(
+        "trait HasX { method x_str() -> string; }\n\
+         type Bar { v: int }\n\
+         impl HasX for Bar { method x_str() -> string { \"x\" } }\n\
+         let arr: Array<dyn HasX> = [Bar { v: 1 }, Bar { v: 2 }]\n\
+         arr[0].x_str()",
+    )
+    .expect("compile failed");
+    // The array literal + box + push live in the module-scope top-level
+    // instruction stream (`prog.instructions`).
+    let has = |op: OpCode| prog.instructions.iter().any(|i| i.opcode == op);
+    assert!(
+        has(OpCode::NewTypedArrayTraitObject),
+        "Array<dyn Trait> must emit NewTypedArrayTraitObject (trait carrier), not the TypedObject carrier"
+    );
+    assert!(
+        has(OpCode::TypedArrayPushTraitObject),
+        "Array<dyn Trait> must emit per-element TypedArrayPushTraitObject"
+    );
+    assert!(
+        has(OpCode::BoxTraitObject),
+        "Array<dyn Trait> must box each concrete element via BoxTraitObject"
+    );
+    assert!(
+        !has(OpCode::NewTypedArrayTypedObject),
+        "Array<dyn Trait> must NOT route through the TypedObject carrier (coincidental-fix guard)"
+    );
 }
 
 // ── r5c-2-β-δ-(α): `Ptr(HeapKind::TypedArray)` carrier regression tests ─────
@@ -868,4 +1165,76 @@ fn ws9b_property_access_resolves_when_type_declared_after_function() {
          ov(Box { lo: 9, hi: 5 }, Box { lo: 3, hi: 4 })",
     );
     assert_eq!(result.as_bool(), Some(true));
+}
+
+/// STAGE B3 (strict-flip collection-dispatch): array-literal element-type
+/// propagation through `Array<T> + Array<T>` concatenation — the book idiom
+/// `weekdays = weekdays + [elem]` (fundamentals/datetime.mdx §Date Range
+/// Iteration). Before the fix, an array literal built from a loop variable / an
+/// f-string interpolating a loop variable, and a body-local `let xs: Array<T>`
+/// read in value position, both inferred `unknown` element type — so the
+/// ArrayConcat operand check rejected `xs + [..]` as `T[] + unknown`
+/// (bytecode compiler) or `<elem> is not compatible with Vec<T>` (runtime
+/// inference engine). The fix propagates the element type from (a) the
+/// declared `Array<T>` annotation via the recorded ConcreteType, and (b) the
+/// literal's homogeneous proven elements (loop var, f-string, struct
+/// constructor).
+///
+/// String and struct element types are exercised here — the book's actual `+`
+/// examples. The numeric `Array<int> + Array<int>` shape is deliberately NOT
+/// covered: `Vec<int>+Vec<int>` is claimed by the (incomplete) element-wise
+/// SIMD `IntrinsicVecAddI64` path, a distinct semantics from concatenation —
+/// SURFACED as an architecture decision, not forced into concat.
+#[test]
+fn test_b3_array_literal_element_type_propagates_through_concat() {
+    // (a) loop-built string array via the book `+` idiom, including an
+    //     f-string element interpolating the loop variable.
+    let result = eval(
+        "let mut weekdays: Array<string> = []\n\
+         for i in 0..5 {\n\
+             weekdays = weekdays + [f\"day-{i}\"]\n\
+         }\n\
+         weekdays.length()",
+    );
+    assert_eq!(result.as_i64(), Some(5));
+
+    // (b) declared-annotation element type pushed into a bare literal operand.
+    let result = eval(
+        "let a: Array<string> = [\"x\"]\n\
+         let b = a + [\"y\", \"z\"]\n\
+         b.length()",
+    );
+    assert_eq!(result.as_i64(), Some(3));
+
+    // (c) struct-typed elements: `Array<P> + Array<P>` concatenation.
+    let result = eval(
+        "type P { x: int }\n\
+         let a: Array<P> = [P{x:1}]\n\
+         let b: Array<P> = [P{x:2}, P{x:3}]\n\
+         let c = a + b\n\
+         c.length()",
+    );
+    assert_eq!(result.as_i64(), Some(3));
+}
+
+/// The type checker must accept `Array<T> + Array<T>` (concatenation) without
+/// routing it into the numeric-arithmetic path, which rejects an array operand
+/// as non-`Numeric`. Pins the `infer_array_add_type` seam in
+/// `inference/operators.rs`: a homogeneous `Array<string> + Array<string>`
+/// type-checks (the runtime-engine layer no longer raises "Array does not
+/// implement trait Numeric").
+#[test]
+fn test_b3_array_add_type_checks_without_numeric_rejection() {
+    use super::test_utils::eval_result;
+    let result = eval_result(
+        "let a: Array<string> = [\"x\"]\n\
+         let b: Array<string> = [\"y\"]\n\
+         let c = a + b\n\
+         c.length()",
+    );
+    assert!(
+        result.is_ok(),
+        "Array<string> + Array<string> should type-check as concat, got: {:?}",
+        result.err()
+    );
 }

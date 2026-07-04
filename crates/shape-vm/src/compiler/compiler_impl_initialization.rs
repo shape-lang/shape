@@ -1,5 +1,23 @@
 use super::*;
 
+/// Clamp a (possibly out-of-range) byte offset into `source` to a valid char
+/// boundary at or below it.
+///
+/// AST span byte offsets can land in the middle of a multibyte UTF-8 char
+/// (e.g. the 2nd byte of an em-dash `—` inside a comment). Slicing `source` at
+/// such an offset panics ("byte index N is not a char boundary"), which would
+/// mask the real compile error with a panic. This first saturates to
+/// `source.len()`, then floors to the nearest char boundary so the resulting
+/// index is always safe to slice at. For ASCII offsets (the common case) the
+/// value is returned unchanged, preserving existing line/col semantics.
+fn clamp_to_char_boundary(source: &str, byte_offset: usize) -> usize {
+    let mut idx = byte_offset.min(source.len());
+    while idx > 0 && !source.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 impl BytecodeCompiler {
     pub(super) fn collect_namespace_import_bindings(program: &Program) -> Vec<String> {
         use shape_ast::ast::{ImportItems, Item};
@@ -36,10 +54,12 @@ impl BytecodeCompiler {
             get_prop_native_kinds: HashMap::new(),
             closure_row_schema: None,
             pending_closure_param_types: None,
+            closure_callsite_param_hints: HashMap::new(),
+            pending_callable_hint_name: None,
+            returned_closure_callsite_param_hints: HashMap::new(),
             last_expr_type_info: None,
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,
-            last_expr_numeric_type: None,
             top_level_program_return_kind: None,
             current_expr_result_mode: ExprResultMode::Value,
             last_expr_reference_result: ExprReferenceResult::default(),
@@ -47,10 +67,6 @@ impl BytecodeCompiler {
             local_callable_return_reference_summaries: HashMap::new(),
             module_binding_callable_pass_modes: HashMap::new(),
             module_binding_callable_return_reference_summaries: HashMap::new(),
-            local_callable_return_types: HashMap::new(),
-            module_binding_callable_return_types: HashMap::new(),
-            local_array_callable_return_types: HashMap::new(),
-            module_binding_array_callable_return_types: HashMap::new(),
             // cluster-2-cw-IB-class-b: retained closure-literal AST for
             // local `let f = |..| ..` bindings; consumed by value-call
             // return-kind inference at `compile_expr_function_call`.
@@ -60,7 +76,13 @@ impl BytecodeCompiler {
             dyn_module_bindings: HashMap::new(),
             function_return_reference_summaries: HashMap::new(),
             current_function_return_reference_summary: None,
+            current_function_returns_borrow: false,
+            current_function_return_type: None,
+            pending_expected_call_return_type: None,
+            return_escape_drop_skip_local: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
+            inference_facts: shape_runtime::type_system::InferenceFacts::default(),
+            resolved_expr_types: HashMap::new(),
             type_aliases: HashMap::new(),
             current_line: 1,
             current_file_id: 0,
@@ -93,28 +115,22 @@ impl BytecodeCompiler {
             hoisted_fields: HashMap::new(),
             hoisted_field_types: HashMap::new(),
             pending_variable_name: None,
+            pending_variable_span: None,
             pending_variable_typed_array_kind: None,
+            pending_trait_object_array_trait: None,
             nested_array_literal_depth: 0,
+            in_interpolation_expr_depth: 0,
             v2_typed_array_locals: HashMap::new(),
             v2_typed_array_module_bindings: HashMap::new(),
             comprehension_element_kind: None,
             comprehension_push_sites: Vec::new(),
             empty_array_accumulators: HashMap::new(),
             pending_empty_array_alloc_idx: None,
-            pending_variable_typed_map_kind: None,
-            v2_typed_map_locals: HashMap::new(),
-            v2_typed_map_module_bindings: HashMap::new(),
             // ADR-006 §2.7.27 / Item 4 ruling: container-kind tracking for
             // `&mut self` write-back emission.
             mut_self_container_locals: HashMap::new(),
             mut_self_container_bindings: HashMap::new(),
             pending_variable_container_kind: None,
-            map_key_value_types: HashMap::new(),
-            local_map_key_value_types: HashMap::new(),
-            module_binding_map_key_value_types: HashMap::new(),
-            array_element_types: HashMap::new(),
-            local_array_element_types: HashMap::new(),
-            module_binding_array_element_types: HashMap::new(),
             future_reference_use_name_scopes: Vec::new(),
             known_traits: std::collections::HashSet::new(),
             trait_defs: HashMap::new(),
@@ -122,7 +138,7 @@ impl BytecodeCompiler {
             comptime_context_struct_defs: HashMap::new(),
             extension_registry: None,
             comptime_fields: HashMap::new(),
-            type_diagnostic_mode: TypeDiagnosticMode::ReliableOnly,
+            type_diagnostic_mode: TypeDiagnosticMode::Strict, // STRICT-FLIP (fix-then-flip branch): ReliableOnly→Strict, merges when corpus clears FPs
             compile_diagnostic_mode: CompileDiagnosticMode::FailFast,
             comptime_mode: false,
             removed_functions: HashSet::new(),
@@ -133,6 +149,8 @@ impl BytecodeCompiler {
             inferred_ref_locals: HashSet::new(),
             reference_value_locals: HashSet::new(),
             exclusive_reference_value_locals: HashSet::new(),
+            reference_value_local_referent_concrete_type: HashMap::new(),
+            reference_value_module_binding_referent_concrete_type: HashMap::new(),
             const_locals: HashSet::new(),
             const_module_bindings: HashSet::new(),
             immutable_locals: HashSet::new(),
@@ -144,11 +162,6 @@ impl BytecodeCompiler {
             inferred_ref_params: HashMap::new(),
             inferred_ref_mutates: HashMap::new(),
             inferred_param_pass_modes: HashMap::new(),
-            inferred_param_type_hints: HashMap::new(),
-            inferred_param_concrete_types: HashMap::new(),
-            inferred_param_object_fields: HashMap::new(),
-            inferred_return_object_fields: HashMap::new(),
-            function_return_schema_ids: HashMap::new(),
             drop_locals: Vec::new(),
             ownership_drop_locals: Vec::new(),
             drop_type_info: HashMap::new(),
@@ -175,6 +188,7 @@ impl BytecodeCompiler {
             current_function_params: Vec::new(),
             stdlib_function_names: HashSet::new(),
             allow_internal_builtins: false,
+            deferring_uninstantiated_template_body: false,
             native_resolution_context: None,
             non_function_mir_context_stack: Vec::new(),
             mir_functions: HashMap::new(),
@@ -185,8 +199,11 @@ impl BytecodeCompiler {
             mir_field_analyses: HashMap::new(),
             graph_namespace_map: HashMap::new(),
             module_graph: None,
-            current_function_local_concrete_types: HashMap::new(),
-            module_binding_concrete_types: HashMap::new(),
+            current_function_local_concrete_facts: HashMap::new(),
+            local_binding_spans: HashMap::new(),
+            current_closure_callee_captures: std::collections::BTreeSet::new(),
+            module_binding_concrete_facts: HashMap::new(),
+            module_binding_spans: HashMap::new(),
             monomorphization_cache:
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             monomorphization_in_progress: std::collections::HashSet::new(),
@@ -198,6 +215,7 @@ impl BytecodeCompiler {
     /// Enable comptime compilation mode for this compiler instance.
     pub fn set_comptime_mode(&mut self, enabled: bool) {
         self.comptime_mode = enabled;
+        self.type_inference.set_root_comptime_context(enabled);
     }
 
     /// Attach a blob-level cache for incremental compilation.
@@ -321,26 +339,67 @@ impl BytecodeCompiler {
             // hash, which makes A's reference to B stale. We iterate until no hashes
             // change (i.e., the dependency graph reaches a fixed point).
             //
-            // Mutual recursion (A calls B, B calls A) can never converge because
-            // each function's hash depends on the other. We detect mutual-recursion
-            // edges and treat them the same as self-recursion: use ZERO sentinel.
-            // The linker resolves ZERO+callee_name to the correct function ID.
+            // Cyclic recursion can never converge because each function's hash
+            // depends (transitively) on the others in the cycle. We detect every
+            // edge that participates in a call cycle and treat it the same as
+            // self-recursion: use the ZERO sentinel. The linker resolves
+            // ZERO+callee_name to the correct function ID.
+            //
+            // A direct 2-cycle (A↔B) is the special case; the general case is any
+            // edge (A→B) where B can reach A back through the call graph — i.e.
+            // A and B share a strongly-connected component of size ≥ 2. The old
+            // detector only caught the literal `call_edges.contains((B,A))`
+            // 2-cycle and so missed ≥3-member cycles (A→B→C→A), leaving their
+            // forward-reference deps to chase non-convergent hashes; after the
+            // iteration cap one blob's dep pointed at a hash that had been
+            // re-finalized out of `function_store`, producing the linker's
+            // "Missing function blob" failure.
 
-            // Build mutual-recursion edge set from callee_names.
-            let mut call_edges: std::collections::HashSet<(String, String)> =
-                std::collections::HashSet::new();
+            // Build the call-graph adjacency from callee_names (self-edges excluded).
+            let mut call_adj: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
             for blob in function_store.values() {
                 for callee in &blob.callee_names {
                     if callee != &blob.name {
-                        call_edges.insert((blob.name.clone(), callee.clone()));
+                        let succs = call_adj.entry(blob.name.clone()).or_default();
+                        if !succs.contains(callee) {
+                            succs.push(callee.clone());
+                        }
                     }
                 }
             }
+
+            // `reaches(from, target)` — can `target` be reached from `from` by
+            // following call edges? Used as `reaches(B, A)` to test whether the
+            // edge A→B closes a cycle back to A.
+            let reaches = |from: &str, target: &str| -> bool {
+                let mut stack: Vec<&str> = vec![from];
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                while let Some(node) = stack.pop() {
+                    if node == target {
+                        return true;
+                    }
+                    if !seen.insert(node) {
+                        continue;
+                    }
+                    if let Some(succs) = call_adj.get(node) {
+                        for s in succs {
+                            stack.push(s.as_str());
+                        }
+                    }
+                }
+                false
+            };
+
+            // An edge A→B is a cycle edge iff B reaches A. This subsumes the
+            // old 2-cycle case (B→A direct) and covers ≥3-member cycles.
             let mut mutual_edges: std::collections::HashSet<(String, String)> =
                 std::collections::HashSet::new();
-            for (a, b) in &call_edges {
-                if call_edges.contains(&(b.clone(), a.clone())) {
-                    mutual_edges.insert((a.clone(), b.clone()));
+            for (a, succs) in &call_adj {
+                for b in succs {
+                    if reaches(b, a) {
+                        mutual_edges.insert((a.clone(), b.clone()));
+                    }
                 }
             }
 
@@ -502,28 +561,19 @@ impl BytecodeCompiler {
                 // table propagated through the content-addressed path so
                 // the linker forwards it to `BytecodeProgram` for the JIT
                 // typed-array / TypedObject fast paths.
-                top_level_local_concrete_types: self
-                    .program
-                    .top_level_local_concrete_types
-                    .clone(),
+                top_level_local_concrete_types: self.program.top_level_local_concrete_types.clone(),
                 // ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array,
                 // 2026-05-12): per-user-function concrete-types side-table
                 // propagated through the content-addressed path for the
                 // JIT's TypedObject Aggregate short-circuit inside user
                 // function bodies.
-                function_local_concrete_types: self
-                    .program
-                    .function_local_concrete_types
-                    .clone(),
+                function_local_concrete_types: self.program.function_local_concrete_types.clone(),
                 // ADR-006 §2.7.5 conduit (W12-jit-call-return-kind,
                 // 2026-05-12): per-user-function declared return
                 // ConcreteType propagated through the content-addressed
                 // path so the conduit can stamp `TerminatorKind::Call`
                 // destination slots from the callee's return type.
-                function_return_concrete_types: self
-                    .program
-                    .function_return_concrete_types
-                    .clone(),
+                function_return_concrete_types: self.program.function_return_concrete_types.clone(),
                 // ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-
                 // conduit close, 2026-05-15): per-call-site monomorphized
                 // method-call FunctionId side-table propagated through
@@ -550,10 +600,7 @@ impl BytecodeCompiler {
                 // content-addressed path so the JIT consumer (rvalues.rs
                 // BinaryOp / UnaryOp arms) can lift the bytecode-time
                 // trait-dispatch decision to method-call IR.
-                operator_trait_dispatch_sites: self
-                    .program
-                    .operator_trait_dispatch_sites
-                    .clone(),
+                operator_trait_dispatch_sites: self.program.operator_trait_dispatch_sites.clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.
@@ -584,6 +631,8 @@ impl BytecodeCompiler {
                 has_imported_const_inline: self.program.has_imported_const_inline,
                 has_w17_marshal_residual: self.program.has_w17_marshal_residual,
                 has_try_unwrap_residual: self.program.has_try_unwrap_residual,
+                has_reference_escape_promotion: self.program.has_reference_escape_promotion,
+                has_null_coalesce_residual: self.program.has_null_coalesce_residual,
             });
         }
     }
@@ -651,12 +700,12 @@ impl BytecodeCompiler {
     /// Set line from a Span (converts byte offset to line number)
     pub fn set_line_from_span(&mut self, span: shape_ast::ast::Span) {
         if let Some(source) = &self.source_text {
-            // Count newlines up to span.start to get line number
-            let line = source[..span.start.min(source.len())]
-                .chars()
-                .filter(|c| *c == '\n')
-                .count() as u32
-                + 1;
+            // Count newlines up to span.start to get line number.
+            // Clamp + floor to a char boundary: span byte offsets can land in
+            // the middle of a multibyte UTF-8 char (e.g. an em-dash in a
+            // comment), and slicing there would panic and mask the real error.
+            let clamped = clamp_to_char_boundary(source, span.start);
+            let line = source[..clamped].chars().filter(|c| *c == '\n').count() as u32 + 1;
             self.current_line = line;
         }
     }
@@ -674,7 +723,10 @@ impl BytecodeCompiler {
         span: shape_ast::ast::Span,
     ) -> shape_ast::error::SourceLocation {
         let (line, column) = if let Some(source) = &self.source_text {
-            let clamped = span.start.min(source.len());
+            // Floor to a char boundary so a span offset landing mid-multibyte
+            // char (e.g. an em-dash in a comment) cannot panic the slice and
+            // mask the real compile error.
+            let clamped = clamp_to_char_boundary(source, span.start);
             let line = source[..clamped].chars().filter(|c| *c == '\n').count() + 1;
             let last_nl = source[..clamped].rfind('\n').map(|p| p + 1).unwrap_or(0);
             let column = clamped - last_nl + 1;
@@ -761,10 +813,7 @@ impl BytecodeCompiler {
     /// `ensure_next_id_above` advances the allocator past every seeded
     /// id so a *new* type declared in this cell cannot collide with a
     /// seeded one.
-    pub fn seed_persistent_schemas(
-        &mut self,
-        schemas: &[shape_runtime::type_schema::TypeSchema],
-    ) {
+    pub fn seed_persistent_schemas(&mut self, schemas: &[shape_runtime::type_schema::TypeSchema]) {
         let registry = self.type_tracker.schema_registry_mut();
         let mut max_id = 0u32;
         for schema in schemas {
@@ -860,19 +909,10 @@ impl BytecodeCompiler {
         ShapeError::MultiError(mapped)
     }
 
-    pub(super) fn should_emit_type_diagnostic(error: &TypeError) -> bool {
-        matches!(
-            error,
-            TypeError::UnknownProperty(_, _)
-            // J-CT.1: comptime-trait diagnostics are emitted in the default
-            // `ReliableOnly` mode. Both are pure rules with no false-positive
-            // surface (the gate fires only on `comptime impl`-marked methods
-            // and the alignment check only on declared trait/impl pairs), so
-            // failing the compile is the right behavior — matches the audit's
-            // §5(d) "compile-time semantic error" expectation.
-            | TypeError::ComptimeMethodCallOutsideComptime { .. }
-            | TypeError::ComptimeImplTraitMismatch { .. }
-        )
+    pub(super) fn should_emit_type_diagnostic(_error: &TypeError) -> bool {
+        // STRICT-FLIP (fix-then-flip branch): allowlist dropped — emit every
+        // type error (fail-closed). Neutralizes any residual ReliableOnly path.
+        true
     }
 
     pub(super) fn collect_program_functions(
@@ -923,6 +963,7 @@ impl BytecodeCompiler {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn is_primitive_value_type_name(name: &str) -> bool {
         matches!(
             name,
@@ -944,11 +985,14 @@ impl BytecodeCompiler {
         )
     }
 
+    #[allow(dead_code)]
     pub(super) fn annotation_is_heap_like(ann: &TypeAnnotation) -> bool {
         match ann {
             TypeAnnotation::Basic(name) => !Self::is_primitive_value_type_name(name),
             TypeAnnotation::Reference(name) => !Self::is_primitive_value_type_name(name),
-            TypeAnnotation::Array(_)
+            // A borrow `&T` / `&mut T` is a pointer carrier — heap-like.
+            TypeAnnotation::Borrow { .. }
+            | TypeAnnotation::Array(_)
             | TypeAnnotation::Tuple(_)
             | TypeAnnotation::Object(_)
             | TypeAnnotation::Function { .. }
@@ -964,6 +1008,7 @@ impl BytecodeCompiler {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn type_is_heap_like(ty: &Type) -> bool {
         match ty {
             Type::Concrete(ann) => Self::annotation_is_heap_like(ann),
@@ -1029,5 +1074,151 @@ impl BytecodeCompiler {
         }
 
         by_function
+    }
+}
+
+#[cfg(test)]
+mod char_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn compiler_defaults_to_strict_type_diagnostics_and_fail_fast_compile() {
+        let compiler = BytecodeCompiler::new();
+        assert_eq!(compiler.type_diagnostic_mode, TypeDiagnosticMode::Strict);
+        assert_eq!(
+            compiler.compile_diagnostic_mode,
+            CompileDiagnosticMode::FailFast
+        );
+    }
+
+    #[test]
+    fn reliable_only_filter_is_fail_closed_for_hard_type_errors() {
+        assert!(BytecodeCompiler::should_emit_type_diagnostic(
+            &TypeError::TypeMismatch("int".to_string(), "string".to_string())
+        ));
+        assert!(BytecodeCompiler::should_emit_type_diagnostic(
+            &TypeError::UndefinedVariable("missing".to_string())
+        ));
+    }
+
+    #[test]
+    fn default_compiler_rejects_hard_type_errors() {
+        let source = "let x: int = \"not an int\"\nx\n";
+        let program = shape_ast::parse_program(source).expect("parse should succeed");
+        let result = BytecodeCompiler::new().compile_with_source(&program, source);
+        assert!(
+            result.is_err(),
+            "default compiler must reject hard type diagnostics"
+        );
+    }
+
+    #[test]
+    fn recover_all_collects_but_still_returns_type_diagnostics() {
+        let source = "let x: int = \"not an int\"\nx\n";
+        let program = shape_ast::parse_program(source).expect("parse should succeed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_type_diagnostic_mode(TypeDiagnosticMode::RecoverAll);
+        let result = compiler.compile_with_source(&program, source);
+        assert!(
+            result.is_err(),
+            "RecoverAll may collect additional diagnostics, but must not compile through hard type errors"
+        );
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_ascii_is_identity() {
+        let s = "let x = foo();\nlet y = bar();";
+        // Every ASCII offset is a char boundary -> returned unchanged.
+        for i in 0..=s.len() {
+            assert_eq!(clamp_to_char_boundary(s, i), i, "ascii offset {i} changed");
+        }
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_floors_mid_multibyte() {
+        // "a" (1 byte) + em-dash "—" (3 bytes: E2 80 94) + "b".
+        let s = "a—b";
+        assert!(s.is_char_boundary(0));
+        assert!(s.is_char_boundary(1)); // start of em-dash
+        assert!(!s.is_char_boundary(2)); // 2nd byte of em-dash
+        assert!(!s.is_char_boundary(3)); // 3rd byte of em-dash
+        assert!(s.is_char_boundary(4)); // start of "b"
+
+        // Mid-char offsets floor down to the start of the em-dash (1).
+        assert_eq!(clamp_to_char_boundary(s, 2), 1);
+        assert_eq!(clamp_to_char_boundary(s, 3), 1);
+        // Boundaries are preserved.
+        assert_eq!(clamp_to_char_boundary(s, 1), 1);
+        assert_eq!(clamp_to_char_boundary(s, 4), 4);
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_saturates_past_end() {
+        let s = "abc";
+        assert_eq!(clamp_to_char_boundary(s, 999), 3);
+    }
+
+    /// Regression: a span offset that lands mid-multibyte-char must NOT panic
+    /// the source slice in the span->line/col helpers (it previously did,
+    /// masking the real compile error with a UTF-8 char-boundary panic).
+    #[test]
+    fn span_helpers_do_not_panic_on_mid_char_offset() {
+        // "// — comment\nlet x = 1\n" — the em-dash spans bytes 3..6.
+        let source = "// — comment\nlet x = 1\n";
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+
+        // Offset 4 == 2nd byte of the em-dash: a raw slice here would panic.
+        let mid_char_offset = 4;
+        assert!(!source.is_char_boundary(mid_char_offset));
+
+        // Both fixed paths must run without panicking.
+        compiler.set_line_from_span(shape_ast::ast::Span {
+            start: mid_char_offset,
+            end: mid_char_offset,
+        });
+        let loc = compiler.span_to_source_location(shape_ast::ast::Span {
+            start: mid_char_offset,
+            end: mid_char_offset + 1,
+        });
+        // Em-dash is on line 1; behaviour is "floor to char boundary", so the
+        // result is a sane, real location rather than a panic.
+        assert_eq!(loc.line, 1);
+    }
+
+    /// End-to-end: a source with a deliberate compile error AND a multibyte
+    /// char in a comment near the error must surface the REAL semantic error
+    /// (Err), not panic.
+    #[test]
+    fn compile_error_with_multibyte_comment_reports_error_not_panic() {
+        // Undefined variable `nope` is a compile error; the preceding comment
+        // carries an em-dash so error-context spans hit the multibyte window.
+        let source = "// boundary — note: this errors\nlet x = nope\n";
+        let program = shape_ast::parse_program(source).expect("parse should succeed");
+        let compiler = BytecodeCompiler::new();
+        let result = compiler.compile_with_source(&program, source);
+        // The key assertion is "did not panic". A compile error is the
+        // expected, correct outcome.
+        assert!(
+            result.is_err(),
+            "expected a semantic compile error for undefined `nope`, got Ok"
+        );
+    }
+
+    /// ASCII-only error source must report identical line/col as the
+    /// char-boundary floor is a no-op for ASCII.
+    #[test]
+    fn ascii_span_location_unchanged() {
+        let source = "let a = 1\nlet b = 2\nlet c = 3\n";
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        // Offset at start of line 3 ("let c").
+        let offset = source.find("let c").unwrap();
+        let loc = compiler.span_to_source_location(shape_ast::ast::Span {
+            start: offset,
+            end: offset + 5,
+        });
+        assert_eq!(loc.line, 3);
+        assert_eq!(loc.column, 1);
     }
 }

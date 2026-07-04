@@ -1,6 +1,7 @@
 //! Stress tests for type annotations on let/const/var, function parameters,
 //! return types, closures, default params, mutable variables, any type, and array annotations.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================
@@ -295,16 +296,19 @@ fn string_concatenation_typed() {
 // 19. ANY TYPE
 // =========================================================================
 
-/// Verifies any type annotation with int.
+/// Strict Shape has no `any` type. Annotating with `any` is rejected: the
+/// initializer's concrete type (`int`) does not unify with `any`.
 #[test]
 fn any_type_annotation_int() {
-    ShapeTest::new("let x: any = 42; x").expect_number(42.0);
+    ShapeTest::new("let x: any = 42; x").expect_run_err_contains("int is not compatible with any");
 }
 
-/// Verifies any type annotation with string.
+/// Strict Shape has no `any` type. Annotating with `any` is rejected: the
+/// initializer's concrete type (`string`) does not unify with `any`.
 #[test]
 fn any_type_annotation_string() {
-    ShapeTest::new(r#"let x: any = "hello"; x"#).expect_string("hello");
+    ShapeTest::new(r#"let x: any = "hello"; x"#)
+        .expect_run_err_contains("string is not compatible with any");
 }
 
 // =========================================================================

@@ -623,12 +623,16 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
             }
         }
         Expr::FunctionCall {
+            const_args,
             args,
             named_args,
             span,
             ..
         } => {
             if visitor.visit_expr_function_call(expr, *span) {
+                for arg in const_args {
+                    walk_expr(visitor, arg);
+                }
                 for arg in args {
                     walk_expr(visitor, arg);
                 }
@@ -638,12 +642,16 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
             }
         }
         Expr::QualifiedFunctionCall {
+            const_args,
             args,
             named_args,
             span,
             ..
         } => {
             if visitor.visit_expr_function_call(expr, *span) {
+                for arg in const_args {
+                    walk_expr(visitor, arg);
+                }
                 for arg in args {
                     walk_expr(visitor, arg);
                 }
@@ -1153,6 +1161,7 @@ mod tests {
                 Expr::TryOperator(
                     Box::new(Expr::FunctionCall {
                         name: "some_function".to_string(),
+                        const_args: Vec::new(),
                         args: vec![Expr::Literal(
                             Literal::String("arg".to_string()),
                             Span::DUMMY,

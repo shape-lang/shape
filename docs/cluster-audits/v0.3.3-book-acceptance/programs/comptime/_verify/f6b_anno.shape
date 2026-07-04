@@ -1,0 +1,17 @@
+annotation ai() {
+  targets: [type]
+  comptime post(target, ctx) {
+    comptime for field in target.fields {
+      comptime for ann in field.annotations {
+        if ann.name == "description" {
+        }
+      }
+    }
+  }
+}
+@ai()
+type Prompt {
+  @description("q")
+  query: string
+}
+print("done")

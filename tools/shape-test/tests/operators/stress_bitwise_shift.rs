@@ -273,10 +273,45 @@ fn test_precedence_shift_before_comparison() {
         .expect_number(1.0);
 }
 
-/// Verifies addition before shift: 2 + 1 << 3 = 2 + 8 = 10.
+/// Verifies addition binds tighter than shift (book precedence table, standard
+/// C/Rust order): 2 + 1 << 3 = (2 + 1) << 3 = 3 << 3 = 24.
 #[test]
 fn test_precedence_addition_before_shift() {
-    ShapeTest::new("2 + 1 << 3").expect_number(10.0);
+    ShapeTest::new("2 + 1 << 3").expect_number(24.0);
+}
+
+// OP2: additive (`+`/`-`) binds TIGHTER than shift (`<<`/`>>`).
+// Book spec: fundamentals/operators.mdx precedence table rows 6 (add/sub)
+// then 7 (shift). Standard C/Rust order.
+
+/// `1 + 1 << 2` parses as `(1 + 1) << 2 = 2 << 2 = 8` (add tighter than shift).
+#[test]
+fn test_precedence_add_tighter_than_shift_left() {
+    ShapeTest::new("1 + 1 << 2").expect_number(8.0);
+}
+
+/// `1 << 2 + 1` parses as `1 << (2 + 1) = 1 << 3 = 8` (add tighter than shift).
+#[test]
+fn test_precedence_add_tighter_than_shift_right() {
+    ShapeTest::new("1 << 2 + 1").expect_number(8.0);
+}
+
+/// Explicit parentheses match the implicit additive-tighter parse: `(1+1)<<2 = 8`.
+#[test]
+fn test_precedence_add_shift_explicit_paren_matches() {
+    ShapeTest::new("(1 + 1) << 2").expect_number(8.0);
+}
+
+/// Subtraction also binds tighter than shift: `10 - 2 << 1 = (10-2) << 1 = 16`.
+#[test]
+fn test_precedence_sub_tighter_than_shift() {
+    ShapeTest::new("10 - 2 << 1").expect_number(16.0);
+}
+
+/// Right shift with additive RHS: `8 >> 1 + 1 = 8 >> (1+1) = 8 >> 2 = 2`.
+#[test]
+fn test_precedence_add_tighter_than_shift_right_shift() {
+    ShapeTest::new("8 >> 1 + 1").expect_number(2.0);
 }
 
 // ============================================================
@@ -297,7 +332,8 @@ fn test_bitwise_shift_with_variables() {
 /// Verifies <<= compound assignment.
 #[test]
 fn test_shl_assign() {
-    ShapeTest::new("fn test() {\n    let mut x = 1\n    x <<= 4\n    x\n}\ntest()").expect_number(16.0);
+    ShapeTest::new("fn test() {\n    let mut x = 1\n    x <<= 4\n    x\n}\ntest()")
+        .expect_number(16.0);
 }
 
 /// Verifies >>= compound assignment.

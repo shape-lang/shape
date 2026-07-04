@@ -617,9 +617,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_u64(ptr: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_u64(ptr: i64, value: i64) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_u64(ptr as *mut u64, value as u64)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_u64(ptr as *mut u64, value as u64) };
 }
 
 // --- OwnedMutable: f64 -------------------------------------------------------
@@ -670,9 +668,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_u32(ptr: i64) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_u32(ptr: i64, value: i32) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_u32(ptr as *mut u32, value as u32)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_u32(ptr as *mut u32, value as u32) };
 }
 
 // --- OwnedMutable: i16 -------------------------------------------------------
@@ -689,9 +685,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_i16(ptr: i64) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_i16(ptr: i64, value: i32) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_i16(ptr as *mut i16, value as i16)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_i16(ptr as *mut i16, value as i16) };
 }
 
 // --- OwnedMutable: u16 -------------------------------------------------------
@@ -708,9 +702,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_u16(ptr: i64) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_u16(ptr: i64, value: i32) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_u16(ptr as *mut u16, value as u16)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_u16(ptr as *mut u16, value as u16) };
 }
 
 // --- OwnedMutable: i8 --------------------------------------------------------
@@ -727,9 +719,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_i8(ptr: i64) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_i8(ptr: i64, value: i32) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_i8(ptr as *mut i8, value as i8)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_i8(ptr as *mut i8, value as i8) };
 }
 
 // --- OwnedMutable: u8 --------------------------------------------------------
@@ -746,9 +736,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_u8(ptr: i64) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_u8(ptr: i64, value: i32) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_u8(ptr as *mut u8, value as u8)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_u8(ptr as *mut u8, value as u8) };
 }
 
 // --- OwnedMutable: bool ------------------------------------------------------
@@ -765,9 +753,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_bool(ptr: i64) -> i32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_bool(ptr: i64, value: i32) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_bool(ptr as *mut bool, value != 0)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_bool(ptr as *mut bool, value != 0) };
 }
 
 // --- OwnedMutable: ptr (8-byte ValueWord-bits payload) -----------------------
@@ -784,9 +770,7 @@ pub unsafe extern "C" fn jit_read_owned_mut_cell_ptr(ptr: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_owned_mut_cell_ptr(ptr: i64, value: i64) {
-    unsafe {
-        shape_value::v2::closure_raw::write_owned_mutable_ptr(ptr as *mut u64, value as u64)
-    };
+    unsafe { shape_value::v2::closure_raw::write_owned_mutable_ptr(ptr as *mut u64, value as u64) };
 }
 
 // --- Shared: i64 -------------------------------------------------------------
@@ -800,9 +784,7 @@ pub unsafe extern "C" fn jit_read_shared_cell_i64(cell_ptr: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_i64(cell_ptr: i64, value: i64) {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::write_shared_i64(cell_ptr as *const SharedCell, value)
-    };
+    unsafe { shape_value::v2::closure_raw::write_shared_i64(cell_ptr as *const SharedCell, value) };
 }
 
 // --- Shared: u64 -------------------------------------------------------------
@@ -810,19 +792,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_i64(cell_ptr: i64, value: i64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_u64(cell_ptr: i64) -> i64 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_u64(cell_ptr as *const SharedCell) as i64
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_u64(cell_ptr as *const SharedCell) as i64 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_u64(cell_ptr: i64, value: i64) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_u64(
-            cell_ptr as *const SharedCell,
-            value as u64,
-        )
+        shape_value::v2::closure_raw::write_shared_u64(cell_ptr as *const SharedCell, value as u64)
     };
 }
 
@@ -837,9 +814,7 @@ pub unsafe extern "C" fn jit_read_shared_cell_f64(cell_ptr: i64) -> f64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_f64(cell_ptr: i64, value: f64) {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::write_shared_f64(cell_ptr as *const SharedCell, value)
-    };
+    unsafe { shape_value::v2::closure_raw::write_shared_f64(cell_ptr as *const SharedCell, value) };
 }
 
 // --- Shared: i32 -------------------------------------------------------------
@@ -853,9 +828,7 @@ pub unsafe extern "C" fn jit_read_shared_cell_i32(cell_ptr: i64) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_i32(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::write_shared_i32(cell_ptr as *const SharedCell, value)
-    };
+    unsafe { shape_value::v2::closure_raw::write_shared_i32(cell_ptr as *const SharedCell, value) };
 }
 
 // --- Shared: u32 -------------------------------------------------------------
@@ -863,19 +836,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_i32(cell_ptr: i64, value: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_u32(cell_ptr: i64) -> i32 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_u32(cell_ptr as *const SharedCell) as i32
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_u32(cell_ptr as *const SharedCell) as i32 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_u32(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_u32(
-            cell_ptr as *const SharedCell,
-            value as u32,
-        )
+        shape_value::v2::closure_raw::write_shared_u32(cell_ptr as *const SharedCell, value as u32)
     };
 }
 
@@ -884,19 +852,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_u32(cell_ptr: i64, value: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_i16(cell_ptr: i64) -> i32 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_i16(cell_ptr as *const SharedCell) as i32
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_i16(cell_ptr as *const SharedCell) as i32 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_i16(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_i16(
-            cell_ptr as *const SharedCell,
-            value as i16,
-        )
+        shape_value::v2::closure_raw::write_shared_i16(cell_ptr as *const SharedCell, value as i16)
     };
 }
 
@@ -905,19 +868,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_i16(cell_ptr: i64, value: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_u16(cell_ptr: i64) -> i32 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_u16(cell_ptr as *const SharedCell) as i32
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_u16(cell_ptr as *const SharedCell) as i32 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_u16(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_u16(
-            cell_ptr as *const SharedCell,
-            value as u16,
-        )
+        shape_value::v2::closure_raw::write_shared_u16(cell_ptr as *const SharedCell, value as u16)
     };
 }
 
@@ -926,19 +884,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_u16(cell_ptr: i64, value: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_i8(cell_ptr: i64) -> i32 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_i8(cell_ptr as *const SharedCell) as i32
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_i8(cell_ptr as *const SharedCell) as i32 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_i8(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_i8(
-            cell_ptr as *const SharedCell,
-            value as i8,
-        )
+        shape_value::v2::closure_raw::write_shared_i8(cell_ptr as *const SharedCell, value as i8)
     };
 }
 
@@ -947,19 +900,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_i8(cell_ptr: i64, value: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_u8(cell_ptr: i64) -> i32 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_u8(cell_ptr as *const SharedCell) as i32
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_u8(cell_ptr as *const SharedCell) as i32 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_u8(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_u8(
-            cell_ptr as *const SharedCell,
-            value as u8,
-        )
+        shape_value::v2::closure_raw::write_shared_u8(cell_ptr as *const SharedCell, value as u8)
     };
 }
 
@@ -968,19 +916,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_u8(cell_ptr: i64, value: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_bool(cell_ptr: i64) -> i32 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_bool(cell_ptr as *const SharedCell) as i32
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_bool(cell_ptr as *const SharedCell) as i32 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_bool(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_bool(
-            cell_ptr as *const SharedCell,
-            value != 0,
-        )
+        shape_value::v2::closure_raw::write_shared_bool(cell_ptr as *const SharedCell, value != 0)
     };
 }
 
@@ -989,19 +932,14 @@ pub unsafe extern "C" fn jit_write_shared_cell_bool(cell_ptr: i64, value: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_read_shared_cell_ptr(cell_ptr: i64) -> i64 {
     use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::read_shared_ptr(cell_ptr as *const SharedCell) as i64
-    }
+    unsafe { shape_value::v2::closure_raw::read_shared_ptr(cell_ptr as *const SharedCell) as i64 }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_write_shared_cell_ptr(cell_ptr: i64, value: i64) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
-        shape_value::v2::closure_raw::write_shared_ptr(
-            cell_ptr as *const SharedCell,
-            value as u64,
-        )
+        shape_value::v2::closure_raw::write_shared_ptr(cell_ptr as *const SharedCell, value as u64)
     };
 }
 
@@ -1040,7 +978,10 @@ mod a1e_shared_ffi_tests {
         // Call the FFI retain — mirrors `op_make_closure`'s
         // `Arc::increment_strong_count` on the capture pointer.
         let returned = unsafe { jit_arc_shared_retain(raw_slot_share as u64) };
-        assert_eq!(returned, raw_slot_share as u64, "helper returns the pointer");
+        assert_eq!(
+            returned, raw_slot_share as u64,
+            "helper returns the pointer"
+        );
         assert_eq!(
             Arc::strong_count(&observer),
             4,
@@ -1068,14 +1009,10 @@ mod a1e_shared_ffi_tests {
         unsafe {
             jit_shared_lock_contended(ptr as u64);
             // While locked, the state byte must read 1.
-            let state = (*ptr)
-                .state
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let state = (*ptr).state.load(std::sync::atomic::Ordering::Relaxed);
             assert_eq!(state, 1, "lock helper must leave state byte = 1");
             jit_shared_unlock_contended(ptr as u64);
-            let state = (*ptr)
-                .state
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let state = (*ptr).state.load(std::sync::atomic::Ordering::Relaxed);
             assert_eq!(state, 0, "unlock helper must leave state byte = 0");
             drop(Box::from_raw(ptr));
         }
@@ -1111,7 +1048,10 @@ mod a1d_owned_mutable_cell_tests {
         let ptr = unsafe { jit_alloc_owned_mut_cell(initial) };
         assert!(!ptr.is_null(), "allocator must return a non-null pointer");
         let read = unsafe { *ptr };
-        assert_eq!(read, initial, "deref of fresh cell must yield the initial bits");
+        assert_eq!(
+            read, initial,
+            "deref of fresh cell must yield the initial bits"
+        );
         // Reclaim via Box::from_raw — matching `release_typed_closure`'s path.
         let _boxed: Box<u64> = unsafe { Box::from_raw(ptr) };
     }
@@ -1201,12 +1141,14 @@ mod phase_h2_finalizer_tests {
     ) -> *mut u8 {
         let size = layout.total_heap_size();
         let align = 8;
-        let alloc_layout =
-            std::alloc::Layout::from_size_align(size, align).expect("valid layout");
+        let alloc_layout = std::alloc::Layout::from_size_align(size, align).expect("valid layout");
         let ptr = unsafe { std::alloc::alloc_zeroed(alloc_layout) };
         assert!(!ptr.is_null(), "alloc_zeroed returned null");
         unsafe {
-            std::ptr::write(ptr as *mut HeapHeader, HeapHeader::new(HEAP_KIND_V2_CLOSURE));
+            std::ptr::write(
+                ptr as *mut HeapHeader,
+                HeapHeader::new(HEAP_KIND_V2_CLOSURE),
+            );
             let header = ptr as *mut TypedClosureHeader;
             (*header).function_id = function_id as u32;
             (*header).type_id = type_id;
@@ -1223,7 +1165,9 @@ mod phase_h2_finalizer_tests {
         // Arc share; the test's `drop_bits_via_raw(bits)` releases the
         // original share at the end of the scope.
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        let hv = vw.as_heap_ref().expect("finalizer should produce a heap value");
+        let hv = vw
+            .as_heap_ref()
+            .expect("finalizer should produce a heap value");
         assert!(
             matches!(hv, HeapValue::ClosureRaw(..)),
             "expected ClosureRaw variant, got {:?}",
@@ -1242,9 +1186,7 @@ mod phase_h2_finalizer_tests {
         // Zero-capture closure: header only, captures area is empty.
         let layout = Arc::new(immutable_layout(&[]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 42, 0) };
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 42, 0, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 42, 0, Arc::as_ptr(&layout)) };
         assert_closure_raw(bits, 42, 0);
         // Final drop releases the owning share — ClosureRaw's OwnedClosureBlock
         // Drop routes through `release_typed_closure` and frees the block.
@@ -1272,9 +1214,7 @@ mod phase_h2_finalizer_tests {
             let raw = ValueWord::from_i64(123).into_raw_bits();
             std::ptr::write(ptr.add(off) as *mut u64, raw);
         }
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 7, 1, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 7, 1, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("should be heap value");
         let handle = hv.as_closure_handle().expect("closure handle");
@@ -1295,9 +1235,7 @@ mod phase_h2_finalizer_tests {
             // F64 captures are stored as native f64 (not NaN-boxed).
             std::ptr::write(ptr.add(off) as *mut f64, 3.14);
         }
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 9, 1, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 9, 1, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
         assert!(matches!(hv, HeapValue::ClosureRaw(..)));
@@ -1317,9 +1255,7 @@ mod phase_h2_finalizer_tests {
             let off = layout.heap_capture_offset(0);
             std::ptr::write(ptr.add(off) as *mut u8, 1u8);
         }
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 1, 1, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 1, 1, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
         assert!(matches!(hv, HeapValue::ClosureRaw(..)));
@@ -1337,9 +1273,7 @@ mod phase_h2_finalizer_tests {
             let off = layout.heap_capture_offset(0);
             std::ptr::write(ptr.add(off) as *mut i32, -12345);
         }
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 2, 1, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 2, 1, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
         assert!(matches!(hv, HeapValue::ClosureRaw(..)));
@@ -1352,10 +1286,7 @@ mod phase_h2_finalizer_tests {
     #[test]
     fn finalizer_mixed_f64_i32_captures() {
         // Two typed captures at distinct offsets.
-        let layout = Arc::new(immutable_layout(&[
-            ConcreteType::F64,
-            ConcreteType::I32,
-        ]));
+        let layout = Arc::new(immutable_layout(&[ConcreteType::F64, ConcreteType::I32]));
         // F64 @ 16, I32 @ 24 (8-aligned after F64)
         assert_eq!(layout.heap_capture_offset(0), 16);
         assert_eq!(layout.heap_capture_offset(1), 24);
@@ -1364,9 +1295,7 @@ mod phase_h2_finalizer_tests {
             std::ptr::write(ptr.add(16) as *mut f64, 2.71);
             std::ptr::write(ptr.add(24) as *mut i32, 99);
         }
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 100, 2, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 100, 2, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
         assert!(matches!(hv, HeapValue::ClosureRaw(..)));
@@ -1402,9 +1331,7 @@ mod phase_h2_finalizer_tests {
             std::mem::forget(_retained);
         }
         // Before finalizer: refcount should be 2 (original + retained for closure).
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 55, 1, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 55, 1, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
         assert!(matches!(hv, HeapValue::ClosureRaw(..)));
@@ -1451,9 +1378,7 @@ mod phase_h2_finalizer_tests {
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 777, 0) };
         // Pass a different function_id via the FFI argument; finalizer must
         // still return a closure with function_id = 777.
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 555, 0, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 555, 0, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
         let hv = vw.as_heap_ref().expect("heap");
         assert!(matches!(hv, HeapValue::ClosureRaw(..)));
@@ -1468,26 +1393,21 @@ mod phase_h2_finalizer_tests {
         // A null header is a codegen bug; finalizer returns TAG_NONE (as a
         // safety valve) rather than dereferencing null.
         let layout = Arc::new(immutable_layout(&[]));
-        let bits = unsafe {
-            jit_finalize_heap_closure(
-                std::ptr::null_mut(),
-                0,
-                0,
-                Arc::as_ptr(&layout),
-            )
-        };
+        let bits =
+            unsafe { jit_finalize_heap_closure(std::ptr::null_mut(), 0, 0, Arc::as_ptr(&layout)) };
         // Should not be a HeapValue::Closure.
         let vw = unsafe { ValueWord::from_raw_bits(bits) };
-        assert!(vw.as_heap_ref().is_none(), "null-input must not decode as heap");
+        assert!(
+            vw.as_heap_ref().is_none(),
+            "null-input must not decode as heap"
+        );
     }
 
     #[test]
     fn finalizer_null_layout_returns_none_tag() {
         let layout = Arc::new(immutable_layout(&[]));
         let ptr = unsafe { alloc_typed_closure_for_test(&layout, 0, 0) };
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 0, 0, std::ptr::null())
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 0, 0, std::ptr::null()) };
         let vw = unsafe { ValueWord::from_raw_bits(bits) };
         assert!(vw.as_heap_ref().is_none());
         // The header is leaked in this test (finalizer's safety valve
@@ -1535,14 +1455,9 @@ mod phase_h2_finalizer_tests {
                 ValueWord::from_i64(7).into_raw_bits(),
             );
         }
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 3, 1, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 3, 1, Arc::as_ptr(&layout)) };
         let vw = unsafe { ValueWord::clone_from_bits(bits) };
-        let is_closure_raw = matches!(
-            vw.as_heap_ref(),
-            Some(HeapValue::ClosureRaw(..))
-        );
+        let is_closure_raw = matches!(vw.as_heap_ref(), Some(HeapValue::ClosureRaw(..)));
         assert!(
             is_closure_raw,
             "finalizer must produce HeapValue::ClosureRaw for H6.5 dispatch"
@@ -1593,7 +1508,9 @@ mod phase_h2_finalizer_tests {
             masked as *const HeapValue
         };
         // +1 observer share on top of s_bits' own share.
-        unsafe { Arc::increment_strong_count(outer_ptr); }
+        unsafe {
+            Arc::increment_strong_count(outer_ptr);
+        }
         let observer: Arc<HeapValue> = unsafe { Arc::from_raw(outer_ptr) };
         // observer share + s_bits share = 2 live shares.
         assert_eq!(Arc::strong_count(&observer), 2);
@@ -1610,9 +1527,7 @@ mod phase_h2_finalizer_tests {
         assert_eq!(Arc::strong_count(&observer), 3);
 
         // Finalize — produces the ClosureRaw ValueWord.
-        let bits = unsafe {
-            jit_finalize_heap_closure(ptr, 71, 1, Arc::as_ptr(&layout))
-        };
+        let bits = unsafe { jit_finalize_heap_closure(ptr, 71, 1, Arc::as_ptr(&layout)) };
         // Still 3 shares — finalizer just wraps the block pointer.
         assert_eq!(Arc::strong_count(&observer), 3);
 
@@ -1624,15 +1539,16 @@ mod phase_h2_finalizer_tests {
         // capture mask walk → outer String Arc count 3→2.
         unsafe {
             let payload = shape_value::tag_bits::get_payload(bits);
-            let block_ptr = (payload & shape_value::tag_bits::HEAP_PTR_MASK)
-                as *const HeapValue;
+            let block_ptr = (payload & shape_value::tag_bits::HEAP_PTR_MASK) as *const HeapValue;
             Arc::decrement_strong_count(block_ptr);
         }
         assert_eq!(Arc::strong_count(&observer), 2);
 
         // Drop the original outer share via `s_bits`. ValueWord has no
         // Drop impl, so release the Arc share by hand.
-        unsafe { Arc::decrement_strong_count(outer_ptr); }
+        unsafe {
+            Arc::decrement_strong_count(outer_ptr);
+        }
         assert_eq!(Arc::strong_count(&observer), 1);
         drop(observer);
     }
@@ -1656,7 +1572,7 @@ mod session_1_shared_local_lifecycle_tests {
     //!   * alloc + retain + release balances the refcount bookkeeping
     //!     exactly as the outer-scope lifecycle contract requires.
     use super::*;
-    use shape_value::v2::closure_layout::{SharedCell, SHARED_CELL_VALUE_OFFSET};
+    use shape_value::v2::closure_layout::{SHARED_CELL_VALUE_OFFSET, SharedCell};
     use shape_value::{ValueWord, ValueWordExt};
     use std::sync::Arc;
 
@@ -1682,8 +1598,7 @@ mod session_1_shared_local_lifecycle_tests {
         );
         // Payload at offset 8 matches initial bits.
         let payload = unsafe {
-            std::ptr::read((ptr as *const u8).add(SHARED_CELL_VALUE_OFFSET as usize)
-                as *const u64)
+            std::ptr::read((ptr as *const u8).add(SHARED_CELL_VALUE_OFFSET as usize) as *const u64)
         };
         assert_eq!(payload, initial, "payload must equal initial_bits");
 
@@ -1750,9 +1665,7 @@ mod session_1_shared_local_lifecycle_tests {
         // Alloc, lock-gated write via FFI helpers (mirroring the JIT's
         // inline lock path with contended fallback), locked-gated read
         // returns the written bits.
-        let ptr = unsafe {
-            jit_alloc_shared_cell(ValueWord::from_i64(100).into_raw_bits())
-        };
+        let ptr = unsafe { jit_alloc_shared_cell(ValueWord::from_i64(100).into_raw_bits()) };
         unsafe {
             // Take the lock via the contended helper (always safe even
             // when uncontended).
@@ -1767,7 +1680,7 @@ mod session_1_shared_local_lifecycle_tests {
             // Read back.
             jit_shared_lock_contended(ptr);
             let v = std::ptr::read(
-                (ptr as *const u8).add(SHARED_CELL_VALUE_OFFSET as usize) as *const u64,
+                (ptr as *const u8).add(SHARED_CELL_VALUE_OFFSET as usize) as *const u64
             );
             jit_shared_unlock_contended(ptr);
             assert_eq!(

@@ -54,12 +54,20 @@ impl BuiltinTypes {
         Type::Concrete(TypeAnnotation::Null)
     }
 
+    /// U1 (canonical-Type unification): the SINGLE encoding for an array type
+    /// is `Type::Generic { base: Reference("Array"), args: [element] }` — the
+    /// same carrier the empty-array literal produces
+    /// (`inference/expressions.rs`). The element `Type` is preserved
+    /// structurally (including an unresolved `Type::Variable`); it is NOT routed
+    /// through `to_annotation()`, which collapsed `Variable` -> `Basic("unknown")`
+    /// (the documented TypeVar loss) and produced a second, never-unifying
+    /// `Concrete(Array)` carrier. Deleting that synthesis path is what makes
+    /// empty and non-empty array literals share one type.
     pub fn array(element_type: Type) -> Type {
-        Type::Concrete(TypeAnnotation::Array(Box::new(
-            element_type
-                .to_annotation()
-                .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
-        )))
+        Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+            args: vec![element_type],
+        }
     }
 
     /// Canonical runtime numeric type for aliases and width-aware native names.

@@ -116,9 +116,7 @@ impl ElementData {
                 // Extract inner TypedObjectPtr by cloning out and consuming.
                 let to_ptr = match &*child_hv {
                     HeapValue::TypedObject(s) => s.clone(),
-                    _ => unreachable!(
-                        "into_typed_object_arc must return HeapValue::TypedObject"
-                    ),
+                    _ => unreachable!("into_typed_object_arc must return HeapValue::TypedObject"),
                 };
                 to_ptr.into_raw()
             })
@@ -169,12 +167,7 @@ impl ElementData {
         // flipped to `HeapValue::TypedObject(TypedObjectPtr)`. The
         // `_new`-returned raw pointer (refcount=1) is wrapped in
         // `TypedObjectPtr`, transferring the share to the wrapper.
-        let storage = TypedObjectStorage::_new(
-            schema_id as u64,
-            slots,
-            heap_mask,
-            field_kinds,
-        );
+        let storage = TypedObjectStorage::_new(schema_id as u64, slots, heap_mask, field_kinds);
         Arc::new(HeapValue::TypedObject(
             shape_value::heap_value::TypedObjectPtr::new(storage),
         ))
@@ -231,10 +224,7 @@ fn ensure_xml_node_schema() -> u32 {
 }
 
 /// Parse an XML element recursively from a quick-xml reader.
-fn parse_element(
-    reader: &mut Reader<&[u8]>,
-    start: &BytesStart,
-) -> Result<ElementData, String> {
+fn parse_element(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<ElementData, String> {
     let name = std::str::from_utf8(start.name().as_ref())
         .map_err(|e| format!("Invalid UTF-8 in element name: {}", e))?
         .to_string();
@@ -382,17 +372,18 @@ fn write_typed_object_node(
     // Match field order from `XML_NODE_FIELDS`. The construction side
     // writes slots in this exact order; the schema registration uses
     // the same field list, so positional access is sound.
-    if storage.slots.len() != XML_NODE_FIELDS.len() {
+    let slots = storage.slots();
+    if slots.len() != XML_NODE_FIELDS.len() {
         return Err(format!(
             "xml.stringify(): child TypedObject has {} slots, expected {}",
-            storage.slots.len(),
+            slots.len(),
             XML_NODE_FIELDS.len()
         ));
     }
-    let name_slot = &storage.slots[0];
-    let attrs_slot = &storage.slots[1];
-    let children_slot = &storage.slots[2];
-    let text_slot = &storage.slots[3];
+    let name_slot = &slots[0];
+    let attrs_slot = &slots[1];
+    let children_slot = &slots[2];
+    let text_slot = &slots[3];
 
     // SAFETY for each slot: the construction-side contract in
     // `ElementData::into_typed_object_arc` writes each slot as
@@ -459,11 +450,7 @@ fn write_typed_object_node(
             Arc::increment_strong_count(arc_ptr);
             let arc = Arc::from_raw(arc_ptr);
             let owned = (*arc).clone();
-            if owned.is_empty() {
-                None
-            } else {
-                Some(owned)
-            }
+            if owned.is_empty() { None } else { Some(owned) }
         }
     };
 
@@ -560,9 +547,7 @@ fn write_xml_element(
             // SAFETY: `children` is non-null (checked above) and points to
             // a live `TypedArray<*const TypedObjectStorage>` per the
             // construction contract in `ElementData::into_typed_object_arc`.
-            let slice = unsafe {
-                TypedArray::<*const TypedObjectStorage>::as_slice(children)
-            };
+            let slice = unsafe { TypedArray::<*const TypedObjectStorage>::as_slice(children) };
             for &child_ptr in slice.iter() {
                 // SAFETY: per the construction contract each element is a
                 // live `*const TypedObjectStorage` with refcount >= 1 owed
@@ -631,9 +616,8 @@ pub fn create_xml_module() -> ModuleExports {
             name: "value".to_string(),
             type_name: "HashMap<string, any>".to_string(),
             required: true,
-            description:
-                "Node value to serialize (with name, attributes, children, text? fields)"
-                    .to_string(),
+            description: "Node value to serialize (with name, attributes, children, text? fields)"
+                .to_string(),
             ..Default::default()
         }],
         ConcreteType::Result(Box::new(ConcreteType::String)),

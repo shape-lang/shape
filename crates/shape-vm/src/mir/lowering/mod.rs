@@ -22,7 +22,6 @@ use crate::mir::analysis::MutabilityError;
 use shape_ast::ast::{self, Span, Statement};
 use std::collections::{HashMap, HashSet};
 
-
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MirLoopContext {
     pub(super) break_block: BasicBlockId,
@@ -117,8 +116,14 @@ pub struct MirBuilder {
     /// COW-container ctor (`Set()` / `HashMap()` / `Deque()` /
     /// `PriorityQueue()`); consumed at `Expr::MethodCall` lowering to decide
     /// whether to emit the receiver write-back assignment after the call.
-    mut_self_container_locals:
-        HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
+    mut_self_container_locals: HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
+    /// Slots backing a `var` smart-default binding (`var x = ...`). Populated at
+    /// `lower_var_decl` for `VarKind::Var` declarations. Threaded into
+    /// `MirFunction.var_binding_slots`; the borrow solver uses it to keep `var`
+    /// on `OwnershipDecision::Clone` on a still-live source (auto-clone /
+    /// clone-on-still-live) while `let` / `let mut` get Move + B0005 (binding-
+    /// move reconcile, user 2026-06-21).
+    var_binding_slots: HashSet<SlotId>,
     /// Per-slot user-struct type name for slots produced by
     /// `Expr::StructLiteral { type_name, .. }` lowering — ADR-006 §2.7.5
     /// producing-site classification, Phase 3 cluster-0 Round 13 T1' gap 1
@@ -140,6 +145,26 @@ pub struct MirBuilder {
     /// annotation resolves to `i8`/`i16`/`i32`/`u8`/`u16`/`u32`. Threaded
     /// into `MirFunction.local_declared_scalar_types`.
     local_declared_scalar_types: HashMap<SlotId, shape_value::v2::ConcreteType>,
+    /// Function-name → return-type `LocalTypeInfo` classification, seeded by
+    /// the compiler from the type-checked function registry (strict REAL-MOVE
+    /// close H1, 2026-06-21). Lets a `let p = mk()` binding sourced from a
+    /// fn-call classify its slot from `mk`'s declared/inferred return type
+    /// (heap ConcreteType → NonCopy → Move + B0005; scalar → Copy) instead of
+    /// the literal-only `Unknown` fallthrough. The MIR layer does not itself
+    /// run inference, so the compiler surfaces the already-type-checked return
+    /// classification here. Empty when lowering is invoked without a seed
+    /// (e.g. unit tests) — those binds keep the conservative `Unknown` path.
+    fn_return_types: HashMap<String, LocalTypeInfo>,
+    /// Names of capitalized enum **unit** variants in scope (e.g. `Red`,
+    /// `Green`). Seeded by the compiler from its schema registry. Used by
+    /// `lower_match_expr` to resolve the pattern-identifier-vs-unit-variant
+    /// ambiguity: a bare `match l { Red => … }` arm whose `Red` names a unit
+    /// variant is a refutable variant pattern, not a catch-all binder. The
+    /// MIR layer has no schema-registry access, so this set is the producer-
+    /// side classification handed down at lowering time. Empty under
+    /// unseeded lowering (unit tests) — bare capitalized identifiers then
+    /// stay binders, matching the pre-fix behavior.
+    known_unit_variant_names: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -193,10 +218,41 @@ impl MirBuilder {
             span,
             fallback_spans: Vec::new(),
             mut_self_container_locals: HashMap::new(),
+            var_binding_slots: HashSet::new(),
             local_struct_type_names: HashMap::new(),
             local_typed_array_element_types: HashMap::new(),
             local_declared_scalar_types: HashMap::new(),
+            fn_return_types: HashMap::new(),
+            known_unit_variant_names: HashSet::new(),
         }
+    }
+
+    /// Seed the in-scope enum unit-variant name set (pattern-identifier-vs-
+    /// unit-variant ambiguity resolution). Called by the compiler before
+    /// lowering with the unit-variant names drawn from its schema registry.
+    pub fn seed_unit_variant_names(&mut self, names: HashSet<String>) {
+        self.known_unit_variant_names = names;
+    }
+
+    /// Is `name` a known enum unit-variant in scope? Drives the
+    /// `Pattern::Identifier` → refutable-variant rewrite in `lower_match_expr`.
+    pub(super) fn is_known_unit_variant(&self, name: &str) -> bool {
+        self.known_unit_variant_names.contains(name)
+    }
+
+    /// Seed the function-name → return-type classification map (strict
+    /// REAL-MOVE close H1, 2026-06-21). Called by the compiler before lowering
+    /// a function body, with the type-checked return-type `LocalTypeInfo` for
+    /// every function in scope. Consumed by `infer_local_type_from_expr_with_
+    /// builder`'s `FunctionCall` arm so a fn-return-sourced bind classifies
+    /// correctly without the MIR layer re-running inference.
+    pub fn seed_fn_return_types(&mut self, map: HashMap<String, LocalTypeInfo>) {
+        self.fn_return_types = map;
+    }
+
+    /// Look up a function's return-type classification, if seeded.
+    pub(super) fn fn_return_type_info(&self, name: &str) -> Option<LocalTypeInfo> {
+        self.fn_return_types.get(name).copied()
     }
 
     /// Record the user-struct type name for a slot produced by an
@@ -278,6 +334,14 @@ impl MirBuilder {
         self.mut_self_container_locals.insert(slot, kind);
     }
 
+    /// Record that `slot` backs a `var` smart-default binding. Called from
+    /// `lower_var_decl` for `VarKind::Var`. The borrow solver reads the threaded
+    /// set (`MirFunction.var_binding_slots`) to keep `var` on clone-on-still-live
+    /// while `let` / `let mut` get Move + B0005 (user 2026-06-21 reconcile).
+    pub(super) fn record_var_binding_slot(&mut self, slot: SlotId) {
+        self.var_binding_slots.insert(slot);
+    }
+
     /// Look up a recognized COW-container kind for a binding slot. Returns
     /// `None` when the binding is not a tracked container (the standard
     /// no-writeback path).
@@ -286,6 +350,20 @@ impl MirBuilder {
         slot: SlotId,
     ) -> Option<crate::compiler::mutation_writeback::ContainerKind> {
         self.mut_self_container_locals.get(&slot).copied()
+    }
+
+    /// True when the binding occupying `slot` is an immutable (`let` /
+    /// const) binding. Used to gate the mut-self write-back: a chained
+    /// builder call (`.set` / `.add` / etc.) on an immutable receiver is a
+    /// pure value-returning call — the handler returns a NEW container Arc
+    /// and the original binding is unchanged — so no in-place write-back to
+    /// the binding slot may be emitted (R2 chained-builder-on-immutable).
+    /// In-place mutation of the receiver is the opt-in `let mut` feature.
+    pub(super) fn is_slot_immutable_binding(&self, slot: SlotId) -> bool {
+        self.locals
+            .get(slot.0 as usize)
+            .and_then(|record| record.binding_info.as_ref())
+            .is_some_and(|info| info.enforce_immutable_assignment)
     }
 
     /// Allocate a new local variable slot.
@@ -389,6 +467,19 @@ impl MirBuilder {
     /// Look up the current slot for a named local.
     pub fn lookup_local(&self, name: &str) -> Option<SlotId> {
         self.local_slots.get(name).copied()
+    }
+
+    /// Read the recorded `LocalTypeInfo` for a slot. Used by
+    /// `infer_local_type_from_expr_with_builder` to propagate a source
+    /// binding's Copy/NonCopy classification through an identifier-sourced
+    /// rebind (`let q = p`) so a heap move (`p: NonCopy`) is tracked as a real
+    /// MOVE while a scalar (`p: Copy`) stays Copy. Returns `Unknown` when the
+    /// slot has no record (e.g. out of range).
+    pub(super) fn slot_type_info(&self, slot: SlotId) -> LocalTypeInfo {
+        self.locals
+            .get(slot.0 as usize)
+            .map(|l| l.type_info.clone())
+            .unwrap_or(LocalTypeInfo::Unknown)
     }
 
     pub fn visible_named_locals(&self) -> Vec<String> {
@@ -586,13 +677,7 @@ impl MirBuilder {
 
     /// Emit a function call as a block terminator. Finishes current block
     /// with TerminatorKind::Call and starts a continuation block.
-    pub fn emit_call(
-        &mut self,
-        func: Operand,
-        args: Vec<Operand>,
-        destination: Place,
-        span: Span,
-    ) {
+    pub fn emit_call(&mut self, func: Operand, args: Vec<Operand>, destination: Place, span: Span) {
         let next_bb = self.new_block();
         self.finish_block(
             TerminatorKind::Call {
@@ -635,6 +720,16 @@ impl MirBuilder {
             .filter(|l| !l.name.starts_with("__mir_"))
             .map(|l| l.name.clone())
             .collect();
+        // Real user-binding slots (strict REAL-MOVE move-detection
+        // discriminator, see MirFunction::binding_slots). Index === slot id,
+        // matching `local_types`'s positional layout.
+        let binding_slots: HashSet<SlotId> = self
+            .locals
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.name.starts_with("__mir_"))
+            .map(|(idx, _)| SlotId(idx as u16))
+            .collect();
 
         MirLoweringResult {
             mir: MirFunction {
@@ -649,6 +744,8 @@ impl MirBuilder {
                 local_struct_type_names: self.local_struct_type_names,
                 local_typed_array_element_types: self.local_typed_array_element_types,
                 local_declared_scalar_types: self.local_declared_scalar_types,
+                binding_slots,
+                var_binding_slots: self.var_binding_slots,
             },
             had_fallbacks,
             fallback_spans,
@@ -683,7 +780,48 @@ pub fn lower_function_detailed(
     body: &[Statement],
     span: Span,
 ) -> MirLoweringResult {
+    lower_function_detailed_with_returns(name, params, body, span, HashMap::new())
+}
+
+/// As [`lower_function_detailed`], but seeds the function-name → return-type
+/// `LocalTypeInfo` map (strict REAL-MOVE close H1, 2026-06-21) so a
+/// fn-return-sourced binding (`let p = mk()`) classifies its slot from the
+/// callee's type-checked return type. The compiler builds the map from its
+/// type-checked function registry; tests use the empty-map
+/// `lower_function_detailed`.
+pub fn lower_function_detailed_with_returns(
+    name: &str,
+    params: &[ast::FunctionParameter],
+    body: &[Statement],
+    span: Span,
+    fn_return_types: HashMap<String, LocalTypeInfo>,
+) -> MirLoweringResult {
+    lower_function_detailed_with_returns_and_variants(
+        name,
+        params,
+        body,
+        span,
+        fn_return_types,
+        HashSet::new(),
+    )
+}
+
+/// As [`lower_function_detailed_with_returns`], but additionally seeds the
+/// in-scope enum unit-variant name set so a bare `match l { Red => … }` arm
+/// resolves `Red` as a refutable variant pattern (pattern-identifier-vs-unit-
+/// variant ambiguity). The compiler builds the set from its schema registry;
+/// the variant-less wrapper passes an empty set (binders unchanged).
+pub fn lower_function_detailed_with_returns_and_variants(
+    name: &str,
+    params: &[ast::FunctionParameter],
+    body: &[Statement],
+    span: Span,
+    fn_return_types: HashMap<String, LocalTypeInfo>,
+    unit_variant_names: HashSet<String>,
+) -> MirLoweringResult {
     let mut builder = MirBuilder::new(name.to_string(), span);
+    builder.seed_fn_return_types(fn_return_types);
+    builder.seed_unit_variant_names(unit_variant_names);
 
     // Register parameters
     for param in params {
@@ -795,6 +933,96 @@ pub fn lower_function(
     span: Span,
 ) -> MirFunction {
     lower_function_detailed(name, params, body, span).mir
+}
+
+/// Classify a function's RETURN type annotation into a `LocalTypeInfo`
+/// (strict REAL-MOVE close H1, 2026-06-21). Used by the compiler to build the
+/// `fn_return_types` seed passed to [`lower_function_detailed_with_returns`]:
+/// a heap return type (string / struct / Array / HashMap / Option / Result /
+/// ...) classifies `NonCopy` so a `let p = mk()` bind moves on rebind; a
+/// scalar return (int/number/bool/width-ints) classifies `Copy`.
+///
+/// Unlike the binding-site `local_type_from_annotation` (which only classifies
+/// types that resolve via `concrete_type_from_annotation` and returns `None`
+/// for unknown names), a RETURN annotation that names an unresolved type is a
+/// user-defined struct/enum return (`fn mk() -> P`) — under the strict
+/// REAL-MOVE model a user struct is a HEAP value, so it classifies `NonCopy`.
+/// This closes the unannotated-struct-fn-return false-green (`fn mk()->P{..}
+/// let p=mk() let q=p p.x` ran instead of B0005).
+///
+/// `generic_params` is the function's own declared generic type-parameter
+/// names (`fn id<T>(x: T) -> T` ⇒ `{"T"}`). A return type whose name IS a
+/// generic param is deliberately NOT seeded (returns `None`) — a generic
+/// return could instantiate to a scalar, so classifying it `NonCopy` would
+/// false-flip a scalar instantiation. The generic case stays on the
+/// conservative non-consuming path. Unlike a fragile single-letter heuristic,
+/// this uses the function's REAL type-param set, so a concrete one-letter
+/// struct name (`type P { .. }`) still classifies as the heap `NonCopy`.
+pub fn classify_return_annotation(
+    annotation: &shape_ast::ast::TypeAnnotation,
+    generic_params: &std::collections::HashSet<String>,
+) -> Option<LocalTypeInfo> {
+    use shape_ast::ast::TypeAnnotation;
+    // First try the precise resolver (scalar → Copy, resolvable heap → NonCopy).
+    if let Some(info) = helpers::local_type_from_annotation(annotation) {
+        return Some(info);
+    }
+    // The resolver returned `None`. For a RETURN type, an unresolved *named*
+    // type that is not one of the function's generic type-parameters is a
+    // concrete user struct/enum → a heap value → `NonCopy`. A bare generic
+    // param is left unseeded.
+    match annotation {
+        TypeAnnotation::Basic(name) => {
+            if generic_params.contains(name) {
+                None
+            } else {
+                Some(LocalTypeInfo::NonCopy)
+            }
+        }
+        TypeAnnotation::Reference(path) => {
+            let name = path.to_string();
+            if generic_params.contains(&name) {
+                None
+            } else {
+                Some(LocalTypeInfo::NonCopy)
+            }
+        }
+        // A generic application that did not resolve above (e.g. a user generic
+        // type `Box<T>` / `MyWrapper<int>`) is still a heap value → `NonCopy`.
+        TypeAnnotation::Generic { .. } => Some(LocalTypeInfo::NonCopy),
+        _ => None,
+    }
+}
+
+/// U4-5b: classify a function's inferred return `ConcreteType` into the
+/// move-class `LocalTypeInfo` (the structural source that replaced the stringly
+/// `function_return_types` map). A register-resident scalar (`int`/`number`/
+/// width-int/`bool`/`char`) or a non-heap `Void` is `Copy`; every concrete heap
+/// value (`string`/`decimal`/`bigint`/`DateTime`/`Array`/`HashMap`/`Option`/
+/// `Result`/struct/enum) is `NonCopy` — a real MOVE on rebind. Genuinely-
+/// unprovable returns never reach here: an unresolved return type yields no
+/// recorded `ConcreteType`, so the function gets NO seed entry and falls through
+/// to the conservative `Unknown` non-consuming path (no Bool-default / force-
+/// scalar — ADR-006 §Forbidden, surface-and-stop).
+pub fn classify_return_concrete_type(ct: &shape_value::v2::ConcreteType) -> LocalTypeInfo {
+    use shape_value::v2::ConcreteType;
+    match ct {
+        ConcreteType::I64
+        | ConcreteType::I32
+        | ConcreteType::I16
+        | ConcreteType::I8
+        | ConcreteType::U64
+        | ConcreteType::U32
+        | ConcreteType::U16
+        | ConcreteType::U8
+        | ConcreteType::F64
+        | ConcreteType::F32
+        | ConcreteType::Bool
+        | ConcreteType::Char
+        | ConcreteType::Void => LocalTypeInfo::Copy,
+        // Every concrete heap value is a real MOVE on rebind.
+        _ => LocalTypeInfo::NonCopy,
+    }
 }
 
 pub fn compute_mutability_errors(lowering: &MirLoweringResult) -> Vec<MutabilityError> {
@@ -923,6 +1151,51 @@ mod tests {
         );
         assert_eq!(errors[0].variable_name, "x");
         assert!(errors[0].is_explicit_let);
+    }
+
+    #[test]
+    fn test_chained_builder_on_immutable_hashmap_no_mutability_error() {
+        // R2 chained-builder-on-immutable: `.set` on an immutable `let`
+        // HashMap returns a NEW map (clone-on-write); the binding is never
+        // reassigned, so no mutation-writeback `Assign(m, ..)` is emitted
+        // and `compute_mutability_errors` must stay clean. In-place
+        // mutation of the receiver is the opt-in `let mut` feature.
+        let lowering = lower_parsed_function(
+            r#"
+                function build() {
+                    let m: HashMap<string, int> = HashMap()
+                    m.set("a", 1).set("b", 2)
+                    m
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert!(
+            errors.is_empty(),
+            "chained builder on immutable HashMap must not flag a mutability error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_builder_on_let_mut_hashmap_still_writes_back() {
+        // The `let mut` counterpart still emits the in-place write-back
+        // (Assign to the receiver slot), but since the binding is mutable
+        // that Assign is NOT a mutability error. Guards against the R2 fix
+        // over-suppressing the writeback for mutable bindings.
+        let lowering = lower_parsed_function(
+            r#"
+                function build() {
+                    let mut m: HashMap<string, int> = HashMap()
+                    m.set("a", 1)
+                    m
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert!(
+            errors.is_empty(),
+            "builder on `let mut` HashMap must compile clean: {errors:?}"
+        );
     }
 
     #[test]
@@ -1316,8 +1589,12 @@ mod tests {
         );
     }
 
+    // A lowered `let x = 1; let r = &x; let alias = r; return alias` must stay
+    // visible to the solver as a ReturnSlot escape. Without an explicit
+    // borrow-return contract, default analysis emits B0003 and derives no
+    // promotion for the alias.
     #[test]
-    fn test_lowered_returned_ref_alias_is_visible_to_solver() {
+    fn test_lowered_returned_ref_alias_rejects_without_borrow_return_contract() {
         let body = vec![
             Statement::VariableDecl(
                 ast::VariableDecl {
@@ -1365,8 +1642,13 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
-            "expected reference-escape error, got {:?}",
+            "unannotated returned LOCAL-ref alias must emit B0003 ReferenceEscape, got {:?}",
             analysis.errors
+        );
+        assert!(
+            analysis.reference_escape_promotions.is_empty(),
+            "unannotated returned LOCAL-ref alias must not promote, got {:?}",
+            analysis.reference_escape_promotions
         );
     }
 
@@ -1594,7 +1876,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1614,7 +1901,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1634,7 +1926,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1674,7 +1971,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1714,7 +2016,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1737,7 +2044,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1761,7 +2073,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     /// W15.2-LANG-5 regression. `Pattern::Typed` arms in a `match`
@@ -1895,7 +2212,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1912,7 +2234,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1986,7 +2313,12 @@ mod tests {
         let lowering = lower_function_detailed("test", &[pair_param], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -2003,7 +2335,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -2020,7 +2357,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -2031,23 +2373,303 @@ mod tests {
             Expr::Literal(ast::Literal::Int(2), span()),
         );
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("arr".to_string(), span()), type_annotation: None, value: Some(Expr::Array(vec![Expr::Identifier("x".to_string(), span()), Expr::Literal(ast::Literal::Int(2), span())], span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("obj".to_string(), span()), type_annotation: None, value: Some(Expr::Object(vec![ast::ObjectEntry::Field { key: "left".to_string(), value: Expr::Identifier("x".to_string(), span()), type_annotation: None }, ast::ObjectEntry::Spread(Expr::Identifier("arr".to_string(), span()))], span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("unary".to_string(), span()), type_annotation: None, value: Some(Expr::UnaryOp { op: ast::UnaryOp::Neg, operand: Box::new(Expr::Identifier("x".to_string(), span())), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("fuzzy".to_string(), span()), type_annotation: None, value: Some(Expr::FuzzyComparison { left: Box::new(Expr::Identifier("x".to_string(), span())), op: ast::operators::FuzzyOp::Equal, right: Box::new(Expr::Literal(ast::Literal::Int(1), span())), tolerance: ast::operators::FuzzyTolerance::Percentage(0.02), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("slice".to_string(), span()), type_annotation: None, value: Some(Expr::IndexAccess { object: Box::new(Expr::Identifier("arr".to_string(), span())), index: Box::new(Expr::Literal(ast::Literal::Int(0), span())), end_index: Some(Box::new(Expr::Literal(ast::Literal::Int(1), span()))), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("asserted".to_string(), span()), type_annotation: None, value: Some(Expr::TypeAssertion { expr: Box::new(Expr::Identifier("x".to_string(), span())), type_annotation: ast::TypeAnnotation::Basic("int".to_string()), meta_param_overrides: Some(overrides), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("instance".to_string(), span()), type_annotation: None, value: Some(Expr::InstanceOf { expr: Box::new(Expr::Identifier("x".to_string(), span())), type_annotation: ast::TypeAnnotation::Basic("int".to_string()), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("variant".to_string(), span()), type_annotation: None, value: Some(Expr::EnumConstructor { enum_name: "Option".into(), variant: "Some".to_string(), payload: ast::EnumConstructorPayload::Tuple(vec![Expr::Identifier("x".to_string(), span())]), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("call".to_string(), span()), type_annotation: None, value: Some(Expr::MethodCall { receiver: Box::new(Expr::Identifier("obj".to_string(), span())), method: "touch".to_string(), args: vec![Expr::Identifier("x".to_string(), span())], named_args: vec![("tail".to_string(), Expr::IndexAccess { object: Box::new(Expr::Identifier("arr".to_string(), span())), index: Box::new(Expr::Literal(ast::Literal::Int(0), span())), end_index: Some(Box::new(Expr::Literal(ast::Literal::Int(1), span()))), span: span() })], optional: false, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("range".to_string(), span()), type_annotation: None, value: Some(Expr::Range { start: Some(Box::new(Expr::Literal(ast::Literal::Int(0), span()))), end: Some(Box::new(Expr::Identifier("x".to_string(), span()))), kind: ast::RangeKind::Exclusive, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("contextual".to_string(), span()), type_annotation: None, value: Some(Expr::TimeframeContext { timeframe: ast::Timeframe::new(5, ast::TimeframeUnit::Minute), expr: Box::new(Expr::Identifier("x".to_string(), span())), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("using_impl".to_string(), span()), type_annotation: None, value: Some(Expr::UsingImpl { expr: Box::new(Expr::Identifier("x".to_string(), span())), impl_name: "Tracked".to_string(), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("simulation".to_string(), span()), type_annotation: None, value: Some(Expr::SimulationCall { name: "sim".to_string(), params: vec![("value".to_string(), Expr::Identifier("x".to_string(), span()))], span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("struct_lit".to_string(), span()), type_annotation: None, value: Some(Expr::StructLiteral { type_name: "Point".into(), fields: vec![("x".to_string(), Expr::Identifier("x".to_string(), span()))], span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("annotated".to_string(), span()), type_annotation: None, value: Some(Expr::Annotated { annotation: ast::Annotation { name: "trace".to_string(), args: vec![Expr::Identifier("x".to_string(), span())], span: span() }, target: Box::new(Expr::Identifier("x".to_string(), span())), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("rows".to_string(), span()), type_annotation: None, value: Some(Expr::TableRows(vec![vec![Expr::Identifier("x".to_string(), span()), Expr::Literal(ast::Literal::Int(2), span())], vec![Expr::Literal(ast::Literal::Int(3), span()), Expr::Literal(ast::Literal::Int(4), span())]], span())), ownership: OwnershipModifier::Inferred }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("arr".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Array(
+                        vec![
+                            Expr::Identifier("x".to_string(), span()),
+                            Expr::Literal(ast::Literal::Int(2), span()),
+                        ],
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("obj".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Object(
+                        vec![
+                            ast::ObjectEntry::Field {
+                                key: "left".to_string(),
+                                value: Expr::Identifier("x".to_string(), span()),
+                                type_annotation: None,
+                            },
+                            ast::ObjectEntry::Spread(Expr::Identifier("arr".to_string(), span())),
+                        ],
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("unary".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::UnaryOp {
+                        op: ast::UnaryOp::Neg,
+                        operand: Box::new(Expr::Identifier("x".to_string(), span())),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("fuzzy".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::FuzzyComparison {
+                        left: Box::new(Expr::Identifier("x".to_string(), span())),
+                        op: ast::operators::FuzzyOp::Equal,
+                        right: Box::new(Expr::Literal(ast::Literal::Int(1), span())),
+                        tolerance: ast::operators::FuzzyTolerance::Percentage(0.02),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("slice".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::IndexAccess {
+                        object: Box::new(Expr::Identifier("arr".to_string(), span())),
+                        index: Box::new(Expr::Literal(ast::Literal::Int(0), span())),
+                        end_index: Some(Box::new(Expr::Literal(ast::Literal::Int(1), span()))),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("asserted".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::TypeAssertion {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        type_annotation: ast::TypeAnnotation::Basic("int".to_string()),
+                        meta_param_overrides: Some(overrides),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("instance".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::InstanceOf {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        type_annotation: ast::TypeAnnotation::Basic("int".to_string()),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("variant".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::EnumConstructor {
+                        enum_name: "Option".into(),
+                        variant: "Some".to_string(),
+                        payload: ast::EnumConstructorPayload::Tuple(vec![Expr::Identifier(
+                            "x".to_string(),
+                            span(),
+                        )]),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("call".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::MethodCall {
+                        receiver: Box::new(Expr::Identifier("obj".to_string(), span())),
+                        method: "touch".to_string(),
+                        args: vec![Expr::Identifier("x".to_string(), span())],
+                        named_args: vec![(
+                            "tail".to_string(),
+                            Expr::IndexAccess {
+                                object: Box::new(Expr::Identifier("arr".to_string(), span())),
+                                index: Box::new(Expr::Literal(ast::Literal::Int(0), span())),
+                                end_index: Some(Box::new(Expr::Literal(
+                                    ast::Literal::Int(1),
+                                    span(),
+                                ))),
+                                span: span(),
+                            },
+                        )],
+                        optional: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("range".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Range {
+                        start: Some(Box::new(Expr::Literal(ast::Literal::Int(0), span()))),
+                        end: Some(Box::new(Expr::Identifier("x".to_string(), span()))),
+                        kind: ast::RangeKind::Exclusive,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("contextual".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::TimeframeContext {
+                        timeframe: ast::Timeframe::new(5, ast::TimeframeUnit::Minute),
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("using_impl".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::UsingImpl {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        impl_name: "Tracked".to_string(),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("simulation".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::SimulationCall {
+                        name: "sim".to_string(),
+                        params: vec![(
+                            "value".to_string(),
+                            Expr::Identifier("x".to_string(), span()),
+                        )],
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("struct_lit".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::StructLiteral {
+                        type_name: "Point".into(),
+                        fields: vec![("x".to_string(), Expr::Identifier("x".to_string(), span()))],
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("annotated".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Annotated {
+                        annotation: ast::Annotation {
+                            name: "trace".to_string(),
+                            args: vec![Expr::Identifier("x".to_string(), span())],
+                            span: span(),
+                        },
+                        target: Box::new(Expr::Identifier("x".to_string(), span())),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("rows".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::TableRows(
+                        vec![
+                            vec![
+                                Expr::Identifier("x".to_string(), span()),
+                                Expr::Literal(ast::Literal::Int(2), span()),
+                            ],
+                            vec![
+                                Expr::Literal(ast::Literal::Int(3), span()),
+                                Expr::Literal(ast::Literal::Int(4), span()),
+                            ],
+                        ],
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
@@ -2056,23 +2678,117 @@ mod tests {
     #[test]
     fn test_lowered_assignment_expr_write_while_borrowed_is_visible_to_solver() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Reference { expr: Box::new(Expr::Identifier("x".to_string(), span())), is_mutable: false, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("y".to_string(), span()), type_annotation: None, value: Some(Expr::Assign(Box::new(ast::AssignExpr { target: Box::new(Expr::Identifier("x".to_string(), span())), value: Box::new(Expr::Literal(ast::Literal::Int(2), span())) }), span())), ownership: OwnershipModifier::Inferred }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("y".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Assign(
+                        Box::new(ast::AssignExpr {
+                            target: Box::new(Expr::Identifier("x".to_string(), span())),
+                            value: Box::new(Expr::Literal(ast::Literal::Int(2), span())),
+                        }),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
             Statement::Return(Some(Expr::Identifier("shared".to_string(), span())), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_property_assignment_expr_preserves_disjoint_places() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("pair".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::String("pair".to_string()), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("left".to_string(), span()), type_annotation: None, value: Some(Expr::Reference { expr: Box::new(Expr::PropertyAccess { object: Box::new(Expr::Identifier("pair".to_string(), span())), property: "left".to_string(), optional: false, span: span() }), is_mutable: false, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Expression(Expr::Assign(Box::new(ast::AssignExpr { target: Box::new(Expr::PropertyAccess { object: Box::new(Expr::Identifier("pair".to_string(), span())), property: "right".to_string(), optional: false, span: span() }), value: Box::new(Expr::Literal(ast::Literal::String("updated".to_string()), span())) }), span()), span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("pair".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(
+                        ast::Literal::String("pair".to_string()),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("left".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "left".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Expression(
+                Expr::Assign(
+                    Box::new(ast::AssignExpr {
+                        target: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "right".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        value: Box::new(Expr::Literal(
+                            ast::Literal::String("updated".to_string()),
+                            span(),
+                        )),
+                    }),
+                    span(),
+                ),
+                span(),
+            ),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
@@ -2082,14 +2798,16 @@ mod tests {
 
     #[test]
     fn test_lowered_property_assignment_direct_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var obj = { value: 0 }
                 let x = 1
                 obj.value = &x
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2097,7 +2815,8 @@ mod tests {
 
     #[test]
     fn test_lowered_property_assignment_indirect_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var obj = { value: 0 }
                 let x = 1
@@ -2105,7 +2824,8 @@ mod tests {
                 obj.value = r
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2113,14 +2833,16 @@ mod tests {
 
     #[test]
     fn test_lowered_index_assignment_direct_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var arr = [0]
                 let x = 1
                 arr[0] = &x
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2128,7 +2850,8 @@ mod tests {
 
     #[test]
     fn test_lowered_index_assignment_indirect_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var arr = [0]
                 let x = 1
@@ -2136,7 +2859,8 @@ mod tests {
                 arr[0] = r
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2145,41 +2869,190 @@ mod tests {
     #[test]
     fn test_lowered_block_expr_write_while_borrowed_is_visible_to_solver() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Block(ast::BlockExpr { items: vec![ast::BlockItem::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("inner".to_string(), span()), type_annotation: None, value: Some(Expr::Reference { expr: Box::new(Expr::Identifier("x".to_string(), span())), is_mutable: false, span: span() }), ownership: OwnershipModifier::Inferred }), ast::BlockItem::Expression(Expr::Identifier("inner".to_string(), span()))] }, span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Assignment(ast::Assignment { pattern: DestructurePattern::Identifier("x".to_string(), span()), value: Expr::Literal(ast::Literal::Int(2), span()) }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Block(
+                        ast::BlockExpr {
+                            items: vec![
+                                ast::BlockItem::VariableDecl(ast::VariableDecl {
+                                    kind: VarKind::Let,
+                                    is_mut: false,
+                                    pattern: DestructurePattern::Identifier(
+                                        "inner".to_string(),
+                                        span(),
+                                    ),
+                                    type_annotation: None,
+                                    value: Some(Expr::Reference {
+                                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                                        is_mutable: false,
+                                        span: span(),
+                                    }),
+                                    ownership: OwnershipModifier::Inferred,
+                                }),
+                                ast::BlockItem::Expression(Expr::Identifier(
+                                    "inner".to_string(),
+                                    span(),
+                                )),
+                            ],
+                        },
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
             Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_let_expr_write_while_borrowed_is_visible_to_solver() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Let(Box::new(ast::LetExpr { pattern: ast::Pattern::Identifier("inner".to_string()), type_annotation: None, value: Some(Box::new(Expr::Reference { expr: Box::new(Expr::Identifier("x".to_string(), span())), is_mutable: false, span: span() })), body: Box::new(Expr::Identifier("inner".to_string(), span())) }), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Assignment(ast::Assignment { pattern: DestructurePattern::Identifier("x".to_string(), span()), value: Expr::Literal(ast::Literal::Int(2), span()) }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Let(
+                        Box::new(ast::LetExpr {
+                            pattern: ast::Pattern::synthetic_identifier("inner".to_string()),
+                            type_annotation: None,
+                            value: Some(Box::new(Expr::Reference {
+                                expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                                is_mutable: false,
+                                span: span(),
+                            })),
+                            body: Box::new(Expr::Identifier("inner".to_string(), span())),
+                        }),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
             Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_if_expression_with_block_branches_stays_supported() {
         let block_branch = |borrow_name: &str| {
-            Expr::Block(ast::BlockExpr { items: vec![ast::BlockItem::Expression(Expr::Reference { expr: Box::new(Expr::Identifier(borrow_name.to_string(), span())), is_mutable: false, span: span() })] }, span())
+            Expr::Block(
+                ast::BlockExpr {
+                    items: vec![ast::BlockItem::Expression(Expr::Reference {
+                        expr: Box::new(Expr::Identifier(borrow_name.to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    })],
+                },
+                span(),
+            )
         };
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("flag".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Bool(true), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Conditional { condition: Box::new(Expr::Identifier("flag".to_string(), span())), then_expr: Box::new(block_branch("x")), else_expr: Some(Box::new(block_branch("x"))), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Assignment(ast::Assignment { pattern: DestructurePattern::Identifier("x".to_string(), span()), value: Expr::Literal(ast::Literal::Int(2), span()) }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("flag".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Bool(true), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Conditional {
+                        condition: Box::new(Expr::Identifier("flag".to_string(), span())),
+                        then_expr: Box::new(block_branch("x")),
+                        else_expr: Some(Box::new(block_branch("x"))),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
@@ -2189,20 +3062,28 @@ mod tests {
 
     #[test]
     fn test_lowered_async_let_exclusive_ref_task_boundary_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let mut x = 1
                 async let fut = &mut x
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_async_let_nested_ref_binding_task_boundary_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let mut x = 1
                 async let fut = {
@@ -2210,29 +3091,43 @@ mod tests {
                     r
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_async_let_shared_ref_task_boundary_stays_clean() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let x = 1
                 async let fut = &x
                 await fut
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(!analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            !analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_join_exclusive_ref_task_boundary_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let mut x = 1
                 await join all {
@@ -2240,15 +3135,22 @@ mod tests {
                     2,
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_async_scope_with_async_let_stays_supported() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let x = 1
                 async scope {
@@ -2256,7 +3158,8 @@ mod tests {
                     await fut
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2264,13 +3167,15 @@ mod tests {
 
     #[test]
     fn test_lowered_closure_capture_of_reference_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let r = &x
                 let f = || r
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2278,41 +3183,57 @@ mod tests {
 
     #[test]
     fn test_lowered_returned_array_with_ref_still_errors() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let arr = [&x]
                 return arr
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray)
+        );
     }
 
     #[test]
     fn test_lowered_returned_closure_with_ref_still_errors() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let r = &x
                 let f = || r
                 return f
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure)
+        );
     }
 
     #[test]
     fn test_lowered_closure_capture_of_owned_value_stays_clean() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let f = || x
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2320,55 +3241,73 @@ mod tests {
 
     #[test]
     fn test_lowered_list_comprehension_write_conflict_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let mut x = 1
                 let r = &x
                 let xs = [(x = 2) for y in [1]]
                 r
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_from_query_write_conflict_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let mut x = 1
                 let r = &x
                 let rows = from y in [1] where (x = 2) > 0 select y
                 r
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_comptime_expr_stays_supported() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let generated = comptime {
                     let x = 1
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
     }
 
     #[test]
     fn test_lowered_comptime_for_expr_stays_supported() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let generated = comptime for f in [1, 2] {
                     let y = f
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
     }
 
@@ -2629,19 +3568,17 @@ mod tests {
         // `Assign(outer_acc, ...)` where the RHS Use references a slot
         // populated by `acc + item` — NOT a self-Assign of inner_acc to
         // itself.
-        let body = vec![
-            Statement::VariableDecl(
-                ast::VariableDecl {
-                    kind: VarKind::Let,
-                    is_mut: true,
-                    pattern: DestructurePattern::Identifier("acc".to_string(), span()),
-                    type_annotation: None,
-                    value: Some(Expr::Literal(ast::Literal::Int(0), span())),
-                    ownership: OwnershipModifier::Inferred,
-                },
-                span(),
-            ),
-        ];
+        let body = vec![Statement::VariableDecl(
+            ast::VariableDecl {
+                kind: VarKind::Let,
+                is_mut: true,
+                pattern: DestructurePattern::Identifier("acc".to_string(), span()),
+                type_annotation: None,
+                value: Some(Expr::Literal(ast::Literal::Int(0), span())),
+                ownership: OwnershipModifier::Inferred,
+            },
+            span(),
+        )];
         let mir = lower_function("test_shadow_in_loop", &[], &body, span());
         // Sanity: the function lowered without panic.
         assert!(mir.num_locals >= 1);
@@ -2681,9 +3618,7 @@ mod tests {
         // `Assign(Local(n), Use(Copy|Move(Local(n))))` (self-Use).
         for block in mir.blocks.iter() {
             for stmt in block.statements.iter() {
-                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) =
-                    &stmt.kind
-                {
+                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) = &stmt.kind {
                     if let Operand::Copy(Place::Local(src))
                     | Operand::Move(Place::Local(src))
                     | Operand::MoveExplicit(Place::Local(src)) = operand
@@ -2737,9 +3672,7 @@ mod tests {
         let mut all_assigns = Vec::new();
         for block in mir.blocks.iter() {
             for stmt in block.statements.iter() {
-                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) =
-                    &stmt.kind
-                {
+                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) = &stmt.kind {
                     if let Operand::Copy(Place::Local(src))
                     | Operand::Move(Place::Local(src))
                     | Operand::MoveExplicit(Place::Local(src)) = operand
@@ -2758,5 +3691,63 @@ mod tests {
             .expect("expected slot-to-slot Use Assign for `let y = x`");
         let (y_dst, x_src) = cross_slot_assign;
         assert_ne!(y_dst, x_src, "y must be a fresh slot");
+    }
+
+    // f-string bool-as-int VM!=JIT divergence fix (2026-06): a primitive
+    // infallible `as`-cast must lower to `Rvalue::PrimitiveCast` (carrying
+    // the target type name), NOT a kind-blind `Rvalue::Use` pass-through
+    // (the deleted W4-δ tagged-dispatch shape that left the SOURCE kind on
+    // the slot and rendered `f"{true as int}"` as `true` under JIT). The
+    // PrimitiveCast Rvalue is preflight-rejected on the JIT side so the
+    // program deopts to the interpreter, where `OpCode::ConvertTo*`
+    // restamps the result kind.
+    #[test]
+    fn test_lower_bool_as_int_emits_primitive_cast() {
+        let lowering = lower_parsed_function(
+            r#"
+                fn cast_it() {
+                    true as int
+                }
+            "#,
+        );
+        let mut found = None;
+        for block in &lowering.mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(_, Rvalue::PrimitiveCast { target, .. }) = &stmt.kind {
+                    found = Some(target.clone());
+                }
+            }
+        }
+        assert_eq!(
+            found.as_deref(),
+            Some("int"),
+            "`true as int` must lower to Rvalue::PrimitiveCast {{ target: \"int\" }} \
+             (not a kind-blind Use pass-through). blocks = {:?}",
+            lowering.mir.blocks
+        );
+    }
+
+    #[test]
+    fn test_lower_int_as_number_emits_primitive_cast() {
+        let lowering = lower_parsed_function(
+            r#"
+                fn cast_it() {
+                    5 as number
+                }
+            "#,
+        );
+        let found = lowering.mir.blocks.iter().any(|b| {
+            b.statements.iter().any(|s| {
+                matches!(
+                    &s.kind,
+                    StatementKind::Assign(_, Rvalue::PrimitiveCast { target, .. })
+                        if target == "number"
+                )
+            })
+        });
+        assert!(
+            found,
+            "`5 as number` must lower to Rvalue::PrimitiveCast {{ target: \"number\" }}"
+        );
     }
 }

@@ -144,12 +144,12 @@ comptime_keyword = { "comptime" }
 
 // Comptime block expression: comptime { statements }
 // Evaluated at compile time; the result replaces the expression with a literal.
-comptime_block = { "comptime" ~ block_expr }
+comptime_block = { &comptime_kw ~ "comptime" ~ block_expr }
 
 // Comptime for expression: comptime for field in target.fields { ... }
 // Unrolled at compile time. Each iteration generates code with the loop variable
 // bound to the concrete field descriptor.
-comptime_for_expr = { "comptime" ~ "for" ~ ident ~ "in" ~ postfix_expr ~ "{" ~ statement* ~ "}" }
+comptime_for_expr = { &comptime_kw ~ "comptime" ~ &for_kw ~ "for" ~ ident ~ &in_kw ~ "in" ~ postfix_expr ~ "{" ~ statement* ~ "}" }
 
 // Annotated expression: @annotation expr
 // Wraps any expression with a compile-time annotation.
@@ -527,17 +527,17 @@ replace_module_expr_payload = { "(" ~ expression ~ ")" }
 return_stmt = { return_keyword ~ expression? }
 // Note: Don't use ("(" ~ expression ~ ")") - that breaks compound expressions like (a) or (b)
 // The expression parser handles parenthesized expressions via primary_expr
-if_stmt = { "if" ~ expression ~ "{" ~ statement* ~ "}" ~ else_clause? }
-else_clause = { "else" ~ ("if" ~ expression ~ "{" ~ statement* ~ "}" ~ else_clause? | "{" ~ statement* ~ "}") }
+if_stmt = { &if_kw ~ "if" ~ expression ~ "{" ~ statement* ~ "}" ~ else_clause? }
+else_clause = { &else_kw ~ "else" ~ (&if_kw ~ "if" ~ expression ~ "{" ~ statement* ~ "}" ~ else_clause? | "{" ~ statement* ~ "}") }
 
 // ===== Loops =====
-for_loop = { "for" ~ for_clause ~ "{" ~ statement* ~ "}" }
+for_loop = { &for_kw ~ "for" ~ for_clause ~ "{" ~ statement* ~ "}" }
 for_clause = {
-    destructure_pattern ~ "in" ~ expression
+    destructure_pattern ~ &in_kw ~ "in" ~ expression
     | variable_decl ~ ";" ~ expression ~ ";" ~ expression
 }
 
-while_loop = { "while" ~ expression ~ "{" ~ statement* ~ "}" }
+while_loop = { &while_kw ~ "while" ~ expression ~ "{" ~ statement* ~ "}" }
 break_stmt = { break_keyword }
 continue_stmt = { continue_keyword }
 
@@ -834,7 +834,8 @@ primary_type = {
 }
 
 non_array_type = {
-    tuple_type
+    reference_type
+    | tuple_type
     | object_type
     | function_type
     | dyn_type
@@ -844,6 +845,14 @@ non_array_type = {
     | unit_type
     | "(" ~ type_annotation ~ ")"
 }
+
+// Reference type in type position: `&T`, `&mut T`.
+// Placed before basic_type/generic_type so `&Foo` does not bind `Foo` alone.
+// Orthogonal to param_ref_keyword (the NAME modifier `fn f(&x: T)`).
+// `param_mut_keyword` is atomic (`@`), so the `mut`/identifier boundary
+// check happens before whitespace is skipped — a bare `"mut" ~ !(..)`
+// here would let `~` consume the space and false-fail on `&mut int`.
+reference_type = { "&" ~ param_mut_keyword? ~ primary_type }
 
 unit_type = { "(" ~ ")" }
 
@@ -882,8 +891,11 @@ object_type_member = {
     annotations? ~ (ident | keyword) ~ "?"? ~ ":" ~ type_annotation
 }
 
-function_type = { 
-    "(" ~ type_param_list? ~ ")" ~ "=>" ~ type_annotation 
+// Function-type annotation: `(T1, T2) -> R` (Rust-shaped) or `(T1, T2) => R`.
+// Both arrows are accepted in type position so the documented HOF parameter
+// form `(int) -> bool` parses as a binding/parameter type.
+function_type = {
+    "(" ~ type_param_list? ~ ")" ~ ("->" | "=>") ~ type_annotation
 }
 
 type_param_list = { 
@@ -929,13 +941,13 @@ bitwise_or_expr_no_range = { bitwise_xor_expr_no_range ~ ("|" ~ !"|" ~ !">" ~ bi
 bitwise_xor_expr_no_range = { bitwise_and_expr_no_range ~ ("^" ~ !"=" ~ bitwise_and_expr_no_range)* }
 bitwise_and_expr_no_range = { comparison_expr_no_range ~ ("&" ~ !"&" ~ comparison_expr_no_range)* }
 
-comparison_expr_no_range = { additive_expr ~ comparison_tail_no_range* }
+comparison_expr_no_range = { shift_expr ~ comparison_tail_no_range* }
 comparison_tail_no_range = {
     fuzzy_comparison_tail_no_range
-    | comparison_op ~ additive_expr
+    | comparison_op ~ shift_expr
     | "instanceof" ~ type_annotation
 }
-fuzzy_comparison_tail_no_range = { fuzzy_op ~ additive_expr ~ within_clause? }
+fuzzy_comparison_tail_no_range = { fuzzy_op ~ shift_expr ~ within_clause? }
 
 null_coalesce_expr = { context_expr ~ ("??" ~ context_expr)* }
 context_expr = { or_expr ~ ("!!" ~ or_expr)* }
@@ -963,15 +975,15 @@ tolerance_spec = { number ~ "%"? }
 // Supports: start..end, start..=end, ..end, ..=end, start.., ..
 range_expr = {
     // Full bounded range: start..end or start..=end (must try before range_from)
-    additive_expr ~ range_op ~ additive_expr
+    shift_expr ~ range_op ~ shift_expr
     // Half-open from start: start..
-    | additive_expr ~ ".."
+    | shift_expr ~ ".."
     // Range to end: ..end or ..=end
-    | range_op ~ additive_expr
+    | range_op ~ shift_expr
     // Full range: ..
     | ".."
     // Not a range - just an expression
-    | additive_expr
+    | shift_expr
 }
 
 // Range operator: ..= (inclusive) must come before .. (exclusive)
@@ -982,8 +994,8 @@ comparison_op = {
     "approaching"    // For trend analysis
 }
 
-additive_expr = { shift_expr ~ (("+"|"-") ~ shift_expr)* }
-shift_expr = { multiplicative_expr ~ (("<<" | ">>") ~ multiplicative_expr)* }
+shift_expr = { additive_expr ~ (("<<" | ">>") ~ additive_expr)* }
+additive_expr = { multiplicative_expr ~ (("+"|"-") ~ multiplicative_expr)* }
 multiplicative_expr = { exponential_expr ~ (("*"|"/"|"%") ~ exponential_expr)* }
 exponential_expr = { unary_expr ~ ("**" ~ unary_expr)* }
 
@@ -1004,6 +1016,7 @@ postfix_expr = {
         property_access
         | optional_property_access
         | index_access
+        | call_const_args
         | function_call
         | type_assertion_suffix
         | using_impl_suffix
@@ -1061,6 +1074,9 @@ using_impl_suffix = { "using" ~ ident }
 property_access = { "." ~ (ident | keyword) }
 optional_property_access = { "?." ~ (ident | keyword) }
 index_access = { "[" ~ index_expr ~ "]" }
+call_const_args = { "::" ~ "<" ~ call_const_arg_list? ~ ">" }
+call_const_arg_list = { call_const_arg ~ ("," ~ call_const_arg)* ~ ","? }
+call_const_arg = { unary_expr }
 function_call = { "(" ~ arg_list? ~ ")" }
 
 index_expr = {
@@ -1149,48 +1165,49 @@ join_branch = {
 struct_literal = { ident ~ "{" ~ object_fields? ~ "}" }
 
 // Enum constructor: Enum::Variant, Enum::Variant(...), Enum::Variant { ... }
-qualified_function_call_expr = { enum_variant_path ~ function_call }
+qualified_function_call_expr = { enum_variant_path ~ call_const_args? ~ function_call }
 enum_constructor_expr = { enum_variant_path ~ (enum_tuple_payload | enum_struct_payload)? }
-enum_variant_path = { ident ~ ("::" ~ variant_ident)+ }
+enum_variant_path = { ident ~ (qualified_path_separator ~ variant_ident)+ }
+qualified_path_separator = { !"::<" ~ "::" }
 enum_tuple_payload = { "(" ~ arg_list? ~ ")" }
 enum_struct_payload = { "{" ~ object_fields? ~ "}" }
 
 // Some expression for Option type
-some_expr = { "Some" ~ "(" ~ expression ~ ")" }
+some_expr = { &some_kw ~ "Some" ~ "(" ~ expression ~ ")" }
 
 // ===== If-Else Expression =====
 // Expression-form conditionals use block branches:
 //   if cond { ... } else { ... }
 // `else if ...` chains are supported recursively.
-if_expr = { "if" ~ expression ~ block_expr ~ ("else" ~ if_expr_else)? }
+if_expr = { &if_kw ~ "if" ~ expression ~ block_expr ~ (&else_kw ~ "else" ~ if_expr_else)? }
 if_expr_else = { if_expr | block_expr }
 
 // ===== Async Let Expression =====
 // Spawns a task and binds a future handle: `async let x = fetch()`
-async_let_expr = { "async" ~ "let" ~ ident ~ "=" ~ expression }
+async_let_expr = { &async_kw ~ "async" ~ &let_kw ~ "let" ~ ident ~ "=" ~ expression }
 
 // ===== Async Scope Expression =====
 // Cancellation boundary — on scope exit, all pending tasks are cancelled: `async scope { ... }`
-async_scope_expr = { "async" ~ "scope" ~ block_expr }
+async_scope_expr = { &async_kw ~ "async" ~ &scope_kw ~ "scope" ~ block_expr }
 
 // ===== While Expression =====
-while_expr = { "while" ~ expression ~ block_expr }
+while_expr = { &while_kw ~ "while" ~ expression ~ block_expr }
 
 // ===== For Expression =====
 // Supports `for x in expr { }` and `for await x in stream { }`
-for_expr = { "for" ~ "await"? ~ for_expr_clause ~ block_expr }
+for_expr = { &for_kw ~ "for" ~ "await"? ~ for_expr_clause ~ block_expr }
 for_expr_clause = {
-    pattern ~ "in" ~ expression
+    pattern ~ &in_kw ~ "in" ~ expression
 }
 
 // ===== Loop Expression =====
-loop_expr = { "loop" ~ block_expr }
+loop_expr = { &loop_kw ~ "loop" ~ block_expr }
 
 // ===== Let Expression =====
-let_expr = { "let" ~ pattern ~ ("=" ~ expression)? ~ "in" ~ expression }
+let_expr = { &let_kw ~ "let" ~ pattern ~ ("=" ~ expression)? ~ &in_kw ~ "in" ~ expression }
 
 // ===== Match Expression =====
-match_expr = { "match" ~ match_scrutinee ~ "{" ~ (match_arm ~ (","? ~ match_arm)* ~ ","?)? ~ "}" }
+match_expr = { &match_kw ~ "match" ~ match_scrutinee ~ "{" ~ (match_arm ~ (","? ~ match_arm)* ~ ","?)? ~ "}" }
 // WS-4 4c: `match_scrutinee_struct` is tried FIRST so a bare
 // struct-literal scrutinee — `match Point { x: 3, y: 4 } { … }` —
 // parses correctly. The `&"{"` lookahead is load-bearing: a
@@ -1245,7 +1262,7 @@ pattern_constructor = {
     pattern_qualified_constructor
     | pattern_unqualified_constructor
 }
-pattern_qualified_constructor = { ident ~ ("::" ~ variant_ident)+ ~ pattern_constructor_payload? }
+pattern_qualified_constructor = { ident ~ (qualified_path_separator ~ variant_ident)+ ~ pattern_constructor_payload? }
 // Constructor with payload (any name), or a known keyword without payload
 pattern_unqualified_constructor = {
     pattern_constructor_name ~ pattern_constructor_payload
@@ -1395,12 +1412,15 @@ datetime_arithmetic = {
 
 datetime_op = { "+" | "-" }
 
+// A datetime literal is just the quoted ISO-8601 string. The timezone is
+// always encoded *inside* the string (e.g. `+00:00`, `Z`), per the DateTime
+// book chapter. An earlier `timezone?` (a bare trailing `ident`) was never
+// read by the AST builder and — because whitespace/newlines are skipped — it
+// greedily swallowed the identifier on the *next* statement line
+// (`let d = @"2024-01-15"\nprint(d)` parsed as `@"2024-01-15" print` then a
+// `(d)` call), so the `let` binding never took. Drop it.
 datetime_literal = {
-    string ~ timezone?
-}
-
-timezone = {
-    ident  // Like EST, PST, UTC
+    string
 }
 
 duration = @{
@@ -1502,6 +1522,27 @@ keyword = {
     "extend" | "method" | "in" |
     "comptime" | "datasource"
 }
+
+// ===== Boundary-guarded keyword tokens =====
+// A keyword is only a keyword when it is a COMPLETE token. A following
+// identifier-char (ASCII_ALPHANUMERIC | "_") means it is part of an identifier,
+// NOT the keyword — so `whileCount` is one identifier, not `while` + `Count`.
+// Atomic so the literal and the boundary lookahead are checked with no
+// implicit whitespace between them. Used as a zero-width positive predicate
+// (`&if_kw ~ "if"`, the established `use_word_boundary` idiom) so no extra
+// token is emitted into the parse tree (AST shape unchanged).
+if_kw       = @{ "if" ~ !(ASCII_ALPHANUMERIC | "_") }
+else_kw     = @{ "else" ~ !(ASCII_ALPHANUMERIC | "_") }
+while_kw    = @{ "while" ~ !(ASCII_ALPHANUMERIC | "_") }
+for_kw      = @{ "for" ~ !(ASCII_ALPHANUMERIC | "_") }
+loop_kw     = @{ "loop" ~ !(ASCII_ALPHANUMERIC | "_") }
+match_kw    = @{ "match" ~ !(ASCII_ALPHANUMERIC | "_") }
+in_kw       = @{ "in" ~ !(ASCII_ALPHANUMERIC | "_") }
+let_kw      = @{ "let" ~ !(ASCII_ALPHANUMERIC | "_") }
+some_kw     = @{ "Some" ~ !(ASCII_ALPHANUMERIC | "_") }
+async_kw    = @{ "async" ~ !(ASCII_ALPHANUMERIC | "_") }
+scope_kw    = @{ "scope" ~ !(ASCII_ALPHANUMERIC | "_") }
+comptime_kw = @{ "comptime" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 // Contextual keywords - not reserved as general identifiers since they're
 // only meaningful within specific syntactic positions:

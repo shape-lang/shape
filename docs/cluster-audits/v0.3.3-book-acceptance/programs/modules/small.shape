@@ -1,0 +1,54 @@
+// small.shape — module-system core exercise (book: fundamentals/modules.mdx)
+//
+// Exercises, all taught by the chapter:
+//   * named import:        from geomlib::linalg use { center }
+//   * named alias:         from geomlib::stats use { variance as var_of }
+//   * namespace import:    use geomlib::stats  +  stats::mean(...)
+//   * cross-module import: linalg imports mean from stats (in the lib files)
+//   * the documented int->number `as number` cast inside stats.shape
+//
+// Self-checking: every expected value derived from book semantics by hand
+// BEFORE running. Prints ALL_CHECKS_PASSED only if all checks hold; otherwise
+// CHECK_FAILED for the first mismatch. (`assert` is not in the implicit
+// prelude — the modules chapter never mentions it — so checks are explicit.)
+
+from geomlib::linalg use { center }
+from geomlib::stats use { variance as var_of }
+use geomlib::stats
+
+let mut ok = true
+
+let data = [10.0, 12.0, 11.5, 13.0, 9.5]
+
+// mean = (10 + 12 + 11.5 + 13 + 9.5) / 5 = 56 / 5 = 11.2
+let mu = stats::mean(data)
+if mu != 11.2 {
+    print(f"CHECK_FAILED: mean expected=11.2 got={mu}")
+    ok = false
+}
+
+// center subtracts the mean from each element; their sum must be ~0,
+// so sum(center) + mean*len recovers sum(data) == 56.
+let c = center(data)
+if c.length != 5 {
+    print(f"CHECK_FAILED: center_length expected=5 got={c.length}")
+    ok = false
+}
+let recovered = c.sum() + (mu * (c.length as number))
+if recovered < 55.999 || recovered > 56.001 {
+    print(f"CHECK_FAILED: recovered expected=~56 got={recovered}")
+    ok = false
+}
+
+// variance = mean of squared deviations.
+// devs: -1.2, 0.8, 0.3, 1.8, -1.7
+// squares: 1.44, 0.64, 0.09, 3.24, 2.89 -> sum 8.30 / 5 = 1.66
+let v = var_of(data)
+if v < 1.6599 || v > 1.6601 {
+    print(f"CHECK_FAILED: variance expected=1.66 got={v}")
+    ok = false
+}
+
+if ok {
+    print("ALL_CHECKS_PASSED")
+}

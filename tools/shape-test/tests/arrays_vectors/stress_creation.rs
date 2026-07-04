@@ -6,7 +6,7 @@ use shape_test::shape_test::ShapeTest;
 #[test]
 fn test_array_literal_empty() {
     ShapeTest::new(
-        r#"function test() { let a = []; a.length() }
+        r#"function test() { let a: Array<int> = []; a.length() }
 test()"#,
     )
     .expect_number(0.0);
@@ -63,10 +63,13 @@ test()"#,
 }
 
 /// Verifies array literal mixed int float.
+/// Strict typing: array elements must share one proven type — the int
+/// literals adopt `number` to match the `2.5` float (lossless context
+/// adoption), keeping a homogeneous `Array<number>`.
 #[test]
 fn test_array_literal_mixed_int_float() {
     ShapeTest::new(
-        r#"function test() { [1, 2.5, 3].length() }
+        r#"function test() { [1.0, 2.5, 3.0].length() }
 test()"#,
     )
     .expect_number(3.0);
@@ -229,7 +232,7 @@ fn test_array_length_empty() {
         r#"function test() { [].length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array length single.
@@ -320,7 +323,7 @@ fn test_array_first_empty_returns_none() {
         r#"function test() { [].first() }
 test()"#,
     )
-    .expect_none();
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array first string.
@@ -360,7 +363,7 @@ fn test_array_last_empty_returns_none() {
         r#"function test() { [].last() }
 test()"#,
     )
-    .expect_none();
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array last string.
@@ -412,7 +415,7 @@ fn test_array_reverse_empty() {
         r#"function test() { [].reverse().length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array reverse preserves length.
@@ -572,5 +575,5 @@ fn test_array_concat_empty_left() {
         r#"function test() { [].concat([1, 2, 3]).length() }
 test()"#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }

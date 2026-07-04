@@ -186,4 +186,3 @@ fn test_formatted_hash_string_mode() {
         }
     );
 }
-

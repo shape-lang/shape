@@ -2,7 +2,6 @@
 //!
 //! Contains the runtime context and data structures used by JIT-compiled code.
 
-use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
 // ============================================================================
@@ -103,8 +102,7 @@ pub const RETURN_TYPE_TAG_OFFSET: usize = std::mem::offset_of!(JITContext, retur
 /// W12 architectural fall-through (a genuine JIT failure abandons the JIT
 /// frame; the VM produces the clean error) — no runtime tag-bit decode, no
 /// value-shaped error sentinel flowing into the typed slot ABI.
-pub const PENDING_CALL_ERROR_OFFSET: usize =
-    std::mem::offset_of!(JITContext, pending_call_error);
+pub const PENDING_CALL_ERROR_OFFSET: usize = std::mem::offset_of!(JITContext, pending_call_error);
 
 /// Negative `i32` deopt signal returned by a JIT-compiled function when a
 /// VM-trampoline FFI call surfaced an `Err`. Distinct from `-1` (generic JIT
@@ -167,7 +165,8 @@ const _: () = {
         "STACK_PTR_OFFSET does not match JITContext layout"
     );
     assert!(
-        std::mem::offset_of!(JITContext, gc_safepoint_flag_ptr) == GC_SAFEPOINT_FLAG_PTR_OFFSET as usize,
+        std::mem::offset_of!(JITContext, gc_safepoint_flag_ptr)
+            == GC_SAFEPOINT_FLAG_PTR_OFFSET as usize,
         "GC_SAFEPOINT_FLAG_PTR_OFFSET does not match JITContext layout"
     );
     assert!(
@@ -978,6 +977,7 @@ impl Default for JITConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::jit_kinds::*;
 
     #[test]
     fn test_closure_dynamic_captures_0() {

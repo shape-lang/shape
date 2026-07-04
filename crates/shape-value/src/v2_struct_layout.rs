@@ -251,10 +251,10 @@ mod tests {
 
     #[test]
     fn test_point_layout() {
-        let layout = compute_struct_layout("Point", &[
-            ("x".into(), FieldType::F64),
-            ("y".into(), FieldType::F64),
-        ]);
+        let layout = compute_struct_layout(
+            "Point",
+            &[("x".into(), FieldType::F64), ("y".into(), FieldType::F64)],
+        );
 
         assert_eq!(layout.name, "Point");
         assert_eq!(layout.fields.len(), 2);
@@ -282,11 +282,14 @@ mod tests {
 
     #[test]
     fn test_color_layout() {
-        let layout = compute_struct_layout("Color", &[
-            ("r".into(), FieldType::U8),
-            ("g".into(), FieldType::U8),
-            ("b".into(), FieldType::U8),
-        ]);
+        let layout = compute_struct_layout(
+            "Color",
+            &[
+                ("r".into(), FieldType::U8),
+                ("g".into(), FieldType::U8),
+                ("b".into(), FieldType::U8),
+            ],
+        );
 
         assert_eq!(layout.name, "Color");
         assert_eq!(layout.fields.len(), 3);
@@ -318,11 +321,14 @@ mod tests {
     #[test]
     fn test_mixed_alignment_padding() {
         // Simulates: type Mixed { flag: bool, value: f64, count: i32 }
-        let layout = compute_struct_layout("Mixed", &[
-            ("flag".into(), FieldType::Bool),
-            ("value".into(), FieldType::F64),
-            ("count".into(), FieldType::I32),
-        ]);
+        let layout = compute_struct_layout(
+            "Mixed",
+            &[
+                ("flag".into(), FieldType::Bool),
+                ("value".into(), FieldType::F64),
+                ("count".into(), FieldType::I32),
+            ],
+        );
 
         assert_eq!(layout.fields.len(), 3);
 
@@ -367,9 +373,7 @@ mod tests {
 
     #[test]
     fn test_single_bool_field() {
-        let layout = compute_struct_layout("Flag", &[
-            ("value".into(), FieldType::Bool),
-        ]);
+        let layout = compute_struct_layout("Flag", &[("value".into(), FieldType::Bool)]);
 
         assert_eq!(layout.fields[0].offset, 8);
         assert_eq!(layout.fields[0].size, 1);
@@ -379,9 +383,7 @@ mod tests {
 
     #[test]
     fn test_single_i32_field() {
-        let layout = compute_struct_layout("Counter", &[
-            ("n".into(), FieldType::I32),
-        ]);
+        let layout = compute_struct_layout("Counter", &[("n".into(), FieldType::I32)]);
 
         assert_eq!(layout.fields[0].offset, 8);
         assert_eq!(layout.fields[0].size, 4);
@@ -395,36 +397,39 @@ mod tests {
 
     #[test]
     fn test_all_field_types() {
-        let layout = compute_struct_layout("AllTypes", &[
-            ("a_f64".into(), FieldType::F64),
-            ("b_i64".into(), FieldType::I64),
-            ("c_ptr".into(), FieldType::Ptr),
-            ("d_i32".into(), FieldType::I32),
-            ("e_u32".into(), FieldType::U32),
-            ("f_i16".into(), FieldType::I16),
-            ("g_u16".into(), FieldType::U16),
-            ("h_i8".into(), FieldType::I8),
-            ("i_u8".into(), FieldType::U8),
-            ("j_bool".into(), FieldType::Bool),
-        ]);
+        let layout = compute_struct_layout(
+            "AllTypes",
+            &[
+                ("a_f64".into(), FieldType::F64),
+                ("b_i64".into(), FieldType::I64),
+                ("c_ptr".into(), FieldType::Ptr),
+                ("d_i32".into(), FieldType::I32),
+                ("e_u32".into(), FieldType::U32),
+                ("f_i16".into(), FieldType::I16),
+                ("g_u16".into(), FieldType::U16),
+                ("h_i8".into(), FieldType::I8),
+                ("i_u8".into(), FieldType::U8),
+                ("j_bool".into(), FieldType::Bool),
+            ],
+        );
 
         // All 8-byte fields first (no padding between them or after header)
-        assert_eq!(layout.fields[0].offset, 8);   // f64 @ 8
-        assert_eq!(layout.fields[1].offset, 16);  // i64 @ 16
-        assert_eq!(layout.fields[2].offset, 24);  // ptr @ 24
+        assert_eq!(layout.fields[0].offset, 8); // f64 @ 8
+        assert_eq!(layout.fields[1].offset, 16); // i64 @ 16
+        assert_eq!(layout.fields[2].offset, 24); // ptr @ 24
 
         // 4-byte fields (naturally aligned after ptr ends at 32)
-        assert_eq!(layout.fields[3].offset, 32);  // i32 @ 32
-        assert_eq!(layout.fields[4].offset, 36);  // u32 @ 36
+        assert_eq!(layout.fields[3].offset, 32); // i32 @ 32
+        assert_eq!(layout.fields[4].offset, 36); // u32 @ 36
 
         // 2-byte fields (naturally aligned after u32 ends at 40)
-        assert_eq!(layout.fields[5].offset, 40);  // i16 @ 40
-        assert_eq!(layout.fields[6].offset, 42);  // u16 @ 42
+        assert_eq!(layout.fields[5].offset, 40); // i16 @ 40
+        assert_eq!(layout.fields[6].offset, 42); // u16 @ 42
 
         // 1-byte fields (no alignment needed)
-        assert_eq!(layout.fields[7].offset, 44);  // i8 @ 44
-        assert_eq!(layout.fields[8].offset, 45);  // u8 @ 45
-        assert_eq!(layout.fields[9].offset, 46);  // bool @ 46
+        assert_eq!(layout.fields[7].offset, 44); // i8 @ 44
+        assert_eq!(layout.fields[8].offset, 45); // u8 @ 45
+        assert_eq!(layout.fields[9].offset, 46); // bool @ 46
 
         // Total: 47, padded to 8 = 48
         assert_eq!(layout.total_size, 48);
@@ -438,10 +443,10 @@ mod tests {
     #[test]
     fn test_i16_then_i64_padding() {
         // type T { a: i16, b: i64 }
-        let layout = compute_struct_layout("T", &[
-            ("a".into(), FieldType::I16),
-            ("b".into(), FieldType::I64),
-        ]);
+        let layout = compute_struct_layout(
+            "T",
+            &[("a".into(), FieldType::I16), ("b".into(), FieldType::I64)],
+        );
 
         // a: i16 at offset 8 (2 bytes)
         assert_eq!(layout.fields[0].offset, 8);
@@ -454,11 +459,14 @@ mod tests {
     #[test]
     fn test_bool_i32_bool_padding() {
         // type T { a: bool, b: i32, c: bool }
-        let layout = compute_struct_layout("T", &[
-            ("a".into(), FieldType::Bool),
-            ("b".into(), FieldType::I32),
-            ("c".into(), FieldType::Bool),
-        ]);
+        let layout = compute_struct_layout(
+            "T",
+            &[
+                ("a".into(), FieldType::Bool),
+                ("b".into(), FieldType::I32),
+                ("c".into(), FieldType::Bool),
+            ],
+        );
 
         // a: bool at offset 8
         assert_eq!(layout.fields[0].offset, 8);
@@ -477,11 +485,14 @@ mod tests {
     #[test]
     fn test_struct_with_pointer_fields() {
         // type Node { value: i32, next: ptr, prev: ptr }
-        let layout = compute_struct_layout("Node", &[
-            ("value".into(), FieldType::I32),
-            ("next".into(), FieldType::Ptr),
-            ("prev".into(), FieldType::Ptr),
-        ]);
+        let layout = compute_struct_layout(
+            "Node",
+            &[
+                ("value".into(), FieldType::I32),
+                ("next".into(), FieldType::Ptr),
+                ("prev".into(), FieldType::Ptr),
+            ],
+        );
 
         // value: i32 at offset 8
         assert_eq!(layout.fields[0].offset, 8);
@@ -505,10 +516,10 @@ mod tests {
 
     #[test]
     fn test_field_lookup_by_name() {
-        let layout = compute_struct_layout("Point", &[
-            ("x".into(), FieldType::F64),
-            ("y".into(), FieldType::F64),
-        ]);
+        let layout = compute_struct_layout(
+            "Point",
+            &[("x".into(), FieldType::F64), ("y".into(), FieldType::F64)],
+        );
 
         let x = layout.field("x").expect("field 'x' should exist");
         assert_eq!(x.offset, 8);
@@ -529,12 +540,15 @@ mod tests {
     fn test_worst_case_padding() {
         // Deliberately adversarial ordering: small, large, small, large
         // type Padded { a: u8, b: f64, c: u8, d: f64 }
-        let layout = compute_struct_layout("Padded", &[
-            ("a".into(), FieldType::U8),
-            ("b".into(), FieldType::F64),
-            ("c".into(), FieldType::U8),
-            ("d".into(), FieldType::F64),
-        ]);
+        let layout = compute_struct_layout(
+            "Padded",
+            &[
+                ("a".into(), FieldType::U8),
+                ("b".into(), FieldType::F64),
+                ("c".into(), FieldType::U8),
+                ("d".into(), FieldType::F64),
+            ],
+        );
 
         // a: u8 at offset 8
         assert_eq!(layout.fields[0].offset, 8);
@@ -572,13 +586,16 @@ mod tests {
 
     #[test]
     fn test_only_16bit_fields() {
-        let layout = compute_struct_layout("Shorts", &[
-            ("a".into(), FieldType::I16),
-            ("b".into(), FieldType::U16),
-            ("c".into(), FieldType::I16),
-        ]);
+        let layout = compute_struct_layout(
+            "Shorts",
+            &[
+                ("a".into(), FieldType::I16),
+                ("b".into(), FieldType::U16),
+                ("c".into(), FieldType::I16),
+            ],
+        );
 
-        assert_eq!(layout.fields[0].offset, 8);  // i16 at 8
+        assert_eq!(layout.fields[0].offset, 8); // i16 at 8
         assert_eq!(layout.fields[1].offset, 10); // u16 at 10
         assert_eq!(layout.fields[2].offset, 12); // i16 at 12
 

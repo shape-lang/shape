@@ -93,7 +93,7 @@ pub extern "C" fn jit_typed_object_alloc(schema_id: u32, data_size: u64) -> u64 
             // deleted `tag_bits::PAYLOAD_MASK` projection. The kind companion
             // for a typed-object allocation is statically known
             // (`HK_TYPED_OBJECT`) at the producing call signature.
-            let kind = unsafe { crate::ffi::value_ffi::heap_kind(result) };
+            let kind = crate::ffi::value_ffi::heap_kind(result);
             tracing::trace!(
                 target: "shape_jit",
                 schema = schema_id,

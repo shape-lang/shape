@@ -9,7 +9,7 @@ use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
 use std::collections::HashSet;
 
-use super::{BytecodeCompiler, FunctionReturnReferenceSummary, ParamPassMode};
+use super::{BytecodeCompiler, ClosureBodyPeek, FunctionReturnReferenceSummary, ParamPassMode};
 
 pub(super) struct TypedFieldPlace {
     pub root_name: String,
@@ -77,6 +77,28 @@ impl BytecodeCompiler {
     ) -> Option<TypedFieldPlace> {
         let (root_name, is_local, slot, type_info) = match object {
             Expr::Identifier(name, _) => {
+                // CaptureCarrier F1 (ADR-006 §2.7.8 / Q10, 2026-06-18): a
+                // mutably-captured outer binding read inside a closure body
+                // does NOT live directly in its resolved local slot — the
+                // slot holds a `*const SharedCell` / `*mut cell` pointer, and
+                // the value is reached through `Load{Shared,OwnedMutable}Capture`.
+                // The MakeRef-on-the-slot field fast-path below would emit
+                // `MakeRef(Local(slot))` against the raw cell pointer and
+                // mis-project the field (read as a Bool-default base →
+                // "MakeFieldRef base must reference a TypedObject; got Bool",
+                // or a corrupted/segfaulting base for String/Array carriers).
+                // Decline so `b.n` falls through to the
+                // `compile_expr(object) + GetFieldTyped` path, which reads the
+                // base via the correct capture-load opcode (kind from the
+                // cell's `SharedCell::kind()` / cell inner kind).
+                if self.mutable_closure_captures.contains_key(name.as_str())
+                    || self.shared_closure_captures.contains_key(name.as_str())
+                    || self
+                        .owned_mutable_closure_captures
+                        .contains_key(name.as_str())
+                {
+                    return None;
+                }
                 if let Some(local_idx) = self.resolve_local(name) {
                     if self.ref_locals.contains(&local_idx)
                         || self.reference_value_locals.contains(&local_idx)
@@ -202,7 +224,6 @@ impl BytecodeCompiler {
         }?;
         self.last_expr_schema = None;
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = None;
         Ok(borrow_id)
     }
 
@@ -399,6 +420,18 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn compile_expr_for_reference_binding_with_expected_return(
+        &mut self,
+        expr: &shape_ast::ast::Expr,
+        expected_return: Option<&shape_ast::ast::TypeAnnotation>,
+    ) -> Result<Option<(u32, bool)>> {
+        let saved = self.pending_expected_call_return_type.clone();
+        self.pending_expected_call_return_type = expected_return.cloned();
+        let result = self.compile_expr_for_reference_binding(expr);
+        self.pending_expected_call_return_type = saved;
+        result
+    }
+
     fn binding_target_requires_reference_value(&self) -> bool {
         let Some(name) = self.pending_variable_name.as_deref() else {
             return false;
@@ -491,6 +524,52 @@ impl BytecodeCompiler {
             || self.exclusive_reference_value_locals.contains(&slot)
     }
 
+    /// ADR-006 §2.7.30 (R2/FlipLive): is `expr` a `&place` / `&mut place`
+    /// whose referent ROOT resolves to a program-lifetime MODULE BINDING
+    /// (never an enclosing-frame local)?
+    ///
+    /// Used to scope the module-scope `let r = &x` flip EXACTLY to the
+    /// `ModuleBindingStore` floor sink. At module top-level, `x` is itself a
+    /// module binding with program lifetime, so `&x` references a slot that
+    /// outlives every reference to it — the §2.7.30 floor case where escape→RC
+    /// promotion is unconditionally sound. A reference rooted at anything that
+    /// resolves as a LOCAL (a real enclosing-frame slot) is NOT a floor sink
+    /// and is rejected by the caller (keeps B0003). A non-place referent
+    /// (`&foo()`) is already rejected earlier by `compile_reference_expr`.
+    ///
+    /// Soundness scope (CLAUDE.md §Forbidden + §2.7.30.7): this predicate is
+    /// the sole gate for suppressing the module-scope B0003 narrow guard. It
+    /// returns true ONLY when the root identifier resolves to a module binding
+    /// AND does NOT resolve to a local — so a closure-captured / container /
+    /// task escape of a transient local cannot match (those roots resolve as
+    /// locals, or are not `&place` at all).
+    pub(super) fn reference_root_is_module_binding(&self, expr: &Expr) -> bool {
+        let Expr::Reference { expr: inner, .. } = expr else {
+            return false;
+        };
+        // Walk the place chain (`x`, `obj.field`, `arr[i]`) to its root
+        // identifier.
+        let mut cursor: &Expr = inner;
+        loop {
+            match cursor {
+                Expr::Identifier(name, _) | Expr::PatternRef(name, _) => {
+                    // A root that resolves as a LOCAL is an enclosing-frame
+                    // slot — NOT the program-lifetime module floor sink.
+                    if self.resolve_local(name).is_some() {
+                        return false;
+                    }
+                    return self
+                        .resolve_scoped_module_binding_name(name)
+                        .and_then(|scoped| self.module_bindings.get(&scoped).copied())
+                        .is_some();
+                }
+                Expr::PropertyAccess { object, .. } => cursor = object,
+                Expr::IndexAccess { object, .. } => cursor = object,
+                _ => return false,
+            }
+        }
+    }
+
     fn track_reference_binding_slot(&mut self, _slot: u16, _is_local: bool) {
         // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }
@@ -577,9 +656,131 @@ impl BytecodeCompiler {
             } else {
                 self.bind_reference_value_slot(slot, is_local, name, is_exclusive, borrow_id);
             }
+            // Record the referent's scalar type name so value-position reads of
+            // this reference binding (`r + 1`, `-r`) can auto-deref to the
+            // referent type for the strict-typing operand check and typed-opcode
+            // numeric stamping — mirroring the `r.len()` method auto-deref. The
+            // init expr is `&inner` / `&mut inner`; the referent type is
+            // `infer_expr_type(inner)`. Scalar referent names only (the operand
+            // arms that need this are numeric/bool/string/decimal). Forwarded
+            // verbatim — `&int` records `int`, no coercion.
+            self.record_reference_referent_type(slot, is_local, expr);
         } else {
             self.update_reference_binding_from_expr(slot, is_local, expr);
         }
+    }
+
+    /// Records the referent's `ConcreteType` for a first-class reference
+    /// binding (`let r = &n`). See `finish_reference_binding_from_expr` and
+    /// `reference_referent_concrete_type`.
+    fn record_reference_referent_type(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        expr: &shape_ast::ast::Expr,
+    ) {
+        if is_local {
+            self.reference_value_local_referent_concrete_type
+                .remove(&slot);
+        } else {
+            self.reference_value_module_binding_referent_concrete_type
+                .remove(&slot);
+        }
+        let shape_ast::ast::Expr::Reference { expr: inner, .. } = expr else {
+            return;
+        };
+        // U4-5b: record the referent's `ConcreteType` STRUCTURALLY — one carrier
+        // for both shapes. `r[i]` reads the element type THROUGH the reference
+        // off the recorded `ConcreteType::Array(elem)`; the value-position
+        // auto-deref (`r + 1`, `-r`) reads the scalar off the recorded scalar
+        // `ConcreteType` (`reference_referent_scalar_type_name` projects it to a
+        // scalar name at the use site). The referent's ConcreteType IS the proof
+        // (ADR-006 §2.7.5) — the U4-5b deletion collapsed the parallel
+        // `"int"`/`"int[]"` display-string carrier the read sites previously
+        // consulted. An unresolved referent records nothing (surface-and-stop).
+        if let Some(referent_ct) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, inner)
+        {
+            if is_local {
+                self.reference_value_local_referent_concrete_type
+                    .insert(slot, referent_ct);
+            } else {
+                self.reference_value_module_binding_referent_concrete_type
+                    .insert(slot, referent_ct);
+            }
+        }
+    }
+
+    /// U4-5b: the referent's SCALAR type name for an identifier bound to a
+    /// reference (`let r = &n`, `n: int` -> `"int"`), projected from the
+    /// structural referent `ConcreteType`. Returns `None` for a non-scalar (or
+    /// unrecorded) referent. Consulted by the value-position auto-deref in
+    /// `infer_expr_type` (`r + 1`, `-r`). Collapses the deleted parallel
+    /// `reference_value_*_referent_type` string carrier onto the one structural
+    /// `reference_value_*_referent_concrete_type` source. Covers every scalar
+    /// `ConcreteType` variant the prior `Basic(name)` carrier could record
+    /// (sized ints, `bigint`, `char`) — int != number preserved, no coercion.
+    pub(super) fn reference_referent_scalar_type_name(&self, name: &str) -> Option<String> {
+        use shape_value::v2::ConcreteType;
+        let ct = self.reference_referent_concrete_type(name)?;
+        let n = match ct {
+            ConcreteType::I64 => "int",
+            ConcreteType::I32 => "i32",
+            ConcreteType::I16 => "i16",
+            ConcreteType::I8 => "i8",
+            ConcreteType::U64 => "u64",
+            ConcreteType::U32 => "u32",
+            ConcreteType::U16 => "u16",
+            ConcreteType::U8 => "u8",
+            ConcreteType::F64 => "number",
+            ConcreteType::F32 => "f32",
+            ConcreteType::Bool => "bool",
+            ConcreteType::String => "string",
+            ConcreteType::Decimal => "decimal",
+            ConcreteType::BigInt => "bigint",
+            ConcreteType::Char => "char",
+            _ => return None,
+        };
+        Some(n.to_string())
+    }
+
+    /// U4-5b: the single structural referent carrier. Returns the referent's
+    /// recorded `ConcreteType` for an identifier bound to a reference (`let r =
+    /// &a`). Serves BOTH `r[i]` (array element via `ConcreteType::Array`) and
+    /// `r + 1` (scalar via `reference_referent_scalar_type_name`) — collapsing
+    /// the deleted parallel `reference_value_*_referent_type` display-string
+    /// carrier onto this one structural source.
+    pub(super) fn reference_referent_concrete_type(
+        &self,
+        name: &str,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(ct) = self
+                .reference_value_local_referent_concrete_type
+                .get(&local_idx)
+            {
+                return Some(ct.clone());
+            }
+        }
+        if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                if let Some(ct) = self
+                    .reference_value_module_binding_referent_concrete_type
+                    .get(&binding_idx)
+                {
+                    return Some(ct.clone());
+                }
+            }
+        }
+        if let Some(&binding_idx) = self.module_bindings.get(name) {
+            if let Some(ct) = self
+                .reference_value_module_binding_referent_concrete_type
+                .get(&binding_idx)
+            {
+                return Some(ct.clone());
+            }
+        }
+        None
     }
 
     pub(super) fn callable_pass_modes_from_expr(
@@ -600,6 +801,7 @@ impl BytecodeCompiler {
         &self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[Statement],
+        return_type: Option<&shape_ast::ast::TypeAnnotation>,
         span: shape_ast::ast::Span,
     ) -> Option<FunctionReturnReferenceSummary> {
         let mut effective_params = params.to_vec();
@@ -609,18 +811,27 @@ impl BytecodeCompiler {
             param.is_mut_reference = pass_mode.is_exclusive();
         }
 
-        let lowering = crate::mir::lowering::lower_function_detailed(
+        let fn_return_types = self.build_fn_return_type_seed();
+        let unit_variant_names = self.build_unit_variant_name_seed();
+        let lowering = crate::mir::lowering::lower_function_detailed_with_returns_and_variants(
             "__callable_expr__",
             &effective_params,
             body,
             span,
+            fn_return_types,
+            unit_variant_names,
         );
         if lowering.had_fallbacks {
             return None;
         }
 
         let callee_summaries = self.build_callee_summaries(None, &lowering.all_local_names);
-        crate::mir::solver::analyze(&lowering.mir, &callee_summaries)
+        let options = crate::mir::solver::BorrowAnalysisOptions {
+            allow_return_slot_local_escape_promotion: return_type
+                .map(|ann| matches!(ann, shape_ast::ast::TypeAnnotation::Borrow { .. }))
+                .unwrap_or(false),
+        };
+        crate::mir::solver::analyze_with_options(&lowering.mir, &callee_summaries, options)
             .return_reference_summary
             .map(Into::into)
     }
@@ -631,8 +842,17 @@ impl BytecodeCompiler {
     ) -> Option<FunctionReturnReferenceSummary> {
         match expr {
             shape_ast::ast::Expr::FunctionExpr {
-                params, body, span, ..
-            } => self.callable_return_reference_summary_from_function_expr(params, body, *span),
+                params,
+                body,
+                return_type,
+                span,
+                ..
+            } => self.callable_return_reference_summary_from_function_expr(
+                params,
+                body,
+                return_type.as_ref(),
+                *span,
+            ),
             shape_ast::ast::Expr::Identifier(name, _)
             | shape_ast::ast::Expr::PatternRef(name, _) => {
                 self.function_return_reference_summary_for_name(name)
@@ -678,6 +898,46 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-006 §2.7.30 (GapA — value-position auto-deref): does the function
+    /// named `name` declare a `&T` (Borrow) return type?
+    ///
+    /// A `-> &T` callee returns a reference value (a `RefTarget`-bearing slot,
+    /// `NativeKind::Ptr(HeapKind::Reference)`). In VALUE position the call site
+    /// must read THROUGH that reference to its referent `T` — a fundamental
+    /// reference-read (not a numeric coercion). This mirrors the existing
+    /// identifier / param-reborrow-summary auto-deref: setting `auto_deref=true`
+    /// on the call's `ExprReferenceResult` makes
+    /// `auto_deref_last_expr_result_if_needed` emit a `DerefLoad` in
+    /// `compile_expr` (value position), while `compile_expr_preserving_refs`
+    /// (ref-expecting position — a ref-typed param, a `let r = &…` reference
+    /// binding) keeps the raw reference. Context-sensitivity is therefore
+    /// enforced by the EXISTING preserve-vs-value split; this helper only
+    /// supplies the missing "callee returns a ref" signal for the §2.7.30
+    /// PromotedCell ReturnSlot floor (which produces no param-reborrow
+    /// `ReturnReferenceSummary`).
+    ///
+    /// Returns the borrow mode so the call site stamps the matching `BorrowMode`
+    /// (shared `&T` vs exclusive `&mut T`).
+    pub(super) fn function_declares_borrow_return(&self, name: &str) -> Option<BorrowMode> {
+        // Only top-level user functions are resolved here: a local/module
+        // closure binding that returns `&T` is a distinct (rarer) shape whose
+        // return-reference tracking flows through the callable-summary maps.
+        // Resolving as a local first keeps a same-named local closure from being
+        // shadowed by a top-level def of the same name.
+        if self.resolve_local(name).is_some() {
+            return None;
+        }
+        let def = self.function_defs.get(name)?;
+        match def.return_type.as_ref()? {
+            shape_ast::ast::TypeAnnotation::Borrow { mutable, .. } => Some(if *mutable {
+                BorrowMode::Exclusive
+            } else {
+                BorrowMode::Shared
+            }),
+            _ => None,
+        }
+    }
+
     pub(super) fn update_callable_binding_from_expr(
         &mut self,
         slot: u16,
@@ -686,165 +946,21 @@ impl BytecodeCompiler {
     ) {
         let pass_modes = self.callable_pass_modes_from_expr(expr);
         let return_summary = self.callable_return_reference_summary_from_expr(expr);
-        // Sweep phase 3c.1: when the initializer is a `FunctionExpr` (a
-        // closure literal), infer its body's return type so a later
-        // `FunctionCall { name: <slot's binding>, .. }` can recover the
-        // type for strict-typing binop dispatch. `f(5) + f(7)` over
-        // `let f = |x: int| x + base` previously failed with
-        // "unknown + unknown" because the call expression's return type
-        // wasn't tracked anywhere — only top-level function returns are
-        // registered in `function_return_types`.
-        let return_type_name: Option<String> = match expr {
-            shape_ast::ast::Expr::FunctionExpr {
-                params,
-                body,
-                return_type,
-                ..
-            } => crate::compiler::expressions::closures::infer_closure_body_return_type_name(
-                self,
-                params,
-                body,
-                return_type.as_ref(),
-            ),
-            // Sweep phase 3c.x: when the initializer is a call to a user
-            // function whose only `return` statement returns a closure
-            // literal, drill in to recover that closure's return type. This
-            // fixes patterns like:
-            //   fn make(n: int) -> any { return |x| x + n }
-            //   let f = make(7)
-            //   f(3) + f(4)
-            // where the function's declared return type `any` would
-            // otherwise leave `f`'s callable return type unknown.
-            shape_ast::ast::Expr::FunctionCall { name, .. } => {
-                if let Some(func_def) = self.function_defs.get(name).cloned() {
-                    extract_returned_closure_return_type_name(
-                        self,
-                        &func_def.body,
-                        &func_def.params,
-                    )
-                } else {
-                    None
-                }
-            }
-            // Sweep phase 3c.x: when the initializer is `arr[i]` and `arr`
-            // is a `let arr = [|...|, ...]` binding tracked in the
-            // array-callable map, propagate the element callable return
-            // type to this binding so a later `g(args)` call recovers it.
-            shape_ast::ast::Expr::IndexAccess { object, .. } => {
-                if let shape_ast::ast::Expr::Identifier(arr_name, _) = object.as_ref() {
-                    let mut from_arr: Option<String> = None;
-                    let local_idx_opt = self.resolve_local(arr_name);
-                    if let Some(local_idx) = local_idx_opt {
-                        from_arr = self
-                            .local_array_callable_return_types
-                            .get(&local_idx)
-                            .cloned();
-                    }
-                    if from_arr.is_none() {
-                        if let Some(scoped) =
-                            self.resolve_scoped_module_binding_name(arr_name)
-                        {
-                            if let Some(&binding_idx) =
-                                self.module_bindings.get(&scoped)
-                            {
-                                from_arr = self
-                                    .module_binding_array_callable_return_types
-                                    .get(&binding_idx)
-                                    .cloned();
-                            }
-                        }
-                    }
-                    if from_arr.is_none() {
-                        if let Some(&binding_idx) = self.module_bindings.get(arr_name) {
-                            from_arr = self
-                                .module_binding_array_callable_return_types
-                                .get(&binding_idx)
-                                .cloned();
-                        }
-                    }
-                    let _ = local_idx_opt;
-                    from_arr
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        // Sweep phase 3c.x: when the initializer is an array literal of
-        // closure expressions with a homogeneous return type, record that
-        // type so `arr[i](args...)` can recover it for strict-typing binop
-        // dispatch. The parser models `arr[0](1)` as
-        // `MethodCall { method: "__call__", receiver: IndexAccess { object: arr, .. } }`,
-        // so the lookup in `infer_expr_type` keys on the receiver's
-        // `IndexAccess.object` identifier.
-        let array_callable_return_type_name: Option<String> = match expr {
-            shape_ast::ast::Expr::Array(elements, _) if !elements.is_empty() => {
-                let mut common: Option<String> = None;
-                for elem in elements {
-                    let rt: Option<String> = match elem {
-                        shape_ast::ast::Expr::FunctionExpr {
-                            params,
-                            body,
-                            return_type,
-                            ..
-                        } => crate::compiler::expressions::closures::infer_closure_body_return_type_name(
-                            self,
-                            params,
-                            body,
-                            return_type.as_ref(),
-                        ),
-                        // Sweep phase 3c.x: array element is an identifier
-                        // bound to a known callable (e.g.
-                        // `let f = make(...)` followed by `let arr = [f]`).
-                        // Look up the binding's callable return type.
-                        shape_ast::ast::Expr::Identifier(elem_name, _) => {
-                            let mut t: Option<String> = None;
-                            if let Some(local_idx) = self.resolve_local(elem_name) {
-                                t = self
-                                    .local_callable_return_types
-                                    .get(&local_idx)
-                                    .cloned();
-                            }
-                            if t.is_none() {
-                                if let Some(&binding_idx) =
-                                    self.module_bindings.get(elem_name)
-                                {
-                                    t = self
-                                        .module_binding_callable_return_types
-                                        .get(&binding_idx)
-                                        .cloned();
-                                }
-                            }
-                            t
-                        }
-                        _ => None,
-                    };
-                    match (&common, rt) {
-                        (None, Some(t)) => common = Some(t),
-                        (Some(prev), Some(t)) if *prev == t => {}
-                        _ => {
-                            common = None;
-                            break;
-                        }
-                    }
-                }
-                common
-            }
-            _ => None,
-        };
         // cluster-2-cw-IB-class-b: when the initializer is a FunctionExpr
-        // (closure literal), retain its body so the value-call site can
-        // re-run return-type inference with caller-context arg types.
+        // (closure literal), or a call to a function returning a closure
+        // literal, retain that closure body so the value-call site can derive
+        // the return type structurally from the engine facts. This replaces
+        // the deleted callable-return string maps.
         // Cleared (set to None below) for non-FunctionExpr initializers
         // so a same-slot reassignment with a non-closure RHS doesn't
         // leak a stale closure peek.
-        let closure_body_peek: Option<super::ClosureBodyPeek> = match expr {
+        let closure_body_peek: Option<ClosureBodyPeek> = match expr {
             shape_ast::ast::Expr::FunctionExpr {
                 params,
                 body,
                 return_type,
                 ..
-            } => Some(super::ClosureBodyPeek {
+            } => Some(ClosureBodyPeek {
                 params: params.clone(),
                 body: body.clone(),
                 return_type: return_type.clone(),
@@ -875,6 +991,10 @@ impl BytecodeCompiler {
                     }
                 },
             }),
+            shape_ast::ast::Expr::FunctionCall { name, .. } => self
+                .function_defs
+                .get(name)
+                .and_then(|func_def| extract_returned_closure_peek(&func_def.body)),
             _ => None,
         };
 
@@ -889,17 +1009,6 @@ impl BytecodeCompiler {
                     .insert(slot, return_summary);
             } else {
                 self.local_callable_return_reference_summaries.remove(&slot);
-            }
-            if let Some(return_type_name) = return_type_name {
-                self.local_callable_return_types
-                    .insert(slot, return_type_name);
-            } else {
-                self.local_callable_return_types.remove(&slot);
-            }
-            if let Some(array_rt) = array_callable_return_type_name {
-                self.local_array_callable_return_types.insert(slot, array_rt);
-            } else {
-                self.local_array_callable_return_types.remove(&slot);
             }
             // cluster-2-cw-IB-class-b: install / clear the closure body
             // peek on this local slot. Same write discipline as the
@@ -924,30 +1033,12 @@ impl BytecodeCompiler {
                 self.module_binding_callable_return_reference_summaries
                     .remove(&slot);
             }
-            // Sweep phase 3c.x: previously this branch keyed on `pass_modes
-            // is Some` and only updated the return-type maps in that case,
-            // which broke the `let f = make(...) -> any` chain (no pass
-            // modes → f's callable return type is never recorded → the
-            // downstream `[f]` array can't recover the closure return type
-            // either). Always update independently.
-            if let Some(return_type_name) = return_type_name {
-                self.module_binding_callable_return_types
-                    .insert(slot, return_type_name);
-            } else {
-                self.module_binding_callable_return_types.remove(&slot);
-            }
-            if let Some(array_rt) = array_callable_return_type_name {
-                self.module_binding_array_callable_return_types
-                    .insert(slot, array_rt);
-            } else {
-                self.module_binding_array_callable_return_types
-                    .remove(&slot);
-            }
             // cluster-2-cw-IB-class-b: install / clear the closure body
             // peek on the module-binding side. Parallels the local-slot
             // branch above.
             if let Some(peek) = closure_body_peek {
-                self.module_binding_callable_closure_bodies.insert(slot, peek);
+                self.module_binding_callable_closure_bodies
+                    .insert(slot, peek);
             } else {
                 self.module_binding_callable_closure_bodies.remove(&slot);
             }
@@ -958,8 +1049,6 @@ impl BytecodeCompiler {
         if is_local {
             self.local_callable_pass_modes.remove(&slot);
             self.local_callable_return_reference_summaries.remove(&slot);
-            self.local_callable_return_types.remove(&slot);
-            self.local_array_callable_return_types.remove(&slot);
             // cluster-2-cw-IB-class-b: release retained closure body
             // peek alongside the other callable-binding state.
             self.local_callable_closure_bodies.remove(&slot);
@@ -967,8 +1056,6 @@ impl BytecodeCompiler {
             self.module_binding_callable_pass_modes.remove(&slot);
             self.module_binding_callable_return_reference_summaries
                 .remove(&slot);
-            self.module_binding_callable_return_types.remove(&slot);
-            self.module_binding_array_callable_return_types.remove(&slot);
             // cluster-2-cw-IB-class-b: release retained module-binding
             // closure body peek alongside the other module-binding
             // callable state.
@@ -1466,18 +1553,29 @@ impl BytecodeCompiler {
     }
 }
 
-/// Sweep phase 3c.x: walk a function body looking for a single
-/// `return |params| body` and infer the closure's return type. Returns
-/// None when the body is not a clean closure-returning shape (multiple
-/// returns, non-closure return, missing return, etc.). Used by
-/// `update_callable_binding_from_expr` to fix the `let f = make(...)` →
-/// `f(arg) + f(arg)` strict-typing chain when `make`'s declared return is
-/// `any`.
-fn extract_returned_closure_return_type_name(
-    compiler: &mut BytecodeCompiler,
-    body: &[Statement],
-    enclosing_params: &[shape_ast::ast::FunctionParameter],
-) -> Option<String> {
+/// Walk a function body looking for a single `return |params| body` shape.
+/// Returns the retained closure peek so callable-return consumers can derive
+/// its return type from the canonical engine facts rather than a string map.
+fn extract_returned_closure_peek(body: &[Statement]) -> Option<ClosureBodyPeek> {
+    let closure_expr = find_returned_closure_expr(body)?;
+    let Expr::FunctionExpr {
+        params,
+        body,
+        return_type,
+        ..
+    } = closure_expr
+    else {
+        return None;
+    };
+    Some(ClosureBodyPeek {
+        params: params.clone(),
+        body: body.clone(),
+        return_type: return_type.clone(),
+        function_index: None,
+    })
+}
+
+fn find_returned_closure_expr(body: &[Statement]) -> Option<&Expr> {
     fn find_returned_closure_in_stmt(stmt: &Statement) -> Option<&Expr> {
         match stmt {
             Statement::Return(Some(expr), _) => match expr {
@@ -1498,7 +1596,6 @@ fn extract_returned_closure_return_type_name(
     // statements once and accept the first matching shape from the tail
     // outward; mismatches abort.
     let mut returned_closure: Option<&Expr> = None;
-    let mut last_stmt_is_terminal = false;
     for (i, stmt) in body.iter().enumerate() {
         let is_last = i + 1 == body.len();
         match stmt {
@@ -1512,30 +1609,10 @@ fn extract_returned_closure_return_type_name(
             _ if is_last => {
                 if let Some(expr) = find_returned_closure_in_stmt(stmt) {
                     returned_closure = Some(expr);
-                    last_stmt_is_terminal = true;
                 }
             }
             _ => {}
         }
-        let _ = last_stmt_is_terminal;
     }
-
-    let closure_expr = returned_closure?;
-    if let Expr::FunctionExpr {
-        params,
-        body,
-        return_type,
-        ..
-    } = closure_expr
-    {
-        crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_outer(
-            compiler,
-            params,
-            body,
-            return_type.as_ref(),
-            enclosing_params,
-        )
-    } else {
-        None
-    }
+    returned_closure
 }

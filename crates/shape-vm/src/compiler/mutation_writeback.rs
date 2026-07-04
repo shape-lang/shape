@@ -91,9 +91,7 @@ impl ContainerKind {
             ContainerKind::HashSet => mr::MUT_SELF_HASHSET_METHODS.contains(method),
             ContainerKind::HashMap => mr::MUT_SELF_HASHMAP_METHODS.contains(method),
             ContainerKind::Deque => mr::MUT_SELF_DEQUE_METHODS.contains(method),
-            ContainerKind::PriorityQueue => {
-                mr::MUT_SELF_PRIORITY_QUEUE_METHODS.contains(method)
-            }
+            ContainerKind::PriorityQueue => mr::MUT_SELF_PRIORITY_QUEUE_METHODS.contains(method),
             ContainerKind::Array => mr::MUT_SELF_ARRAY_METHODS.contains(method),
         }
     }
@@ -117,18 +115,12 @@ impl ContainerKind {
     pub fn is_mut_self_tuple_return_method(self, method: &str) -> bool {
         use crate::executor::objects::method_registry as mr;
         match self {
-            ContainerKind::HashMap => {
-                mr::MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS.contains(method)
-            }
-            ContainerKind::Deque => {
-                mr::MUT_SELF_TUPLE_RETURN_DEQUE_METHODS.contains(method)
-            }
+            ContainerKind::HashMap => mr::MUT_SELF_TUPLE_RETURN_HASHMAP_METHODS.contains(method),
+            ContainerKind::Deque => mr::MUT_SELF_TUPLE_RETURN_DEQUE_METHODS.contains(method),
             ContainerKind::PriorityQueue => {
                 mr::MUT_SELF_TUPLE_RETURN_PRIORITY_QUEUE_METHODS.contains(method)
             }
-            ContainerKind::Array => {
-                mr::MUT_SELF_TUPLE_RETURN_ARRAY_METHODS.contains(method)
-            }
+            ContainerKind::Array => mr::MUT_SELF_TUPLE_RETURN_ARRAY_METHODS.contains(method),
             // HashSet has no canonical pop-shape method in the current
             // stdlib (no `take(x)` / `pop_first()`); see audit-and-include
             // disposition in W17-pop-mutation close report.
@@ -209,6 +201,7 @@ pub enum MutSelfWriteBackTarget {
 /// `Swap; Pop` (silent drop for r-value receivers — mirror of the
 /// §2.7.27 self-returning r-value silent-drop rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MutSelfWriteBackMode {
     /// Self-returning `&mut self` (existing §2.7.27 base): handler
     /// returns the (possibly-cloned) container Arc. Codegen emits

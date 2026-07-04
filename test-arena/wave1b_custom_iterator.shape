@@ -1,0 +1,33 @@
+type Counter {
+    count: int,
+    max: int,
+}
+
+impl Iterator for Counter {
+    method next() -> Option<int> {
+        if self.count < self.max {
+            let v: int = self.count
+            self.count = self.count + 1
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+fn run() -> int {
+    let mut c = Counter { count: 0, max: 5 }
+    let a = c.next()
+    let b = c.next()
+    match a {
+        Some(x) => { print(x) }
+        None => { print(-1) }
+    }
+    match b {
+        Some(y) => { print(y) }
+        None => { print(-1) }
+    }
+    0
+}
+
+print(run())

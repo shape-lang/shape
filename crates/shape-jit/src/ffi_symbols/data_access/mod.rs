@@ -8,7 +8,6 @@
 // Cranelift call sites in the JIT codegen don't need to change today.
 
 use crate::context::JITContext;
-use crate::ffi::value_ffi::*;
 // crate::jit_array::JitArray removed — see jit_array.rs SURFACE comment.
 // `jit_get_all_rows` returned a `JitArray`-of-data-row indices; it
 // surfaces per ADR-006 §2.7.4 / W10 jit-playbook §5.

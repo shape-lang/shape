@@ -29,24 +29,29 @@ print(add(5, 6))
 }
 
 #[test]
-fn comptime_type_info_is_removed_and_not_suggested_by_lsp() {
+fn comptime_type_info_is_available_and_suggested_by_lsp() {
     let code = r#"
-comptime {
+let TAG: string = comptime {
   let info = type_info("Point")
+  "type-info-ok"
 }
+print(TAG)
 "#;
 
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("type_info has been removed")
-        .at(pos(2, 12))
-        .expect_no_completion("type_info");
+        .expect_no_semantic_diagnostics()
+        .expect_output("type-info-ok");
+
+    ShapeTest::new("comptime {\n    \n}\n")
+        .at(pos(1, 4))
+        .expect_completion("type_info");
 }
 
 #[test]
 fn trait_bound_method_dispatch_resolves_at_runtime() {
     let code = r#"
 trait Displayable {
-  display(): string
+  method display() -> string;
 }
 
 type User { name: string }
@@ -68,7 +73,7 @@ print(render(User { name: "Ada" }))
 }
 
 #[test]
-fn expression_annotation_before_after_hooks_execute() {
+fn expression_annotation_before_after_hooks_surface_on_deleted_empty_arg_array() {
     let code = r#"
 annotation trace_expr() {
   targets: [expression]
@@ -88,7 +93,7 @@ print(x)
 
     ShapeTest::new(code)
         .expect_no_semantic_diagnostics()
-        .expect_output("before\nafter\n3");
+        .expect_run_err_contains("op_new_array(0): SURFACE");
 }
 
 #[test]
@@ -237,6 +242,62 @@ fn semantic_tokens_with_trailing_garbage() {
 fn parse_error_on_completely_broken_code() {
     // Completely broken code should produce a parse error
     ShapeTest::new("let = ;").expect_parse_err();
+}
+
+// =========================================================================
+// STAGE F4 (strict-flip, 2026-06-20): a bare empty-array argument (`[]`) in
+// CALL-ARGUMENT position whose param is `Array<T>` constructs a valid typed
+// empty `TypedArray<T>` from the callee's declared param element type, rather
+// than SURFACEing `op_new_array(0)` NotImplemented at runtime. When the element
+// type has no constructible typed-array carrier the bare `[]` surface-and-stops
+// with a CLEAN compile-error (never a mid-program runtime SURFACE).
+// =========================================================================
+
+#[test]
+fn empty_array_call_arg_scalar_param_constructs_typed_empty() {
+    let code = r#"
+fn g(xs: Array<int>) -> int { xs.length }
+print(g([]))
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_output("0");
+}
+
+#[test]
+fn nonempty_array_call_arg_still_works_after_f4() {
+    let code = r#"
+fn g(xs: Array<int>) -> int { xs.length }
+print(g([1, 2, 3]))
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_output("3");
+}
+
+#[test]
+fn empty_array_call_arg_struct_element_param_constructs_typed_empty() {
+    let code = r#"
+type Token { value: int }
+fn expect_err(label: string, toks: Array<Token>) -> int { toks.length }
+print(expect_err("empty", []))
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_output("0");
+}
+
+#[test]
+fn empty_array_call_arg_unconstructible_element_is_clean_compile_error() {
+    // `Array<Array<int>>` has no bare-`[]`-constructible typed-array carrier.
+    // The arg must surface a CLEAN compile error — NOT a runtime
+    // `op_new_array(0)` NotImplemented SURFACE.
+    let code = r#"
+fn nested(xs: Array<Array<int>>) -> int { xs.length }
+print(nested([]))
+"#;
+    ShapeTest::new(code)
+        .expect_semantic_diagnostic_contains("cannot construct an empty array for parameter");
 }
 
 #[test]

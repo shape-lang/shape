@@ -1,0 +1,799 @@
+// large.shape — Reference-Driven Directed-Graph Analysis Engine
+// =============================================================================
+// Slice: fundamentals/references-borrowing.mdx
+//
+// A non-interactive, deterministic, machine-proofable graph engine built
+// entirely around the chapter's reference model:
+//   * Read-only traversals take a SHARED borrow:    fn f(&g)        (book §References as Function Parameters)
+//   * In-place mutations take an EXCLUSIVE borrow:   fn f(&mut s)    (book §Reference Rules)
+//   * Helpers return the dereferenced VALUE through a reference     (book §"return the VALUE through a reference")
+//   * clone keeps an independent copy live                          (book §Move and Clone)
+//   * let mut accumulators mutate directly, zero copy               (book §let and let mut)
+//   * NLL lets a borrow end at last use before a later mutation     (book §Non-Lexical Lifetimes)
+//
+// GRAPH STORAGE — Compressed-Sparse-Row (CSR), two FLAT int arrays:
+//   * `adj`     : every neighbor list concatenated, in node visitOrder
+//   * `offsets` : offsets[i]..offsets[i+1] is the slice of `adj` for node i
+//   CSR is used (instead of array-of-arrays) so the whole program stays in
+//   flat `Array<int>` territory — see REPORT.md for why nested/empty arrays
+//   are avoided in this WIP build. Both flat arrays are passed by SHARED
+//   reference into every query; per-node work state (dist / visited / indeg)
+//   lives in flat `Array<int>` mutated through &mut params.
+//
+// All reference parameters are EXPLICITLY typed `Array<int>` and all helpers
+// carry explicit return types — required so indexing-through-a-reference yields
+// a proven `int` rather than `unknown` (see REPORT.md book-gap note).
+//
+// Every computed result is asserted against an expected value derived BY HAND
+// from the fixed graph BEFORE the first run (see GROUND TRUTH). On success
+// prints ALL_CHECKS_PASSED.
+// =============================================================================
+
+// ----------------------------------------------------------------------------
+// Test harness
+// ----------------------------------------------------------------------------
+var failures = 0
+fn check_int(name: string, got: int, want: int) {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
+    }
+}
+fn check_bool(name: string, got: bool, want: bool) {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
+    }
+}
+
+// ----------------------------------------------------------------------------
+// GROUND TRUTH — fixed directed graph (8 nodes 0..7)
+// Edges (directed, listed neighbor visitOrder):
+//   0 -> 1, 0 -> 2
+//   1 -> 3, 1 -> 4
+//   2 -> 4, 2 -> 5
+//   3 -> 6
+//   4 -> 6, 4 -> 7
+//   5 -> 7
+//   6 -> 7
+//   7 -> (sink)
+//
+// CSR encoding (verified):
+//   adj     = [1,2, 3,4, 4,5, 6, 6,7, 7, 7]   (11 entries)
+//   offsets = [0, 2, 4, 6, 7, 9, 10, 11, 11]
+//
+// Hand-computed facts (expected values):
+//   out-degree: [2,2,2,1,2,1,1,0]   sum = 11 edges
+//   in-degree : [0,1,1,1,2,1,2,3]   sum = 11
+//   Sources (indeg 0): {0} -> 1 ; Sinks (outdeg 0): {7} -> 1
+//   BFS visitOrder from 0 (mark on enqueue, FIFO) = [0,1,2,3,4,5,6,7]
+//   BFS hop distance from 0          = [0,1,1,2,2,2,3,3]
+//   Reachable from 0 = 8 ; from 7 = 1 ; from 3 ({3,6,7}) = 3
+//   DFS preorder from 0 (recursive, listed visitOrder) = [0,1,3,6,7,4,2,5]
+//   Topological visitOrder (Kahn, smallest-ready-id) = [0,1,2,3,4,5,6,7]
+//   Longest path (edges) from 0: L=[0,1,1,2,2,2,3,4]
+//     L[7]=max(L[4],L[5],L[6])+1 = max(2,2,3)+1 = 4   (e.g. 0-1-3-6-7)
+//   Edge (1,4)=true ; (4,1)=false ; (7,0)=false
+// ----------------------------------------------------------------------------
+
+let NODES = 8
+
+// ---- flat-array helpers -----------------------------------------------------
+
+fn filled(n: int, fill: int) -> Array<int> {
+    var a = []
+    var i = 0
+    while i < n {
+        a.push(fill)
+        i = i + 1
+    }
+    return a
+}
+
+// single-level index-assign through an EXCLUSIVE borrow
+fn set_at(&mut a: Array<int>, i: int, v: int) {
+    a[i] = v
+}
+
+// ---- CSR read-only queries (SHARED borrows) ---------------------------------
+
+// out-degree of node n — returns the dereferenced VALUE through &offsets
+fn out_degree(&offsets: Array<int>, n: int) -> int {
+    return offsets[n + 1] - offsets[n]
+}
+
+// k-th neighbor of node n
+fn neighbor_at(&offsets: Array<int>, &adj: Array<int>, n: int, k: int) -> int {
+    let base = offsets[n]
+    return adj[base + k]
+}
+
+fn edge_count(&offsets: Array<int>) -> int {
+    // last offset = total neighbor entries = edge count
+    return offsets[NODES]
+}
+
+// directed edge u->v exists?
+fn has_edge(&offsets: Array<int>, &adj: Array<int>, u: int, v: int) -> bool {
+    let deg = out_degree(&offsets, u)
+    var k = 0
+    while k < deg {
+        if neighbor_at(&offsets, &adj, u, k) == v { return true }
+        k = k + 1
+    }
+    return false
+}
+
+fn in_degree(&offsets: Array<int>, &adj: Array<int>, n: int) -> int {
+    var cnt = 0
+    var u = 0
+    while u < NODES {
+        if has_edge(&offsets, &adj, u, n) { cnt = cnt + 1 }
+        u = u + 1
+    }
+    return cnt
+}
+
+fn count_sources(&offsets: Array<int>, &adj: Array<int>) -> int {
+    var cnt = 0
+    var n = 0
+    while n < NODES {
+        if in_degree(&offsets, &adj, n) == 0 { cnt = cnt + 1 }
+        n = n + 1
+    }
+    return cnt
+}
+
+fn count_sinks(&offsets: Array<int>) -> int {
+    var cnt = 0
+    var n = 0
+    while n < NODES {
+        if out_degree(&offsets, n) == 0 { cnt = cnt + 1 }
+        n = n + 1
+    }
+    return cnt
+}
+
+// ---- BFS --------------------------------------------------------------------
+
+fn bfs_order(&offsets: Array<int>, &adj: Array<int>, start: int) -> Array<int> {
+    var enqueued = filled(NODES, 0)
+    var visitOrder = []
+    var queue = []
+    queue.push(start)
+    set_at(&mut enqueued, start, 1)
+    var head = 0
+    while head < queue.len() {
+        let node = queue[head]
+        head = head + 1
+        visitOrder.push(node)
+        let deg = out_degree(&offsets, node)
+        var k = 0
+        while k < deg {
+            let nb = neighbor_at(&offsets, &adj, node, k)
+            if enqueued[nb] == 0 {
+                set_at(&mut enqueued, nb, 1)
+                queue.push(nb)
+            }
+            k = k + 1
+        }
+    }
+    return visitOrder
+}
+
+fn bfs_distances(&offsets: Array<int>, &adj: Array<int>, start: int) -> Array<int> {
+    var dist = filled(NODES, -1)
+    var queue = []
+    queue.push(start)
+    set_at(&mut dist, start, 0)
+    var head = 0
+    while head < queue.len() {
+        let node = queue[head]
+        head = head + 1
+        let d = dist[node]
+        let deg = out_degree(&offsets, node)
+        var k = 0
+        while k < deg {
+            let nb = neighbor_at(&offsets, &adj, node, k)
+            if dist[nb] == -1 {
+                set_at(&mut dist, nb, d + 1)
+                queue.push(nb)
+            }
+            k = k + 1
+        }
+    }
+    return dist
+}
+
+fn reachable_count(&offsets: Array<int>, &adj: Array<int>, start: int) -> int {
+    let dist = bfs_distances(&offsets, &adj, start)
+    var cnt = 0
+    var i = 0
+    while i < dist.len() {
+        if dist[i] != -1 { cnt = cnt + 1 }
+        i = i + 1
+    }
+    return cnt
+}
+
+fn is_reachable(&offsets: Array<int>, &adj: Array<int>, start: int, target: int) -> bool {
+    let dist = bfs_distances(&offsets, &adj, start)
+    return dist[target] != -1
+}
+
+// ---- DFS preorder (iterative LIFO, neighbors pushed in reverse) -------------
+fn dfs_preorder(&offsets: Array<int>, &adj: Array<int>, start: int) -> Array<int> {
+    var visited = filled(NODES, 0)
+    var visitOrder = []
+    var stack = []
+    stack.push(start)
+    while stack.len() > 0 {
+        let node = stack[stack.len() - 1]
+        stack.pop()
+        if visited[node] == 0 {
+            set_at(&mut visited, node, 1)
+            visitOrder.push(node)
+            // push neighbors in reverse listed visitOrder so first neighbor is on top
+            let deg = out_degree(&offsets, node)
+            var k = deg - 1
+            while k >= 0 {
+                let nb = neighbor_at(&offsets, &adj, node, k)
+                if visited[nb] == 0 {
+                    stack.push(nb)
+                }
+                k = k - 1
+            }
+        }
+    }
+    return visitOrder
+}
+
+// ---- Topological sort (Kahn, smallest-ready-id first) -----------------------
+fn topo_order(&offsets: Array<int>, &adj: Array<int>) -> Array<int> {
+    var indeg = filled(NODES, 0)
+    var u = 0
+    while u < NODES {
+        let deg = out_degree(&offsets, u)
+        var k = 0
+        while k < deg {
+            let v = neighbor_at(&offsets, &adj, u, k)
+            // read BEFORE the exclusive borrow (book §Reference Rules: owner
+            // cannot be read while &mut is active — sequence the read first).
+            let cur = indeg[v]
+            set_at(&mut indeg, v, cur + 1)
+            k = k + 1
+        }
+        u = u + 1
+    }
+    var visitOrder = []
+    var emitted = filled(NODES, 0)
+    var produced = 0
+    while produced < NODES {
+        var pick = -1
+        var i = 0
+        while i < NODES {
+            if emitted[i] == 0 {
+                if indeg[i] == 0 {
+                    if pick == -1 {
+                        pick = i
+                    }
+                }
+            }
+            i = i + 1
+        }
+        if pick == -1 {
+            return visitOrder
+        }
+        set_at(&mut emitted, pick, 1)
+        visitOrder.push(pick)
+        produced = produced + 1
+        let deg = out_degree(&offsets, pick)
+        var k = 0
+        while k < deg {
+            let v = neighbor_at(&offsets, &adj, pick, k)
+            let cur = indeg[v]
+            set_at(&mut indeg, v, cur - 1)
+            k = k + 1
+        }
+    }
+    return visitOrder
+}
+
+// ---- Longest path length (edges) from start on a DAG, via topo DP -----------
+fn longest_path_to(&offsets: Array<int>, &adj: Array<int>, start: int, target: int) -> int {
+    let topo = topo_order(&offsets, &adj)
+    var best = filled(NODES, -1)
+    set_at(&mut best, start, 0)
+    var t = 0
+    while t < topo.len() {
+        let u = topo[t]
+        if best[u] != -1 {
+            let deg = out_degree(&offsets, u)
+            var k = 0
+            while k < deg {
+                let v = neighbor_at(&offsets, &adj, u, k)
+                let cand = best[u] + 1
+                if cand > best[v] {
+                    set_at(&mut best, v, cand)
+                }
+                k = k + 1
+            }
+        }
+        t = t + 1
+    }
+    return best[target]
+}
+
+// ---- Descendant count (reachable excluding self), via a SHARED borrow --------
+// Ground truth (reachable_count per node = [8,5,5,3,3,2,2,1]):
+//   descendants[n] = reachable_count(n) - 1 = [7,4,4,2,2,1,1,0]
+fn descendant_count(&offsets: Array<int>, &adj: Array<int>, n: int) -> int {
+    let r = reachable_count(&offsets, &adj, n)
+    return r - 1
+}
+
+// ---- Count of ALL distinct directed paths start->target on the DAG -----------
+// Recursive over neighbors reached through SHARED borrows. The recursion takes
+// the same two shared borrows at every level — any number of shared borrows may
+// coexist (book §Reference Rules, rule 1).
+// Hand-derived path counts on the fixed graph:
+//   0->7 : 0-1-3-6-7, 0-1-4-6-7, 0-1-4-7, 0-2-4-6-7, 0-2-4-7, 0-2-5-7   = 6
+//   0->6 : 0-1-3-6, 0-1-4-6, 0-2-4-6                                     = 3
+//   0->4 : 0-1-4, 0-2-4                                                  = 2
+//   1->7 : 1-3-6-7, 1-4-6-7, 1-4-7                                       = 3
+//   3->7 : 3-6-7                                                         = 1
+//   7->7 : (the empty path at the target itself)                        = 1
+//   7->0 : (unreachable)                                                = 0
+fn path_count(&offsets: Array<int>, &adj: Array<int>, start: int, target: int) -> int {
+    if start == target { return 1 }
+    let deg = out_degree(&offsets, start)
+    var total = 0
+    var k = 0
+    while k < deg {
+        let nb = neighbor_at(&offsets, &adj, start, k)
+        total = total + path_count(&offsets, &adj, nb, target)
+        k = k + 1
+    }
+    return total
+}
+
+// ---- Sum of a flat array through a SHARED borrow (returns dereferenced VALUE) -
+fn sum_array(&a: Array<int>) -> int {
+    var s = 0
+    var i = 0
+    let n: int = a.len()
+    while i < n {
+        let ai: int = a[i]
+        s = s + ai
+        i = i + 1
+    }
+    return s
+}
+
+// ---- Maximum element through a SHARED borrow ---------------------------------
+fn max_array(&a: Array<int>) -> int {
+    let n: int = a.len()
+    var best: int = a[0]
+    var i = 1
+    while i < n {
+        let ai: int = a[i]
+        if ai > best { best = ai }
+        i = i + 1
+    }
+    return best
+}
+
+// ---- In-place reverse through an EXCLUSIVE borrow (caller-visible) ------------
+fn reverse_in_place(&mut a: Array<int>) {
+    let n: int = a.len()
+    var i = 0
+    var j = n - 1
+    while i < j {
+        let tmp = a[i]
+        a[i] = a[j]
+        a[j] = tmp
+        i = i + 1
+        j = j - 1
+    }
+}
+
+// ---- In-place scalar add through an EXCLUSIVE borrow --------------------------
+fn add_scalar(&mut a: Array<int>, delta: int) {
+    var i = 0
+    let n: int = a.len()
+    while i < n {
+        a[i] = a[i] + delta
+        i = i + 1
+    }
+}
+
+// ---- Per-node descendant vector built through &mut, queried through & ---------
+fn descendant_vector(&offsets: Array<int>, &adj: Array<int>) -> Array<int> {
+    var v = filled(NODES, 0)
+    var n = 0
+    while n < NODES {
+        let d = descendant_count(&offsets, &adj, n)
+        set_at(&mut v, n, d)
+        n = n + 1
+    }
+    return v
+}
+
+// compare two int arrays for equality (two SHARED borrows)
+fn arrays_equal(&a: Array<int>, &b: Array<int>) -> bool {
+    // results from indexing/.len() through a shared-ref param need an explicit
+    // type binding before use in a comparison (see REPORT.md book-gap note).
+    let la: int = a.len()
+    let lb: int = b.len()
+    if la != lb { return false }
+    var i = 0
+    while i < la {
+        let ai: int = a[i]
+        let bi: int = b[i]
+        if ai != bi { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// =============================================================================
+// MAIN — build the CSR graph once, run every query through references, assert.
+// =============================================================================
+
+let offsets = [0, 2, 4, 6, 7, 9, 10, 11, 11]
+let adj = [1, 2, 3, 4, 4, 5, 6, 6, 7, 7, 7]
+
+// --- structural facts ---
+check_int("num_nodes", NODES, 8)
+check_int("edge_count", edge_count(&offsets), 11)
+
+// out-degrees: [2,2,2,1,2,1,1,0]
+check_int("outdeg_0", out_degree(&offsets, 0), 2)
+check_int("outdeg_1", out_degree(&offsets, 1), 2)
+check_int("outdeg_2", out_degree(&offsets, 2), 2)
+check_int("outdeg_3", out_degree(&offsets, 3), 1)
+check_int("outdeg_4", out_degree(&offsets, 4), 2)
+check_int("outdeg_5", out_degree(&offsets, 5), 1)
+check_int("outdeg_6", out_degree(&offsets, 6), 1)
+check_int("outdeg_7", out_degree(&offsets, 7), 0)
+
+// in-degrees: [0,1,1,1,2,1,2,3]
+check_int("indeg_0", in_degree(&offsets, &adj, 0), 0)
+check_int("indeg_1", in_degree(&offsets, &adj, 1), 1)
+check_int("indeg_2", in_degree(&offsets, &adj, 2), 1)
+check_int("indeg_3", in_degree(&offsets, &adj, 3), 1)
+check_int("indeg_4", in_degree(&offsets, &adj, 4), 2)
+check_int("indeg_5", in_degree(&offsets, &adj, 5), 1)
+check_int("indeg_6", in_degree(&offsets, &adj, 6), 2)
+check_int("indeg_7", in_degree(&offsets, &adj, 7), 3)
+
+// edge existence
+check_bool("edge_1_4", has_edge(&offsets, &adj, 1, 4), true)
+check_bool("edge_4_1", has_edge(&offsets, &adj, 4, 1), false)
+check_bool("edge_7_0", has_edge(&offsets, &adj, 7, 0), false)
+check_bool("edge_0_1", has_edge(&offsets, &adj, 0, 1), true)
+check_bool("edge_6_7", has_edge(&offsets, &adj, 6, 7), true)
+
+// sources / sinks
+check_int("num_sources", count_sources(&offsets, &adj), 1)
+check_int("num_sinks", count_sinks(&offsets), 1)
+
+// --- BFS visitOrder from 0 = [0,1,2,3,4,5,6,7] ---
+let bfs = bfs_order(&offsets, &adj, 0)
+let bfs_expected = [0, 1, 2, 3, 4, 5, 6, 7]
+check_bool("bfs_order", arrays_equal(&bfs, &bfs_expected), true)
+check_int("bfs_len", bfs.len(), 8)
+
+// --- BFS distances from 0 = [0,1,1,2,2,2,3,3] ---
+let dist = bfs_distances(&offsets, &adj, 0)
+let dist_expected = [0, 1, 1, 2, 2, 2, 3, 3]
+check_bool("bfs_distances", arrays_equal(&dist, &dist_expected), true)
+check_int("dist_to_7", dist[7], 3)
+check_int("dist_to_6", dist[6], 3)
+check_int("dist_to_3", dist[3], 2)
+
+// --- reachability ---
+check_int("reachable_from_0", reachable_count(&offsets, &adj, 0), 8)
+check_bool("reach_0_to_7", is_reachable(&offsets, &adj, 0, 7), true)
+check_int("reachable_from_7", reachable_count(&offsets, &adj, 7), 1)
+check_bool("reach_7_to_0", is_reachable(&offsets, &adj, 7, 0), false)
+check_int("reachable_from_3", reachable_count(&offsets, &adj, 3), 3)
+check_bool("reach_3_to_7", is_reachable(&offsets, &adj, 3, 7), true)
+check_bool("reach_3_to_0", is_reachable(&offsets, &adj, 3, 0), false)
+
+// --- DFS preorder from 0 = [0,1,3,6,7,4,2,5] ---
+let dfs = dfs_preorder(&offsets, &adj, 0)
+let dfs_expected = [0, 1, 3, 6, 7, 4, 2, 5]
+check_bool("dfs_preorder", arrays_equal(&dfs, &dfs_expected), true)
+check_int("dfs_len", dfs.len(), 8)
+check_int("dfs_first", dfs[0], 0)
+check_int("dfs_last", dfs[7], 5)
+
+// --- topological visitOrder = [0,1,2,3,4,5,6,7] ---
+let topo = topo_order(&offsets, &adj)
+let topo_expected = [0, 1, 2, 3, 4, 5, 6, 7]
+check_bool("topo_order", arrays_equal(&topo, &topo_expected), true)
+check_int("topo_len", topo.len(), 8)
+check_int("topo_first", topo[0], 0)
+check_int("topo_last", topo[7], 7)
+
+// --- longest path lengths (edges) on the DAG ---
+check_int("longest_0_to_7", longest_path_to(&offsets, &adj, 0, 7), 4)
+check_int("longest_0_to_6", longest_path_to(&offsets, &adj, 0, 6), 3)
+check_int("longest_0_to_4", longest_path_to(&offsets, &adj, 0, 4), 2)
+check_int("longest_0_to_1", longest_path_to(&offsets, &adj, 0, 1), 1)
+check_int("longest_0_to_0", longest_path_to(&offsets, &adj, 0, 0), 0)
+check_int("longest_7_to_0", longest_path_to(&offsets, &adj, 7, 0), -1)
+
+// --- ownership: clone gives an independent copy; original stays usable -------
+let original = bfs_order(&offsets, &adj, 0)
+let copy = clone original
+check_int("clone_len_orig", original.len(), 8)
+check_int("clone_len_copy", copy.len(), 8)
+check_bool("clone_equal", arrays_equal(&original, &copy), true)
+
+// --- let mut accumulator: direct mutation, single owner ----------------------
+let mut deg_sum = 0
+var node = 0
+while node < NODES {
+    deg_sum = deg_sum + out_degree(&offsets, node)
+    node = node + 1
+}
+check_int("degree_sum_equals_edges", deg_sum, 11)
+
+// --- &mut mutation visible to caller -----------------------------------------
+var counters = filled(8, 0)
+fn bump_all(&mut a: Array<int>) {
+    var i = 0
+    while i < a.len() {
+        a[i] = a[i] + 1
+        i = i + 1
+    }
+}
+bump_all(&mut counters)
+bump_all(&mut counters)
+check_int("counters_0", counters[0], 2)
+check_int("counters_7", counters[7], 2)
+
+// --- NLL: a shared read ends, then we mutate the owner -----------------------
+var live = filled(3, 5)
+let snap0 = live[0]
+check_int("nll_snap0", snap0, 5)
+live.push(9)
+check_int("nll_after_push", live.len(), 4)
+check_int("nll_pushed", live[3], 9)
+
+// --- descendant counts (reachable excluding self) = [7,4,4,2,2,1,1,0] --------
+check_int("desc_0", descendant_count(&offsets, &adj, 0), 7)
+check_int("desc_1", descendant_count(&offsets, &adj, 1), 4)
+check_int("desc_2", descendant_count(&offsets, &adj, 2), 4)
+check_int("desc_3", descendant_count(&offsets, &adj, 3), 2)
+check_int("desc_4", descendant_count(&offsets, &adj, 4), 2)
+check_int("desc_5", descendant_count(&offsets, &adj, 5), 1)
+check_int("desc_6", descendant_count(&offsets, &adj, 6), 1)
+check_int("desc_7", descendant_count(&offsets, &adj, 7), 0)
+
+// descendant vector (built through &mut, compared through &)
+let dvec = descendant_vector(&offsets, &adj)
+let dvec_expected = [7, 4, 4, 2, 2, 1, 1, 0]
+check_bool("desc_vector", arrays_equal(&dvec, &dvec_expected), true)
+check_int("desc_vector_sum", sum_array(&dvec), 21)   // 7+4+4+2+2+1+1+0 = 21
+check_int("desc_vector_max", max_array(&dvec), 7)
+
+// --- distinct directed path counts on the DAG -------------------------------
+check_int("paths_0_7", path_count(&offsets, &adj, 0, 7), 6)
+check_int("paths_0_6", path_count(&offsets, &adj, 0, 6), 3)
+check_int("paths_0_4", path_count(&offsets, &adj, 0, 4), 2)
+check_int("paths_1_7", path_count(&offsets, &adj, 1, 7), 3)
+check_int("paths_3_7", path_count(&offsets, &adj, 3, 7), 1)
+check_int("paths_7_7", path_count(&offsets, &adj, 7, 7), 1)
+check_int("paths_7_0", path_count(&offsets, &adj, 7, 0), 0)
+
+// --- sum / max over flat arrays through shared borrows -----------------------
+// out-degree vector = [2,2,2,1,2,1,1,0]; sum = 11 (= edge count), max = 2
+var outdeg_vec = filled(NODES, 0)
+var nn = 0
+while nn < NODES {
+    set_at(&mut outdeg_vec, nn, out_degree(&offsets, nn))
+    nn = nn + 1
+}
+check_int("outdeg_vec_sum", sum_array(&outdeg_vec), 11)
+check_int("outdeg_vec_max", max_array(&outdeg_vec), 2)
+
+// --- in-place reverse through &mut (caller-visible mutation) ------------------
+var rev = [1, 2, 3, 4, 5]
+reverse_in_place(&mut rev)
+let rev_expected = [5, 4, 3, 2, 1]
+check_bool("reverse_in_place", arrays_equal(&rev, &rev_expected), true)
+check_int("reverse_first", rev[0], 5)
+check_int("reverse_last", rev[4], 1)
+reverse_in_place(&mut rev)   // reversing twice restores the original
+let orig_expected = [1, 2, 3, 4, 5]
+check_bool("reverse_twice_identity", arrays_equal(&rev, &orig_expected), true)
+
+// --- in-place scalar add through &mut ----------------------------------------
+var acc = [10, 20, 30]
+add_scalar(&mut acc, 5)
+let acc_expected = [15, 25, 35]
+check_bool("add_scalar", arrays_equal(&acc, &acc_expected), true)
+check_int("add_scalar_sum", sum_array(&acc), 75)
+
+// --- clone before an in-place mutation: original stays independent -----------
+let base = [1, 2, 3]
+var mutant = clone base
+add_scalar(&mut mutant, 100)
+check_int("clone_base_unchanged_0", base[0], 1)        // base untouched
+check_int("clone_base_unchanged_2", base[2], 3)
+check_int("clone_mutant_changed_0", mutant[0], 101)    // only the clone changed
+check_int("clone_mutant_changed_2", mutant[2], 103)
+check_int("clone_base_sum", sum_array(&base), 6)
+check_int("clone_mutant_sum", sum_array(&mutant), 306)
+
+// =============================================================================
+// SECOND FIXTURE — a perfect binary tree (7 nodes 0..6), analyzed through the
+// SAME reference discipline but with an explicit node-count parameter so the
+// helpers are independent of the module-level NODES=8.
+//
+//          0
+//        /   \
+//       1     2
+//      / \   / \
+//     3   4 5   6
+//
+// Edges: 0->1,0->2, 1->3,1->4, 2->5,2->6
+// CSR:  adj    = [1,2, 3,4, 5,6]            (6 entries)
+//       offsets= [0, 2, 4, 6, 6, 6, 6, 6]
+//
+// Hand-derived ground truth:
+//   out-degree:  [2,2,2,0,0,0,0]   sum = 6 edges
+//   in-degree :  [0,1,1,1,1,1,1]
+//   leaves (outdeg 0) = {3,4,5,6} -> 4 ; root (indeg 0) = {0} -> 1
+//   BFS order from 0   = [0,1,2,3,4,5,6]
+//   BFS distances      = [0,1,1,2,2,2,2]   (tree depth on each leaf = 2)
+//   DFS preorder from 0= [0,1,3,4,2,5,6]   (verified)
+//   reachable from 0 = 7 ; from 1 = 3 ({1,3,4}) ; from 2 = 3 ({2,5,6})
+//   descendants       = [6,2,2,0,0,0,0]
+//   unique tree paths 0->leaf = 1 each ; longest path 0->leaf = 2
+// =============================================================================
+
+let TNODES = 7
+
+fn t_out_degree(&offsets: Array<int>, n: int) -> int {
+    return offsets[n + 1] - offsets[n]
+}
+fn t_neighbor_at(&offsets: Array<int>, &adj: Array<int>, n: int, k: int) -> int {
+    let base = offsets[n]
+    return adj[base + k]
+}
+fn t_filled(n: int, fill: int) -> Array<int> {
+    var a = []
+    var i = 0
+    while i < n { a.push(fill); i = i + 1 }
+    return a
+}
+fn t_set_at(&mut a: Array<int>, i: int, v: int) { a[i] = v }
+
+fn t_bfs_distances(&offsets: Array<int>, &adj: Array<int>, start: int, count: int) -> Array<int> {
+    var dist = t_filled(count, -1)
+    var queue = []
+    queue.push(start)
+    t_set_at(&mut dist, start, 0)
+    var head = 0
+    while head < queue.len() {
+        let node = queue[head]
+        head = head + 1
+        let d = dist[node]
+        let deg = t_out_degree(&offsets, node)
+        var k = 0
+        while k < deg {
+            let nb = t_neighbor_at(&offsets, &adj, node, k)
+            if dist[nb] == -1 {
+                t_set_at(&mut dist, nb, d + 1)
+                queue.push(nb)
+            }
+            k = k + 1
+        }
+    }
+    return dist
+}
+fn t_reachable_count(&offsets: Array<int>, &adj: Array<int>, start: int, count: int) -> int {
+    let dist = t_bfs_distances(&offsets, &adj, start, count)
+    var cnt = 0
+    var i = 0
+    while i < dist.len() {
+        if dist[i] != -1 { cnt = cnt + 1 }
+        i = i + 1
+    }
+    return cnt
+}
+fn t_dfs_preorder(&offsets: Array<int>, &adj: Array<int>, start: int, count: int) -> Array<int> {
+    var visited = t_filled(count, 0)
+    var visitOrder = []
+    var stack = []
+    stack.push(start)
+    while stack.len() > 0 {
+        let node = stack[stack.len() - 1]
+        stack.pop()
+        if visited[node] == 0 {
+            t_set_at(&mut visited, node, 1)
+            visitOrder.push(node)
+            let deg = t_out_degree(&offsets, node)
+            var k = deg - 1
+            while k >= 0 {
+                let nb = t_neighbor_at(&offsets, &adj, node, k)
+                if visited[nb] == 0 { stack.push(nb) }
+                k = k - 1
+            }
+        }
+    }
+    return visitOrder
+}
+fn t_count_leaves(&offsets: Array<int>, count: int) -> int {
+    var cnt = 0
+    var n = 0
+    while n < count {
+        if t_out_degree(&offsets, n) == 0 { cnt = cnt + 1 }
+        n = n + 1
+    }
+    return cnt
+}
+fn t_path_count(&offsets: Array<int>, &adj: Array<int>, start: int, target: int) -> int {
+    if start == target { return 1 }
+    let deg = t_out_degree(&offsets, start)
+    var total = 0
+    var k = 0
+    while k < deg {
+        let nb = t_neighbor_at(&offsets, &adj, start, k)
+        total = total + t_path_count(&offsets, &adj, nb, target)
+        k = k + 1
+    }
+    return total
+}
+
+let toffsets = [0, 2, 4, 6, 6, 6, 6, 6]
+let tadj = [1, 2, 3, 4, 5, 6]
+
+check_int("tree_nodes", TNODES, 7)
+check_int("tree_outdeg_0", t_out_degree(&toffsets, 0), 2)
+check_int("tree_outdeg_1", t_out_degree(&toffsets, 1), 2)
+check_int("tree_outdeg_3", t_out_degree(&toffsets, 3), 0)
+check_int("tree_outdeg_6", t_out_degree(&toffsets, 6), 0)
+check_int("tree_leaves", t_count_leaves(&toffsets, TNODES), 4)
+
+let tdist = t_bfs_distances(&toffsets, &tadj, 0, TNODES)
+let tdist_expected = [0, 1, 1, 2, 2, 2, 2]
+check_bool("tree_bfs_distances", arrays_equal(&tdist, &tdist_expected), true)
+check_int("tree_depth_leaf3", tdist[3], 2)
+check_int("tree_depth_leaf6", tdist[6], 2)
+
+let tdfs = t_dfs_preorder(&toffsets, &tadj, 0, TNODES)
+let tdfs_expected = [0, 1, 3, 4, 2, 5, 6]
+check_bool("tree_dfs_preorder", arrays_equal(&tdfs, &tdfs_expected), true)
+
+check_int("tree_reach_0", t_reachable_count(&toffsets, &tadj, 0, TNODES), 7)
+check_int("tree_reach_1", t_reachable_count(&toffsets, &tadj, 1, TNODES), 3)
+check_int("tree_reach_2", t_reachable_count(&toffsets, &tadj, 2, TNODES), 3)
+check_int("tree_reach_3", t_reachable_count(&toffsets, &tadj, 3, TNODES), 1)
+
+// every root->leaf path in a tree is unique
+check_int("tree_paths_0_3", t_path_count(&toffsets, &tadj, 0, 3), 1)
+check_int("tree_paths_0_4", t_path_count(&toffsets, &tadj, 0, 4), 1)
+check_int("tree_paths_0_5", t_path_count(&toffsets, &tadj, 0, 5), 1)
+check_int("tree_paths_0_6", t_path_count(&toffsets, &tadj, 0, 6), 1)
+// the root reaches each of its 6 descendants by exactly one path -> 6 leaf+internal paths
+check_int("tree_paths_0_1", t_path_count(&toffsets, &tadj, 0, 1), 1)
+
+// sum of tree out-degrees through a built &mut vector, read via & = 6 (edge count)
+var tout = t_filled(TNODES, 0)
+var tn = 0
+while tn < TNODES {
+    t_set_at(&mut tout, tn, t_out_degree(&toffsets, tn))
+    tn = tn + 1
+}
+check_int("tree_outdeg_sum", sum_array(&tout), 6)
+check_int("tree_outdeg_max", max_array(&tout), 2)
+
+// --- final tally -------------------------------------------------------------
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+}

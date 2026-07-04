@@ -24,11 +24,12 @@
 //!
 //! ## Round 7A precedent
 //!
-//! The Result/Option Arc carriers in `ffi/result.rs::jit_v2_make_result_ok`
-//! / `_err` / `jit_v2_make_option_some` / `_none` and the kinded
-//! retain/release `jit_arc_result_retain` / `_release` /
-//! `jit_arc_option_retain` / `_release` are the bound precedent for the
-//! shape of every body in this module.
+//! The legacy Result/Option typed-Arc retain/release entries
+//! `jit_arc_result_retain` / `_release` / `jit_arc_option_retain` /
+//! `_release` are the layout precedent for the Arc refcount operations in this
+//! module. W88A retires the old Result/Option producer imports themselves;
+//! collection constructors here remain active because their carriers have no
+//! schema-backed replacement mandate.
 //!
 //! ## Inertness
 //!
@@ -39,12 +40,11 @@
 //! entry points are inert at the program surface — Round 9's smoke
 //! matrix is unchanged.
 
+use shape_value::ValueSlot;
 use shape_value::heap_value::{
-    AtomicData, ChannelData, DequeData, HashSetData, LazyData,
-    MutexData, PriorityQueueData,
+    AtomicData, ChannelData, DequeData, HashSetData, LazyData, MutexData, PriorityQueueData,
 };
 use shape_value::kinded_slot::KindedSlot;
-use shape_value::ValueSlot;
 use std::sync::Arc;
 
 use super::super::stack_kind_code;
@@ -259,9 +259,7 @@ pub extern "C" fn jit_arc_hashmap_retain(bits: u64) {
         return;
     }
     unsafe {
-        Arc::increment_strong_count(
-            bits as *const shape_value::heap_value::HashMapKindedRef,
-        );
+        Arc::increment_strong_count(bits as *const shape_value::heap_value::HashMapKindedRef);
     }
 }
 
@@ -275,9 +273,7 @@ pub extern "C" fn jit_arc_hashmap_release(bits: u64) {
         return;
     }
     unsafe {
-        Arc::decrement_strong_count(
-            bits as *const shape_value::heap_value::HashMapKindedRef,
-        );
+        Arc::decrement_strong_count(bits as *const shape_value::heap_value::HashMapKindedRef);
     }
 }
 
@@ -486,7 +482,10 @@ mod tests {
             // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits now
             // point to Arc<HashMapKindedRef> per ADR-006 §2.7.24 Q25.B
             // SUPERSEDED.
-            assert_eq!(observe_strong_count::<shape_value::heap_value::HashMapKindedRef>(bits), 1);
+            assert_eq!(
+                observe_strong_count::<shape_value::heap_value::HashMapKindedRef>(bits),
+                1
+            );
             drop_arc::<shape_value::heap_value::HashMapKindedRef>(bits);
         }
     }

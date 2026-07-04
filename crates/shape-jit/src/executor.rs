@@ -51,8 +51,6 @@ impl ProgramExecutor for JITExecutor {
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        use shape_vm::BytecodeCompiler;
-
         // REPL cross-cell persistence (WS-11): when the engine is a REPL
         // (`init_repl` enabled persistence), execute the cell on the
         // bytecode interpreter. Cross-cell `let`/`var` bindings and
@@ -75,6 +73,40 @@ impl ProgramExecutor for JITExecutor {
             return self.bytecode_executor.execute_program(engine, program);
         }
 
+        // R6 top-level-comptime exactly-once (ADR-006 §2.7.14): a top-level
+        // `comptime { ... }` block is executed for its side-effects at COMPILE
+        // time (`Item::Comptime` in `compiler/statements.rs`), emitting no
+        // runtime bytecode. The JIT path otherwise compiles the program TWICE:
+        // once at `compile_program_for_inspection` below (firing the comptime
+        // body's observable side-effects, e.g. `comptime { print("X") }`),
+        // then — because `compile_strategy` SURFACE-deopts any top-level
+        // comptime — a second time on the `[jit-fallback]` re-compile via
+        // `bytecode_executor.execute_program(engine, program)` (firing the same
+        // side-effects AGAIN). `--mode vm` compiles once, so the observable
+        // effect fired twice under `--mode jit` — a VM != JIT divergence
+        // (`comptime { print("SIDE") } print("main")` → JIT printed "SIDE"
+        // twice). The interpreter (VM) is the oracle: exactly-once.
+        //
+        // Deopt to the bytecode interpreter BEFORE the JIT path compiles the
+        // program at all. The interpreter compiles+runs the program exactly
+        // once (comptime side-effects fire once), matching `--mode vm`. This
+        // detection mirrors `compile_strategy`'s `top_level_has_comptime`
+        // surface-and-stop, hoisted ahead of the first compile so the comptime
+        // body is never re-evaluated. Pure (side-effect-free) comptime
+        // (`let x = comptime { 3 + 4 }`) took the same SURFACE-deopt before;
+        // the result is identical (interpreter runs the baked literal), only
+        // now without the wasted double-compile.
+        if shape_vm::compiler::program_has_top_level_comptime(program) {
+            tracing::info!(
+                target: "shape_jit::fallback",
+                function = "main",
+                reason = "top-level comptime block: deopt before compile to keep \
+                          comptime side-effects exactly-once (VM == JIT)",
+                "jit-fallback: top-level comptime, running under interpreter",
+            );
+            return self.bytecode_executor.execute_program(engine, program);
+        }
+
         // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
         // `tracing::enabled!` compiles away under `release_max_level_off`
         // (the default when the `jit-trace` Cargo feature is OFF), so this
@@ -87,57 +119,34 @@ impl ProgramExecutor for JITExecutor {
             tracing::Level::INFO,
         );
 
-        // Capture source text before getting runtime reference (for error messages)
-        let source_for_compilation = engine.current_source().map(|s| s.to_string());
-
-        // Compile to bytecode first to check JIT compatibility
-        let runtime = engine.get_runtime_mut();
-
-        // Get known module bindings — prefer persistent context, fallback to precompiled names
-        let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
-            let names = ctx.root_scope_binding_names();
-            if names.is_empty() {
-                shape_vm::stdlib::core_binding_names(runtime)
-            } else {
-                names
-            }
-        } else {
-            shape_vm::stdlib::core_binding_names(runtime)
-        };
-
-        // Build module graph and compile via graph pipeline.
+        // STAGE-modules JIT-divergence fix: build the bytecode through the
+        // SAME configured pipeline the VM (`--mode vm`) uses, by delegating to
+        // `BytecodeExecutor::compile_program_for_inspection`
+        // (→ `compile_program_impl`). That path consumes `self.bytecode_executor`'s
+        // CONFIGURED module loader (`set_module_loader` wired by the CLI's
+        // `wire_vm_executor_module_loading`), its `dependency_paths`,
+        // `native_resolution_context`, and `root_package_key` — exactly the
+        // project / search-root context that lets `from mathx::stats use { .. }`
+        // resolve when the script lives in a `shape.toml` project run from
+        // outside the project directory.
         //
-        // W9: pass `self.bytecode_executor.extensions()` so the graph build
-        // can hybridize native extension modules with their Shape overlay
-        // (e.g. `std::core::remote`'s `pub annotation remote(addr)`). Without
-        // the extensions list, the graph would skip the hybridization probe
-        // and the namespace import path would lose annotation visibility.
-        let extensions = self.bytecode_executor.extensions().to_vec();
-        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
-        let (graph, stdlib_names, prelude_imports) =
-            shape_vm::module_resolution::build_graph_and_stdlib_names(
-                program,
-                &mut loader,
-                &extensions,
-            )
-            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("Module graph construction failed: {}", e),
-                location: None,
-            })?;
-
+        // The previous body built the module graph with a FRESH, unconfigured
+        // `ModuleLoader::new()`, so project-mode imports only resolved when the
+        // process CWD happened to be the project root. Outside that CWD the
+        // graph build / type-check raised "Undefined function" at compile time
+        // and `execute_program` returned the error BEFORE the W12 fall-through
+        // (line below) could run the program under the interpreter — a hard
+        // VM != JIT divergence (`small/main.shape`, `large/main.shape`).
+        //
+        // Delegating produces byte-identical bytecode to `--mode vm` (same
+        // loader, same `compile_with_graph_and_prelude`, same imported-symbol
+        // injection), so the JIT-compatibility probe + W12 interpreter
+        // fall-through both observe the SAME program the VM does. No new dynamic
+        // path; no fresh-loader divergence.
         let bytecode_compile_start = Instant::now();
-        let mut compiler = if extensions.is_empty() {
-            BytecodeCompiler::new()
-        } else {
-            BytecodeCompiler::new().with_extensions(extensions.clone())
-        };
-        compiler.stdlib_function_names = stdlib_names;
-        compiler.register_known_bindings(&known_bindings);
-        if let Some(source) = &source_for_compilation {
-            compiler.set_source(source);
-        }
-        let bytecode = compiler
-            .compile_with_graph_and_prelude(program, graph, &prelude_imports)
+        let bytecode = self
+            .bytecode_executor
+            .compile_program_for_inspection(engine, program)
             .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
                 message: format!("Bytecode compilation failed: {}", e),
                 location: None,
@@ -289,7 +298,8 @@ impl JITExecutor {
                           interpreter via this `[jit-fallback]` path preserves \
                           VM == JIT semantics. Tracked via \
                           `docs/v0.3-close-summary.md` §5.16 (v0.4 / planned: JIT \
-                          identifier-eval lowering root-cause fix)".to_string(),
+                          identifier-eval lowering root-cause fix)"
+                    .to_string(),
                 location: None,
             });
         }
@@ -347,7 +357,8 @@ impl JITExecutor {
                           Tracked via `docs/v0.3-close-summary.md` §5.16 (v0.4 / \
                           planned: JIT ModuleFn dispatch root-cause fix at \
                           `dispatch_module_fn_call` todo!() + §2.7.10/Q11 kinded \
-                          handler ABI rebuild)".to_string(),
+                          handler ABI rebuild)"
+                    .to_string(),
                 location: None,
             });
         }
@@ -418,7 +429,69 @@ impl JITExecutor {
                           supervisor 2026-05-28 c4-4B ratification + \
                           `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` \
                           §4B (Sub-cluster 4B FN-REG-CORRECTNESS / RELEASE-BLOCKING; \
-                          this SURFACE-deopt is the ratified v0.3.3 fix shape)".to_string(),
+                          this SURFACE-deopt is the ratified v0.3.3 fix shape)"
+                    .to_string(),
+                location: None,
+            });
+        }
+
+        // ADR-006 §2.7.30 (GapA value-position auto-deref) SURFACE: the program
+        // value-derefs a reference returned via the reference-escape→RC
+        // `PromotedCell` carrier (`fn make() -> &int { let x = 5; return &x }`
+        // then `print(make())` / `make() + 1`). The VM resolves the returned
+        // reference through the owning `Arc<SharedCell>` share
+        // (`read_ref_target` PromotedCell arm at `executor/variables/mod.rs`),
+        // reading the live referent. The JIT models references ONLY as
+        // per-function stack-cell / typed-field addresses (`mir_compiler/
+        // rvalues.rs` Borrow path / `places.rs` `emit_typed_field_address`) — it
+        // has NO PromotedCell lowering, so its `DerefLoad` reads the raw
+        // reference pointer instead of the referent: silent-wrong-output
+        // (`VM=5`, `JIT=<stack-pointer>`) observed at module scope. Whole-program
+        // deopt to the (correct) interpreter preserves VM == JIT semantics. Same
+        // surface-and-stop shape as the W17-marshal / c4-4B TryUnwrap deopts
+        // above; root-cause JIT PromotedCell lowering is a v0.4 JIT-lowering
+        // followup.
+        if bytecode.has_reference_escape_promotion {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "ADR-006 §2.7.30 reference-escape-promotion SURFACE: the \
+                          program value-derefs a reference returned via the \
+                          escape→RC `PromotedCell` carrier (`fn f() -> &T { … return \
+                          &local }` consumed in value position). The JIT has no \
+                          PromotedCell deref lowering (it models refs as \
+                          per-function stack-cell / typed-field addresses only) and \
+                          would read the raw reference pointer instead of the \
+                          referent. Whole-program deopting to the bytecode \
+                          interpreter via this `[jit-fallback]` path preserves \
+                          VM == JIT semantics (the VM `read_ref_target` PromotedCell \
+                          arm reads the live referent through the owning \
+                          `Arc<SharedCell>` share)."
+                    .to_string(),
+                location: None,
+            });
+        }
+
+        // v0.3.3 book-gate `??` SURFACE: the bytecode VM unwraps an
+        // `Option<T>` left operand of `a ?? b` (`Some(v) -> v`) via the
+        // `CoalesceProbe` opcode (`executor/exceptions/mod.rs::
+        // op_coalesce_probe`), but the JIT MIR lowering
+        // (`mir/lowering/expr.rs::lower_null_coalesce`) models `??` as a
+        // `BinOp::Eq` against `MirConstant::None`, which does NOT
+        // recognise/unwrap the `Arc<OptionData>` carrier — it would leak
+        // the whole `Some(v)` wrapper, diverging from the VM. The JIT has
+        // no Option-unwrap lowering (the sibling `?` operator deopts via
+        // `has_try_unwrap_residual` for the same reason). Whole-program
+        // deopt to the (correct) interpreter preserves VM == JIT semantics.
+        if bytecode.has_null_coalesce_residual {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "v0.3.3 `??` null-coalesce SURFACE: the program contains a \
+                          null-coalescing operator (`a ?? b`). The bytecode VM unwraps \
+                          an `Option<T>` left operand `Some(v) -> v` via the \
+                          `CoalesceProbe` opcode; the JIT MIR lowering models `??` as \
+                          `Eq` against `None` with no `Arc<OptionData>` unwrap and \
+                          would leak the `Some(v)` wrapper. Whole-program deopting to \
+                          the bytecode interpreter via this `[jit-fallback]` path \
+                          preserves VM == JIT semantics."
+                    .to_string(),
                 location: None,
             });
         }
@@ -673,9 +746,15 @@ impl JITExecutor {
             target: "shape_jit::arc_counters",
             tracing::Level::INFO,
         );
-        let (retain_before, release_before, frees_before,
-             str_allocs_before, str_retain_before,
-             str_release_before, str_frees_before) = if arc_counters_enabled {
+        let (
+            retain_before,
+            release_before,
+            frees_before,
+            str_allocs_before,
+            str_retain_before,
+            str_release_before,
+            str_frees_before,
+        ) = if arc_counters_enabled {
             (
                 crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed),
                 crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
@@ -701,17 +780,13 @@ impl JITExecutor {
             let frees_after =
                 crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
             let str_allocs_after =
-                crate::ffi::arc::STRING_CONSTANT_ALLOCS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_CONSTANT_ALLOCS.load(std::sync::atomic::Ordering::Relaxed);
             let str_retain_after =
-                crate::ffi::arc::STRING_RETAIN_CALLS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             let str_release_after =
-                crate::ffi::arc::STRING_RELEASE_CALLS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             let str_frees_after =
-                crate::ffi::arc::STRING_RELEASE_FREES
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
             tracing::info!(
                 target: "shape_jit::arc_counters",
                 retain_calls = retain_after - retain_before,
@@ -799,11 +874,10 @@ impl JITExecutor {
                     // was stored in the `JIT_RUNTIME_ERROR` thread-local —
                     // surface it verbatim so `--mode jit` reports the SAME
                     // error the interpreter would.
-                    let message =
-                        match crate::ffi::control::take_jit_runtime_error() {
-                            Some(vm_err) => vm_err,
-                            None => format!("JIT execution error (code: {})", signal),
-                        };
+                    let message = match crate::ffi::control::take_jit_runtime_error() {
+                        Some(vm_err) => vm_err,
+                        None => format!("JIT execution error (code: {})", signal),
+                    };
                     return Ok(Err(shape_runtime::error::ShapeError::RuntimeError {
                         message,
                         location: None,
@@ -824,18 +898,10 @@ impl JITExecutor {
         // v2: check return_type_tag for native-typed return values.
         // Non-zero tags bypass NaN-box decoding entirely.
         let wire_value = match jit_ctx.return_type_tag {
-            crate::context::RETURN_TAG_F64 => {
-                WireValue::Number(f64::from_bits(raw_result))
-            }
-            crate::context::RETURN_TAG_I64 => {
-                WireValue::Integer(raw_result as i64)
-            }
-            crate::context::RETURN_TAG_I32 => {
-                WireValue::Integer((raw_result as i32) as i64)
-            }
-            crate::context::RETURN_TAG_BOOL => {
-                WireValue::Bool(raw_result != 0)
-            }
+            crate::context::RETURN_TAG_F64 => WireValue::Number(f64::from_bits(raw_result)),
+            crate::context::RETURN_TAG_I64 => WireValue::Integer(raw_result as i64),
+            crate::context::RETURN_TAG_I32 => WireValue::Integer((raw_result as i32) as i64),
+            crate::context::RETURN_TAG_BOOL => WireValue::Bool(raw_result != 0),
             crate::context::RETURN_TAG_UNIT => {
                 // W11-jit-new-array: `()`-typed return — the program's
                 // terminal expression produced no value. Map to Null

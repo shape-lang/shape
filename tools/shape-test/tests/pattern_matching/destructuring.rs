@@ -106,7 +106,7 @@ handle(Err("fail"))
 // Error: "expected something else, found `}`"
 // Root cause: `None` is a none_literal in the grammar, and Option::None
 // in pattern_qualified_constructor expects ident :: ident, but "None" as
-// a keyword may conflict with none_literal parsing precedence.
+// a keyword may conflict with None_literal parsing precedence.
 // Also, Option::Some(val) fails similarly because the parser may not
 // handle Option::Some as a qualified constructor correctly in this context.
 
@@ -155,9 +155,9 @@ unwrap_or(None, 0)
     ShapeTest::new(code).expect_run_ok().expect_number(0.0);
 }
 
-// Workaround: Use guard-based null checking instead of Option pattern
+// Workaround: Use guard-based None checking instead of Option pattern
 #[test]
-fn pm_17_workaround_null_check() {
+fn pm_17_workaround_none_check() {
     let code = r#"
 function unwrap_or(opt, default_val) {
     return match opt {
@@ -171,7 +171,7 @@ unwrap_or(42, 0)
 }
 
 #[test]
-fn pm_17_workaround_null_check_none() {
+fn pm_17_workaround_none_check_none() {
     let code = r#"
 function unwrap_or(opt, default_val) {
     return match opt {

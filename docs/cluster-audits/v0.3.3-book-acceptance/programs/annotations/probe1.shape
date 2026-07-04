@@ -1,0 +1,29 @@
+// Probe: comptime-only @serializable from cookbook Recipe 2 (runnable=true)
+annotation serializable() {
+  targets: [type]
+
+  comptime pre(target, ctx) {
+    comptime for field in target.fields {
+      if field.type == "function" {
+        error("Serializable type cannot include function fields")
+      }
+    }
+  }
+
+  comptime post(target, ctx) {
+    extend target {
+      method to_json() {
+        // generated serializer
+      }
+
+      method from_json(payload) {
+        // generated deserializer
+      }
+    }
+  }
+}
+
+@serializable()
+type Point { x: number, y: number }
+
+print("PROBE1_OK")

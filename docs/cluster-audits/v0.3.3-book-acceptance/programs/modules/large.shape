@@ -1,0 +1,424 @@
+// large.shape — Ledger Analytics Engine (book slice: fundamentals/modules.mdx)
+// =============================================================================
+// A real-world, non-interactive, machine-proofable application that is ROOTED
+// in the module system: a six-file library under `ledger/` that this driver
+// composes. It exercises every documented import form from the chapter:
+//
+//   * named import           from ledger::money use { format }
+//   * named alias            from ledger::stats use { spread as range_of }
+//   * namespace import       use ledger::engine   +  engine::net(...)
+//   * namespace alias        use ledger::stats as st  +  st::count(...)
+//   * cross-module imports    (engine/rules/report import sibling modules)
+//   * deep file->path mapping (ledger/<name>.shape -> ledger::<name>)
+//
+// MONEY MODEL: integer cents everywhere -> every result is EXACT. Every
+// expected value below was derived BY HAND from the fixture + book semantics
+// BEFORE the first run (see EXPECTED-VALUE DERIVATION comments), never
+// back-filled from output.
+//
+// Self-check protocol: a `check` helper compares got vs expected and prints
+// "CHECK_FAILED: <name> expected=<e> got=<g>" on mismatch. On all-pass the
+// program prints "ALL_CHECKS_PASSED".
+// =============================================================================
+
+// ---- import forms (all five documented styles) ------------------------------
+from ledger::model use { Category, Txn, Account }
+from ledger::money use { format, total, iabs, dollars, cent_part, pad2 }
+from ledger::rules use { validate, validate_all, is_credit, is_debit }
+from ledger::report use { build, cat_label, header_line, category_line, flow_line, extremes_line }
+from ledger::budget use { BudgetLine, cat_variance, within, total_planned, over_count, variance_line }
+from ledger::audit use { low_water, high_water, had_overdraft, reconciles, dips_below, audited_net }
+
+use ledger::engine                         // namespace import: engine::net(...)
+use ledger::stats as st                    // namespace alias:  st::count(...)
+from ledger::stats use { spread as range_of }   // named alias
+
+// ---- check harness ----------------------------------------------------------
+let mut failures = 0
+
+fn check_int(name: string, got: int, expected: int) -> int {
+    if got != expected {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        1
+    } else {
+        0
+    }
+}
+
+fn check_str(name: string, got: string, expected: string) -> int {
+    if got != expected {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        1
+    } else {
+        0
+    }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) -> int {
+    if got != expected {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        1
+    } else {
+        0
+    }
+}
+
+// =============================================================================
+// SECTION 1 — money module: pure formatting/arithmetic (leaf module)
+// =============================================================================
+// EXPECTED-VALUE DERIVATION (by hand, integer cents):
+//   format(1234)  = "$12.34"      (dollars=12, cents=34)
+//   format(-50)   = "-$0.50"      (sign='-', dollars=0, cents=50)
+//   format(0)     = "$0.00"
+//   format(100)   = "$1.00"
+//   format(-1234) = "-$12.34"
+//   format(5)     = "$0.05"
+//   format(99)    = "$0.99"
+//   format(-99)   = "-$0.99"
+failures = failures + check_str("fmt_1234", format(1234), "$12.34")
+failures = failures + check_str("fmt_neg50", format(-50), "-$0.50")
+failures = failures + check_str("fmt_zero", format(0), "$0.00")
+failures = failures + check_str("fmt_100", format(100), "$1.00")
+failures = failures + check_str("fmt_neg1234", format(-1234), "-$12.34")
+failures = failures + check_str("fmt_5", format(5), "$0.05")
+failures = failures + check_str("fmt_99", format(99), "$0.99")
+failures = failures + check_str("fmt_neg99", format(-99), "-$0.99")
+
+// iabs / dollars / cent_part / pad2
+failures = failures + check_int("iabs_neg", iabs(-7), 7)
+failures = failures + check_int("iabs_pos", iabs(7), 7)
+failures = failures + check_int("iabs_zero", iabs(0), 0)
+failures = failures + check_int("dollars_1234", dollars(1234), 12)
+failures = failures + check_int("dollars_neg1234", dollars(-1234), -12)
+failures = failures + check_int("cent_1234", cent_part(1234), 34)
+failures = failures + check_int("cent_neg50", cent_part(-50), 50)
+failures = failures + check_int("cent_100", cent_part(100), 0)
+failures = failures + check_str("pad2_5", pad2(5), "05")
+failures = failures + check_str("pad2_34", pad2(34), "34")
+failures = failures + check_str("pad2_0", pad2(0), "00")
+
+// total() over an int array
+let amts: Array<int> = [10, 20, -5, 100]
+failures = failures + check_int("total_amts", total(amts), 125)
+let amts2: Array<int> = [0]
+failures = failures + check_int("total_one", total(amts2), 0)
+
+// =============================================================================
+// SECTION 2 — fixture: the canonical month of transactions
+// =============================================================================
+// Account opens at $1,000.00 = 100000 cents.
+let acct = Account{name:"checking", opening_cents: 100000}
+
+// Fixture (inline struct literals so the array element type is proven).
+// Listed with running notes used for hand-derivation below.
+let txns: Array<Txn> = [
+  Txn{id:1, cents:300000,  cat:Category::Income,    memo:"salary"},      // +3000.00
+  Txn{id:2, cents:-80000,  cat:Category::Rent,      memo:"rent"},        //  -800.00
+  Txn{id:3, cents:-4500,   cat:Category::Food,      memo:"groceries"},   //   -45.00
+  Txn{id:4, cents:-1299,   cat:Category::Food,      memo:"lunch"},       //   -12.99
+  Txn{id:5, cents:-2500,   cat:Category::Transport, memo:"fuel"},        //   -25.00
+  Txn{id:6, cents:-1800,   cat:Category::Fun,       memo:"cinema"},      //   -18.00
+  Txn{id:7, cents:-6000,   cat:Category::Food,      memo:"restaurant"},  //   -60.00
+  Txn{id:8, cents:50000,   cat:Category::Income,    memo:"bonus"},       //  +500.00
+  Txn{id:9, cents:-900,    cat:Category::Transport, memo:"bus"},         //    -9.00
+  Txn{id:10, cents:-15000, cat:Category::Fun,       memo:"concert"},     //  -150.00
+]
+
+// EXPECTED-VALUE DERIVATION (hand sums, cents):
+//   Income  : 300000 + 50000               = 350000
+//   Rent    : -80000                        = -80000
+//   Food    : -4500 -1299 -6000             = -11799
+//   Transport: -2500 -900                   = -3400
+//   Fun     : -1800 -15000                  = -16800
+//   net     = 350000 -80000 -11799 -3400 -16800 = 238001
+//   credits = 350000 ; debits = 80000+11799+3400+16800 = 111999
+//   closing = 100000 + 238001 = 338001
+//   count   = 10
+//   max amount = 300000 ; min amount = -80000 ; spread = 380000
+//   mean = 238001 / 10 = 23800 (integer truncation toward zero)
+
+// =============================================================================
+// SECTION 3 — rules module: validation + Result/? error recovery
+// =============================================================================
+let v_food  = Txn{id:3,  cents:-4500,  cat:Category::Food,   memo:"groceries"}
+let v_inc   = Txn{id:1,  cents:300000, cat:Category::Income, memo:"salary"}
+let bad_sign = Txn{id:2, cents:500,    cat:Category::Food,   memo:"oops"}    // food must be <=0
+let bad_id   = Txn{id:0, cents:-10,    cat:Category::Fun,    memo:"x"}        // id<=0
+let bad_memo = Txn{id:5, cents:-10,    cat:Category::Fun,    memo:""}         // empty memo
+let inc_neg  = Txn{id:6, cents:-1,     cat:Category::Income, memo:"bad"}      // income must be >=0
+let zero_ok  = Txn{id:7, cents:0,      cat:Category::Food,   memo:"correction"} // zero allowed
+
+failures = failures + check_int("validate_food_ok",
+    match validate(v_food) { Ok(v) => v, Err(e) => -1 }, 3)
+failures = failures + check_int("validate_income_ok",
+    match validate(v_inc) { Ok(v) => v, Err(e) => -1 }, 1)
+failures = failures + check_int("validate_bad_sign",
+    match validate(bad_sign) { Ok(v) => -1, Err(e) => 0 }, 0)
+failures = failures + check_int("validate_bad_id",
+    match validate(bad_id) { Ok(v) => -1, Err(e) => 0 }, 0)
+failures = failures + check_int("validate_bad_memo",
+    match validate(bad_memo) { Ok(v) => -1, Err(e) => 0 }, 0)
+failures = failures + check_int("validate_income_neg",
+    match validate(inc_neg) { Ok(v) => -1, Err(e) => 0 }, 0)
+failures = failures + check_int("validate_zero_ok",
+    match validate(zero_ok) { Ok(v) => v, Err(e) => -1 }, 7)
+
+// is_credit / is_debit
+failures = failures + check_bool("is_credit_inc", is_credit(v_inc), true)
+failures = failures + check_bool("is_credit_food", is_credit(v_food), false)
+failures = failures + check_bool("is_debit_food", is_debit(v_food), true)
+failures = failures + check_bool("is_debit_inc", is_debit(v_inc), false)
+
+// validate_all: clean fixture passes (count==10); a tainted batch short-circuits.
+failures = failures + check_int("validate_all_ok",
+    match validate_all(txns) { Ok(n) => n, Err(e) => -1 }, 10)
+
+let tainted: Array<Txn> = [
+  Txn{id:1,  cents:300000, cat:Category::Income, memo:"salary"},
+  Txn{id:2,  cents:500,    cat:Category::Food,   memo:"oops"},   // fails here
+  Txn{id:3,  cents:-100,   cat:Category::Food,   memo:"ok"},
+]
+failures = failures + check_int("validate_all_taint",
+    match validate_all(tainted) { Ok(n) => -1, Err(e) => 0 }, 0)
+
+// =============================================================================
+// SECTION 4 — engine module (namespace import: engine::*)
+// =============================================================================
+failures = failures + check_int("net", engine::net(txns), 238001)
+failures = failures + check_int("closing", engine::closing_balance(acct, txns), 338001)
+failures = failures + check_int("credits", engine::total_credits(txns), 350000)
+failures = failures + check_int("debits", engine::total_debits(txns), 111999)
+
+failures = failures + check_int("count_food", engine::count_in(txns, Category::Food), 3)
+failures = failures + check_int("count_income", engine::count_in(txns, Category::Income), 2)
+failures = failures + check_int("count_rent", engine::count_in(txns, Category::Rent), 1)
+failures = failures + check_int("count_transport", engine::count_in(txns, Category::Transport), 2)
+failures = failures + check_int("count_fun", engine::count_in(txns, Category::Fun), 2)
+
+failures = failures + check_int("sum_income", engine::sum_in(txns, Category::Income), 350000)
+failures = failures + check_int("sum_rent", engine::sum_in(txns, Category::Rent), -80000)
+failures = failures + check_int("sum_food", engine::sum_in(txns, Category::Food), -11799)
+failures = failures + check_int("sum_transport", engine::sum_in(txns, Category::Transport), -3400)
+failures = failures + check_int("sum_fun", engine::sum_in(txns, Category::Fun), -16800)
+
+// running balances: opening then after each txn.
+// 100000
+// +300000 = 400000
+// -80000  = 320000
+// -4500   = 315500
+// -1299   = 314201
+// -2500   = 311701
+// -1800   = 309901
+// -6000   = 303901
+// +50000  = 353901
+// -900    = 353001
+// -15000  = 338001
+let run = engine::running(acct, txns)
+failures = failures + check_int("running_len", run.length, 11)
+failures = failures + check_int("running_0", run[0], 100000)
+failures = failures + check_int("running_1", run[1], 400000)
+failures = failures + check_int("running_2", run[2], 320000)
+failures = failures + check_int("running_3", run[3], 315500)
+failures = failures + check_int("running_4", run[4], 314201)
+failures = failures + check_int("running_5", run[5], 311701)
+failures = failures + check_int("running_6", run[6], 309901)
+failures = failures + check_int("running_7", run[7], 303901)
+failures = failures + check_int("running_8", run[8], 353901)
+failures = failures + check_int("running_9", run[9], 353001)
+failures = failures + check_int("running_10", run[10], 338001)
+// last running balance equals closing balance — an internal consistency proof.
+failures = failures + check_int("running_eq_closing",
+    run[run.length - 1], engine::closing_balance(acct, txns))
+
+// credits + (-debits) must equal net — algebraic invariant across the engine.
+failures = failures + check_int("flow_invariant",
+    engine::total_credits(txns) - engine::total_debits(txns), engine::net(txns))
+
+// =============================================================================
+// SECTION 5 — stats module (namespace alias st::*  +  named alias range_of)
+// =============================================================================
+failures = failures + check_int("st_count", st::count(txns), 10)
+failures = failures + check_int("st_max", st::max_amount(txns), 300000)
+failures = failures + check_int("st_min", st::min_amount(txns), -80000)
+failures = failures + check_int("st_mean", st::mean_amount(txns), 23800)
+failures = failures + check_int("st_spread", st::spread(txns), 380000)
+failures = failures + check_int("range_alias", range_of(txns), 380000)
+
+// stats on a single-element list.
+let one: Array<Txn> = [Txn{id:1, cents:777, cat:Category::Fun, memo:"a"}]
+failures = failures + check_int("one_count", st::count(one), 1)
+failures = failures + check_int("one_max", st::max_amount(one), 777)
+failures = failures + check_int("one_min", st::min_amount(one), 777)
+failures = failures + check_int("one_mean", st::mean_amount(one), 777)
+failures = failures + check_int("one_spread", st::spread(one), 0)
+
+// mean truncation toward zero: amounts summing to -7 over 2 entries -> -3 (trunc).
+let trunc: Array<Txn> = [
+  Txn{id:1, cents:-3, cat:Category::Fun, memo:"a"},
+  Txn{id:2, cents:-4, cat:Category::Fun, memo:"b"},
+]
+failures = failures + check_int("mean_trunc", st::mean_amount(trunc), -3)
+
+// =============================================================================
+// SECTION 6 — report module: multi-module composition into formatted lines
+// =============================================================================
+// EXPECTED (derived from sums above, formatted by money::format):
+//   header  : "checking: 10 txns, closing $3380.01"   (338001 cents)
+//   flow    : "in $3500.00 / out $1119.99"            (350000 / 111999)
+//   income  : "Income: $3500.00"
+//   food    : "Food: -$117.99"                        (-11799)
+//   rent    : "Rent: -$800.00"
+//   transport: "Transport: -$34.00"                   (-3400)
+//   fun     : "Fun: -$168.00"                         (-16800)
+//   extremes: "hi $3000.00 lo -$800.00 spread $3800.00"
+failures = failures + check_str("hdr", header_line(acct, txns),
+    "checking: 10 txns, closing $3380.01")
+failures = failures + check_str("flow", flow_line(txns),
+    "in $3500.00 / out $1119.99")
+failures = failures + check_str("cat_income", category_line(txns, Category::Income),
+    "Income: $3500.00")
+failures = failures + check_str("cat_food", category_line(txns, Category::Food),
+    "Food: -$117.99")
+failures = failures + check_str("cat_rent", category_line(txns, Category::Rent),
+    "Rent: -$800.00")
+failures = failures + check_str("cat_transport", category_line(txns, Category::Transport),
+    "Transport: -$34.00")
+failures = failures + check_str("cat_fun", category_line(txns, Category::Fun),
+    "Fun: -$168.00")
+failures = failures + check_str("extremes", extremes_line(txns),
+    "hi $3000.00 lo -$800.00 spread $3800.00")
+
+// cat_label direct
+failures = failures + check_str("lbl_food", cat_label(Category::Food), "Food")
+failures = failures + check_str("lbl_income", cat_label(Category::Income), "Income")
+failures = failures + check_str("lbl_rent", cat_label(Category::Rent), "Rent")
+failures = failures + check_str("lbl_transport", cat_label(Category::Transport), "Transport")
+failures = failures + check_str("lbl_fun", cat_label(Category::Fun), "Fun")
+
+// build() assembles the whole report: header + flow + 5 category lines + extremes = 8.
+let report = build(acct, txns)
+failures = failures + check_int("report_len", report.length, 8)
+failures = failures + check_str("report_0", report[0], "checking: 10 txns, closing $3380.01")
+failures = failures + check_str("report_1", report[1], "in $3500.00 / out $1119.99")
+failures = failures + check_str("report_2", report[2], "Income: $3500.00")
+failures = failures + check_str("report_3", report[3], "Food: -$117.99")
+failures = failures + check_str("report_4", report[4], "Rent: -$800.00")
+failures = failures + check_str("report_5", report[5], "Transport: -$34.00")
+failures = failures + check_str("report_6", report[6], "Fun: -$168.00")
+failures = failures + check_str("report_7", report[7], "hi $3000.00 lo -$800.00 spread $3800.00")
+
+// =============================================================================
+// SECTION 8 — budget module: variance vs a planned allowance
+// =============================================================================
+// Planned allowances (negative spending budgets), inline so the array's
+// element type is proven:
+let budgets: Array<BudgetLine> = [
+  BudgetLine{cat:Category::Food,      planned_cents:-10000},  // plan -$100.00
+  BudgetLine{cat:Category::Rent,      planned_cents:-80000},  // plan -$800.00
+  BudgetLine{cat:Category::Transport, planned_cents:-5000},   // plan  -$50.00
+  BudgetLine{cat:Category::Fun,       planned_cents:-10000},  // plan -$100.00
+]
+
+// EXPECTED-VALUE DERIVATION (variance = actual - planned):
+//   Food      actual -11799  planned -10000  var = -1799   (OVER:  -11799 <  -10000)
+//   Rent      actual -80000  planned -80000  var =     0   (within: equal)
+//   Transport actual  -3400  planned  -5000  var =  1600   (within: -3400 > -5000)
+//   Fun       actual -16800  planned -10000  var = -6800   (OVER:  -16800 < -10000)
+//   total_planned = -10000 -80000 -5000 -10000 = -105000
+//   over_count = 2 (Food, Fun)
+let food_b = BudgetLine{cat:Category::Food, planned_cents:-10000}
+let rent_b = BudgetLine{cat:Category::Rent, planned_cents:-80000}
+let trans_b = BudgetLine{cat:Category::Transport, planned_cents:-5000}
+let fun_b = BudgetLine{cat:Category::Fun, planned_cents:-10000}
+
+failures = failures + check_int("var_food", cat_variance(txns, food_b), -1799)
+failures = failures + check_int("var_rent", cat_variance(txns, rent_b), 0)
+failures = failures + check_int("var_transport", cat_variance(txns, trans_b), 1600)
+failures = failures + check_int("var_fun", cat_variance(txns, fun_b), -6800)
+
+failures = failures + check_bool("within_food", within(txns, food_b), false)
+failures = failures + check_bool("within_rent", within(txns, rent_b), true)
+failures = failures + check_bool("within_transport", within(txns, trans_b), true)
+failures = failures + check_bool("within_fun", within(txns, fun_b), false)
+
+failures = failures + check_int("total_planned", total_planned(budgets), -105000)
+failures = failures + check_int("over_count", over_count(txns, budgets), 2)
+
+failures = failures + check_str("var_line_food", variance_line(txns, food_b), "Food: var -$17.99")
+failures = failures + check_str("var_line_rent", variance_line(txns, rent_b), "Rent: var $0.00")
+failures = failures + check_str("var_line_transport", variance_line(txns, trans_b), "Transport: var $16.00")
+failures = failures + check_str("var_line_fun", variance_line(txns, fun_b), "Fun: var -$68.00")
+
+// Cross-module invariant: a category's variance equals
+// engine::sum_in - planned (re-derive through the engine directly).
+failures = failures + check_int("var_food_via_engine",
+    engine::sum_in(txns, Category::Food) - food_b.planned_cents, cat_variance(txns, food_b))
+
+// =============================================================================
+// SECTION 9 — audit module: reconciliation, water marks, overdraft
+// =============================================================================
+// Running balances for the main fixture (from Section 4):
+//   [100000, 400000, 320000, 315500, 314201, 311701, 309901,
+//    303901, 353901, 353001, 338001]
+// EXPECTED:
+//   low_water  = 100000   (the opening balance is the minimum)
+//   high_water = 400000   (after the salary credit)
+//   overdraft  = false    (never below 0)
+//   reconciles = true     (last running == opening+net == 338001)
+//   dips_below 320000 -> samples strictly < 320000:
+//       {100000,315500,314201,311701,309901,303901} = 6
+//   dips_below 100001 -> {100000} = 1
+//   audited_net = engine net = 238001
+failures = failures + check_int("low_water", low_water(acct, txns), 100000)
+failures = failures + check_int("high_water", high_water(acct, txns), 400000)
+failures = failures + check_bool("overdraft", had_overdraft(acct, txns), false)
+failures = failures + check_bool("reconciles", reconciles(acct, txns), true)
+failures = failures + check_int("dips_320000", dips_below(acct, txns, 320000), 6)
+failures = failures + check_int("dips_100001", dips_below(acct, txns, 100001), 1)
+failures = failures + check_int("audited_net", audited_net(txns), 238001)
+
+// Bridge invariant: audit's net agrees with the engine's net.
+failures = failures + check_int("audit_net_eq_engine", audited_net(txns), engine::net(txns))
+// High water is at least the opening balance; low water at most the opening.
+failures = failures + check_bool("hi_ge_open", high_water(acct, txns) >= acct.opening_cents, true)
+failures = failures + check_bool("lo_le_open", low_water(acct, txns) <= acct.opening_cents, true)
+
+// Overdraft scenario on a thin account — proves the negative path.
+let poor = Account{name:"thin", opening_cents: 1000}
+let drain: Array<Txn> = [
+  Txn{id:1, cents:-5000,  cat:Category::Food,   memo:"big purchase"},   // -> -4000
+  Txn{id:2, cents:10000,  cat:Category::Income, memo:"refund"},         // ->  6000
+  Txn{id:3, cents:-2000,  cat:Category::Fun,    memo:"night out"},      // ->  4000
+]
+// running(poor, drain) = [1000, -4000, 6000, 4000]
+failures = failures + check_int("poor_low", low_water(poor, drain), -4000)
+failures = failures + check_int("poor_high", high_water(poor, drain), 6000)
+failures = failures + check_bool("poor_overdraft", had_overdraft(poor, drain), true)
+failures = failures + check_bool("poor_reconciles", reconciles(poor, drain), true)
+failures = failures + check_int("poor_dips0", dips_below(poor, drain, 0), 1)  // only -4000
+failures = failures + check_int("poor_net", audited_net(drain), 3000)         // -5000+10000-2000
+
+// =============================================================================
+// SECTION 7 — printed report (run-only display) + final verdict
+// =============================================================================
+print("---- LEDGER REPORT ----")
+for line in report {
+    print(line)
+}
+print("---- BUDGET VARIANCE ----")
+for b in budgets {
+    print(variance_line(txns, b))
+}
+print(f"over budget: {over_count(txns, budgets)} of {budgets.length}")
+print("---- AUDIT ----")
+print(f"low water:  {format(low_water(acct, txns))}")
+print(f"high water: {format(high_water(acct, txns))}")
+print(f"overdraft:  {had_overdraft(acct, txns)}")
+print(f"reconciles: {reconciles(acct, txns)}")
+print("-----------------------")
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"FAILURES: {failures}")
+}

@@ -27,7 +27,12 @@ fn complex_point_distance_squared() {
     .expect_number(25.0);
 }
 
-// BUG: nested typed struct field access (l.end.x) returns the inner object instead of the field
+// R2 TP-rebaseline (strict-flip, now-valid direction): the int literals `0`/`3`/
+// `4` constructed into the `number` fields of `Point` now ADOPT the number
+// context (THE RULE: a small int literal losslessly representable in `number` IS
+// a number literal — no conversion). The program is well-typed and computes
+// `(3-0)^2 + (4-0)^2 = 25.0`, so the old `.expect_run_err()` (which asserted the
+// pre-adoption struct-constructor rejection) is flipped to the success value.
 #[test]
 fn complex_line_from_points() {
     ShapeTest::new(
@@ -43,7 +48,7 @@ fn complex_line_from_points() {
         line_length_sq(l)
     "#,
     )
-    .expect_run_err();
+    .expect_number(25.0);
 }
 
 #[test]

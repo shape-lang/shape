@@ -1,6 +1,158 @@
 use super::*;
 
 impl BytecodeCompiler {
+    fn native_auto_symbol_part(name: &str) -> String {
+        let mut out = String::with_capacity(name.len());
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        out
+    }
+
+    fn native_auto_object_name_for_layout(name: &str) -> Option<String> {
+        if let Some(base) = name.strip_suffix("Layout")
+            && !base.is_empty()
+        {
+            return Some(base.to_string());
+        }
+        if let Some(base) = name.strip_suffix('C')
+            && !base.is_empty()
+        {
+            return Some(base.to_string());
+        }
+        if let Some(base) = name.strip_prefix('C')
+            && !base.is_empty()
+            && base
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_uppercase())
+                .unwrap_or(false)
+        {
+            return Some(base.to_string());
+        }
+        None
+    }
+
+    fn native_auto_fields_match(
+        native: &shape_ast::ast::StructTypeDef,
+        object: &shape_ast::ast::StructTypeDef,
+    ) -> bool {
+        if native
+            .type_params
+            .as_ref()
+            .is_some_and(|params| !params.is_empty())
+            || object
+                .type_params
+                .as_ref()
+                .is_some_and(|params| !params.is_empty())
+        {
+            return false;
+        }
+
+        let native_fields = native
+            .fields
+            .iter()
+            .filter(|field| !field.is_comptime)
+            .map(|field| (field.name.as_str(), &field.type_annotation))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let object_fields = object
+            .fields
+            .iter()
+            .filter(|field| !field.is_comptime)
+            .map(|field| (field.name.as_str(), &field.type_annotation))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        native_fields == object_fields
+    }
+
+    fn native_auto_conversion_decl(source_type: &str, target_type: &str) -> shape_ast::ast::Item {
+        let fn_name = format!(
+            "__auto_native_from_{}_to_{}",
+            Self::native_auto_symbol_part(source_type),
+            Self::native_auto_symbol_part(target_type)
+        );
+        shape_ast::ast::Item::BuiltinFunctionDecl(
+            shape_ast::ast::BuiltinFunctionDecl {
+                name: fn_name,
+                name_span: shape_ast::ast::Span::DUMMY,
+                doc_comment: None,
+                type_params: None,
+                params: vec![shape_ast::ast::FunctionParameter {
+                    pattern: shape_ast::ast::DestructurePattern::Identifier(
+                        "value".to_string(),
+                        shape_ast::ast::Span::DUMMY,
+                    ),
+                    is_const: false,
+                    is_reference: false,
+                    is_mut_reference: false,
+                    is_out: false,
+                    type_annotation: Some(shape_ast::ast::TypeAnnotation::Reference(
+                        source_type.into(),
+                    )),
+                    default_value: None,
+                }],
+                return_type: shape_ast::ast::TypeAnnotation::Reference(target_type.into()),
+            },
+            shape_ast::ast::Span::DUMMY,
+        )
+    }
+
+    fn native_auto_conversion_analysis_items(program: &Program) -> Vec<shape_ast::ast::Item> {
+        fn collect_structs<'a>(
+            items: &'a [shape_ast::ast::Item],
+            out: &mut std::collections::BTreeMap<String, &'a shape_ast::ast::StructTypeDef>,
+        ) {
+            for item in items {
+                match item {
+                    shape_ast::ast::Item::StructType(def, _) => {
+                        out.insert(def.name.clone(), def);
+                    }
+                    shape_ast::ast::Item::Export(export, _) => {
+                        if let shape_ast::ast::ExportItem::Struct(def) = &export.item {
+                            out.insert(def.name.clone(), def);
+                        }
+                    }
+                    shape_ast::ast::Item::Module(module, _) => {
+                        collect_structs(&module.items, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut structs = std::collections::BTreeMap::new();
+        collect_structs(&program.items, &mut structs);
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut items = Vec::new();
+        for (native_name, native_def) in &structs {
+            if native_def.native_layout.is_none() {
+                continue;
+            }
+            let Some(object_name) = Self::native_auto_object_name_for_layout(native_name) else {
+                continue;
+            };
+            let Some(object_def) = structs.get(&object_name) else {
+                continue;
+            };
+            if object_def.native_layout.is_some()
+                || !Self::native_auto_fields_match(native_def, object_def)
+            {
+                continue;
+            }
+            let pair_key = format!("{}::{}", native_name, object_name);
+            if !seen.insert(pair_key) {
+                continue;
+            }
+            items.push(Self::native_auto_conversion_decl(native_name, &object_name));
+            items.push(Self::native_auto_conversion_decl(&object_name, native_name));
+        }
+        items
+    }
+
     pub(super) fn infer_reference_params_from_types(
         program: &Program,
         inferred_types: &HashMap<String, Type>,
@@ -796,40 +948,89 @@ impl BytecodeCompiler {
 }
 
 impl BytecodeCompiler {
+    fn collect_inline_module_analysis_items(
+        &self,
+        items: &[shape_ast::ast::Item],
+        parent_module_path: Option<&str>,
+        out: &mut Vec<shape_ast::ast::Item>,
+    ) -> Result<()> {
+        for item in items {
+            let shape_ast::ast::Item::Module(module, _) = item else {
+                continue;
+            };
+            let module_path = if let Some(parent) = parent_module_path {
+                Self::qualify_module_symbol(parent, &module.name)
+            } else {
+                module.name.clone()
+            };
+            let local_functions = Self::module_local_function_names(&module.items);
+
+            for nested in &module.items {
+                if matches!(nested, shape_ast::ast::Item::Import(..)) {
+                    continue;
+                }
+                if matches!(nested, shape_ast::ast::Item::Module(..)) {
+                    self.collect_inline_module_analysis_items(
+                        std::slice::from_ref(nested),
+                        Some(&module_path),
+                        out,
+                    )?;
+                } else {
+                    out.push(self.qualify_module_item_with_local_function_calls(
+                        nested,
+                        &module_path,
+                        &local_functions,
+                    )?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn prepend_inline_module_analysis_items(&self, program: &mut Program) -> Result<()> {
+        let mut qualified_module_items = Vec::new();
+        self.collect_inline_module_analysis_items(
+            &program.items,
+            None,
+            &mut qualified_module_items,
+        )?;
+        if qualified_module_items.is_empty() {
+            return Ok(());
+        }
+        qualified_module_items.extend(program.items.drain(..));
+        program.items = qualified_module_items;
+        Ok(())
+    }
+
     pub(super) fn infer_reference_model(
         program: &Program,
     ) -> (
         HashMap<String, Vec<bool>>,
         HashMap<String, Vec<bool>>,
-        HashMap<String, Vec<Option<String>>>,
-        HashMap<String, String>,
-        HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
-        HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
-        HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>>,
+        HashMap<String, shape_ast::ast::TypeAnnotation>,
+        // Canonical post-solve facts from the single best-effort inference pass.
+        InferenceFacts,
+    ) {
+        Self::infer_reference_model_with_comptime_context(program, false)
+    }
+
+    pub(super) fn infer_reference_model_with_comptime_context(
+        program: &Program,
+        root_comptime_context: bool,
+    ) -> (
+        HashMap<String, Vec<bool>>,
+        HashMap<String, Vec<bool>>,
+        HashMap<String, shape_ast::ast::TypeAnnotation>,
+        // Canonical post-solve facts from the single best-effort inference pass.
+        InferenceFacts,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
-        let (types, _) = inference.infer_program_best_effort(program);
-        let inferred_ref_params = Self::infer_reference_params_from_types(program, &types);
-        let inferred_param_type_hints = Self::infer_param_type_hints_from_types(program, &types);
-        let inferred_return_type_hints = Self::infer_return_type_hints_from_types(program, &types);
-        // v0.3 WS-7: project the inference engine's per-parameter `Type`
-        // for UNANNOTATED params into a `ConcreteType`. This is the JIT's
-        // proof source for the v2 typed-array fast path on unannotated
-        // array params.
-        let inferred_param_concrete_types =
-            Self::infer_param_concrete_types_from_types(program, &types);
-        // WS-9b: project anonymous-object param types into per-field
-        // `FieldType` lists so `compile_function_body` can register an
-        // inline schema and resolve `param.field` for unannotated
-        // object-literal-shaped parameters.
-        let inferred_param_object_fields =
-            Self::infer_param_object_fields_from_types(program, &types);
-        // WS-9c: project anonymous-object inferred RETURN types so
-        // `compile_expr_function_call` can register an inline schema and
-        // resolve `f(...).field` for unannotated object-literal factories.
-        let inferred_return_object_fields =
-            Self::infer_return_object_fields_from_types(program, &types);
+        inference.set_root_comptime_context(root_comptime_context);
+        let (facts, _) = inference.infer_program_facts_best_effort(program);
+        let types = facts.top_level_types();
+        let inferred_ref_params = Self::infer_reference_params_from_types(program, types);
+        let inferred_return_annotations = Self::infer_return_annotations_from_types(program, types);
 
         let mut effective_ref_params: HashMap<String, Vec<bool>> = HashMap::new();
         for (name, func) in &funcs {
@@ -896,226 +1097,446 @@ impl BytecodeCompiler {
         (
             inferred_ref_params,
             result,
-            inferred_param_type_hints,
-            inferred_return_type_hints,
-            inferred_param_concrete_types,
-            inferred_param_object_fields,
-            inferred_return_object_fields,
+            inferred_return_annotations,
+            facts,
         )
     }
 
-    /// WS-9b: project the program-wide type-inference engine's per-parameter
-    /// `Type` into a `Vec<(field_name, FieldType)>` for UNANNOTATED params
-    /// whose resolved type is an anonymous structural object.
+    /// Wave 1a PART B: derive, for an unannotated param used as a callable,
+    /// the concrete argument annotations that should seed a closure literal
+    /// at the call site.
     ///
-    /// Mirrors `infer_param_concrete_types_from_types` — same
-    /// `Type::Function`-keyed lookup, same annotated-param / non-simple-name
-    /// skip. Only `Type::Concrete(TypeAnnotation::Object(_))` params produce
-    /// `Some`; named structs (which resolve through the schema registry via
-    /// their hint name) and every non-object param keep `None`. A field
-    /// whose annotation projects to `FieldType::Any` is still recorded —
-    /// `Any` is the honest "field exists, kind not narrowed" marker, not a
-    /// fabricated primitive.
-    pub(super) fn infer_param_object_fields_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>> {
-        use shape_ast::ast::TypeAnnotation;
-        let funcs = Self::collect_program_functions(program);
-        let mut out = HashMap::new();
+    /// This is the on-demand producer for fn-typed-parameter call-site closure seeding:
+    /// `fn apply2(f, x, y) { f(x, y) }` USES `f` as a callable, so the engine
+    /// (via its callable-param-source-var machinery) infers `f`'s type from
+    /// the body usage + the call-site arg types, yielding e.g.
+    /// `fn(int,int)->_`. We return only the ARGUMENT annotations (the closure
+    /// seeding consumer maps them onto the closure's user params 1:1).
+    ///
+    /// Soundness (strict-typing core):
+    /// * We require EVERY argument position to resolve to a concrete
+    ///   `TypeAnnotation` via `Type::to_annotation()` AND reject the `"unknown"`
+    ///   sentinel that `to_annotation` substitutes for unresolved inner vars.
+    ///   A single unresolved argument ⇒ the whole param entry is `None` (no
+    ///   fabrication, no `any`, no Bool-default). The closure then keeps its
+    ///   existing compile path / rejection — an un-inferable usage is NOT
+    ///   forced.
+    /// * `int` and `number` stay distinct (each is its own `Basic` name); a
+    ///   later inconsistency surfaces as the engine's own conflict, not a
+    ///   silent pick here.
+    pub(crate) fn inferred_param_fn_param_types_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<Vec<shape_ast::ast::TypeAnnotation>> {
+        let param = func.params.get(param_idx)?;
+        // Only fill UNANNOTATED, single-identifier params. An explicitly
+        // annotated callable param already drives closure seeding through its
+        // own annotation; destructuring params have no single callable slot.
+        let param_name = param.simple_name()?;
+        if param.type_annotation.is_some() {
+            return None;
+        }
 
-        for (name, func) in funcs {
-            let mut param_fields: Vec<
-                Option<Vec<(String, shape_runtime::type_schema::FieldType)>>,
-            > = vec![None; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                out.insert(name, param_fields);
-                continue;
-            };
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
 
-            for (idx, param) in func.params.iter().enumerate() {
-                if param.type_annotation.is_some() || param.simple_name().is_none() {
-                    continue;
+        // Map each param NAME to its positional index, so a body call
+        // `f(x, y)` whose args are bare param identifiers can be mapped back
+        // to the OUTER param positions (`x`→1, `y`→2).
+        let mut param_name_to_index: HashMap<&str, usize> = HashMap::new();
+        for (i, p) in func.params.iter().enumerate() {
+            if let Some(n) = p.simple_name() {
+                param_name_to_index.insert(n, i);
+            }
+        }
+
+        // PRIMARY (sound) path: derive the callable's argument annotations
+        // from the OUTER function's own resolved parameter types, following
+        // the body usage `f(x, y)`. The callable param's own projection can be
+        // clobbered by multi-call closure unions, so do not read it unless no
+        // simple body mapping exists.
+        let body_arg_indices =
+            Self::callable_param_body_arg_indices(func, param_name, &param_name_to_index);
+        if let Some(outer_indices) = body_arg_indices
+            && !outer_indices.is_empty()
+        {
+            let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
+                Vec::with_capacity(outer_indices.len());
+            for &outer_idx in &outer_indices {
+                let ann = params.get(outer_idx).and_then(|t| t.to_annotation())?;
+                if Self::annotation_is_unknown(&ann) {
+                    return None;
                 }
-                let Some(inferred_param_ty) = params.get(idx) else {
-                    continue;
-                };
-                if let Type::Concrete(TypeAnnotation::Object(obj_fields)) = inferred_param_ty {
-                    let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
-                        .iter()
-                        .map(|f| {
-                            (
-                                f.name.clone(),
-                                Self::type_annotation_to_field_type(&f.type_annotation),
-                            )
-                        })
-                        .collect();
-                    if !fields.is_empty() {
-                        param_fields[idx] = Some(fields);
+                arg_anns.push(ann);
+            }
+            return Some(arg_anns);
+        }
+
+        // FALLBACK: when the body usage is not a simple `f(<param>, <param>)`
+        // call, fall back to the engine's projection of the callable param
+        // itself — but ONLY when that projection is a clean `Type::Function`.
+        // Require EVERY argument position concrete.
+        let Type::Function {
+            params: fn_params, ..
+        } = params.get(param_idx)?
+        else {
+            return None;
+        };
+        if fn_params.is_empty() {
+            return None;
+        }
+        let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> = Vec::with_capacity(fn_params.len());
+        for fp in fn_params {
+            let ann = fp.to_annotation()?;
+            if Self::annotation_is_unknown(&ann) {
+                return None;
+            }
+            arg_anns.push(ann);
+        }
+        Some(arg_anns)
+    }
+
+    /// Wave 1a PART B (soundness fix): find the OUTER-parameter index that each
+    /// argument position of an in-body callable invocation receives.
+    ///
+    /// For `fn apply2(f, x, y) { f(x, y) }`, called on `f`, returns
+    /// `Some([1, 2])` — `f`'s arg 0 is the outer param `x` (index 1), arg 1 is
+    /// `y` (index 2). The caller then reads the OUTER params' resolved types
+    /// (which the engine pins precisely from the call site, e.g. `int`) instead
+    /// of the callable param's own projection (which a closure-eager
+    /// `Numeric`-collapse can widen to `number`).
+    ///
+    /// Returns `None` (no sound mapping) when:
+    /// * the body never calls `callable_name`, OR
+    /// * any argument of the call is not a bare identifier naming an outer
+    ///   param (`f(x + 1, y)`, `f(g(x), y)`, `f(2, y)` — the arg type is then
+    ///   not simply an outer param type), OR
+    /// * the body calls `callable_name` more than once with DIFFERENT arg
+    ///   mappings (inconsistent usage — leave it to the engine), OR
+    /// * the callable's name is shadowed by a non-param binding (we only key on
+    ///   the static call name; an inner `let f = ...` is out of scope and
+    ///   conservatively yields `None` via the inconsistency check below).
+    ///
+    /// Pure AST inspection — no fabrication, no defaulting. `int`/`number` are
+    /// whatever the caller reads off the outer param's resolved type.
+    fn callable_param_body_arg_indices(
+        func: &shape_ast::ast::FunctionDef,
+        callable_name: &str,
+        param_name_to_index: &HashMap<&str, usize>,
+    ) -> Option<Vec<usize>> {
+        use shape_ast::ast::{BlockItem, Expr, Statement};
+
+        // Collected mapping; once set, a second call with a different mapping
+        // makes the whole thing ambiguous → `None`.
+        struct Ctx<'a> {
+            callable_name: &'a str,
+            param_name_to_index: &'a HashMap<&'a str, usize>,
+            found: Option<Vec<usize>>,
+            ambiguous: bool,
+        }
+
+        fn record_call(ctx: &mut Ctx, args: &[Expr]) {
+            // Every arg must be a bare identifier naming an outer param.
+            let mut indices = Vec::with_capacity(args.len());
+            for a in args {
+                match a {
+                    Expr::Identifier(id, _) => match ctx.param_name_to_index.get(id.as_str()) {
+                        Some(&j) => indices.push(j),
+                        None => {
+                            // Arg is some other identifier (a local / capture),
+                            // not an outer param — cannot map soundly.
+                            ctx.ambiguous = true;
+                            return;
+                        }
+                    },
+                    _ => {
+                        // A non-trivial call shape (`f(x + 1, y)`, `f(g(x))`,
+                        // `f(2, y)`) — cannot map soundly.
+                        ctx.ambiguous = true;
+                        return;
                     }
                 }
             }
-
-            out.insert(name, param_fields);
+            match &ctx.found {
+                None => ctx.found = Some(indices),
+                Some(prev) if *prev == indices => {}
+                Some(_) => ctx.ambiguous = true,
+            }
         }
 
-        out
+        fn visit_expr(expr: &Expr, ctx: &mut Ctx) {
+            if ctx.ambiguous {
+                return;
+            }
+            match expr {
+                Expr::FunctionCall { name, args, .. } => {
+                    if name == ctx.callable_name {
+                        record_call(ctx, args);
+                    }
+                    for a in args {
+                        visit_expr(a, ctx);
+                    }
+                }
+                Expr::QualifiedFunctionCall { args, .. } => {
+                    for a in args {
+                        visit_expr(a, ctx);
+                    }
+                }
+                Expr::MethodCall { receiver, args, .. } => {
+                    visit_expr(receiver, ctx);
+                    for a in args {
+                        visit_expr(a, ctx);
+                    }
+                }
+                Expr::BinaryOp { left, right, .. } => {
+                    visit_expr(left, ctx);
+                    visit_expr(right, ctx);
+                }
+                Expr::UnaryOp { operand, .. } => visit_expr(operand, ctx),
+                Expr::Reference { expr, .. } => visit_expr(expr, ctx),
+                Expr::Array(elems, _) => {
+                    for e in elems {
+                        visit_expr(e, ctx);
+                    }
+                }
+                Expr::IndexAccess { object, index, .. } => {
+                    visit_expr(object, ctx);
+                    visit_expr(index, ctx);
+                }
+                Expr::PropertyAccess { object, .. } => visit_expr(object, ctx),
+                Expr::Conditional {
+                    condition,
+                    then_expr,
+                    else_expr,
+                    ..
+                } => {
+                    visit_expr(condition, ctx);
+                    visit_expr(then_expr, ctx);
+                    if let Some(e) = else_expr {
+                        visit_expr(e, ctx);
+                    }
+                }
+                Expr::FunctionExpr { body, .. } => {
+                    for s in body {
+                        visit_stmt(s, ctx);
+                    }
+                }
+                Expr::Block(block, _) => {
+                    for it in &block.items {
+                        visit_block_item(it, ctx);
+                    }
+                }
+                Expr::If(i, _) => {
+                    visit_expr(&i.condition, ctx);
+                    visit_expr(&i.then_branch, ctx);
+                    if let Some(e) = &i.else_branch {
+                        visit_expr(e, ctx);
+                    }
+                }
+                Expr::While(w, _) => {
+                    visit_expr(&w.condition, ctx);
+                    visit_expr(&w.body, ctx);
+                }
+                Expr::For(f, _) => {
+                    visit_expr(&f.iterable, ctx);
+                    visit_expr(&f.body, ctx);
+                }
+                Expr::Loop(l, _) => visit_expr(&l.body, ctx),
+                Expr::Match(m, _) => {
+                    visit_expr(&m.scrutinee, ctx);
+                    for arm in &m.arms {
+                        visit_expr(&arm.body, ctx);
+                    }
+                }
+                Expr::Return(Some(e), _) => visit_expr(e, ctx),
+                Expr::Await(e, _) => visit_expr(e, ctx),
+                _ => {}
+            }
+        }
+
+        fn visit_block_item(item: &BlockItem, ctx: &mut Ctx) {
+            match item {
+                BlockItem::VariableDecl(decl) => {
+                    if let Some(v) = decl.value.as_ref() {
+                        visit_expr(v, ctx);
+                    }
+                }
+                BlockItem::Assignment(asgn) => visit_expr(&asgn.value, ctx),
+                BlockItem::Statement(stmt) => visit_stmt(stmt, ctx),
+                BlockItem::Expression(e) => visit_expr(e, ctx),
+            }
+        }
+
+        fn visit_stmt(stmt: &Statement, ctx: &mut Ctx) {
+            match stmt {
+                Statement::VariableDecl(decl, _) => {
+                    if let Some(v) = decl.value.as_ref() {
+                        visit_expr(v, ctx);
+                    }
+                }
+                Statement::Assignment(asgn, _) => visit_expr(&asgn.value, ctx),
+                Statement::Expression(e, _) => visit_expr(e, ctx),
+                Statement::Return(Some(e), _) => visit_expr(e, ctx),
+                Statement::For(f, _) => {
+                    for s in &f.body {
+                        visit_stmt(s, ctx);
+                    }
+                }
+                Statement::While(w, _) => {
+                    for s in &w.body {
+                        visit_stmt(s, ctx);
+                    }
+                }
+                Statement::If(i, _) => {
+                    for s in &i.then_body {
+                        visit_stmt(s, ctx);
+                    }
+                    if let Some(else_body) = &i.else_body {
+                        for s in else_body {
+                            visit_stmt(s, ctx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut ctx = Ctx {
+            callable_name,
+            param_name_to_index,
+            found: None,
+            ambiguous: false,
+        };
+        for stmt in &func.body {
+            visit_stmt(stmt, &mut ctx);
+        }
+
+        if ctx.ambiguous {
+            return None;
+        }
+        ctx.found
     }
 
-    /// WS-9c: project each function's inferred RETURN type into a
-    /// `Vec<(field_name, FieldType)>` when that return type is an anonymous
-    /// structural object.
-    ///
-    /// Mirrors `infer_param_object_fields_from_types` for the return
-    /// position. The motivating shape is an anonymous-object factory:
-    /// `fn aabb(lo, hi) { {min: lo, max: hi} }`. The program-wide inference
-    /// pass resolves the return type to `Object({min: int, max: int})` once
-    /// callsite propagation binds the parameters; this projection hands the
-    /// bytecode compiler the per-field types so it can register an anonymous
-    /// schema for the return value and resolve `aabb(...).field` /
-    /// `let a = aabb(...); a.field` — exactly the resolution a named struct
-    /// return type already gets. A return type that is not an anonymous
-    /// object (a primitive, a named struct, an array, or still-unresolved)
-    /// keeps `None`.
-    pub(super) fn infer_return_object_fields_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>> {
+    /// Reject the `"unknown"` sentinel that `Type::to_annotation()` substitutes
+    /// for unresolved type variables. A `Basic` or `Reference` literally named
+    /// `unknown` is treated as not-concrete anywhere in the annotation tree so
+    /// we never seed a param from a fabricated type like `Array<unknown>`.
+    fn annotation_is_unknown(ann: &shape_ast::ast::TypeAnnotation) -> bool {
         use shape_ast::ast::TypeAnnotation;
-        let funcs = Self::collect_program_functions(program);
-        let mut out = HashMap::new();
-
-        for (name, func) in funcs {
-            // A function with an explicit return-type annotation already
-            // resolves through the annotation path in
-            // `compile_expr_function_call`; only unannotated functions need
-            // the inferred-return projection.
-            if func.return_type.is_some() {
-                continue;
+        match ann {
+            TypeAnnotation::Basic(n) => n == "unknown",
+            TypeAnnotation::Reference(path) => path.to_string() == "unknown",
+            TypeAnnotation::Array(inner) | TypeAnnotation::Borrow { inner, .. } => {
+                Self::annotation_is_unknown(inner)
             }
-            let Some(Type::Function { returns, .. }) = inferred_types.get(&name) else {
-                continue;
-            };
-            if let Type::Concrete(TypeAnnotation::Object(obj_fields)) = returns.as_ref() {
-                let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name.clone(),
-                            Self::type_annotation_to_field_type(&f.type_annotation),
-                        )
-                    })
-                    .collect();
-                if !fields.is_empty() {
-                    out.insert(name, fields);
-                }
-            }
-        }
-        out
-    }
-
-    /// WS-9c: register an inline anonymous schema for every unannotated
-    /// function whose inferred return type is an anonymous object, recording
-    /// the schema id under the function name in `function_return_schema_ids`
-    /// and the precise per-field types as schema field contracts.
-    ///
-    /// The schema is Any-uniform (mirroring
-    /// `extract_object_schema_id_from_annotation` so the layout matches the
-    /// pre-existing inline-object shape); the precise field types live in the
-    /// parallel field-contract side table consulted by `infer_expr_type`.
-    fn register_inferred_return_object_schemas(&mut self) {
-        use shape_runtime::type_schema::FieldType;
-        let return_fields = self.inferred_return_object_fields.clone();
-        for (fn_name, fields) in return_fields {
-            if fields.is_empty() {
-                continue;
-            }
-            let typed_fields: Vec<(&str, FieldType)> = fields
+            TypeAnnotation::Tuple(items)
+            | TypeAnnotation::Union(items)
+            | TypeAnnotation::Intersection(items) => items.iter().any(Self::annotation_is_unknown),
+            TypeAnnotation::Object(fields) => fields
                 .iter()
-                .map(|(name, _)| (name.as_str(), FieldType::Any))
-                .collect();
-            let schema_id = self
-                .type_tracker
-                .register_inline_object_schema_typed(&typed_fields);
-            let mut contracts = std::collections::HashMap::with_capacity(fields.len());
-            for (name, field_ty) in &fields {
-                if let Some(ann) =
-                    crate::compiler::expressions::function_calls::field_type_contract_annotation(
-                        field_ty,
-                    )
-                {
-                    contracts.insert(name.clone(), ann);
-                }
+                .any(|field| Self::annotation_is_unknown(&field.type_annotation)),
+            TypeAnnotation::Function { params, returns } => {
+                params
+                    .iter()
+                    .any(|param| Self::annotation_is_unknown(&param.type_annotation))
+                    || Self::annotation_is_unknown(returns)
             }
-            if !contracts.is_empty() {
-                self.type_tracker
-                    .register_object_field_contracts(schema_id, contracts);
+            TypeAnnotation::Generic { name, args } => {
+                name.to_string() == "unknown" || args.iter().any(Self::annotation_is_unknown)
             }
-            self.function_return_schema_ids
-                .insert(fn_name, schema_id);
+            TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.to_string() == "unknown"),
+            _ => false,
         }
     }
 
-    /// v0.3 WS-7: project the program-wide type-inference engine's
-    /// per-parameter `Type` into a `ConcreteType` for UNANNOTATED params.
-    ///
-    /// The JIT's v2 typed-array fast path is gated on
-    /// `function_local_concrete_types[fn][param_slot]` carrying a precise
-    /// `ConcreteType::Array(elem)`. For an annotated param that stamp comes
-    /// from the annotation; for an UNANNOTATED param (`fn get(xs, i) {
-    /// xs[i] }`) there is no annotation to read, so without this projection
-    /// the slot stays `ConcreteType::Void`. The JIT then mis-takes the v2
-    /// `TypedArray<T>` pointer (data@+8/len@+16) for a NaN-boxed v1 array
-    /// (data@+0/len@+8 after an 8-byte header) and the inline index load
-    /// reads garbage / SIGSEGVs even on a valid in-bounds access.
-    ///
-    /// Mirrors `infer_param_type_hints_from_types` exactly — same
-    /// `Type::Function`-keyed lookup, same annotated-param skip — but
-    /// projects to `ConcreteType` (the JIT's proof carrier) instead of a
-    /// display string. Annotated params keep `None`; their `ConcreteType`
-    /// is stamped from the annotation in the per-fn seeding pass.
-    pub(super) fn infer_param_concrete_types_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>> {
-        let funcs = Self::collect_program_functions(program);
-        let mut out = HashMap::new();
-
-        for (name, func) in funcs {
-            let mut param_cts: Vec<Option<shape_value::v2::ConcreteType>> =
-                vec![None; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                out.insert(name, param_cts);
-                continue;
-            };
-
-            for (idx, param) in func.params.iter().enumerate() {
-                // Annotated params are stamped from the annotation directly
-                // in the `function_local_concrete_types` per-fn seeding pass;
-                // a destructuring param has no single slot ConcreteType.
-                if param.type_annotation.is_some() || param.simple_name().is_none() {
-                    continue;
-                }
-                let Some(inferred_param_ty) = params.get(idx) else {
-                    continue;
-                };
-                // `Type::to_annotation()` reconstructs the `TypeAnnotation`
-                // for resolved concrete / generic types and yields `None`
-                // for unresolved type variables — exactly the gate we want
-                // (no fabricated kind, no Bool-default). The existing
-                // `concrete_type_from_annotation` then projects
-                // `Array<int>` → `ConcreteType::Array(I64)`.
-                let Some(ann) = inferred_param_ty.to_annotation() else {
-                    continue;
-                };
-                param_cts[idx] =
-                    crate::compiler::v2_map_emission::concrete_type_from_annotation(&ann);
-            }
-
-            out.insert(name, param_cts);
+    pub(super) fn inferred_param_concrete_type_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let param = func.params.get(param_idx)?;
+        // Annotated params are stamped from their declaration directly in the
+        // per-fn seeding pass; destructuring params have no single slot
+        // ConcreteType.
+        if param.type_annotation.is_some() || param.simple_name().is_none() {
+            return None;
         }
 
-        out
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
+        let ann = params.get(param_idx)?.to_annotation()?;
+        if Self::annotation_is_unknown(&ann) {
+            return None;
+        }
+        crate::compiler::v2_map_emission::concrete_type_from_annotation(&ann)
+    }
+
+    pub(super) fn inferred_param_object_fields_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<Vec<(String, shape_runtime::type_schema::FieldType)>> {
+        use shape_ast::ast::TypeAnnotation;
+
+        let param = func.params.get(param_idx)?;
+        if param.type_annotation.is_some() || param.simple_name().is_none() {
+            return None;
+        }
+
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
+        let Type::Concrete(TypeAnnotation::Object(obj_fields)) = params.get(param_idx)? else {
+            return None;
+        };
+
+        let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.clone(),
+                    Self::type_annotation_to_field_type(&field.type_annotation),
+                )
+            })
+            .collect();
+        if fields.is_empty() {
+            return None;
+        }
+        Some(fields)
+    }
+
+    pub(super) fn inferred_param_type_name_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<String> {
+        let param = func.params.get(param_idx)?;
+        // Annotated params are stamped from their declaration; destructuring
+        // params do not have one tracker slot to seed.
+        if param.type_annotation.is_some() || param.simple_name().is_none() {
+            return None;
+        }
+
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
+        let param_ty = params.get(param_idx)?;
+        let ann = param_ty.to_annotation()?;
+        if Self::annotation_is_unknown(&ann) {
+            return None;
+        }
+        Self::inferred_type_to_hint_name(param_ty)
     }
 
     pub(crate) fn inferred_type_to_hint_name(ty: &Type) -> Option<String> {
@@ -1136,55 +1557,37 @@ impl BytecodeCompiler {
         }
     }
 
-    pub(super) fn infer_param_type_hints_from_types(
+    /// U4-5b: extract each function's inferred return `TypeAnnotation` (for
+    /// functions WITHOUT an explicit return annotation). The caller resolves it
+    /// to a `ConcreteType` SCHEMA-AWARELY (`declared_annotation_concrete_type`)
+    /// and registers `type_tracker.function_return_concrete_types` so call
+    /// expressions recover the return type STRUCTURALLY (numeric source,
+    /// struct-name key, Result/Option kind, Copy/NonCopy move-class). Replaces
+    /// the deleted stringly `infer_return_type_hints_from_types` →
+    /// `function_return_types` map.
+    ///
+    /// `Type::to_annotation()` reconstructs the `TypeAnnotation` for resolved
+    /// concrete/generic types and yields `None` for unresolved type variables —
+    /// exactly the gate we want (no fabricated type, no Bool-default;
+    /// surface-and-stop preserved). The annotation is resolved to a
+    /// `ConcreteType` at the registration site (where the schema registry is in
+    /// scope) so a named-struct/enum inferred return resolves to
+    /// `ConcreteType::Struct`/`Enum`.
+    pub(super) fn infer_return_annotations_from_types(
         program: &Program,
         inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<Option<String>>> {
+    ) -> HashMap<String, shape_ast::ast::TypeAnnotation> {
         let funcs = Self::collect_program_functions(program);
-        let mut hints = HashMap::new();
-
-        for (name, func) in funcs {
-            let mut param_hints = vec![None; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                hints.insert(name, param_hints);
-                continue;
-            };
-
-            for (idx, param) in func.params.iter().enumerate() {
-                if param.type_annotation.is_some() || param.simple_name().is_none() {
-                    continue;
-                }
-                if let Some(inferred_param_ty) = params.get(idx) {
-                    param_hints[idx] = Self::inferred_type_to_hint_name(inferred_param_ty);
-                }
-            }
-
-            hints.insert(name, param_hints);
-        }
-
-        hints
-    }
-
-    /// Phase 3e: extract a hint name for each function's inferred return
-    /// type. Used to populate `type_tracker.function_return_types` so call
-    /// expressions can recover numeric types (and string/bool primitives
-    /// via `set_function_return_type`) when the source has no explicit
-    /// return-type annotation.
-    pub(super) fn infer_return_type_hints_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, String> {
-        let funcs = Self::collect_program_functions(program);
-        let mut hints = HashMap::new();
+        let mut out = HashMap::new();
         for (name, _) in funcs {
             let Some(Type::Function { returns, .. }) = inferred_types.get(&name) else {
                 continue;
             };
-            if let Some(rt_name) = Self::inferred_type_to_hint_name(returns) {
-                hints.insert(name, rt_name);
+            if let Some(ann) = returns.to_annotation() {
+                out.insert(name, ann);
             }
         }
-        hints
+        out
     }
 
     pub(crate) fn resolve_compiled_annotation_name(
@@ -1347,13 +1750,251 @@ impl BytecodeCompiler {
         })
     }
 
+    /// STAGE Modules: build synthetic top-level AST items for every NAMED
+    /// import of the root module, so the shared type checker resolves imported
+    /// functions and types at every use position (let-initializer, nested
+    /// argument, type construction), not just in tolerated statement-expression
+    /// position.
+    ///
+    /// Reads the root node's `resolved_imports` straight from the module graph
+    /// (the single source of truth) — the per-compiler import tables are not
+    /// populated until later in `compile()`. For each imported symbol it emits:
+    ///   * Function  → a signature-only `BuiltinFunctionDecl` renamed to the
+    ///     local name (inference predeclares the signature; no body re-check).
+    ///     A function without a return annotation can't be a `BuiltinFunctionDecl`
+    ///     (return type is required), so it falls back to the renamed full
+    ///     function with its real body.
+    ///   * Struct / Enum / TypeAlias → the real definition renamed to the local
+    ///     name, so `LocalName { .. }` construction + field reads type-check.
+    fn build_imported_analysis_items(&self) -> Vec<shape_ast::ast::Item> {
+        use crate::module_graph::ResolvedImport;
+        use shape_ast::ast::{ExportItem, Item};
+
+        let Some(graph) = self.module_graph.as_ref() else {
+            return Vec::new();
+        };
+        let root = graph.node(graph.root_id());
+        let mut items: Vec<Item> = Vec::new();
+
+        for ri in &root.resolved_imports {
+            let ResolvedImport::Named {
+                module_id: dep_id,
+                symbols,
+                ..
+            } = ri
+            else {
+                continue;
+            };
+            let dep_node = graph.node(*dep_id);
+            let Some(dep_ast) = dep_node.ast.as_ref() else {
+                continue;
+            };
+            for sym in symbols {
+                if sym.is_annotation {
+                    continue;
+                }
+                let Some(export_item) = Self::find_exported_item(dep_ast, &sym.original_name)
+                else {
+                    continue;
+                };
+                match export_item {
+                    ExportItem::Function(func) => {
+                        // Inject a SIGNATURE-ONLY decl (never the body): the body
+                        // may call intrinsics / sibling functions not visible in
+                        // the root's analysis program, which would mis-fire as
+                        // "undefined function".
+                        //
+                        // OP0 (embedded-stdlib let-bind): an imported function
+                        // WITHOUT a return annotation (`pub fn sum(series) {
+                        // series.sum() }` in `std::core::math`) is registered so
+                        // its name resolves in EVERY use position (let-initializer,
+                        // nested arg), not only the tolerated statement-expression
+                        // position (`print(sum(xs))` previously worked while
+                        // `let t = sum(xs)` failed "Undefined function: 'sum'").
+                        //
+                        // SOUNDNESS: we must NOT model the unknown return as an
+                        // unconstrained universally-quantified `__ret` parameter.
+                        // That is unsound — a `fn sum<__ret>(series) -> __ret`
+                        // signature lets the return unify with ANY annotation /
+                        // arithmetic context (`let s: string = sum(xs)`,
+                        // `int_val + sum(xs)`) with no error, then mis-runs /
+                        // traps at runtime. It behaves as an `any` sink and
+                        // breaks strict typing (`int != number`, no coercion).
+                        //
+                        // Nor can we inject the renamed FULL body to let the
+                        // checker infer the real return type: the analysis program
+                        // is the ROOT module's, where the dep body's gated
+                        // intrinsics (`__intrinsic_mean`) and sibling helpers are
+                        // not visible, so the body mis-fires "Undefined function".
+                        //
+                        // Resolving the genuine return type requires inferring the
+                        // dep body in the DEP module's own context (it has no
+                        // declared annotation to copy). That is a larger change;
+                        // until it lands, a function with no return annotation is
+                        // SKIPPED from the inference env (it still resolves at the
+                        // bytecode-compiler layer via `imported_names`, and the
+                        // checker tolerates an undefined call in the
+                        // statement-expression position). The let-initializer form
+                        // `let t = sum(xs)` is SURFACED as "Undefined function"
+                        // rather than silently admitted with an unsound `any`
+                        // return — strict typing takes priority over the
+                        // convenience form. Tracked: OP0 dep-context return-type
+                        // inference follow-up.
+                        let Some(return_type) = func.return_type.clone() else {
+                            continue;
+                        };
+                        let decl = shape_ast::ast::BuiltinFunctionDecl {
+                            name: sym.local_name.clone(),
+                            name_span: shape_ast::ast::Span::DUMMY,
+                            doc_comment: None,
+                            type_params: func.type_params.clone(),
+                            params: func.params.clone(),
+                            return_type,
+                        };
+                        items.push(Item::BuiltinFunctionDecl(decl, shape_ast::ast::Span::DUMMY));
+                    }
+                    ExportItem::Struct(struct_def) => {
+                        let mut renamed = struct_def.clone();
+                        renamed.name = sym.local_name.clone();
+                        items.push(Item::StructType(renamed, shape_ast::ast::Span::DUMMY));
+                    }
+                    ExportItem::Enum(enum_def) => {
+                        let mut renamed = enum_def.clone();
+                        renamed.name = sym.local_name.clone();
+                        items.push(Item::Enum(renamed, shape_ast::ast::Span::DUMMY));
+                    }
+                    ExportItem::TypeAlias(alias) => {
+                        let mut renamed = alias.clone();
+                        renamed.name = sym.local_name.clone();
+                        items.push(Item::TypeAlias(renamed, shape_ast::ast::Span::DUMMY));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        items
+    }
+
+    /// Find the `ExportItem` for a named export in a dependency module's AST.
+    fn find_exported_item<'a>(
+        dep_ast: &'a Program,
+        original_name: &str,
+    ) -> Option<&'a shape_ast::ast::ExportItem> {
+        use shape_ast::ast::{ExportItem, Item};
+        for item in &dep_ast.items {
+            if let Item::Export(export, _) = item {
+                let name = match &export.item {
+                    ExportItem::Function(f) => &f.name,
+                    ExportItem::Struct(s) => &s.name,
+                    ExportItem::Enum(e) => &e.name,
+                    ExportItem::TypeAlias(a) => &a.name,
+                    _ => continue,
+                };
+                if name == original_name {
+                    return Some(&export.item);
+                }
+            }
+        }
+        None
+    }
+
+    fn reject_user_internal_intrinsic_calls(&self, program: &Program) -> Result<()> {
+        if self.allow_internal_builtins {
+            return Ok(());
+        }
+
+        let Some((name, span)) = first_matching_direct_function_call(program, &|name| {
+            (name.starts_with("__intrinsic_") || name.starts_with("__json_"))
+                && matches!(
+                    self.classify_builtin_function(name),
+                    Some(BuiltinNameResolution::InternalOnly {
+                        scope: ResolutionScope::InternalIntrinsic,
+                        ..
+                    })
+                )
+        }) else {
+            return Ok(());
+        };
+
+        let Some(resolution) = self.classify_builtin_function(&name) else {
+            return Ok(());
+        };
+        Err(ShapeError::SemanticError {
+            message: self.internal_intrinsic_error_message(&name, resolution),
+            location: Some(self.span_to_source_location(span)),
+        })
+    }
+
     /// Compile a program to bytecode
     pub fn compile(mut self, program: &Program) -> Result<BytecodeProgram> {
         // First: desugar the program (converts FromQuery to method chains, etc.)
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);
-        let analysis_program =
+
+        // Numeric-conversion §4 literal adoption (THE RULE user 2026-06-01):
+        // re-type every annotation-driven adopting bare int literal to a
+        // `Number` literal BEFORE bytecode compilation and MIR lowering (both
+        // consume this same mutated AST). Without this, a `let n: number = 5`
+        // / `f(5: number)` / `-> number { 5 }` lowers an i64 constant into a
+        // Float64-stamped slot — the catastrophic bit-reinterpret hole
+        // (`takes_num(5)` → `2.5e-323`). Compile-time literal re-typing, NOT a
+        // runtime coercion opcode. See `shape_ast::transform::numeric_literal_adopt`.
+        shape_ast::transform::widen_numeric_literals(&mut program);
+
+        // Named arguments (STAGE T4, 2026-06-22): rebind `name: value` call
+        // arguments to positional form against the callee's parameter list,
+        // BEFORE inference and codegen. Every downstream pass (type-inference
+        // call-shape constraint, bytecode compiler, MIR lowering) reads only
+        // the positional `args` slice; this single AST rewrite makes named and
+        // out-of-order arguments + default-filled omitted params bind by name
+        // everywhere at once. Unknown / duplicate named args surface as a clean
+        // compile error here. See `shape_ast::transform::named_args_rebind`.
+        shape_ast::transform::rebind_named_args(&mut program)?;
+
+        self.reject_user_internal_intrinsic_calls(&program)?;
+
+        // Wave 1a PART A: bidirectional inference for let-bound closures.
+        // A `let f = |a, b| a + b` compiles the closure body EAGERLY at the
+        // let-site (before any `f(2, 3)` call site is seen), so the call-site
+        // argument types must be gathered up front. This pre-pass records, per
+        // closure-bound name, the per-arg types observed at direct call sites;
+        // `compile_expr_closure` then seeds the still-unannotated params.
+        // Soundness lives in `collect_closure_callsite_param_hints` (conflicts
+        // and shadowing → not applied; the closure keeps its existing
+        // rejection).
+        self.closure_callsite_param_hints =
+            crate::compiler::expressions::closures::collect_closure_callsite_param_hints(&program);
+        self.returned_closure_callsite_param_hints =
+            crate::compiler::expressions::closures::collect_returned_closure_callsite_param_hints(
+                &program,
+            );
+        let mut analysis_program =
             shape_ast::transform::augment_program_with_generated_extends(&program);
+        let native_auto_items = Self::native_auto_conversion_analysis_items(&analysis_program);
+        if !native_auto_items.is_empty() {
+            let mut merged = native_auto_items;
+            merged.extend(analysis_program.items.drain(..));
+            analysis_program.items = merged;
+        }
+
+        // STAGE Modules: teach the type checker (and the reference-model
+        // inference) about IMPORTED module symbols. The module graph is the
+        // single source of truth for `from m use { f, T }` resolution, but the
+        // root's import tables are not registered until later in `compile()`
+        // (after the analyzer runs). So read the root node's resolved imports
+        // straight from the graph and prepend signature-only function decls +
+        // renamed type defs for every named-imported symbol. Without this an
+        // imported call only resolves in statement-expression position (which
+        // the checker tolerates) and fails in a let-initializer / nested arg,
+        // and an imported `pub type` cannot be constructed.
+        let imported_items = self.build_imported_analysis_items();
+        if !imported_items.is_empty() {
+            let mut merged = imported_items;
+            merged.extend(analysis_program.items.drain(..));
+            analysis_program.items = merged;
+        }
+        self.prepend_inline_module_analysis_items(&mut analysis_program)?;
 
         // Run the shared analyzer and surface diagnostics that are currently
         // proven reliable in the compiler execution path.
@@ -1414,12 +2055,13 @@ impl BytecodeCompiler {
         } else {
             TypeAnalysisMode::FailFast
         };
-        if let Err(errors) = analyze_program_with_mode(
+        if let Err(errors) = analyze_program_with_mode_and_comptime_context(
             &analysis_program,
             self.source_text.as_deref(),
             None,
             Some(&known_bindings),
             analysis_mode,
+            self.comptime_mode,
         ) {
             match self.type_diagnostic_mode {
                 TypeDiagnosticMode::Strict => {
@@ -1447,38 +2089,21 @@ impl BytecodeCompiler {
         let (
             inferred_ref_params,
             inferred_ref_mutates,
-            inferred_param_type_hints,
-            inferred_return_type_hints,
-            inferred_param_concrete_types,
-            inferred_param_object_fields,
-            inferred_return_object_fields,
-        ) = Self::infer_reference_model(&program);
+            inferred_return_annotations,
+            inference_facts,
+        ) = Self::infer_reference_model_with_comptime_context(
+            &analysis_program,
+            self.comptime_mode,
+        );
+        // T1 KEYSTONE: store the post-solve per-expression type table so
+        // `infer_expr_type` can consult it first (root fix for static
+        // type-erasure of function-body collection-dispatch / match-arm locals).
+        self.resolved_expr_types = inference_facts.expression_types().clone();
+        self.inference_facts = inference_facts;
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;
         self.inferred_ref_mutates = inferred_ref_mutates;
-        self.inferred_param_type_hints = inferred_param_type_hints;
-        self.inferred_param_concrete_types = inferred_param_concrete_types;
-        self.inferred_param_object_fields = inferred_param_object_fields;
-        self.inferred_return_object_fields = inferred_return_object_fields;
-        // WS-9c: eagerly register an inline anonymous schema (+ per-field
-        // contracts) for every unannotated function whose inferred return
-        // type is an anonymous object. Registering up-front — before any
-        // body compiles — makes the return-object schema available both to
-        // `compile_expr_function_call` (which stamps it on the call's
-        // `last_expr_schema` so a `let` binding inherits it) and to the
-        // read-only `infer_expr_type` property-access path (which resolves
-        // `f(...).field` directly). `register_inline_object_schema_typed` is
-        // idempotent on the field set, so this never duplicates a schema.
-        self.register_inferred_return_object_schemas();
-        // Phase 3e: register inferred return types so function-call
-        // compilation can recover the numeric type even for sources with
-        // no explicit `-> T` annotation.
-        for (fn_name, ret_ty) in &inferred_return_type_hints {
-            self.type_tracker
-                .register_function_return_type(fn_name, ret_ty);
-        }
-
         // Two-phase TypedObject field hoisting:
         //
         // Phase 1 (here, AST pre-pass): Collect all property assignments (e.g.,
@@ -1500,9 +2125,9 @@ impl BytecodeCompiler {
         // be mapped to field names via the schema registry — see the integration
         // note in `compile_typed_object_literal`.
         {
-            use shape_runtime::type_system::inference::PropertyAssignmentCollector;
             use shape_ast::ast::{Expr, Literal};
             use shape_runtime::type_schema::FieldType;
+            use shape_runtime::type_system::inference::PropertyAssignmentCollector;
             let assignments = PropertyAssignmentCollector::collect(&program);
             let grouped = PropertyAssignmentCollector::group_by_variable(&assignments);
             // Phase 3e: infer a primitive FieldType for each hoisted field
@@ -1554,6 +2179,31 @@ impl BytecodeCompiler {
         // types as `unknown`.
         for item in &program.items {
             self.predeclare_item_struct_schemas(item);
+        }
+
+        // U4-5b: register inferred return ConcreteTypes so function-call
+        // compilation can recover the return type STRUCTURALLY even for sources
+        // with no explicit `-> T` annotation. Resolve this after the schema
+        // predeclare pass above; otherwise an inferred user-struct return like
+        // `fn mk() { P { ... } }` sees `P` as unresolved and never gets the
+        // `NonCopy` move seed used by top-level MIR.
+        //
+        // An unresolvable inferred annotation still registers nothing
+        // (surface-and-stop).
+        let self_ref: &Self = &self;
+        let inferred_return_cts: Vec<(String, shape_value::v2::ConcreteType)> =
+            inferred_return_annotations
+                .iter()
+                .filter_map(|(fn_name, ann)| {
+                    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                        self_ref, ann,
+                    )
+                    .map(|ct| (fn_name.clone(), ct))
+                })
+                .collect();
+        for (fn_name, ret_ty) in inferred_return_cts {
+            self.type_tracker
+                .register_function_return_concrete_type(&fn_name, ret_ty);
         }
 
         // MIR authority for non-function items: run borrow analysis on top-level
@@ -1612,9 +2262,16 @@ impl BytecodeCompiler {
                 // yet proven" as `Option::None` — `.or_else(...)` falls
                 // back to the AST-driven path when the state-driven one
                 // produced no kind.
-                let kind = self
-                    .infer_top_level_return_kind()
-                    .or_else(|| self.infer_top_level_return_kind_from_item(item));
+                // U4-4: the final expression's resolved Type drives the
+                // numeric return kind — thread the last item's tail expr so
+                // `infer_top_level_return_kind` derives it from the one Type
+                // table (`numeric_type_of`) rather than the deleted
+                // `last_expr_numeric_type` register.
+                let tail_expr = Self::top_level_item_tail_expr(item);
+                let kind = match self.infer_top_level_return_kind(tail_expr)? {
+                    Some(kind) => Some(kind),
+                    None => self.infer_top_level_return_kind_from_item(item)?,
+                };
                 self.top_level_program_return_kind = kind;
             }
             self.release_unused_module_reference_borrows_for_remaining_items(
@@ -1663,8 +2320,20 @@ impl BytecodeCompiler {
         // Store top-level locals count so executor can advance sp past them
         self.program.top_level_locals_count = self.next_local;
 
+        // v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14).
+        // Detect any `comptime { ... }` / `comptime for` in top-level code so
+        // the JIT top-level strategy can deopt to the bytecode interpreter
+        // (see `top_level_has_comptime` doc on BytecodeProgram). The JIT
+        // consumes the borrow-solver MIR, whose comptime lowering re-lowers
+        // the comptime body's statements (for borrow analysis) rather than the
+        // compile-time-baked literal — re-running the body at runtime leaks
+        // its trailing value into the program-return slot. Deopt preserves
+        // VM == JIT.
+        self.program.top_level_has_comptime =
+            program.items.iter().any(top_level_item_contains_comptime);
+
         // Persist storage hints for JIT width-aware lowering.
-        self.populate_program_storage_hints();
+        self.populate_program_storage_hints()?;
 
         // Transfer type schema registry for TypedObject field resolution
         self.program.type_schema_registry = self.type_tracker.schema_registry().clone();
@@ -1824,9 +2493,7 @@ impl BytecodeCompiler {
                 .get(&func.name)
                 .and_then(|fd| fd.return_type.as_ref())
                 .and_then(|ann| {
-                    crate::compiler::v2_map_emission::concrete_type_from_annotation(
-                        ann,
-                    )
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(ann)
                 })
                 .unwrap_or(shape_value::v2::ConcreteType::Void);
             per_fn_ret.push(ct);
@@ -1889,10 +2556,7 @@ impl BytecodeCompiler {
                 // string is `DEFAULT_TRAIT_IMPL_SELECTOR` at
                 // `crates/shape-vm/src/bytecode.rs:15`; inlined here to
                 // avoid the borrow.
-                let default_suffix = format!(
-                    "::{}::__default__::{}",
-                    type_name, method_name
-                );
+                let default_suffix = format!("::{}::__default__::{}", type_name, method_name);
                 for (key, func_name) in &trait_method_symbols {
                     if key.ends_with(&default_suffix) {
                         return Some(func_name.clone());
@@ -1939,19 +2603,17 @@ impl BytecodeCompiler {
         // closes over the `current_function` half of the composite key
         // — top-level uses `None`; per-fn loop below uses
         // `Some(fn_idx)`.
-        let monomorph_call_sites =
-            self.program.monomorphized_method_call_sites.clone();
-        let monomorph_method_returns_top = |span: shape_ast::ast::span::Span|
-            -> Option<shape_value::v2::ConcreteType>
-        {
-            let idx = *monomorph_call_sites.get(&(span, None))?;
-            let ct = returns_vec.get(idx)?;
-            if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                None
-            } else {
-                Some(ct.clone())
-            }
-        };
+        let monomorph_call_sites = self.program.monomorphized_method_call_sites.clone();
+        let monomorph_method_returns_top =
+            |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                let idx = *monomorph_call_sites.get(&(span, None))?;
+                let ct = returns_vec.get(idx)?;
+                if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                    None
+                } else {
+                    Some(ct.clone())
+                }
+            };
 
         // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
         // ratified): value-call return-ConcreteType resolver. Consumes
@@ -1960,18 +2622,16 @@ impl BytecodeCompiler {
         // result for closure-bound calls. Top-level conduit closes
         // over `None` for the caller half of the composite key — same
         // convention as `monomorph_method_returns_top`.
-        let value_call_sites =
-            self.program.value_call_return_concrete_types.clone();
-        let value_call_returns_top = |span: shape_ast::ast::span::Span|
-            -> Option<shape_value::v2::ConcreteType>
-        {
-            let ct = value_call_sites.get(&(span, None))?.clone();
-            if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                None
-            } else {
-                Some(ct)
-            }
-        };
+        let value_call_sites = self.program.value_call_return_concrete_types.clone();
+        let value_call_returns_top =
+            |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                let ct = value_call_sites.get(&(span, None))?.clone();
+                if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                    None
+                } else {
+                    Some(ct)
+                }
+            };
 
         // Re-run top-level conduit with the callee-return resolver so the
         // `let r = divide(10, 2)` slot picks up `Result(I64, String)` from
@@ -2029,32 +2689,30 @@ impl BytecodeCompiler {
                 // (i.e. `Some(fn_idx)` here matches the populator's
                 // post-monomorphization specialized caller FunctionId).
                 let current_fn = Some(fn_idx);
-                let monomorph_method_returns_per_fn = |span: shape_ast::ast::span::Span|
-                    -> Option<shape_value::v2::ConcreteType>
-                {
-                    let idx = *monomorph_call_sites.get(&(span, current_fn))?;
-                    let ct = returns_vec.get(idx)?;
-                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                        None
-                    } else {
-                        Some(ct.clone())
-                    }
-                };
+                let monomorph_method_returns_per_fn =
+                    |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                        let idx = *monomorph_call_sites.get(&(span, current_fn))?;
+                        let ct = returns_vec.get(idx)?;
+                        if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                            None
+                        } else {
+                            Some(ct.clone())
+                        }
+                    };
                 // cluster-2-cw-IB-class-b: per-fn variant of the value-call
                 // return-ConcreteType resolver. Same composite-key
                 // discipline as monomorph_method_returns_per_fn above —
                 // closes over `Some(fn_idx)` so calls inside user-function
                 // bodies pick up their own caller-context entries.
-                let value_call_returns_per_fn = |span: shape_ast::ast::span::Span|
-                    -> Option<shape_value::v2::ConcreteType>
-                {
-                    let ct = value_call_sites.get(&(span, current_fn))?.clone();
-                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                        None
-                    } else {
-                        Some(ct)
-                    }
-                };
+                let value_call_returns_per_fn =
+                    |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                        let ct = value_call_sites.get(&(span, current_fn))?.clone();
+                        if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                            None
+                        } else {
+                            Some(ct)
+                        }
+                    };
                 let mut concrete_types =
                     crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                         &mir_data.mir,
@@ -2089,21 +2747,12 @@ impl BytecodeCompiler {
                 // MIR-walk inference's classifications dominate when both
                 // sources are present.
                 if let Some(def) = self.function_defs.get(&func.name) {
-                    // v0.3 WS-7: inference-resolved per-param `ConcreteType`
-                    // for UNANNOTATED params (projected in
-                    // `infer_param_concrete_types_from_types`). Used as the
-                    // seed source when a param has no annotation to read.
-                    let inferred_param_cts =
-                        self.inferred_param_concrete_types.get(&func.name);
                     for (i, &param_slot) in mir_data.mir.param_slots.iter().enumerate() {
                         let idx = param_slot.0 as usize;
                         if idx >= concrete_types.len() {
                             continue;
                         }
-                        if !matches!(
-                            concrete_types[idx],
-                            shape_value::v2::ConcreteType::Void
-                        ) {
+                        if !matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void) {
                             continue;
                         }
                         let Some(param) = def.params.get(i) else {
@@ -2114,7 +2763,9 @@ impl BytecodeCompiler {
                                 // Annotated param: the declared type IS the
                                 // proof source for the slot's ConcreteType.
                                 if let Some(ct) =
-                                    crate::compiler::v2_map_emission::concrete_type_from_annotation(ann)
+                                    crate::compiler::v2_map_emission::concrete_type_from_annotation(
+                                        ann,
+                                    )
                                 {
                                     concrete_types[idx] = ct;
                                 }
@@ -2134,9 +2785,8 @@ impl BytecodeCompiler {
                                 // paths use the SAME proven type the VM
                                 // uses, instead of mis-classifying a v2
                                 // heap pointer as a NaN-boxed v1 value.
-                                if let Some(ct) = inferred_param_cts
-                                    .and_then(|v| v.get(i))
-                                    .and_then(|opt| opt.clone())
+                                if let Some(ct) =
+                                    self.inferred_param_concrete_type_from_facts(&func.name, def, i)
                                 {
                                     concrete_types[idx] = ct;
                                 }
@@ -2283,9 +2933,7 @@ impl BytecodeCompiler {
         // `FieldType::Any` outside the named-exception classes. ADR-006
         // §2.7.5 (producer-side stamp) + §2.7.26 (parallel-`field_kinds`
         // carrier for the permanent classes) anchor the discipline.
-        crate::compiler::post_inference_verify::verify_no_post_inference_any(
-            &self.program,
-        )?;
+        crate::compiler::post_inference_verify::verify_no_post_inference_any(&self.program)?;
 
         Ok(self.program)
     }
@@ -2399,6 +3047,32 @@ impl BytecodeCompiler {
 
         self.module_scope_stack.push(module_path.clone());
 
+        // U4-1: per-module span-table for the engine-served field-read consult.
+        //
+        // The T1 keystone span-table (`self.resolved_expr_types`) is populated
+        // in `compile()` (Phase 2) over the ROOT program ONLY — dependency
+        // modules compile HERE in Phase 1, before that table exists, so an
+        // imported module body (`pub fn area(r: Rect) -> int { r.w * r.h }`) had
+        // NO span-table coverage. Before U4-1 the deleted field-read ladder arms
+        // (#13/#14) re-derived `r.w`'s type from the type-tracker schema; with
+        // those gone, the engine must serve imported field reads too — exactly
+        // the U4 "one source of truth" invariant, extended to imported modules.
+        //
+        // Run the inference engine over THIS module's own AST and install its
+        // post-solve span table for the duration of this module's body
+        // compilation, then restore. `Span` carries no module discriminator
+        // (it is `{start, end}` byte offsets), so the table is module-scoped to
+        // its compile window — never merged across modules — which avoids any
+        // cross-module span aliasing. This is an engine re-point, NOT the deleted
+        // re-derivation ladder: a field read the engine cannot resolve stays a
+        // genuine miss → STAGE-F1 surface-and-stop, identical to the root path.
+        let (.., module_facts) = Self::infer_reference_model(&ast);
+        let saved_expr_types = std::mem::replace(
+            &mut self.resolved_expr_types,
+            module_facts.expression_types().clone(),
+        );
+        let saved_inference_facts = std::mem::replace(&mut self.inference_facts, module_facts);
+
         // 1. Register this module's imports from the graph
         self.register_graph_imports_for_module(module_id, graph)?;
 
@@ -2434,6 +3108,12 @@ impl BytecodeCompiler {
             Ok(())
         })();
         self.non_function_mir_context_stack.pop();
+        // U4-1: restore the caller's span-table (the per-module table was active
+        // only across this module's body compilation; see the swap above). On an
+        // error path `compile_result?` aborts the whole compilation, so the
+        // not-yet-restored tables are discarded with the compiler instance.
+        self.resolved_expr_types = saved_expr_types;
+        self.inference_facts = saved_inference_facts;
         compile_result?;
 
         // 5. Build module object and store in canonical binding
@@ -2462,7 +3142,9 @@ impl BytecodeCompiler {
             OpCode::StoreModuleBinding,
             Some(Operand::ModuleBinding(binding_idx)),
         ));
-        self.propagate_initializer_type_to_slot(binding_idx, false, false);
+        // U4-4: module-namespace object → non-numeric heap value; tracker type
+        // comes from `last_expr_type_info`.
+        self.propagate_initializer_type_to_slot(binding_idx, false, false, Some(&module_object));
 
         self.module_scope_stack.pop();
         self.allow_internal_builtins = prev_allow;
@@ -2494,5 +3176,173 @@ impl BytecodeCompiler {
         }
 
         Ok((bytecode, export_map))
+    }
+}
+
+fn first_matching_direct_function_call<F>(
+    program: &Program,
+    predicate: &F,
+) -> Option<(String, shape_ast::ast::Span)>
+where
+    F: Fn(&str) -> bool,
+{
+    use shape_ast::ast::{Expr, Item, Span, Statement};
+    use shape_runtime::visitor::{Visitor, walk_item};
+
+    struct Finder<'a, F> {
+        predicate: &'a F,
+        found: Option<(String, Span)>,
+    }
+
+    impl<F> Visitor for Finder<'_, F>
+    where
+        F: Fn(&str) -> bool,
+    {
+        fn visit_item(&mut self, _item: &Item) -> bool {
+            self.found.is_none()
+        }
+
+        fn visit_stmt(&mut self, _stmt: &Statement) -> bool {
+            self.found.is_none()
+        }
+
+        fn visit_expr(&mut self, _expr: &Expr) -> bool {
+            self.found.is_none()
+        }
+
+        fn visit_expr_function_call(&mut self, expr: &Expr, span: Span) -> bool {
+            if let Expr::FunctionCall { name, .. } = expr {
+                if (self.predicate)(name) {
+                    self.found = Some((name.clone(), span));
+                    return false;
+                }
+            }
+            self.found.is_none()
+        }
+    }
+
+    let mut finder = Finder {
+        predicate,
+        found: None,
+    };
+    for item in &program.items {
+        walk_item(&mut finder, item);
+        if finder.found.is_some() {
+            break;
+        }
+    }
+    finder.found
+}
+
+/// v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14).
+///
+/// True when a TOP-LEVEL item contains a `comptime { ... }` / `comptime for`
+/// expression (including in a `let`/`var`/`const` initializer or a bare
+/// top-level expression). Functions are NOT descended into: a comptime block
+/// inside a `fn` body compiles to that function's own MIR, not the
+/// `top_level_mir` the JIT top-level strategy consumes. See
+/// `BytecodeProgram::top_level_has_comptime`.
+pub fn top_level_item_contains_comptime(item: &shape_ast::ast::Item) -> bool {
+    use shape_ast::ast::Item;
+    match item {
+        Item::Comptime(_, _) => true,
+        Item::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(expr_contains_comptime),
+        Item::Assignment(asgn, _) => expr_contains_comptime(&asgn.value),
+        Item::Expression(expr, _) => expr_contains_comptime(expr),
+        Item::Statement(stmt, _) => stmt_contains_comptime(stmt),
+        _ => false,
+    }
+}
+
+fn stmt_contains_comptime(stmt: &shape_ast::ast::Statement) -> bool {
+    use shape_ast::ast::Statement;
+    match stmt {
+        Statement::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(expr_contains_comptime),
+        Statement::Assignment(asgn, _) => expr_contains_comptime(&asgn.value),
+        Statement::Expression(expr, _) => expr_contains_comptime(expr),
+        Statement::Return(Some(expr), _) => expr_contains_comptime(expr),
+        Statement::For(f, _) => {
+            let init_has = match &f.init {
+                shape_ast::ast::ForInit::ForIn { iter, .. } => expr_contains_comptime(iter),
+                shape_ast::ast::ForInit::ForC {
+                    condition, update, ..
+                } => expr_contains_comptime(condition) || expr_contains_comptime(update),
+            };
+            init_has || f.body.iter().any(stmt_contains_comptime)
+        }
+        Statement::While(w, _) => w.body.iter().any(stmt_contains_comptime),
+        Statement::If(i, _) => {
+            i.then_body.iter().any(stmt_contains_comptime)
+                || i.else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(stmt_contains_comptime))
+        }
+        _ => false,
+    }
+}
+
+/// Recursively true when `expr` (or any sub-expression) is a `comptime`
+/// block / `comptime for`. Conservative: covers every value-position
+/// expression form. A miss only suppresses the deopt (leaving the existing
+/// behaviour); it never introduces unsoundness.
+fn expr_contains_comptime(expr: &shape_ast::ast::Expr) -> bool {
+    use shape_ast::ast::{BlockItem, Expr};
+    match expr {
+        Expr::Comptime(_, _) | Expr::ComptimeFor(_, _) => true,
+        Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+            args.iter().any(expr_contains_comptime)
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_contains_comptime(receiver) || args.iter().any(expr_contains_comptime)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_comptime(left) || expr_contains_comptime(right)
+        }
+        Expr::UnaryOp { operand, .. } => expr_contains_comptime(operand),
+        Expr::Reference { expr, .. } => expr_contains_comptime(expr),
+        Expr::Array(elems, _) => elems.iter().any(expr_contains_comptime),
+        Expr::IndexAccess { object, index, .. } => {
+            expr_contains_comptime(object) || expr_contains_comptime(index)
+        }
+        Expr::PropertyAccess { object, .. } => expr_contains_comptime(object),
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            expr_contains_comptime(condition)
+                || expr_contains_comptime(then_expr)
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_contains_comptime(e))
+        }
+        Expr::Block(block, _) => block.items.iter().any(|it| match it {
+            BlockItem::VariableDecl(decl) => {
+                decl.value.as_ref().is_some_and(expr_contains_comptime)
+            }
+            BlockItem::Assignment(asgn) => expr_contains_comptime(&asgn.value),
+            BlockItem::Statement(stmt) => stmt_contains_comptime(stmt),
+            BlockItem::Expression(e) => expr_contains_comptime(e),
+        }),
+        Expr::If(i, _) => {
+            expr_contains_comptime(&i.condition)
+                || expr_contains_comptime(&i.then_branch)
+                || i.else_branch
+                    .as_ref()
+                    .is_some_and(|e| expr_contains_comptime(e))
+        }
+        Expr::While(w, _) => {
+            expr_contains_comptime(&w.condition) || expr_contains_comptime(&w.body)
+        }
+        Expr::For(f, _) => expr_contains_comptime(&f.iterable) || expr_contains_comptime(&f.body),
+        Expr::Loop(l, _) => expr_contains_comptime(&l.body),
+        Expr::Match(m, _) => {
+            expr_contains_comptime(&m.scrutinee)
+                || m.arms.iter().any(|arm| expr_contains_comptime(&arm.body))
+        }
+        Expr::Return(Some(e), _) => expr_contains_comptime(e),
+        Expr::Await(e, _) => expr_contains_comptime(e),
+        _ => false,
     }
 }

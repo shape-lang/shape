@@ -10,10 +10,11 @@ use super::types::TypeAnnotation;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Pattern {
     /// Match a specific identifier and bind it
-    Identifier(String),
+    Identifier { name: String, span: Span },
     /// Match by type and bind identifier when the runtime value conforms
     Typed {
         name: String,
+        name_span: Span,
         type_annotation: TypeAnnotation,
     },
     /// Match a literal value
@@ -43,10 +44,11 @@ pub enum PatternConstructorFields {
 impl std::fmt::Display for Pattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Pattern::Identifier(name) => write!(f, "{}", name),
+            Pattern::Identifier { name, .. } => write!(f, "{}", name),
             Pattern::Typed {
                 name,
                 type_annotation,
+                ..
             } => write!(f, "{}: {:?}", name, type_annotation),
             Pattern::Wildcard => write!(f, "_"),
             Pattern::Literal(lit) => write!(f, "{}", lit),
@@ -109,12 +111,60 @@ impl std::fmt::Display for Pattern {
 }
 
 impl Pattern {
+    /// Create an identifier pattern with a source span for the binder.
+    pub fn identifier(name: impl Into<String>, span: Span) -> Self {
+        Pattern::Identifier {
+            name: name.into(),
+            span,
+        }
+    }
+
+    /// Create an identifier pattern for synthesized AST nodes.
+    pub fn synthetic_identifier(name: impl Into<String>) -> Self {
+        Pattern::identifier(name, Span::DUMMY)
+    }
+
     /// Get the simple identifier name if this is a simple pattern
     pub fn as_simple_name(&self) -> Option<&str> {
         match self {
-            Pattern::Identifier(name) => Some(name),
+            Pattern::Identifier { name, .. } => Some(name),
             Pattern::Typed { name, .. } => Some(name),
             _ => None,
+        }
+    }
+
+    /// Get the source span for the binder name in simple binding patterns.
+    pub fn binder_span(&self) -> Option<Span> {
+        match self {
+            Pattern::Identifier { span, .. } => Some(*span),
+            Pattern::Typed { name_span, .. } => Some(*name_span),
+            _ => None,
+        }
+    }
+
+    /// Get all binding names and binder spans recursively from this pattern.
+    pub fn get_bindings(&self) -> Vec<(String, Span)> {
+        match self {
+            Pattern::Identifier { name, span } => vec![(name.clone(), *span)],
+            Pattern::Typed {
+                name, name_span, ..
+            } => vec![(name.clone(), *name_span)],
+            Pattern::Array(patterns) => patterns.iter().flat_map(Pattern::get_bindings).collect(),
+            Pattern::Object(fields) => fields
+                .iter()
+                .flat_map(|(_, pattern)| pattern.get_bindings())
+                .collect(),
+            Pattern::Constructor { fields, .. } => match fields {
+                PatternConstructorFields::Unit => Vec::new(),
+                PatternConstructorFields::Tuple(patterns) => {
+                    patterns.iter().flat_map(Pattern::get_bindings).collect()
+                }
+                PatternConstructorFields::Struct(fields) => fields
+                    .iter()
+                    .flat_map(|(_, pattern)| pattern.get_bindings())
+                    .collect(),
+            },
+            Pattern::Wildcard | Pattern::Literal(_) => Vec::new(),
         }
     }
 }

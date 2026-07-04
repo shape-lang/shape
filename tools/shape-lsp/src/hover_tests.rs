@@ -1651,8 +1651,8 @@ fn test_get_content_api_hover_unknown() {
 
 #[test]
 fn test_get_content_member_hover_known() {
-    let hover = get_content_member_hover("Content", "text")
-        .expect("expected hover for Content.text");
+    let hover =
+        get_content_member_hover("Content", "text").expect("expected hover for Content.text");
     if let HoverContents::Markup(markup) = hover.contents {
         assert!(
             markup.value.contains("Content.text") || markup.value.contains("text"),
@@ -1731,7 +1731,10 @@ fn test_is_annotation_word_at_position_no_at_sign() {
             character: 3,
         },
     );
-    assert!(!result, "expected non-@ word to not be detected as annotation");
+    assert!(
+        !result,
+        "expected non-@ word to not be detected as annotation"
+    );
 }
 
 #[test]

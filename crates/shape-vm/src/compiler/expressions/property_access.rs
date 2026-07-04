@@ -3,10 +3,9 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::NumericType;
-use shape_ast::ast::{DataIndex, Expr, Spanned, TypeAnnotation};
+use shape_ast::ast::{DataIndex, Expr, Spanned};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
-use shape_runtime::type_system::{BuiltinTypes, Type};
 
 use shape_value::v2::struct_layout::FieldKind;
 
@@ -16,8 +15,6 @@ use super::super::BytecodeCompiler;
 enum TypedLengthLocal {
     /// Receiver is a typed array — emit `ArrayLenTyped(slot)`
     Array(u16),
-    /// Receiver is a typed HashMap — emit `MapLenTyped(slot)`
-    Map(u16),
     /// Receiver is a string — emit `StringLenTyped(slot)`
     String(u16),
 }
@@ -39,51 +36,68 @@ fn field_type_to_numeric(ft: &FieldType) -> Option<NumericType> {
     }
 }
 
-fn basic_name_to_numeric(name: &str) -> Option<NumericType> {
-    if BuiltinTypes::is_integer_type_name(name) {
-        return Some(NumericType::Int);
-    }
-    if BuiltinTypes::is_number_type_name(name) {
-        return Some(NumericType::Number);
-    }
-    match name {
-        "decimal" | "Decimal" => Some(NumericType::Decimal),
-        _ => None,
-    }
-}
-
-fn array_type_name_to_numeric(type_name: &str) -> Option<NumericType> {
-    let inner = type_name
-        .strip_prefix("Vec<")
-        .and_then(|s| s.strip_suffix('>'))?;
-    basic_name_to_numeric(inner.trim())
-}
-
-fn type_annotation_to_numeric(annotation: &TypeAnnotation) -> Option<NumericType> {
-    match annotation {
-        TypeAnnotation::Basic(name) => basic_name_to_numeric(name),
-        TypeAnnotation::Reference(name) => basic_name_to_numeric(name),
-        TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
-            type_annotation_to_numeric(&args[0])
-        }
-        _ => None,
+/// SC1 style-spec namespace member resolution.
+///
+/// `Color` / `Border` / `ChartType` are not types or variables — they are
+/// compile-time-constant namespaces whose members (`Color.red`,
+/// `Border.rounded`, `ChartType.line`, …) lower to a canonical string
+/// carrier matching the Rust `NamedColor` / `BorderStyle` / `ChartType`
+/// enums in `shape-value/src/content.rs`. The returned string is the
+/// serde snake_case spec name; `None` means the namespace+member pair is
+/// not a recognised style spec.
+///
+/// NOTE: `NamedColor` has 8 variants (red/green/blue/yellow/magenta/cyan/
+/// white/default) — there is NO `black`, matching the book. `BorderStyle`
+/// has 6, `ChartType` has 9 (the book writes `boxplot` one word; the Rust
+/// variant is `BoxPlot`, serde `box_plot`, so the user-facing member name
+/// is `boxplot`).
+fn style_spec_member(namespace: &str, member: &str) -> Option<String> {
+    let valid = style_spec_members(namespace);
+    if valid.contains(&member) {
+        Some(member.to_string())
+    } else {
+        None
     }
 }
 
-fn index_result_numeric_from_object_type(ty: &Type) -> Option<NumericType> {
-    match ty {
-        Type::Concrete(TypeAnnotation::Array(inner)) => type_annotation_to_numeric(inner),
-        Type::Concrete(TypeAnnotation::Generic { name, args })
-            if name == "Option" && args.len() == 1 =>
-        {
-            match &args[0] {
-                TypeAnnotation::Array(elem) => type_annotation_to_numeric(elem),
-                _ => None,
-            }
-        }
-        _ => None,
+/// Whether `namespace` is one of the SC1 style-spec namespaces (used to
+/// reject unknown members cleanly rather than emit a generic
+/// "Undefined variable").
+fn is_style_spec_namespace(namespace: &str) -> bool {
+    matches!(namespace, "Color" | "Border" | "ChartType")
+}
+
+/// The valid member names for a style-spec namespace. `Color.rgb` is the
+/// call-form constructor (handled as a builtin, not a member), so it is
+/// not listed here.
+fn style_spec_members(namespace: &str) -> &'static [&'static str] {
+    match namespace {
+        "Color" => &[
+            "red", "green", "blue", "yellow", "magenta", "cyan", "white", "default",
+        ],
+        "Border" => &["rounded", "sharp", "heavy", "double", "minimal", "none"],
+        "ChartType" => &[
+            "line",
+            "bar",
+            "scatter",
+            "area",
+            "candlestick",
+            "histogram",
+            "boxplot",
+            "heatmap",
+            "bubble",
+        ],
+        _ => &[],
     }
 }
+
+// U4-4: `basic_name_to_numeric`, `array_type_name_to_numeric` (a `Vec<...>`
+// string re-parse), `type_annotation_to_numeric`, and
+// `index_result_numeric_from_object_type` are DELETED. They projected an
+// `arr[i]` element type to a `NumericType` only to stamp the deleted
+// `last_expr_numeric_type` register. The index-result numeric kind is now
+// derived from the one resolved Type via `numeric_type_of` →
+// `infer_expr_type` (which resolves `arr[i]` via `tracked_array_element_type`).
 
 impl BytecodeCompiler {
     /// Compile a property access expression
@@ -102,6 +116,70 @@ impl BytecodeCompiler {
                 message: format!(
                     "Module namespace access must use `::`. Replace `{}.{}` with an explicit import or `{}::...` call.",
                     name, property, name
+                ),
+                location: Some(self.span_to_source_location(*span)),
+            });
+        }
+
+        if let Some(name) = self.pending_empty_array_accumulator_name_for_expr(object) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "cannot infer the type of field read from `{name}` because it was \
+                     created from an unannotated empty array (`[]`); annotate the array \
+                     (`let mut {name}: Array<T> = []`) before reading element fields"
+                ),
+                location: Some(self.span_to_source_location(object.span())),
+            });
+        }
+
+        // SC1 (R8 — supervisor): style-spec namespace member access.
+        // `Color.red` / `Border.rounded` / `ChartType.line` etc. are NOT
+        // variables — they are compile-time-constant style specs. The
+        // runtime carrier is a `string` holding the canonical serde
+        // snake_case name (mirroring the Rust `NamedColor` / `BorderStyle`
+        // / `ChartType` enums in `shape-value/src/content.rs`). Emitting a
+        // `Constant::String` directly reuses the existing string-typed
+        // `.border(style)` method and the future `.fg`/`.bg`/`Content.chart`
+        // parsers with no new HeapKind and no parallel discriminator. The
+        // call-form `Color.rgb(r,g,b)` is handled separately as a builtin
+        // (it has runtime args). An unknown member rejects cleanly.
+        if !optional
+            && let Expr::Identifier(ns, span) = object
+            && self.resolve_local(ns).is_none()
+            && !self.mutable_closure_captures.contains_key(ns.as_str())
+            && self.type_tracker.schema_registry().get(ns).is_none()
+            && let Some(spec) = style_spec_member(ns, property)
+        {
+            let const_idx = self.program.add_constant(Constant::String(spec));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(const_idx)),
+            ));
+            self.last_expr_schema = None;
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                "string".to_string(),
+            ));
+            self.clear_last_expr_reference_result();
+            let _ = span;
+            return Ok(());
+        }
+        // A bare style-spec namespace member that does not match any known
+        // variant rejects cleanly (e.g. `Color.bogus`) rather than falling
+        // through to a generic "Undefined variable" on the namespace name.
+        if !optional
+            && let Expr::Identifier(ns, span) = object
+            && self.resolve_local(ns).is_none()
+            && !self.mutable_closure_captures.contains_key(ns.as_str())
+            && self.type_tracker.schema_registry().get(ns).is_none()
+            && is_style_spec_namespace(ns)
+        {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Unknown {} member '{}.{}'. Valid members: {}",
+                    ns,
+                    ns,
+                    property,
+                    style_spec_members(ns).join(", "),
                 ),
                 location: Some(self.span_to_source_location(*span)),
             });
@@ -152,10 +230,10 @@ impl BytecodeCompiler {
         // Check for RowView property access - emit typed column opcode
         if let Expr::Identifier(name, _) = object {
             if let Some(col_id) = self.try_resolve_row_view_column(name, property) {
+                // Prove the schema field type before emitting any typed column load.
+                let opcode = self.row_view_field_opcode(name, property)?;
                 // Compile the object (pushes RowView onto stack)
                 self.compile_expr(object)?;
-                // Emit typed column load based on field type
-                let opcode = self.row_view_field_opcode(name, property);
                 self.emit(Instruction::new(
                     opcode,
                     Some(Operand::ColumnAccess { col_id }),
@@ -163,8 +241,6 @@ impl BytecodeCompiler {
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
                 // Propagate numeric type from RowView field type
-                self.last_expr_numeric_type =
-                    self.resolve_row_view_field_numeric_type(name, property);
                 return Ok(());
             }
             // If the variable IS a RowView but the field was NOT found → compile error
@@ -189,33 +265,18 @@ impl BytecodeCompiler {
         // The type name is not a variable, so we resolve the comptime field directly
         // without compiling the object expression.
         if let Expr::Identifier(type_name, _) = object {
-            if self
+            if let Some(slot) = self
                 .comptime_fields
                 .get(type_name.as_str())
                 .and_then(|m| m.get(property))
-                .is_some()
+                .cloned()
             {
-                // SURFACE: the kinded `KindedSlot → Constant` projection
-                // for comptime field reads lives in phase-2c (ADR-006
-                // §2.4). The carrier-tier `comptime_fields` registry is
-                // already `HashMap<String, HashMap<String, KindedSlot>>`,
-                // but the producer side that bakes comptime defaults into
-                // it is dormant (see `statements.rs:2450-2512` —
-                // recognised-literal arms are validated but never stored),
-                // so this branch is currently unreachable in real
-                // programs. Returning a structured semantic error rather
-                // than a panic keeps the surface honest when a future
-                // phase-2c commit wires the producer side but lands ahead
-                // of the projector. Tracked as `c3-expr-lowering-misc`
-                // per playbook §3 (Wave 2.5).
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "comptime field access '{}.{}' is dormant pending the phase-2c \
-                         KindedSlot-to-Constant projection rebuild (ADR-006 §2.4 / §2.7.4)",
-                        type_name, property
-                    ),
-                    location: Some(self.span_to_source_location(object.span())),
-                });
+                return self.emit_comptime_field_constant(
+                    type_name,
+                    property,
+                    &slot,
+                    object.span(),
+                );
             }
         }
 
@@ -275,10 +336,7 @@ impl BytecodeCompiler {
                  empty chain for a resolved typed_field_place",
             );
             for field_operand in field_chain {
-                self.emit(Instruction::new(
-                    OpCode::MakeFieldRef,
-                    Some(field_operand),
-                ));
+                self.emit(Instruction::new(OpCode::MakeFieldRef, Some(field_operand)));
             }
             self.emit(Instruction::new(
                 OpCode::StoreLocal,
@@ -298,7 +356,6 @@ impl BytecodeCompiler {
                 _ => None,
             };
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = field_type_to_numeric(&place.field_type_info);
             return Ok(());
         }
 
@@ -333,17 +390,6 @@ impl BytecodeCompiler {
                         ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = Some(NumericType::Int);
-                        return Ok(());
-                    }
-                    TypedLengthLocal::Map(slot) => {
-                        self.emit(Instruction::new(
-                            OpCode::MapLenTyped,
-                            Some(Operand::Local(slot)),
-                        ));
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = Some(NumericType::Int);
                         return Ok(());
                     }
                     TypedLengthLocal::String(slot) => {
@@ -353,7 +399,6 @@ impl BytecodeCompiler {
                         ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = Some(NumericType::Int);
                         return Ok(());
                     }
                 }
@@ -379,23 +424,14 @@ impl BytecodeCompiler {
                     .and_then(|m| m.get(property))
                     .cloned();
 
-                if comptime_value.is_some() {
-                    // SURFACE: same boundary as the static-path branch
-                    // above. The kinded `KindedSlot → Constant`
-                    // projection for comptime field reads lives in
-                    // phase-2c (ADR-006 §2.4 / §2.7.4); the producer side
-                    // (`statements.rs:2450-2512`) is dormant so this
-                    // branch is currently unreachable. Tracked as
-                    // `c3-expr-lowering-misc` per playbook §3.
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "comptime field access '{}.{}' (via schema lookup) is dormant \
-                             pending the phase-2c KindedSlot-to-Constant projection rebuild \
-                             (ADR-006 §2.4 / §2.7.4)",
-                            type_name, property
-                        ),
-                        location: Some(self.span_to_source_location(object.span())),
-                    });
+                if let Some(slot) = comptime_value {
+                    self.emit(Instruction::simple(OpCode::Pop));
+                    return self.emit_comptime_field_constant(
+                        &type_name,
+                        property,
+                        &slot,
+                        object.span(),
+                    );
                 }
             }
         }
@@ -412,10 +448,8 @@ impl BytecodeCompiler {
                         .get_v2_layout(schema_id)
                         .and_then(|layout| {
                             // Find the field index by name in the layout
-                            let field_idx = layout
-                                .fields
-                                .iter()
-                                .position(|f| f.name == property)?;
+                            let field_idx =
+                                layout.fields.iter().position(|f| f.name == property)?;
                             let byte_offset = layout.field_offset(field_idx);
                             let field_kind = layout.field_kind(field_idx);
                             // Map FieldKind to v2 load opcode
@@ -558,7 +592,6 @@ impl BytecodeCompiler {
         };
         self.last_expr_type_info = None;
         // Propagate numeric type from field type for typed opcode emission
-        self.last_expr_numeric_type = field_numeric_type;
         // D-α.2: when the slow-path `Length` / `TypedArrayLen` opcode was
         // emitted (reached only when neither a v2 field load nor a typed-
         // object field-tag carrier applied), the produced value is always
@@ -572,9 +605,7 @@ impl BytecodeCompiler {
             && v2_load_opcode.is_none()
             && typed_field.is_none()
             && field_numeric_type.is_none()
-        {
-            self.last_expr_numeric_type = Some(NumericType::Int);
-        }
+        {}
         Ok(())
     }
 
@@ -585,35 +616,11 @@ impl BytecodeCompiler {
         index: &Expr,
         end_index: &Option<Box<Expr>>,
     ) -> Result<()> {
-        let tracked_numeric = if let Expr::Identifier(name, _) = object {
-            if let Some(local_idx) = self.resolve_local(name) {
-                self.type_tracker
-                    .get_local_type(local_idx)
-                    .and_then(|info| info.type_name.as_deref())
-                    .and_then(array_type_name_to_numeric)
-            } else {
-                let scoped_name = self
-                    .resolve_scoped_module_binding_name(name)
-                    .unwrap_or_else(|| name.to_string());
-                self.module_bindings
-                    .get(&scoped_name)
-                    .and_then(|binding_idx| self.type_tracker.get_binding_type(*binding_idx))
-                    .and_then(|info| info.type_name.as_deref())
-                    .and_then(array_type_name_to_numeric)
-            }
-        } else {
-            None
-        };
-
-        let inferred_numeric = if end_index.is_none() {
-            tracked_numeric.or_else(|| {
-                self.infer_expr_type(object)
-                    .ok()
-                    .and_then(|ty| index_result_numeric_from_object_type(&ty))
-            })
-        } else {
-            None
-        };
+        // U4-4: the `arr[i]` index-result numeric-type computation (formerly
+        // stamped onto the deleted `last_expr_numeric_type` register) is
+        // removed — a downstream `arr[i] + 1` derives the element's numeric
+        // kind from the one resolved Type (`numeric_type_of` →
+        // `infer_expr_type` → `tracked_array_element_type`).
 
         // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr[i]`.
         // Resolve the receiver kind BEFORE compiling the object —
@@ -635,13 +642,9 @@ impl BytecodeCompiler {
         if end_index.is_none() {
             if let Some((slot, elem_opcode)) = self.try_resolve_typed_elem_get(object) {
                 self.compile_expr(index)?;
-                self.emit(Instruction::new(
-                    elem_opcode,
-                    Some(Operand::Local(slot)),
-                ));
+                self.emit(Instruction::new(elem_opcode, Some(Operand::Local(slot))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = inferred_numeric;
                 return Ok(());
             }
         }
@@ -665,7 +668,6 @@ impl BytecodeCompiler {
                 emit_index_trait_call(self, "index", 1);
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = None;
                 return Ok(());
             }
         }
@@ -686,7 +688,6 @@ impl BytecodeCompiler {
         // Index access result is typically not a TypedObject
         self.last_expr_schema = None;
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = inferred_numeric;
         Ok(())
     }
 
@@ -703,16 +704,16 @@ impl BytecodeCompiler {
         if self.v2_typed_array_locals.contains_key(&local_idx) {
             return Some(TypedLengthLocal::Array(local_idx));
         }
-        // Typed HashMap (v2)
-        if self.v2_typed_map_locals.contains_key(&local_idx) {
-            return Some(TypedLengthLocal::Map(local_idx));
-        }
         // String (non-param locals with confirmed type name)
         if !self.param_locals.contains(&local_idx) {
             let is_string = self
                 .type_tracker
                 .get_local_type(local_idx)
-                .and_then(|info| info.type_name.as_deref().map(|n| n == "string" || n == "String"))
+                .and_then(|info| {
+                    info.type_name
+                        .as_deref()
+                        .map(|n| n == "string" || n == "String")
+                })
                 .unwrap_or(false);
             if is_string {
                 return Some(TypedLengthLocal::String(local_idx));

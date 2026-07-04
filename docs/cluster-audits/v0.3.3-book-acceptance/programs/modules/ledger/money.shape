@@ -1,0 +1,48 @@
+// ledger/money.shape  -> importable as "ledger::money"
+//
+// Exact integer-cents money helpers + string formatting. No floats: every
+// result is deterministic and machine-proofable. Demonstrates a leaf module
+// (no intra-library imports) that other modules depend on.
+
+// Absolute value for ints (the global `abs` is not in the prelude here, so
+// the library ships its own — a realistic "utility module" situation).
+pub fn iabs(x: int) -> int {
+    if x < 0 { 0 - x } else { x }
+}
+
+// Whole-dollar part (truncated toward zero) of a signed cent amount.
+pub fn dollars(cents: int) -> int {
+    cents / 100
+}
+
+// Two-digit cent remainder (always 0..99), independent of sign.
+pub fn cent_part(cents: int) -> int {
+    iabs(cents) % 100
+}
+
+// Left-pad the cents remainder to two digits ("5" -> "05").
+pub fn pad2(n: int) -> string {
+    if n < 10 {
+        f"0{n}"
+    } else {
+        f"{n}"
+    }
+}
+
+// Format a signed cent amount as a currency string, e.g.
+//   1234  -> "$12.34"
+//   -50   -> "-$0.50"
+//   0     -> "$0.00"
+pub fn format(cents: int) -> string {
+    let sign = if cents < 0 { "-" } else { "" }
+    let d = iabs(dollars(cents))
+    let c = cent_part(cents)
+    f"{sign}${d}.{pad2(c)}"
+}
+
+// Sum a list of cent amounts exactly.
+pub fn total(amounts: Array<int>) -> int {
+    let mut acc = 0
+    for a in amounts { acc = acc + a }
+    acc
+}

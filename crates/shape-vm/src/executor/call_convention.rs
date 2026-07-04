@@ -81,7 +81,7 @@
 //! enforced via `debug_assert_eq!` at every frame-construction site.
 
 use shape_value::v2::closure_raw::{OwnedClosureBlock, typed_closure_function_id};
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, VMError, ValueSlot};
 
 use super::task_scheduler::TaskStatus;
 use super::vm_impl::stack::clone_with_kind;
@@ -89,6 +89,14 @@ use super::vm_impl::stack::clone_with_kind;
 use super::{CallFrame, VirtualMachine};
 
 impl VirtualMachine {
+    #[inline]
+    fn ensure_call_stack_capacity(&self) -> Result<(), VMError> {
+        if self.call_stack.len() >= self.config.max_call_depth {
+            return Err(VMError::StackOverflow);
+        }
+        Ok(())
+    }
+
     /// Execute a named function with arguments, returning its result.
     ///
     /// **W7-cv-method (Round 3 close).** Resolves `name` to `func_id` via
@@ -262,10 +270,7 @@ impl VirtualMachine {
                     // `args[idx] = ...` write below — Drop-no-op for
                     // (NONE_BITS, Bool).
                     super::vm_impl::stack::clone_with_kind(value.slot.raw(), value.kind);
-                    args[idx] = KindedSlot::new(
-                        ValueSlot::from_raw(value.slot.raw()),
-                        value.kind,
-                    );
+                    args[idx] = KindedSlot::new(ValueSlot::from_raw(value.slot.raw()), value.kind);
                 }
             }
         }
@@ -549,8 +554,12 @@ impl VirtualMachine {
         // strong-count. Same pattern as `TaskScheduler::resolve_task`
         // and `try_resolve_external` cached-completion paths.
         clone_with_kind(result_bits, result_kind);
-        self.task_scheduler.complete(task_id, result_bits, result_kind);
-        Ok(KindedSlot::new(ValueSlot::from_raw(result_bits), result_kind))
+        self.task_scheduler
+            .complete(task_id, result_bits, result_kind);
+        Ok(KindedSlot::new(
+            ValueSlot::from_raw(result_bits),
+            result_kind,
+        ))
     }
 
     /// Non-closure frame setup from a `&[KindedSlot]` arg slice
@@ -577,6 +586,8 @@ impl VirtualMachine {
         func_id: u16,
         args: &[KindedSlot],
     ) -> Result<(), VMError> {
+        self.ensure_call_stack_capacity()?;
+
         let (locals_count, entry_point) = {
             let func = self
                 .program
@@ -652,6 +663,7 @@ impl VirtualMachine {
     /// ABI shape — the kinded replacement takes a borrowed
     /// `OwnedClosureBlock` per ADR-006 §2.7.8 / Q10 (the cell-storage
     /// parallel-kind track is the canonical capture-kind source).
+    #[allow(dead_code)]
     pub(crate) fn call_closure_with_nb_args(
         &mut self,
         func_id: u16,
@@ -700,6 +712,8 @@ impl VirtualMachine {
         closure_heap_bits: Option<u64>,
         closure_heap_kind: Option<NativeKind>,
     ) -> Result<(), VMError> {
+        self.ensure_call_stack_capacity()?;
+
         debug_assert_eq!(
             closure_heap_bits.is_some(),
             closure_heap_kind.is_some(),
@@ -730,13 +744,55 @@ impl VirtualMachine {
             self.kinds.resize(needed * 2 + 1, NativeKind::Bool);
         }
 
+        // ADR-006 §2.7.8 / Q10 — upvalue-frame wiring (Bucket-2
+        // mutable-capture fix). Capture access in the closure body splits
+        // by `CaptureKind`:
+        //
+        //   * `Immutable` captures are leading params (see
+        //     `compile_expr_closure`'s `closure_params` build) and the
+        //     body reads them as LOCAL slots via `LoadLocal`. The local
+        //     write loop below installs them.
+        //   * `OwnedMutable` / `Shared` captures are accessed via the
+        //     `Load/StoreOwnedMutableCapture<Kind>` / `Load/StoreSharedCapture<Kind>`
+        //     opcodes, which read `frame.upvalues[idx]` to recover the
+        //     interior cell pointer (`*mut T` from `alloc_owned_mutable_*`
+        //     or `*const SharedCell` from `Arc::into_raw`). Those opcodes
+        //     abort with "mutable/shared capture access in a frame without
+        //     upvalues" when `frame.upvalues` is `None`.
+        //
+        // Build the upvalue indirection table from the closure block's
+        // capture slots: `frame.upvalues[idx]` = the raw 8-byte bits of
+        // capture slot `idx`. For `OwnedMutable` / `Shared` those bits are
+        // the interior cell pointer (the value the capture opcodes
+        // dereference); for `Immutable` they mirror the by-value payload
+        // (used by the `LoadClosure` / `StoreClosure` polymorphic shells,
+        // which also read `frame.upvalues`).
+        //
+        // OWNERSHIP: the upvalue table holds RAW bits only — it does NOT
+        // take a refcount share. The cell / SharedCell is owned by the
+        // closure block, which stays live for the whole call (the
+        // `closure_block` borrow is held by the dispatch shell, and the
+        // closure-self share rides `closure_heap_bits`). `frame.upvalues`
+        // is dropped as a plain `Vec<u64>` at frame teardown
+        // (`truncate_stack` touches only the data stack, never the upvalue
+        // table), so no `drop_with_kind` is owed for it.
+        let mut upvalues: Vec<u64> = Vec::with_capacity(capture_count);
+        for capture_idx in 0..capture_count {
+            // SAFETY: the block was constructed by the producing
+            // `MakeClosure` opcode with `capture_count` initialised
+            // capture slots; the borrow from the dispatch shell holds
+            // the block live for the duration of this call.
+            let (bits, _kind) = unsafe { closure_block.read_capture_kinded(capture_idx) };
+            upvalues.push(bits);
+        }
+
         let return_ip = self.ip;
         self.call_stack.push(CallFrame {
             return_ip,
             base_pointer,
             locals_count,
             function_id: Some(func_id),
-            upvalues: None,
+            upvalues: Some(upvalues),
             blob_hash,
             closure_heap_bits,
             // ADR-006 §2.7.8 / Q10: lockstep companion to
@@ -745,33 +801,43 @@ impl VirtualMachine {
             closure_heap_kind,
         });
 
-        // Walk captures from the closure layout's parallel-kind track
-        // (ADR-006 §2.7.8 / Q10). `read_capture_kinded(idx)` returns
-        // `(bits, kind)` directly — the kind comes from
-        // `layout.capture_native_kinds[idx]`, set at closure
-        // construction by the producing `MakeClosure` opcode. No
-        // fabrication, no Bool-default fallback (§2.7.8 #4 forbidden);
-        // a misalignment between layout and stored bits is a
-        // construction-side bug that surfaces as a panic from
-        // `read_capture_kinded` itself (W7 playbook §8 surface-and-stop).
+        // Install `Immutable` captures into their leading-param LOCAL
+        // slots. `read_capture_kinded(idx)` returns `(bits, kind)` directly
+        // — the kind comes from `layout.capture_native_kinds[idx]`, set at
+        // closure construction by the producing `MakeClosure` opcode. No
+        // fabrication, no Bool-default fallback (§2.7.8 #4 forbidden).
+        //
+        // `OwnedMutable` / `Shared` captures are SKIPPED here: they are
+        // accessed through `frame.upvalues` (wired above), never as
+        // locals, and their `read_capture_kinded` kind classifies the cell
+        // INTERIOR (closure_raw.rs:138-146) — `clone_with_kind` on the
+        // cell-pointer bits with a heap-bearing interior kind (e.g.
+        // `String`) would retain the cell pointer as if it were the heap
+        // payload, a refcount-corruption bug. The leading-param slot stays
+        // the `(NONE_BITS, Bool)` sentinel (Drop-no-op at teardown).
         //
         // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
         // `read_capture_kinded` is a raw bit read — does NOT bump the
         // capture's refcount. The frame's `truncate_stack(bp)` at
-        // `op_return_value` teardown WILL release each capture's share
-        // via `drop_with_kind`. The closure block itself ALSO owns one
-        // share per capture (released at `OwnedClosureBlock::Drop` via
+        // `op_return_value` teardown WILL release each Immutable capture's
+        // share via `drop_with_kind`. The closure block itself ALSO owns
+        // one share per capture (released at `OwnedClosureBlock::Drop` via
         // the capture-mask walk). Without the `clone_with_kind` below,
         // both releases retire one share more than was acquired — same
         // pattern as the Round 13 T5 `closure_heap_bits` companion fix
         // for the closure-self share. Mirror precedent: the explicit
         // `clone_with_kind` at `call_value_immediate_nb` line 870 for
         // the callee carrier.
+        use shape_value::v2::closure_layout::CaptureKind;
         for capture_idx in 0..capture_count {
-            // SAFETY: the block was constructed by the producing
-            // `MakeClosure` opcode with `capture_count` initialised
-            // capture slots; the borrow from the dispatch shell holds
-            // the block live for the duration of this call.
+            if !matches!(
+                layout.capture_storage_kind(capture_idx),
+                CaptureKind::Immutable
+            ) {
+                continue;
+            }
+            // SAFETY: see the upvalue-table loop above — same construction
+            // invariant and live-block borrow.
             let (bits, kind) = unsafe { closure_block.read_capture_kinded(capture_idx) };
             crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
             self.stack_write_kinded(base_pointer + capture_idx, bits, kind);
@@ -835,6 +901,51 @@ impl VirtualMachine {
     /// `HeapValue::HostClosure` variant referenced in pre-Wave-7 docs
     /// has been deleted; only `ClosureRaw` survives in the
     /// closure-dispatch path.
+    /// Error-unwind frame cleanup (ADR-006 §2.7.8 / Q10, 2026-06-18).
+    ///
+    /// When a nested value-call aborts with a `VMError`, every frame the
+    /// callee pushed beyond `target_depth` is still on `self.call_stack`
+    /// — `op_return` / `op_return_value` never ran for them, so the
+    /// per-frame teardown (data-stack truncate + `closure_heap_bits`
+    /// keep-alive release) was skipped. This pops those frames in
+    /// reverse, performing the SAME teardown `return_value_inner` does on
+    /// the happy path: truncate the data stack to each frame's base
+    /// pointer (releasing live slot shares via the §2.7.7 parallel-kind
+    /// track) and release the closure-self keep-alive via
+    /// `drop_with_kind(bits, kind)` on the lockstep
+    /// `closure_heap_bits` / `closure_heap_kind` companion. Inline-scalar
+    /// keep-alive kinds are no-op drops; heap-bearing kinds retire exactly
+    /// the one share the matching `clone_with_kind` installed at frame
+    /// setup. No bare `vw_drop` (§2.7.7 #8), no `is_heap()` probe
+    /// (§2.7.7 #7), no Bool-default fallback (§2.7.8 #4).
+    fn unwind_call_frames_to(&mut self, target_depth: usize) {
+        while self.call_stack.len() > target_depth {
+            let Some(frame) = self.call_stack.pop() else {
+                break;
+            };
+            let bp = frame.base_pointer;
+            if bp <= self.sp {
+                self.truncate_stack(bp);
+            }
+            match (frame.closure_heap_bits, frame.closure_heap_kind) {
+                (Some(bits), Some(kind)) => {
+                    crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+                }
+                (None, None) => {}
+                (bits, kind) => {
+                    debug_assert!(
+                        false,
+                        "ADR-006 §2.7.8 / Q10: CallFrame.closure_heap_bits / \
+                         closure_heap_kind lockstep violated during error unwind: \
+                         bits={:?}, kind={:?}",
+                        bits.is_some(),
+                        kind.is_some(),
+                    );
+                }
+            }
+        }
+    }
+
     pub fn call_value_immediate_nb(
         &mut self,
         callee: &KindedSlot,
@@ -938,6 +1049,7 @@ impl VirtualMachine {
                 // share-balance pattern as
                 // `execute_function_with_named_args` (lines 246-250)
                 // which clones each named-arg into the positional vec.
+                self.ensure_call_stack_capacity()?;
                 super::vm_impl::stack::clone_with_kind(callee.slot.raw(), callee.kind);
                 self.call_closure_with_nb_args_keepalive(
                     function_id,
@@ -953,7 +1065,28 @@ impl VirtualMachine {
                 // The return value is left on the value stack by
                 // `op_return_value`; pop it via the kinded API so the
                 // share transfers cleanly into the result `KindedSlot`.
-                self.execute_until_call_depth(saved_call_depth, ctx)?;
+                //
+                // CaptureCarrier error-unwind fix (ADR-006 §2.7.8 / Q10,
+                // 2026-06-18): if the callee aborts with a `VMError`
+                // (e.g. a runtime division-by-zero inside the closure body,
+                // or a `StoreSharedCapturePtr` mid-life kind-change SURFACE),
+                // `op_return` / `op_return_value` never runs for the in-flight
+                // frame(s), so the closure-self keep-alive share installed in
+                // `closure_heap_bits` above (the `clone_with_kind` at the
+                // `call_closure_with_nb_args_keepalive` site) is never
+                // released — leaking the `Arc<HeapValue::ClosureRaw>` block
+                // (valgrind "40 bytes definitely lost" on ANY runtime error
+                // inside a `forEach`/`map` closure). Unwind every frame the
+                // callee pushed beyond `saved_call_depth`, releasing each
+                // frame's `closure_heap_bits` companion via `drop_with_kind`
+                // (the same teardown `return_value_inner` performs on the
+                // happy path) and truncating the data stack to the frame's
+                // base pointer. No bare `vw_drop`, no Bool-default — the kind
+                // is the lockstep `closure_heap_kind` companion.
+                if let Err(e) = self.execute_until_call_depth(saved_call_depth, ctx) {
+                    self.unwind_call_frames_to(saved_call_depth);
+                    return Err(e);
+                }
                 let (bits, kind) = self.pop_kinded()?;
                 Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
             }
@@ -1262,6 +1395,8 @@ impl VirtualMachine {
         func_id: u16,
         arg_count: usize,
     ) -> Result<(), VMError> {
+        self.ensure_call_stack_capacity()?;
+
         let func = self
             .program
             .functions

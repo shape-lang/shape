@@ -419,16 +419,16 @@ fn block_with_loop_inside() {
 // Trailing semicolons and unit values
 // =========================================================================
 
-/// A trailing semicolon in a block discards the value (returns unit).
+/// A trailing semicolon in a block discards the value (prints as None).
 #[test]
 fn cf_03_trailing_semicolon() {
     let code = r#"
 // Test 03: Trailing semicolon discards value (returns unit)
 let unit = { 1; }
 print(unit)
-// Expected: () or some unit representation
+// Expected: None
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("()");
+    ShapeTest::new(code).expect_run_ok().expect_output("None");
 }
 
 /// Detailed trailing semicolon behavior across various block forms.
@@ -442,7 +442,7 @@ print(f"a={a}")
 
 let b = { 42; }
 print(f"b={b}")
-// Expected: b=() -- but based on test 03, might be b=42
+// Expected: b=None
 
 let c = { 1; 2; 3 }
 print(f"c={c}")
@@ -450,11 +450,11 @@ print(f"c={c}")
 
 let d = { 1; 2; 3; }
 print(f"d={d}")
-// Expected: d=() -- if trailing semicolon discards, or d=3
+// Expected: d=None
 "#;
     ShapeTest::new(code)
         .expect_run_ok()
-        .expect_output("a=42\nb=()\nc=3\nd=()");
+        .expect_output("a=42\nb=None\nc=3\nd=None");
 }
 
 // =========================================================================

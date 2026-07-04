@@ -68,8 +68,7 @@ pub fn create_recurrence_intrinsics_module() -> ModuleExports {
                 name: "initial_value".to_string(),
                 type_name: "number?".to_string(),
                 required: false,
-                description: "Optional seed for y[0]; when omitted, y[0] = input[0]"
-                    .to_string(),
+                description: "Optional seed for y[0]; when omitted, y[0] = input[0]".to_string(),
                 default_snippet: Some("null".to_string()),
                 ..Default::default()
             },

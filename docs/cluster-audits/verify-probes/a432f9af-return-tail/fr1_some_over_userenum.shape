@@ -1,0 +1,9 @@
+enum Color { Red, Green, Blue }
+fn g() -> Result<Color, string> { Ok(Color::Green) }
+fn use_it() -> int {
+  match g() {
+    Ok(Some(n)) => 1,
+    _ => 0,
+  }
+}
+print(use_it())

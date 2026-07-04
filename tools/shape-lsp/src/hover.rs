@@ -334,6 +334,7 @@ impl Visitor for TypedMatchPatternCollector {
                 let Pattern::Typed {
                     name,
                     type_annotation,
+                    ..
                 } = &arm.pattern
                 else {
                     continue;
@@ -1872,12 +1873,14 @@ fn trait_member_signatures_with_impl(
 
     for member in &trait_def.members {
         match member {
-            shape_ast::ast::TraitMember::Required(shape_ast::ast::TraitMemberSignature::Method {
-                name,
-                params,
-                return_type,
-                ..
-            }) => {
+            shape_ast::ast::TraitMember::Required(
+                shape_ast::ast::TraitMemberSignature::Method {
+                    name,
+                    params,
+                    return_type,
+                    ..
+                },
+            ) => {
                 let param_names: Vec<String> = params
                     .iter()
                     .map(|p| {
@@ -1945,7 +1948,6 @@ fn trait_member_signatures_with_impl(
 
     signatures
 }
-
 
 /// Render an "Implementations" section listing every `impl Trait for Type`
 /// block discovered for `type_name`. Returns `None` when no impls are present

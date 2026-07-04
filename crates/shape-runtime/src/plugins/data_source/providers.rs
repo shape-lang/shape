@@ -8,8 +8,8 @@ use std::ptr;
 
 use serde_json::Value;
 use shape_abi_v1::DataSourceVTable;
-use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use shape_ast::error::{Result, ShapeError};
+use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 
 use super::query;
 

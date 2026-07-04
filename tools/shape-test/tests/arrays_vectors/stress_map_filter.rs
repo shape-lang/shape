@@ -43,17 +43,24 @@ fn test_map_double() {
 }
 
 /// Verifies map to float.
+///
+/// strict-flip (v0.3.3 numeric lossless-only): `x * 1.5` is `int * number`,
+/// which under the strict numeric rule requires an explicit `as number` cast on
+/// the `int` operand (no implicit int↔number widening). The map OUTPUT element
+/// is the closure RETURN type (`number`), so the result is `Array<number>` and
+/// the per-element value is the float product — intent preserved, written in
+/// the strict-valid form.
 #[test]
 fn test_map_to_float() {
     ShapeTest::new(
         r#"(
-        [1, 2, 3].map(|x| x * 1.5)
+        [1, 2, 3].map(|x| (x as number) * 1.5)
     )[0]"#,
     )
     .expect_number(1.5);
     ShapeTest::new(
         r#"(
-        [1, 2, 3].map(|x| x * 1.5)
+        [1, 2, 3].map(|x| (x as number) * 1.5)
     )[2]"#,
     )
     .expect_number(4.5);
@@ -64,7 +71,7 @@ fn test_map_to_float() {
 fn test_map_empty_array() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.map(|x| x * 2).length
     "#,
     )
@@ -211,7 +218,7 @@ fn test_filter_some_match() {
 fn test_filter_empty_array() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.filter(|x| x > 0).length
     "#,
     )
@@ -352,7 +359,7 @@ fn test_reduce_single_element() {
 fn test_reduce_empty_returns_initial() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.reduce(|acc, x| acc + x, 99)
     "#,
     )
@@ -473,7 +480,7 @@ fn test_sort_single_element() {
 fn test_sort_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.sort().length
     "#,
     )
@@ -592,7 +599,7 @@ fn test_unique_all_same() {
 fn test_unique_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.unique().length
     "#,
     )

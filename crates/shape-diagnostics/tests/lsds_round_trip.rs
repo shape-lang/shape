@@ -24,8 +24,8 @@
 //! errors are resolved.
 
 use shape_diagnostics::{
-    render, Diagnostic, DiagnosticBuilder, DiagnosticNote, Location, SCHEMA_VERSION, Severity,
-    SuggestedFix,
+    Diagnostic, DiagnosticBuilder, DiagnosticNote, Location, SCHEMA_VERSION, Severity,
+    SuggestedFix, render,
 };
 
 /// Sample B0013 diagnostic — matches what

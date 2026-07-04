@@ -28,15 +28,19 @@ fn ref_on_index_place_expression_is_allowed() {
     .expect_number(0.0);
 }
 
+// FlipLive (ADR-006 §2.7.30): module-scope `let r = &x` (x a program-lifetime
+// module binding) now COMPILES via the ModuleBindingStore floor sink. Renamed
+// from `violation_ref_in_let_binding` — no longer a violation.
 #[test]
-fn violation_ref_in_let_binding() {
+fn module_ref_in_let_binding_compiles() {
     ShapeTest::new(
         r#"
         let x = 5
         let r = &x
+        print(r)
     "#,
     )
-    .expect_run_err_contains("B0003");
+    .expect_output_contains("5");
 }
 
 #[test]
@@ -134,6 +138,16 @@ fn violation_ref_on_binary_expression() {
     .expect_run_err_contains("place expression");
 }
 
+// GAP-2 (ADR-006 §2.7.30 R1): a bare `&a` in operand position is a distinct
+// Borrow type (`&int`) — a fresh borrow, NOT a value read THROUGH a reference
+// binding — so `f(&a) + &a` is rejected (the `+ &a` operand is a reference, not
+// a number). The operator-level auto-deref (finding 9, `operator_deref.rs`) is
+// scoped to reference-BOUND identifiers read via `DerefLoad` (`let r = &a; r +
+// 1`); a bare `&a` operand carries no such read and is caught by the bytecode
+// `reference_operand_span` guard (`compiler/expressions/binary_ops.rs`) with the
+// "reference operand" diagnostic. The rejection (GAP-2) is preserved; only the
+// message moved from the inference-engine "Numeric" form to the more specific
+// bytecode guard form suggesting `*ref`.
 #[test]
 fn violation_ref_in_nested_expression() {
     ShapeTest::new(
@@ -143,9 +157,13 @@ fn violation_ref_in_nested_expression() {
         let b = f(&a) + &a
     "#,
     )
-    .expect_run_err_contains("Cannot apply");
+    .expect_run_err_contains("reference operand");
 }
 
+// GAP-2 (ADR-006 §2.7.30 R1): `&x` is a distinct Borrow type (`&bool`), NOT the
+// referent `bool`. With no truthiness coercion, a `&bool` condition is a genuine
+// type error (`&bool is not compatible with bool`) — strict-typing-correct. Was
+// `expect_number(1.0)` under the pre-flip auto-deref-to-bool behavior.
 #[test]
 fn violation_ref_as_if_condition() {
     ShapeTest::new(
@@ -154,7 +172,7 @@ fn violation_ref_as_if_condition() {
         if &x { 1 } else { 0 }
     "#,
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("&bool");
 }
 
 #[test]

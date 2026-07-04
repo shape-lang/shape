@@ -123,7 +123,11 @@ impl MatrixSliceData {
     /// Construct a projection into a parent matrix.
     #[inline]
     pub fn new(parent: Arc<MatrixData>, offset: u32, len: u32) -> Self {
-        Self { parent, offset, len }
+        Self {
+            parent,
+            offset,
+            len,
+        }
     }
 
     /// Borrow the underlying slice into the parent's flat data buffer.
@@ -520,6 +524,32 @@ impl IoHandleData {
 // (`e58218c`). 4-table lockstep landed there; HeapKind::TraitObject = 29
 // is the assigned ordinal.
 
+/// Miri-only provenance lane for raw pointer slots whose normal ABI is still
+/// an 8-byte address. Strict provenance cannot recover a pointer from the
+/// integer bits alone, so focused Miri tests carry the original pointer next to
+/// the unchanged `ValueSlot` bits.
+#[cfg(miri)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiriSlotProvenance {
+    None,
+    String(*const String),
+    TypedObject(*const TypedObjectStorage),
+}
+
+#[cfg(miri)]
+impl Default for MiriSlotProvenance {
+    #[inline]
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[cfg(miri)]
+unsafe impl Send for MiriSlotProvenance {}
+
+#[cfg(miri)]
+unsafe impl Sync for MiriSlotProvenance {}
+
 /// Owning newtype around `*const TypedObjectStorage` carrying one
 /// v2-raw refcount share on the pointed-to allocation's HeapHeader.
 ///
@@ -802,6 +832,74 @@ impl std::ops::Deref for TraitObjectPtr {
     }
 }
 
+// ── CallablePtr (W29 callable-HashMap, 2026-06-30) ─────────────────────────
+
+/// Owning newtype around `*const HeapValue` carrying one `Arc<HeapValue>`
+/// strong-count share for callable values stored inside `HashMapData`.
+///
+/// Callable HashMap values are normalized to the closure carrier at insertion:
+/// `Arc::into_raw(Arc<HeapValue::ClosureRaw(..)>)` plus
+/// `NativeKind::Ptr(HeapKind::Closure)`. Named function IDs are materialized
+/// into zero-capture closures by the executor before they enter this carrier.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct CallablePtr(pub *const HeapValue);
+
+// SAFETY: The wrapper carries the same aliasing/thread-safety contract as an
+// `Arc<HeapValue>` raw pointer. Clone/Drop adjust the Arc strong count.
+unsafe impl Send for CallablePtr {}
+unsafe impl Sync for CallablePtr {}
+
+impl Default for CallablePtr {
+    #[inline]
+    fn default() -> Self {
+        Self(std::ptr::null())
+    }
+}
+
+impl Clone for CallablePtr {
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.0.is_null() {
+            unsafe { Arc::increment_strong_count(self.0) };
+        }
+        Self(self.0)
+    }
+}
+
+impl Drop for CallablePtr {
+    #[inline]
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { Arc::decrement_strong_count(self.0) };
+        }
+    }
+}
+
+impl CallablePtr {
+    #[inline]
+    pub fn new(ptr: *const HeapValue) -> Self {
+        Self(ptr)
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> *const HeapValue {
+        self.0
+    }
+
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+
+    #[inline]
+    pub fn into_raw(self) -> *const HeapValue {
+        let ptr = self.0;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
 // ── HashMap storage (Stage C P1(b), 2026-05-07) ─────────────────────────────
 //
 // Wave 2 Round 3b C2-joint ckpt-1 (2026-05-14): `HashMapValueBuf` deleted;
@@ -1047,9 +1145,8 @@ unsafe impl HashMapValueElem for TypedObjectPtr {
                 for i in 0..arr.len {
                     let _elem: TypedObjectPtr = std::ptr::read(arr.data.add(i as usize));
                 }
-                let data_layout =
-                    std::alloc::Layout::array::<TypedObjectPtr>(arr.cap as usize)
-                        .expect("invalid array layout");
+                let data_layout = std::alloc::Layout::array::<TypedObjectPtr>(arr.cap as usize)
+                    .expect("invalid array layout");
                 std::alloc::dealloc(arr.data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
@@ -1080,9 +1177,8 @@ unsafe impl HashMapValueElem for TraitObjectPtr {
                 for i in 0..arr.len {
                     let _elem: TraitObjectPtr = std::ptr::read(arr.data.add(i as usize));
                 }
-                let data_layout =
-                    std::alloc::Layout::array::<TraitObjectPtr>(arr.cap as usize)
-                        .expect("invalid array layout");
+                let data_layout = std::alloc::Layout::array::<TraitObjectPtr>(arr.cap as usize)
+                    .expect("invalid array layout");
                 std::alloc::dealloc(arr.data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
@@ -1098,6 +1194,37 @@ unsafe impl HashMapValueElem for TraitObjectPtr {
     #[inline]
     unsafe fn release_owned(_value: Self) {
         // TraitObjectPtr's Drop impl runs at scope-end.
+    }
+}
+
+unsafe impl HashMapValueElem for CallablePtr {
+    /// `CallablePtr` is `#[repr(transparent)]` over `*const HeapValue` and
+    /// has a manual Drop impl that retires the `Arc<HeapValue>` share. Walk
+    /// the buffer via `ptr::read` so each element's Drop runs before freeing
+    /// the typed-array storage.
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                for i in 0..arr.len {
+                    let _elem: CallablePtr = std::ptr::read(arr.data.add(i as usize));
+                }
+                let data_layout = std::alloc::Layout::array::<CallablePtr>(arr.cap as usize)
+                    .expect("invalid array layout");
+                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        elem.clone()
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {
+        // CallablePtr's Drop retires the owned Arc<HeapValue> share.
     }
 }
 
@@ -1132,12 +1259,10 @@ unsafe impl HashMapValueElem for HashMapKindedRef {
                 // via its auto-derived Drop (chains through Arc::drop on
                 // the inner `Arc<HashMapData<V_inner>>`).
                 for i in 0..arr.len {
-                    let _elem: HashMapKindedRef =
-                        std::ptr::read(arr.data.add(i as usize));
+                    let _elem: HashMapKindedRef = std::ptr::read(arr.data.add(i as usize));
                 }
-                let data_layout =
-                    std::alloc::Layout::array::<HashMapKindedRef>(arr.cap as usize)
-                        .expect("invalid array layout");
+                let data_layout = std::alloc::Layout::array::<HashMapKindedRef>(arr.cap as usize)
+                    .expect("invalid array layout");
                 std::alloc::dealloc(arr.data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
@@ -1208,7 +1333,24 @@ pub struct HashMapData<V: HashMapValueElem> {
     /// Eager bucket-index: hash → list of indices into `keys` / `values`
     /// arrays. Enables O(1) lookup at the user-facing `map.get(key)` path.
     /// Hash is computed via FNV-1a over the key string bytes.
-    pub index: std::collections::HashMap<u64, Vec<u32>>,
+    ///
+    /// **Boxed-out-of-line (U3-perf, 2026-06-23).** This is a Copy raw
+    /// pointer to a SEPARATE `Box`-allocated `std::HashMap`, NOT an inline
+    /// field, for the same reason `keys`/`values` are out-of-line raw
+    /// pointers: `insert_at(this: *mut Self, ...)` mutates the index through
+    /// `this` (derived from `Arc::as_ptr` of a SHARED `&Arc<HashMapData<V>>`).
+    /// Forming a Rust `&mut` to an *inline* field reached through such a
+    /// `this` is UB under Stacked/Tree Borrows (it retags the whole Arc
+    /// allocation as uniquely-borrowed). By boxing the index out of line, the
+    /// `&mut *(*this).index` carries the Box allocation's whole-allocation
+    /// provenance — NOT the Arc's — exactly as keys/values do. All three
+    /// fields are now Copy `*mut` to separate allocations; there is ZERO
+    /// `&mut` to any inline field reached via an `Arc::as_ptr`-derived `this`.
+    ///
+    /// Allocated via `Box::into_raw(Box::new(HashMap::new()))` at every
+    /// construction site; freed via `drop(Box::from_raw(self.index))` in
+    /// `Drop`. Always non-null for a live `HashMapData<V>`.
+    pub index: *mut std::collections::HashMap<u64, Vec<u32>>,
 }
 
 // SAFETY: `*mut TypedArray<T>` is `!Send + !Sync` by default. `HashMapData<V>`
@@ -1233,14 +1375,14 @@ impl<V: HashMapValueElem> HashMapData<V> {
         Self {
             // `*const StringObj` is `Copy` (raw pointer), so the Copy-bounded
             // `TypedArray::<*const StringObj>::new` works here.
-            keys: crate::v2::typed_array::TypedArray::<
-                *const crate::v2::string_obj::StringObj,
-            >::new(),
+            keys:
+                crate::v2::typed_array::TypedArray::<*const crate::v2::string_obj::StringObj>::new(),
             // V may be non-Copy (e.g. `TypedObjectPtr` has manual `Drop`),
             // so use the non-Copy `TypedArray::<V>::new_generic` path
             // (allocation only; no element-level reads/writes).
             values: crate::v2::typed_array::TypedArray::<V>::new_generic(),
-            index: std::collections::HashMap::new(),
+            // Boxed out-of-line index (raw provenance, separate allocation).
+            index: Box::into_raw(Box::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1277,12 +1419,10 @@ impl<V: HashMapValueElem> HashMapData<V> {
         // Build the bucket index from the keys buffer. Walks `*const StringObj`
         // pointers without taking ownership; each `StringObj::as_str` is a
         // borrow that's valid while the keys buffer is alive.
-        let mut index: std::collections::HashMap<u64, Vec<u32>> =
-            std::collections::HashMap::new();
+        let mut index: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
         // SAFETY: keys is live + len is the element count.
-        let keys_slice: &[*const crate::v2::string_obj::StringObj] = unsafe {
-            crate::v2::typed_array::TypedArray::as_slice(keys)
-        };
+        let keys_slice: &[*const crate::v2::string_obj::StringObj] =
+            unsafe { crate::v2::typed_array::TypedArray::as_slice(keys) };
         for (i, &key_ptr) in keys_slice.iter().enumerate() {
             // SAFETY: keys-buffer elements are live `*const StringObj` per the
             // construction-side contract (caller owned one share each; that
@@ -1304,7 +1444,8 @@ impl<V: HashMapValueElem> HashMapData<V> {
         Self {
             keys,
             values,
-            index,
+            // Move the locally-built index into a fresh Box (raw provenance).
+            index: Box::into_raw(Box::new(index)),
         }
     }
 
@@ -1338,9 +1479,7 @@ impl<V: HashMapValueElem> HashMapData<V> {
         V: Copy,
     {
         // SAFETY: caller-bound bounds contract + values is live.
-        unsafe {
-            crate::v2::typed_array::TypedArray::get_unchecked(self.values, i as u32)
-        }
+        unsafe { crate::v2::typed_array::TypedArray::get_unchecked(self.values, i as u32) }
     }
 
     /// Look up a value by string key. Returns `Some(i)` (the index into the
@@ -1352,15 +1491,17 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// disambiguation.
     pub fn get_index(&self, key: &str) -> Option<usize> {
         let hash = fnv1a_hash(key.as_bytes());
-        let bucket = self.index.get(&hash)?;
+        // SAFETY: `self.index` is a live Box-allocated HashMap for any live
+        // `HashMapData<V>`; `&*` here is a shared borrow of that separate
+        // allocation (Box provenance, not Arc).
+        let bucket = unsafe { (*self.index).get(&hash)? };
         // SAFETY: keys is live; len is the bucket-recorded element count.
-        let keys_slice = unsafe {
-            crate::v2::typed_array::TypedArray::as_slice(self.keys)
-        };
+        let keys_slice = unsafe { crate::v2::typed_array::TypedArray::as_slice(self.keys) };
         for &idx in bucket {
             let i = idx as usize;
-            // SAFETY: key-buffer elements are live `*const StringObj`.
-            let stored = unsafe { keys_slice[i] };
+            // Reading a `*const StringObj` value out of the slice is a plain
+            // copy; the deref happens below in `StringObj::as_str`.
+            let stored = keys_slice[i];
             let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored) };
             if stored_str == key {
                 return Some(i);
@@ -1408,14 +1549,14 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// own themselves.
     pub unsafe fn insert(&mut self, key: &str, value: V) -> bool {
         let hash = fnv1a_hash(key.as_bytes());
-        // Check for existing key — overwrite path.
-        if let Some(bucket) = self.index.get(&hash) {
+        // Check for existing key — overwrite path. SAFETY: `self.index` is a
+        // live Box-allocated HashMap (Box provenance, separate allocation).
+        if let Some(bucket) = unsafe { (*self.index).get(&hash) } {
             for &idx in bucket {
                 let i = idx as usize;
                 // SAFETY: keys live + index points into keys range.
-                let stored_ptr = unsafe {
-                    crate::v2::typed_array::TypedArray::get_unchecked(self.keys, idx)
-                };
+                let stored_ptr =
+                    unsafe { crate::v2::typed_array::TypedArray::get_unchecked(self.keys, idx) };
                 let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored_ptr) };
                 if stored_str == key {
                     // Overwrite: read+drop the old value, write the new.
@@ -1446,8 +1587,81 @@ impl<V: HashMapValueElem> HashMapData<V> {
         unsafe { crate::v2::typed_array::TypedArray::push(self.keys, key_obj) };
         // Push value into the values buffer via raw write (V may be non-Copy).
         unsafe { Self::values_push(self.values, value) };
-        // Update bucket index.
-        self.index.entry(hash).or_default().push(new_idx_u32);
+        // Update bucket index. SAFETY: `&mut *self.index` carries the Box
+        // allocation's whole-allocation provenance (separate allocation), NOT
+        // any Arc provenance.
+        unsafe { (*self.index).entry(hash).or_default().push(new_idx_u32) };
+        true
+    }
+
+    /// Raw-pointer in-place insert — the O(1)-amortized entry point used by
+    /// the method-tier `HashMap.set` handler (U3-perf, 2026-06-23).
+    ///
+    /// Mirrors `TypedArray::push(this: *mut Self)` exactly: takes a raw
+    /// `*mut Self` (NOT `&mut self`) and mutates through it. The caller
+    /// derives `this` from the receiver SLOT BITS (the heap pointer value),
+    /// **not** from `Arc::as_ptr(&borrow)` — so there is no `&Arc`→`&mut`
+    /// retag under a shared-Arc protector (the reverted-UB shape). The
+    /// keys/values buffers (`(*this).keys` / `(*this).values`) are
+    /// separately-allocated v2-raw `TypedArray` heap objects addressed by
+    /// their own raw pointers; mutating through them is sound regardless of
+    /// the enclosing `Arc<HashMapData<V>>`'s strong count — the same
+    /// discipline that lets `Array.push` mutate a possibly-shared array's
+    /// buffer in place.
+    ///
+    /// Semantics identical to `insert(&mut self, ...)`: overwrite drops the
+    /// old value's share (SB-13), new-key insert allocates a fresh `StringObj`
+    /// key + transfers one share on `value` into the values buffer. Returns
+    /// `true` on new-key insert, `false` on overwrite.
+    ///
+    /// # Safety
+    /// `this` must point to a live `HashMapData<V>` (derived from the
+    /// receiver slot bits). `value` must be a valid owned V — the caller
+    /// transfers one refcount share (for HeapElement / ptr-newtype V).
+    pub unsafe fn insert_at(this: *mut Self, key: &str, value: V) -> bool {
+        let hash = fnv1a_hash(key.as_bytes());
+        // Read the Copy index pointer field, then borrow the Box-allocated
+        // HashMap behind it. SAFETY: `(*this).index` is the Copy `*mut`
+        // pointer value (raw provenance from the Box allocation); `&*idx_ptr`
+        // borrows the SEPARATE Box allocation — NOT the Arc allocation `this`
+        // points into. No `&mut`/`&` to any inline field of `*this` is formed.
+        let idx_ptr: *mut std::collections::HashMap<u64, Vec<u32>> = unsafe { (*this).index };
+        // Check for existing key — overwrite path.
+        if let Some(bucket) = unsafe { (*idx_ptr).get(&hash) } {
+            for &idx in bucket {
+                let i = idx as usize;
+                // SAFETY: keys live + index points into keys range.
+                let stored_ptr =
+                    unsafe { crate::v2::typed_array::TypedArray::get_unchecked((*this).keys, idx) };
+                let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored_ptr) };
+                if stored_str == key {
+                    // Overwrite: read+drop the old value (SB-13), write new.
+                    unsafe {
+                        let data_ptr = (*(*this).values).data.add(i);
+                        let old_value: V = std::ptr::read(data_ptr);
+                        Self::drop_owned_value(old_value);
+                        std::ptr::write(data_ptr, value);
+                    }
+                    return false;
+                }
+            }
+        }
+        // New-key insert path. Allocate new StringObj for the key.
+        let key_obj: *const crate::v2::string_obj::StringObj =
+            crate::v2::string_obj::StringObj::new(key);
+        let new_idx_u32 = unsafe { crate::v2::typed_array::TypedArray::len((*this).keys) };
+        // Push key into the StringObj keys buffer (Copy-bounded *const T).
+        unsafe { crate::v2::typed_array::TypedArray::push((*this).keys, key_obj) };
+        // Push value into the values buffer via raw write (V may be non-Copy).
+        unsafe { Self::values_push((*this).values, value) };
+        // Update bucket index. SAFETY: `idx_ptr` is the Copy index-pointer
+        // field value read above (Box allocation provenance); `&mut *idx_ptr`
+        // carries the Box allocation's whole-allocation provenance, NOT the
+        // Arc's. This is the load-bearing fix: forming `&mut` here used to
+        // retag the inline `index` field through an `Arc::as_ptr`-derived
+        // `this` (UB under Stacked/Tree Borrows); it now retags only the
+        // separately-allocated Box, exactly as keys/values do.
+        unsafe { (*idx_ptr).entry(hash).or_default().push(new_idx_u32) };
         true
     }
 
@@ -1459,14 +1673,17 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// position (mirror of `HashSetData::remove`).
     pub unsafe fn remove(&mut self, key: &str) -> Option<V> {
         let hash = fnv1a_hash(key.as_bytes());
+        // Read the Copy index pointer field once; all index access below
+        // goes through the Box allocation (raw provenance, separate alloc).
+        let idx_ptr: *mut std::collections::HashMap<u64, Vec<u32>> = self.index;
         let removed_idx: usize = {
-            let bucket = self.index.get(&hash)?;
+            // SAFETY: `idx_ptr` is the live Box-allocated HashMap.
+            let bucket = unsafe { (*idx_ptr).get(&hash)? };
             let mut found: Option<usize> = None;
             for (bucket_pos, &idx) in bucket.iter().enumerate() {
                 // SAFETY: keys live.
-                let stored_ptr = unsafe {
-                    crate::v2::typed_array::TypedArray::get_unchecked(self.keys, idx)
-                };
+                let stored_ptr =
+                    unsafe { crate::v2::typed_array::TypedArray::get_unchecked(self.keys, idx) };
                 let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored_ptr) };
                 if stored_str == key {
                     found = Some(bucket_pos);
@@ -1474,10 +1691,12 @@ impl<V: HashMapValueElem> HashMapData<V> {
                 }
             }
             let bucket_pos = found?;
-            let bucket = self.index.get_mut(&hash).expect("bucket present");
+            // SAFETY: `&mut *idx_ptr` carries Box-allocation provenance, not
+            // Arc provenance.
+            let bucket = unsafe { (*idx_ptr).get_mut(&hash).expect("bucket present") };
             let removed_idx = bucket.swap_remove(bucket_pos) as usize;
             if bucket.is_empty() {
-                self.index.remove(&hash);
+                unsafe { (*idx_ptr).remove(&hash) };
             }
             removed_idx
         };
@@ -1507,7 +1726,8 @@ impl<V: HashMapValueElem> HashMapData<V> {
             (*self.values).len -= 1;
         }
         // Renumber the bucket index entries pointing past the removed slot.
-        for bucket in self.index.values_mut() {
+        // SAFETY: `&mut *idx_ptr` carries Box-allocation provenance.
+        for bucket in unsafe { (*idx_ptr).values_mut() } {
             for slot in bucket.iter_mut() {
                 if (*slot as usize) > removed_idx {
                     *slot -= 1;
@@ -1537,9 +1757,8 @@ impl<V: HashMapValueElem> HashMapData<V> {
         let n = other.len();
         for i in 0..n {
             // SAFETY: i < other.len().
-            let key_ptr = unsafe {
-                crate::v2::typed_array::TypedArray::get_unchecked(other.keys, i as u32)
-            };
+            let key_ptr =
+                unsafe { crate::v2::typed_array::TypedArray::get_unchecked(other.keys, i as u32) };
             let key_str = unsafe { crate::v2::string_obj::StringObj::as_str(key_ptr) };
             let value_ref: &V = unsafe { &*(*other.values).data.add(i) };
             let cloned_value = unsafe { V::share_clone(value_ref) };
@@ -1555,20 +1774,29 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// `values` must point to a live `TypedArray<V>`; `value` must be a
     /// valid owned V (caller transfers one share).
     unsafe fn values_push(values: *mut crate::v2::typed_array::TypedArray<V>, value: V) {
-        use std::alloc::{alloc, realloc, Layout};
+        use std::alloc::{Layout, alloc, realloc};
         unsafe {
             let arr = &mut *values;
             if arr.len == arr.cap {
                 // Grow (doubling, min 4).
-                let new_cap = if arr.cap == 0 { 4u32 } else { arr.cap.checked_mul(2).expect("capacity overflow") };
-                let new_layout = Layout::array::<V>(new_cap as usize).expect("invalid array layout");
+                let new_cap = if arr.cap == 0 {
+                    4u32
+                } else {
+                    arr.cap.checked_mul(2).expect("capacity overflow")
+                };
+                let new_layout =
+                    Layout::array::<V>(new_cap as usize).expect("invalid array layout");
                 let new_data = if arr.cap == 0 || arr.data.is_null() {
                     alloc(new_layout) as *mut V
                 } else {
-                    let old_layout = Layout::array::<V>(arr.cap as usize).expect("invalid array layout");
+                    let old_layout =
+                        Layout::array::<V>(arr.cap as usize).expect("invalid array layout");
                     realloc(arr.data as *mut u8, old_layout, new_layout.size()) as *mut V
                 };
-                assert!(!new_data.is_null(), "reallocation failed for HashMapData<V> values");
+                assert!(
+                    !new_data.is_null(),
+                    "reallocation failed for HashMapData<V> values"
+                );
                 arr.data = new_data;
                 arr.cap = new_cap;
             }
@@ -1619,6 +1847,14 @@ impl<V: HashMapValueElem> Drop for HashMapData<V> {
             // Per-V dispatcher via `HashMapValueElem`.
             unsafe { V::release_typed_array(self.values) }
         }
+        if !self.index.is_null() {
+            // SAFETY: `self.index` was allocated via `Box::into_raw` at the
+            // construction site and is owned exclusively by this struct.
+            // Reconstituting the Box and dropping it frees the separate
+            // allocation exactly once (no leak, no double-free). After this
+            // `self.index` is invalid.
+            unsafe { drop(Box::from_raw(self.index)) }
+        }
     }
 }
 
@@ -1647,12 +1883,13 @@ impl<V: HashMapValueElem> Clone for HashMapData<V> {
         // Walk source elements; share_clone keys + values into the new buffers.
         unsafe {
             for i in 0..n {
-                let key_ptr = crate::v2::typed_array::TypedArray::get_unchecked(
-                    self.keys, i as u32,
-                );
+                let key_ptr =
+                    crate::v2::typed_array::TypedArray::get_unchecked(self.keys, i as u32);
                 // Share-clone the key (v2_retain on the *const StringObj).
-                let cloned_key = <*const crate::v2::string_obj::StringObj
-                    as HashMapValueElem>::share_clone(&key_ptr);
+                let cloned_key =
+                    <*const crate::v2::string_obj::StringObj as HashMapValueElem>::share_clone(
+                        &key_ptr,
+                    );
                 std::ptr::write((*new_keys).data.add(i), cloned_key);
                 let value_ref: &V = &*(*self.values).data.add(i);
                 let cloned_value = V::share_clone(value_ref);
@@ -1661,10 +1898,16 @@ impl<V: HashMapValueElem> Clone for HashMapData<V> {
             (*new_keys).len = n as u32;
             (*new_values).len = n as u32;
         }
+        // Deep-copy the index into a FRESH Box allocation. SAFETY: `self.index`
+        // is a live Box-allocated HashMap; `&*self.index` borrows it to clone
+        // the contents into a new owned `HashMap`, then `Box::into_raw` hands
+        // the clone its own separate allocation. The clone does NOT alias the
+        // source's index allocation.
+        let cloned_index = unsafe { (*self.index).clone() };
         Self {
             keys: new_keys,
             values: new_values,
-            index: self.index.clone(),
+            index: Box::into_raw(Box::new(cloned_index)),
         }
     }
 }
@@ -1734,6 +1977,10 @@ pub enum HashMapKindedRef {
     /// `Arc<HashMapData<TraitObjectPtr>>` — V = `TraitObjectPtr`
     /// (#[repr(transparent)] newtype over `*const TraitObjectStorage`).
     TraitObject(Arc<HashMapData<TraitObjectPtr>>),
+    /// `Arc<HashMapData<CallablePtr>>` — V = callable closure carrier.
+    /// Elements own `Arc<HeapValue::ClosureRaw(..)>` shares and project as
+    /// `NativeKind::Ptr(HeapKind::Closure)`.
+    Callable(Arc<HashMapData<CallablePtr>>),
     /// `Arc<HashMapData<HashMapKindedRef>>` — V = `HashMapKindedRef` itself
     /// (recursive carrier). The inner HashMaps' values buffer is a flat
     /// array of `HashMapKindedRef` payloads (per-V kinded refs, each
@@ -1761,6 +2008,7 @@ impl Clone for HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => HashMapKindedRef::Decimal(Arc::clone(arc)),
             HashMapKindedRef::TypedObject(arc) => HashMapKindedRef::TypedObject(Arc::clone(arc)),
             HashMapKindedRef::TraitObject(arc) => HashMapKindedRef::TraitObject(Arc::clone(arc)),
+            HashMapKindedRef::Callable(arc) => HashMapKindedRef::Callable(Arc::clone(arc)),
             HashMapKindedRef::HashMap(arc) => HashMapKindedRef::HashMap(Arc::clone(arc)),
         }
     }
@@ -1820,6 +2068,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
             HashMapKindedRef::TypedObject(_) => NativeKind::Ptr(HeapKind::TypedObject),
             HashMapKindedRef::TraitObject(_) => NativeKind::Ptr(HeapKind::TraitObject),
+            HashMapKindedRef::Callable(_) => NativeKind::Ptr(HeapKind::Closure),
             HashMapKindedRef::HashMap(_) => NativeKind::Ptr(HeapKind::HashMap),
         }
     }
@@ -1839,6 +2088,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => arc.len(),
             HashMapKindedRef::TypedObject(arc) => arc.len(),
             HashMapKindedRef::TraitObject(arc) => arc.len(),
+            HashMapKindedRef::Callable(arc) => arc.len(),
             HashMapKindedRef::HashMap(arc) => arc.len(),
         }
     }
@@ -1863,6 +2113,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => arc.contains_key(key),
             HashMapKindedRef::TypedObject(arc) => arc.contains_key(key),
             HashMapKindedRef::TraitObject(arc) => arc.contains_key(key),
+            HashMapKindedRef::Callable(arc) => arc.contains_key(key),
             HashMapKindedRef::HashMap(arc) => arc.contains_key(key),
         }
     }
@@ -1994,6 +2245,14 @@ fn hashmap_kref_display(
                 write!(f, "<trait_object:{:p}>", v_ref.as_ptr())?;
             }
         }
+        HashMapKindedRef::Callable(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v_ref: &CallablePtr = unsafe { &*(*arc.values).data.add(i) };
+                write!(f, "<function:{:p}>", v_ref.as_ptr())?;
+            }
+        }
         HashMapKindedRef::HashMap(arc) => {
             // Recursive carrier: each value is itself a HashMapKindedRef.
             // Recurse via this same display formatter (Wave N
@@ -2029,18 +2288,20 @@ fn hashmap_kref_display(
 /// ADR-006 §2.7.15 / Q16 amendment (mirror of §2.7.9 FilterExpr / §2.7.13
 /// Reference precedent for the cardinality-amendment shape, but Set is
 /// a HashMap *sibling* — full `HeapValue::HashSet` arm rather than
-/// pure-discriminator). Reuses the Stage C P1(b) Phase 2d Array shape
-/// (`TypedBuffer<Arc<String>>`) for the keys buffer verbatim. Insertion
-/// order is the canonical storage; the `index` is a sidecar acceleration
-/// structure for O(1) `set.has(key)`.
+/// pure-discriminator). Insertion order is the canonical storage; the
+/// `index` sidecars accelerate O(1) `set.has(key)`.
 ///
-/// **String-only keyspace at landing** (per the W9-set-methods owner
-/// audit's Path A scope and the §2.7.15 Q16 ruling). Heterogeneous-
-/// element keysets (int-keyed, TypedObject-keyed) are explicitly
-/// out-of-scope; the Path B (`TypedSet<T>` per element kind) rebuild
-/// is a future Phase-2c amendment with measurement.
+/// W74B redrive (2026-07-01): the public stdlib/type-system contract is
+/// `Set<T>`, and the `std::core::set` module must preserve integer element
+/// coverage. The original W13 string-only landing remains the string arm, but
+/// `HashSetData` now also carries an explicit `i64` arm selected only by a
+/// statically typed construction path. Mixed element-kind writes are rejected
+/// by the storage API in release builds rather than coerced.
 #[derive(Debug)]
 pub struct HashSetData {
+    /// Active element storage. Empty sets still carry this static element arm;
+    /// inserts never infer it from the first runtime element.
+    element_kind: HashSetElementKind,
     /// Insertion-ordered keys (string-typed buffer).
     ///
     /// Storage shape: `Arc<Vec<Arc<String>>>` post-V3-S5 ckpt-5-prime²a
@@ -2048,19 +2309,62 @@ pub struct HashSetData {
     /// `TypedBuffer<T>` wrapper layer retired wholesale at ckpt-4;
     /// `Arc<Vec<T>>` is the smallest delta preserving `Arc::make_mut`
     /// clone-on-write semantics).
-    pub keys: Arc<Vec<Arc<String>>>,
+    keys: Arc<Vec<Arc<String>>>,
     /// Eager bucket-index: hash → list of indices into `keys` array.
     /// Enables O(1) lookup at `set.has(key)`. Hash is FNV-1a over the
     /// key string bytes — same as `HashMapData::index`.
-    pub index: std::collections::HashMap<u64, Vec<u32>>,
+    index: std::collections::HashMap<u64, Vec<u32>>,
+    /// Insertion-ordered integer keys for `Set<int>`.
+    i64_keys: Arc<Vec<i64>>,
+    /// Eager bucket-index for `i64_keys`. Hash is FNV-1a over the little-endian
+    /// integer bytes.
+    i64_index: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashSetElementKind {
+    String,
+    I64,
+}
+
+impl HashSetElementKind {
+    #[inline]
+    pub fn name(self) -> &'static str {
+        match self {
+            HashSetElementKind::String => "string",
+            HashSetElementKind::I64 => "int",
+        }
+    }
 }
 
 impl HashSetData {
-    /// Build an empty HashSetData with no entries.
+    /// Build an empty string-key HashSetData with no entries.
+    ///
+    /// Kept as the W13-compatible constructor for existing string-set callers.
+    /// New typed construction paths should prefer `new_string` / `new_i64`
+    /// so the static element arm is visible at the call site.
     pub fn new() -> Self {
+        Self::new_string()
+    }
+
+    /// Build an empty string-key HashSetData with no entries.
+    pub fn new_string() -> Self {
+        Self::empty_for_element_kind(HashSetElementKind::String)
+    }
+
+    /// Build an empty i64-key HashSetData with no entries.
+    pub fn new_i64() -> Self {
+        Self::empty_for_element_kind(HashSetElementKind::I64)
+    }
+
+    /// Build an empty set carrying the supplied static element arm.
+    pub fn empty_for_element_kind(element_kind: HashSetElementKind) -> Self {
         Self {
+            element_kind,
             keys: Arc::new(Vec::new()),
             index: std::collections::HashMap::new(),
+            i64_keys: Arc::new(Vec::new()),
+            i64_index: std::collections::HashMap::new(),
         }
     }
 
@@ -2068,28 +2372,62 @@ impl HashSetData {
     /// index eagerly. Duplicate keys in the input are collapsed
     /// (insertion-order preserved, first occurrence wins).
     pub fn from_keys(keys: Vec<Arc<String>>) -> Self {
-        let mut out = Self::new();
+        let mut out = Self::new_string();
         for k in keys {
-            out.insert(k);
+            out.insert(k)
+                .expect("HashSetData::from_keys constructs a string set");
         }
         out
+    }
+
+    /// Build from a `Vec<i64>` of keys, computing the bucket index eagerly.
+    /// Duplicate keys in the input are collapsed (insertion-order preserved,
+    /// first occurrence wins).
+    pub fn from_i64_keys(keys: Vec<i64>) -> Self {
+        let mut out = Self::new_i64();
+        for k in keys {
+            out.insert_i64(k)
+                .expect("HashSetData::from_i64_keys constructs an i64 set");
+        }
+        out
+    }
+
+    #[inline]
+    pub fn element_kind(&self) -> HashSetElementKind {
+        self.element_kind
+    }
+
+    #[inline]
+    pub fn string_keys(&self) -> &[Arc<String>] {
+        self.keys.as_slice()
+    }
+
+    #[inline]
+    pub fn i64_keys(&self) -> &[i64] {
+        self.i64_keys.as_slice()
     }
 
     /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.keys.len()
+        match self.element_kind {
+            HashSetElementKind::String => self.keys.len(),
+            HashSetElementKind::I64 => self.i64_keys.len(),
+        }
     }
 
     /// Whether the set is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.len() == 0
     }
 
     /// Whether the set contains the given key. O(1) via the bucket
     /// index plus a short bucket scan for collision disambiguation.
     pub fn contains(&self, key: &str) -> bool {
+        if self.element_kind != HashSetElementKind::String {
+            return false;
+        }
         let hash = fnv1a_hash(key.as_bytes());
         let Some(bucket) = self.index.get(&hash) else {
             return false;
@@ -2103,29 +2441,77 @@ impl HashSetData {
         false
     }
 
+    /// Whether the set contains the given i64 key. O(1) via the bucket index
+    /// plus a short bucket scan for collision disambiguation.
+    pub fn contains_i64(&self, key: i64) -> bool {
+        if self.element_kind != HashSetElementKind::I64 {
+            return false;
+        }
+        let hash = fnv1a_hash(&key.to_le_bytes());
+        let Some(bucket) = self.i64_index.get(&hash) else {
+            return false;
+        };
+        for &idx in bucket {
+            let i = idx as usize;
+            if self.i64_keys[i] == key {
+                return true;
+            }
+        }
+        false
+    }
+
     // ── Mutation API (Wave 13 W13-hashset-rebuild, 2026-05-10) ──────────────
     //
     // Mirror of HashMapData's W13-hashmap-mutation API with the values
-    // buffer dropped. `Arc::make_mut` clone-on-write over the inner
-    // `Arc<TypedBuffer<Arc<String>>>` keys plus parallel bucket-index
-    // maintenance — same shape, one less buffer to mutate.
+    // buffer dropped. `Arc::make_mut` clone-on-write over the active keys
+    // vector plus parallel bucket-index maintenance.
 
     /// Insert a key. Returns `true` if the key was newly added,
     /// `false` if it was already present (no-op in the latter case).
-    pub fn insert(&mut self, key: Arc<String>) -> bool {
+    pub fn insert(&mut self, key: Arc<String>) -> Result<bool, String> {
+        if self.element_kind != HashSetElementKind::String {
+            return Err(format!(
+                "HashSetData::insert(string) called on {} set",
+                self.element_kind.name()
+            ));
+        }
         let hash = fnv1a_hash(key.as_bytes());
         if let Some(bucket) = self.index.get(&hash) {
             for &idx in bucket {
                 let i = idx as usize;
                 if self.keys[i].as_str() == key.as_str() {
-                    return false;
+                    return Ok(false);
                 }
             }
         }
         let new_idx = self.keys.len();
         Arc::make_mut(&mut self.keys).push(key);
         self.index.entry(hash).or_default().push(new_idx as u32);
-        true
+        Ok(true)
+    }
+
+    /// Insert an i64 key. Returns `true` if the key was newly added,
+    /// `false` if it was already present.
+    pub fn insert_i64(&mut self, key: i64) -> Result<bool, String> {
+        if self.element_kind != HashSetElementKind::I64 {
+            return Err(format!(
+                "HashSetData::insert_i64 called on {} set",
+                self.element_kind.name()
+            ));
+        }
+        let hash = fnv1a_hash(&key.to_le_bytes());
+        if let Some(bucket) = self.i64_index.get(&hash) {
+            for &idx in bucket {
+                let i = idx as usize;
+                if self.i64_keys[i] == key {
+                    return Ok(false);
+                }
+            }
+        }
+        let new_idx = self.i64_keys.len();
+        Arc::make_mut(&mut self.i64_keys).push(key);
+        self.i64_index.entry(hash).or_default().push(new_idx as u32);
+        Ok(true)
     }
 
     /// Remove the entry under `key`. Returns `true` if the key was
@@ -2134,6 +2520,9 @@ impl HashSetData {
     /// every entry after the removed slot shifts down by one position
     /// (mirror of `HashMapData::remove`).
     pub fn remove(&mut self, key: &str) -> bool {
+        if self.element_kind != HashSetElementKind::String {
+            return false;
+        }
         let hash = fnv1a_hash(key.as_bytes());
         let removed_idx: usize = {
             let Some(bucket) = self.index.get(&hash) else {
@@ -2167,6 +2556,46 @@ impl HashSetData {
         }
         true
     }
+
+    /// Remove the i64 entry under `key`. Returns `true` if the key was
+    /// present, `false` if no entry existed.
+    pub fn remove_i64(&mut self, key: i64) -> bool {
+        if self.element_kind != HashSetElementKind::I64 {
+            return false;
+        }
+        let hash = fnv1a_hash(&key.to_le_bytes());
+        let removed_idx: usize = {
+            let Some(bucket) = self.i64_index.get(&hash) else {
+                return false;
+            };
+            let mut found: Option<usize> = None;
+            for (bucket_pos, &idx) in bucket.iter().enumerate() {
+                if self.i64_keys[idx as usize] == key {
+                    found = Some(bucket_pos);
+                    break;
+                }
+            }
+            let bucket_pos = match found {
+                Some(p) => p,
+                None => return false,
+            };
+            let bucket = self.i64_index.get_mut(&hash).expect("bucket present");
+            let removed_idx = bucket.swap_remove(bucket_pos) as usize;
+            if bucket.is_empty() {
+                self.i64_index.remove(&hash);
+            }
+            removed_idx
+        };
+        Arc::make_mut(&mut self.i64_keys).remove(removed_idx);
+        for bucket in self.i64_index.values_mut() {
+            for slot in bucket.iter_mut() {
+                if (*slot as usize) > removed_idx {
+                    *slot -= 1;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Default for HashSetData {
@@ -2178,8 +2607,11 @@ impl Default for HashSetData {
 impl Clone for HashSetData {
     fn clone(&self) -> Self {
         Self {
+            element_kind: self.element_kind,
             keys: Arc::clone(&self.keys),
             index: self.index.clone(),
+            i64_keys: Arc::clone(&self.i64_keys),
+            i64_index: self.i64_index.clone(),
         }
     }
 }
@@ -2218,13 +2650,19 @@ impl ResultData {
     /// Construct an Ok-tagged result.
     #[inline]
     pub fn ok(payload: crate::kinded_slot::KindedSlot) -> Self {
-        Self { is_ok: true, payload }
+        Self {
+            is_ok: true,
+            payload,
+        }
     }
 
     /// Construct an Err-tagged result.
     #[inline]
     pub fn err(payload: crate::kinded_slot::KindedSlot) -> Self {
-        Self { is_ok: false, payload }
+        Self {
+            is_ok: false,
+            payload,
+        }
     }
 }
 
@@ -2253,7 +2691,10 @@ impl OptionData {
     /// Construct a Some-tagged option.
     #[inline]
     pub fn some(payload: crate::kinded_slot::KindedSlot) -> Self {
-        Self { is_some: true, payload }
+        Self {
+            is_some: true,
+            payload,
+        }
     }
 
     /// Construct a None-tagged option (payload is a no-op KindedSlot).
@@ -2474,7 +2915,11 @@ impl ChannelData {
     /// Number of pending elements. Useful for diagnostics; not part
     /// of the user-facing method surface.
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("channel mutex poisoned").queue.len()
+        self.inner
+            .lock()
+            .expect("channel mutex poisoned")
+            .queue
+            .len()
     }
 
     /// Whether the queue currently holds zero pending elements.
@@ -2632,11 +3077,7 @@ impl MutexData {
     /// is independently owned.
     pub fn get(&self) -> crate::kinded_slot::KindedSlot {
         let inner = self.inner.lock().expect("mutex poisoned");
-        inner
-            .value
-            .as_ref()
-            .expect("mutex value present")
-            .clone()
+        inner.value.as_ref().expect("mutex value present").clone()
     }
 
     /// Replace the wrapped value. The prior slot drops here
@@ -2945,10 +3386,12 @@ impl TraitObjectStorage {
     /// let ptr = TraitObjectStorage::_new(value, vtable);
     /// let slot = ValueSlot::from_trait_object_raw(ptr);
     /// ```
-    pub fn _new(
-        value: *const TypedObjectStorage,
-        vtable: Arc<crate::value::VTable>,
-    ) -> *mut Self {
+    // Deliberate raw-pointer allocator API: `value` is a borrowed `*const`
+    // copied (not dereferenced) into fresh storage. Keeping this safe matches
+    // the sibling `_new`/`_drop` v2-raw constructors; making it `unsafe` would
+    // change the public allocator signature for no soundness gain.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn _new(value: *const TypedObjectStorage, vtable: Arc<crate::value::VTable>) -> *mut Self {
         let layout = std::alloc::Layout::new::<Self>();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
         assert!(!ptr.is_null(), "allocation failed for TraitObjectStorage");
@@ -3063,7 +3506,9 @@ impl Clone for TraitObjectStorage {
         // share, retired at its `_drop` / auto-derived `Drop` via
         // `TypedObjectStorage::release_elem(value)`.
         if !self.value.is_null() {
-            unsafe { crate::v2::refcount::v2_retain(&(*self.value).header); }
+            unsafe {
+                crate::v2::refcount::v2_retain(&(*self.value).header);
+            }
         }
         Self {
             header: crate::v2::heap_header::HeapHeader::new(
@@ -3504,7 +3949,32 @@ pub struct TypedObjectStorage {
     /// Registry key for the TypeSchema describing each slot's `FieldType`.
     pub schema_id: u64,
     /// Per-field 8-byte storage. Length matches the schema's field count.
-    pub slots: Box<[crate::slot::ValueSlot]>,
+    ///
+    /// **Interior mutability (soundness fix, 2026-06-23).** Each element is
+    /// wrapped in `UnsafeCell` so that the Q14 in-place projection write
+    /// (`write_slot_in_place(&self, ...)`) can mutate a slot through a SHARED
+    /// `&TypedObjectStorage` (the receiver `Arc` has refcount > 1 by
+    /// construction; `Arc::get_mut`/`make_mut` cannot apply). Writing through
+    /// a `*mut` narrowed from `Box::as_ptr()` (a `&[ValueSlot]`,
+    /// `SharedReadOnly` under Stacked/Tree Borrows) is UB — Miri flags it as
+    /// "retag for SharedReadWrite from a SharedReadOnly tag". `UnsafeCell` is
+    /// the only sound way to obtain `&self`-reachable write permission: the
+    /// writer does `*cell.get() = ...` (raw `*mut ValueSlot` carrying the
+    /// cell's own interior-mutable provenance, NOT a shared-ref tag).
+    ///
+    /// `UnsafeCell<ValueSlot>` is `repr(transparent)` over `ValueSlot` (itself
+    /// `repr(transparent)` over `u64`), so the layout, size, alignment and
+    /// per-slot bit semantics are byte-for-byte identical to the prior
+    /// `Box<[ValueSlot]>` — the JIT/marshal/snapshot field offsets and the
+    /// `heap_mask` Drop walk are unchanged. Shared reads go through the
+    /// `slots()` accessor, which casts `&[UnsafeCell<ValueSlot>]` to
+    /// `&[ValueSlot]` (sound: transparent newtype, read-only borrow).
+    ///
+    /// Renamed from `slots` to `slot_cells` so the type change surfaces a
+    /// compile error at every former direct `.slots` reader; readers migrate
+    /// to the `slots()` accessor (shared read) and writers to
+    /// `write_slot_in_place` (interior-mutable write).
+    pub slot_cells: Box<[std::cell::UnsafeCell<crate::slot::ValueSlot>]>,
     /// Bit `i` set ⇔ slot `i` holds a heap pointer that participates in
     /// Arc refcount discipline. Bits beyond `slots.len()` must be zero.
     pub heap_mask: u64,
@@ -3514,6 +3984,12 @@ pub struct TypedObjectStorage {
     /// Consulted by `Drop` to dispatch per-slot `Arc::decrement_strong_count`
     /// without any schema-registry probe.
     pub field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+    /// Miri-only pointer provenance sidecar for heap-bearing field slots.
+    /// Normal builds keep the original 8-byte slot ABI; strict Miri runs use
+    /// this sidecar to avoid integer-to-pointer reconstruction when a field is
+    /// cloned or dropped.
+    #[cfg(miri)]
+    pub field_provenance: Box<[MiriSlotProvenance]>,
 }
 
 impl TypedObjectStorage {
@@ -3549,14 +4025,130 @@ impl TypedObjectStorage {
             slots.len(),
             field_kinds.len(),
         );
+        #[cfg(miri)]
+        let slot_len = slots.len();
         Self {
             header: crate::v2::heap_header::HeapHeader::new(
                 crate::v2::heap_header::HEAP_KIND_V2_TYPED_OBJECT,
             ),
             schema_id,
-            slots,
+            slot_cells: Self::wrap_slot_cells(slots),
             heap_mask,
             field_kinds,
+            #[cfg(miri)]
+            field_provenance: Self::empty_field_provenance(slot_len),
+        }
+    }
+
+    #[cfg(miri)]
+    #[inline]
+    fn empty_field_provenance(len: usize) -> Box<[MiriSlotProvenance]> {
+        vec![MiriSlotProvenance::None; len].into_boxed_slice()
+    }
+
+    /// Convert an owned `Box<[ValueSlot]>` (the public constructor param) into
+    /// the interior-mutable `Box<[UnsafeCell<ValueSlot>]>` carrier without
+    /// reallocating or copying. `UnsafeCell<ValueSlot>` is `repr(transparent)`
+    /// over `ValueSlot`, so the slice layout is identical; we transmute the
+    /// box's element type in place.
+    #[inline]
+    fn wrap_slot_cells(
+        slots: Box<[crate::slot::ValueSlot]>,
+    ) -> Box<[std::cell::UnsafeCell<crate::slot::ValueSlot>]> {
+        let raw = Box::into_raw(slots) as *mut [std::cell::UnsafeCell<crate::slot::ValueSlot>];
+        // SAFETY: `UnsafeCell<ValueSlot>` is `repr(transparent)` over
+        // `ValueSlot` — same size/align/layout. Reconstituting the Box with
+        // the cell element type over the same allocation is sound; ownership
+        // (and the original allocation) transfers unchanged.
+        unsafe { Box::from_raw(raw) }
+    }
+
+    /// Shared read view of the slots as `&[ValueSlot]`.
+    ///
+    /// SAFETY of the cast: `UnsafeCell<ValueSlot>` is `repr(transparent)`
+    /// over `ValueSlot`, so `&[UnsafeCell<ValueSlot>]` and `&[ValueSlot]`
+    /// have identical layout. The returned borrow is read-only; concurrent
+    /// in-place writes are forbidden by the single-threaded VM contract that
+    /// `write_slot_in_place` documents (no `&self` read borrow may overlap an
+    /// in-flight projection write).
+    #[inline]
+    pub fn slots(&self) -> &[crate::slot::ValueSlot] {
+        let cells: &[std::cell::UnsafeCell<crate::slot::ValueSlot>] = &self.slot_cells;
+        // SAFETY: transparent newtype; read-only reborrow of the same bytes.
+        unsafe {
+            std::slice::from_raw_parts(cells.as_ptr() as *const crate::slot::ValueSlot, cells.len())
+        }
+    }
+
+    /// Clone a field into an owned `KindedSlot` while preserving Miri pointer
+    /// provenance for field payloads that still store raw address bits.
+    #[inline]
+    pub fn clone_field_kinded(&self, idx: usize) -> Option<crate::kinded_slot::KindedSlot> {
+        let slot = *self.slots().get(idx)?;
+        let kind = *self.field_kinds.get(idx)?;
+        #[cfg(miri)]
+        let borrowed = crate::kinded_slot::KindedSlot::new_with_miri_provenance(
+            slot,
+            kind,
+            self.field_provenance
+                .get(idx)
+                .copied()
+                .unwrap_or(MiriSlotProvenance::None),
+        );
+        #[cfg(not(miri))]
+        let borrowed = crate::kinded_slot::KindedSlot::new(slot, kind);
+
+        let cloned = borrowed.clone();
+        std::mem::forget(borrowed);
+        Some(cloned)
+    }
+
+    #[inline]
+    unsafe fn decrement_string_field(&self, idx: usize, bits: u64) {
+        #[cfg(not(miri))]
+        let _ = idx;
+        #[cfg(miri)]
+        let _ = bits;
+        #[cfg(miri)]
+        match self.field_provenance.get(idx).copied() {
+            Some(MiriSlotProvenance::String(ptr)) if !ptr.is_null() => {
+                unsafe { std::sync::Arc::decrement_strong_count(ptr) };
+            }
+            _ => {
+                panic!(
+                    "TypedObjectStorage::drop_fields: missing Miri provenance for String field {}",
+                    idx
+                );
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            unsafe { std::sync::Arc::decrement_strong_count(bits as *const String) };
+        }
+    }
+
+    #[inline]
+    unsafe fn release_typed_object_field(&self, idx: usize, bits: u64) {
+        use crate::v2::heap_element::HeapElement;
+        #[cfg(not(miri))]
+        let _ = idx;
+        #[cfg(miri)]
+        let _ = bits;
+        #[cfg(miri)]
+        match self.field_provenance.get(idx).copied() {
+            Some(MiriSlotProvenance::TypedObject(ptr)) if !ptr.is_null() => {
+                unsafe { TypedObjectStorage::release_elem(ptr) };
+            }
+            _ => {
+                panic!(
+                    "TypedObjectStorage::drop_fields: missing Miri provenance for TypedObject field {}",
+                    idx
+                );
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            unsafe { TypedObjectStorage::release_elem(bits as *const TypedObjectStorage) };
         }
     }
 
@@ -3587,6 +4179,38 @@ impl TypedObjectStorage {
         heap_mask: u64,
         field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
     ) -> *mut Self {
+        #[cfg(miri)]
+        let field_provenance = Self::empty_field_provenance(slots.len());
+        Self::_new_inner(
+            schema_id,
+            slots,
+            heap_mask,
+            field_kinds,
+            #[cfg(miri)]
+            field_provenance,
+        )
+    }
+
+    /// Miri-only allocator variant that preserves field pointer provenance
+    /// alongside the unchanged `ValueSlot` bits.
+    #[cfg(miri)]
+    pub fn _new_with_miri_field_provenance(
+        schema_id: u64,
+        slots: Box<[crate::slot::ValueSlot]>,
+        heap_mask: u64,
+        field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+        field_provenance: Box<[MiriSlotProvenance]>,
+    ) -> *mut Self {
+        Self::_new_inner(schema_id, slots, heap_mask, field_kinds, field_provenance)
+    }
+
+    fn _new_inner(
+        schema_id: u64,
+        slots: Box<[crate::slot::ValueSlot]>,
+        heap_mask: u64,
+        field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+        #[cfg(miri)] field_provenance: Box<[MiriSlotProvenance]>,
+    ) -> *mut Self {
         debug_assert_eq!(
             slots.len(),
             field_kinds.len(),
@@ -3594,6 +4218,15 @@ impl TypedObjectStorage {
              (slots={}, field_kinds={}) — every slot must have a proven NativeKind",
             slots.len(),
             field_kinds.len(),
+        );
+        #[cfg(miri)]
+        debug_assert_eq!(
+            slots.len(),
+            field_provenance.len(),
+            "TypedObjectStorage::_new: slots/field_provenance length mismatch \
+             (slots={}, field_provenance={})",
+            slots.len(),
+            field_provenance.len(),
         );
         let layout = std::alloc::Layout::new::<Self>();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
@@ -3610,9 +4243,11 @@ impl TypedObjectStorage {
                 ),
             );
             std::ptr::write(&mut (*ptr).schema_id, schema_id);
-            std::ptr::write(&mut (*ptr).slots, slots);
+            std::ptr::write(&mut (*ptr).slot_cells, Self::wrap_slot_cells(slots));
             std::ptr::write(&mut (*ptr).heap_mask, heap_mask);
             std::ptr::write(&mut (*ptr).field_kinds, field_kinds);
+            #[cfg(miri)]
+            std::ptr::write(&mut (*ptr).field_provenance, field_provenance);
         }
         ptr
     }
@@ -3644,8 +4279,10 @@ impl TypedObjectStorage {
             // payloads so their allocations are freed. The `header`,
             // `schema_id`, and `heap_mask` fields are POD (`Copy` or
             // primitive) — no Drop work owed.
-            std::ptr::drop_in_place(&mut (*ptr).slots);
+            std::ptr::drop_in_place(&mut (*ptr).slot_cells);
             std::ptr::drop_in_place(&mut (*ptr).field_kinds);
+            #[cfg(miri)]
+            std::ptr::drop_in_place(&mut (*ptr).field_provenance);
             // Deallocate the struct's heap memory.
             let layout = std::alloc::Layout::new::<Self>();
             std::alloc::dealloc(ptr as *mut u8, layout);
@@ -3674,7 +4311,8 @@ impl TypedObjectStorage {
         // Defensive: if construction left a length mismatch (debug_assert
         // catches it earlier), drop only the prefix where both bookkeeping
         // structures agree. Better a leak than UB.
-        let n = self.slots.len().min(self.field_kinds.len());
+        let slots = self.slots();
+        let n = slots.len().min(self.field_kinds.len());
         for i in 0..n {
             // heap_mask is u64; bits beyond 63 cannot be addressed today.
             if i >= 64 {
@@ -3683,7 +4321,7 @@ impl TypedObjectStorage {
             if (self.heap_mask >> i) & 1 == 0 {
                 continue;
             }
-            let bits = self.slots[i].raw();
+            let bits = slots[i].raw();
             if bits == 0 {
                 continue;
             }
@@ -3696,7 +4334,7 @@ impl TypedObjectStorage {
             unsafe {
                 match self.field_kinds[i] {
                     NativeKind::String => {
-                        std::sync::Arc::decrement_strong_count(bits as *const String);
+                        self.decrement_string_field(i, bits);
                     }
                     // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
                     // A TypedObject field of kind `NativeKind::StringV2` /
@@ -3723,7 +4361,7 @@ impl TypedObjectStorage {
                     }
                     NativeKind::Ptr(hk) => match hk {
                         HeapKind::String => {
-                            std::sync::Arc::decrement_strong_count(bits as *const String);
+                            self.decrement_string_field(i, bits);
                         }
                         // r5c-2-β-δ-(α) (2026-05-20): `HeapKind::TypedArray`
                         // dispatch arm RE-INSTATED. The V3-S5 ckpt-5-prime
@@ -3758,10 +4396,7 @@ impl TypedObjectStorage {
                         // struct). Mirror of the §2.7.5 StringV2 /
                         // DecimalV2 release arms above (Agent B precedent).
                         HeapKind::TypedObject => {
-                            use crate::v2::heap_element::HeapElement;
-                            TypedObjectStorage::release_elem(
-                                bits as *const TypedObjectStorage,
-                            );
+                            self.release_typed_object_field(i, bits);
                         }
                         HeapKind::HashMap => {
                             // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
@@ -3770,9 +4405,7 @@ impl TypedObjectStorage {
                             // shape. Release dispatches outer Arc decrement;
                             // enum Drop chains to per-V `Arc<HashMapData<V>>`
                             // release.
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const HashMapKindedRef,
-                            );
+                            std::sync::Arc::decrement_strong_count(bits as *const HashMapKindedRef);
                         }
                         HeapKind::HashSet => {
                             std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
@@ -3800,9 +4433,7 @@ impl TypedObjectStorage {
                         // Mirror of the TypedObject arm above.
                         HeapKind::TraitObject => {
                             use crate::v2::heap_element::HeapElement;
-                            TraitObjectStorage::release_elem(
-                                bits as *const TraitObjectStorage,
-                            );
+                            TraitObjectStorage::release_elem(bits as *const TraitObjectStorage);
                         }
                         HeapKind::Decimal => {
                             std::sync::Arc::decrement_strong_count(
@@ -3821,9 +4452,7 @@ impl TypedObjectStorage {
                             std::sync::Arc::decrement_strong_count(bits as *const IoHandleData);
                         }
                         HeapKind::NativeView => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const NativeViewData,
-                            );
+                            std::sync::Arc::decrement_strong_count(bits as *const NativeViewData);
                         }
                         HeapKind::Content => {
                             std::sync::Arc::decrement_strong_count(
@@ -3886,9 +4515,7 @@ impl TypedObjectStorage {
                             std::sync::Arc::decrement_strong_count(bits as *const MatrixData);
                         }
                         HeapKind::MatrixSlice => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const MatrixSliceData,
-                            );
+                            std::sync::Arc::decrement_strong_count(bits as *const MatrixSliceData);
                         }
                         HeapKind::SharedCell => {
                             std::sync::Arc::decrement_strong_count(
@@ -3928,8 +4555,11 @@ impl TypedObjectStorage {
         }
     }
 
-    /// In-place write of slot `idx` through a shared `&TypedObjectStorage`
-    /// (i.e. through an `Arc<TypedObjectStorage>` with refcount > 1).
+    /// In-place write of slot `idx` through a raw `*mut Self`
+    /// (the storage is reached from an `Arc<TypedObjectStorage>` with
+    /// refcount > 1, but NO shared `&TypedObjectStorage` is formed — see the
+    /// Safety section; forming `&TypedObjectStorage` would freeze the
+    /// allocation and forbid the interior-mutable write).
     /// Returns the prior `(bits, kind)` so the caller can run
     /// `drop_with_kind` on the released share. The caller transfers
     /// ownership of `new_bits` (one strong-count share for heap kinds) to
@@ -3956,11 +4586,14 @@ impl TypedObjectStorage {
     ///    `NonSendableAcrossTaskBoundary`). No other thread may hold an
     ///    `&Arc<TypedObjectStorage>` to the same storage at the same
     ///    time the write executes.
-    /// 2. **No aliased `&mut ValueSlot`**: callers must NOT mint a
-    ///    `&mut ValueSlot` to slot `idx` from any path while this write
-    ///    is in flight. The Q14 dispatch in `op_deref_store` /
-    ///    `op_set_index_ref` is the only caller, and it operates on
-    ///    `&TypedObjectStorage` exclusively.
+    /// 2. **No aliased `&mut ValueSlot` AND no live `&TypedObjectStorage`**:
+    ///    callers must NOT mint a `&mut ValueSlot` to slot `idx`, NOR hold any
+    ///    `&TypedObjectStorage` (or `&`-narrowed pointer to the storage) live
+    ///    across this write. The receiver is a raw `*mut Self` precisely so
+    ///    the storage allocation is never frozen by a shared retag; forming
+    ///    `&TypedObjectStorage` on the write path reintroduces the
+    ///    SharedReadOnly/Frozen UB this signature exists to prevent. Callers
+    ///    pass `recv_bits as *mut TypedObjectStorage` directly.
     /// 3. **Kind invariance**: `new_kind` must equal
     ///    `self.field_kinds[idx]`. The Q14 RefTarget carries the
     ///    projected slot's kind at construction (`MakeFieldRef` sources
@@ -3981,30 +4614,59 @@ impl TypedObjectStorage {
     /// `module_binding_write_kinded` already encapsulate this pattern
     /// for non-projected places; this is the projected-place mirror).
     #[inline]
-    pub unsafe fn write_slot_in_place(
-        &self,
-        idx: usize,
-        new_bits: u64,
-    ) -> u64 {
-        debug_assert!(
-            idx < self.slots.len(),
-            "TypedObjectStorage::write_slot_in_place: idx {} out of bounds (slots.len = {})",
-            idx,
-            self.slots.len(),
-        );
+    pub unsafe fn write_slot_in_place(this: *mut Self, idx: usize, new_bits: u64) -> u64 {
         // SAFETY: see method contract. Single-threaded VM; refs cannot
         // escape across task boundaries; no aliased `&mut ValueSlot`
-        // outstanding by construction; `Box<[ValueSlot]>` is `Sized`-laid-
-        // out and the slot's `u64` is naturally aligned. We cast through
-        // `&[ValueSlot]` -> `*const ValueSlot` -> `*mut ValueSlot` to
-        // perform the single-word write. The slot's `field_kinds[idx]`
-        // is the kind invariant; the caller already debug_asserted kind
-        // equality, so the slot's heap-mask bit (if set) still applies
-        // to the new bits.
-        let slot_ptr = self.slots.as_ptr().add(idx) as *mut crate::slot::ValueSlot;
-        let prior = (*slot_ptr).raw();
-        *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
-        prior
+        // outstanding by construction; the slot's `u64` is naturally aligned.
+        //
+        // SOUNDNESS (2026-06-23, raw-*mut completion of 32e9800a): the
+        // receiver is a raw `*mut Self`. A shared `&TypedObjectStorage` is
+        // NEVER formed on the write path — forming `&TypedObjectStorage`
+        // FREEZES the whole reachable allocation (SharedReadOnly / Frozen),
+        // which then forbids ALL child writes, even ones routed through an
+        // `UnsafeCell`. (The prior `&self` receiver, combined with the outer
+        // `&*(recv_bits as *const TypedObjectStorage)` retag at the caller,
+        // was UB under both Stacked Borrows "tag only grants SharedReadOnly"
+        // and Tree Borrows "tag has state Frozen which forbids this child
+        // write access" — Miri proved it on the shape-vm caller path.)
+        //
+        // We reach the slot via RAW place projection: `(*this).slot_cells`
+        // reads the Box *pointer field* (which points to a SEPARATE slice
+        // allocation), then `.get_unchecked(idx).get()` yields a
+        // `*mut ValueSlot` whose provenance comes from that separate slice
+        // allocation with interior-mutable (`UnsafeCell`) access. No
+        // `&Self` / `&[ValueSlot]` narrowing happens anywhere. The prior
+        // value is read through the SAME raw cell pointer (no `&self`/`slots()`
+        // read borrow is formed).
+        //
+        // SAFETY (Rust-2024 unsafe_op_in_unsafe_fn): `this` is a valid,
+        // aligned, dereferenceable `*mut Self`; `idx` is in-bounds per the
+        // debug_assert; the single-word write/read are guarded by the method
+        // contract documented above.
+        unsafe {
+            // Raw place projection: `&raw const *(*this).slot_cells` takes the
+            // address of the deref'd Box place WITHOUT forming any reference
+            // (no `&Self`, no `&[UnsafeCell<ValueSlot>]` — both would freeze /
+            // trigger the `implicit_autoref` lint). The resulting fat raw slice
+            // pointer carries the SEPARATE slice allocation's provenance.
+            let cells_ptr: *const [std::cell::UnsafeCell<crate::slot::ValueSlot>] =
+                &raw const *(*this).slot_cells;
+            debug_assert!(
+                idx < cells_ptr.len(),
+                "TypedObjectStorage::write_slot_in_place: idx {} out of bounds (slots.len = {})",
+                idx,
+                cells_ptr.len(),
+            );
+            // Index by raw pointer arithmetic — still no reference formed.
+            let cell_ptr: *const std::cell::UnsafeCell<crate::slot::ValueSlot> =
+                (cells_ptr as *const std::cell::UnsafeCell<crate::slot::ValueSlot>).add(idx);
+            // `UnsafeCell::raw_get` yields a `*mut ValueSlot` carrying the
+            // cell's interior-mutable provenance — never a shared-ref tag.
+            let slot_ptr: *mut crate::slot::ValueSlot = std::cell::UnsafeCell::raw_get(cell_ptr);
+            let prior = (*slot_ptr).raw();
+            *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
+            prior
+        }
     }
 }
 
@@ -4033,7 +4695,9 @@ impl Drop for TypedObjectStorage {
         // for `Arc<TypedObjectStorage>` instances; raw-pointer instances
         // route through `_drop` which calls `drop_fields` directly and
         // never reaches here).
-        unsafe { self.drop_fields(); }
+        unsafe {
+            self.drop_fields();
+        }
     }
 }
 
@@ -4381,11 +5045,10 @@ fn native_scalar_decimal_eq(a: &NativeScalar, b: &rust_decimal::Decimal) -> bool
 /// from `&TypedBuffer<i64>` / `&AlignedTypedBuffer` to `&[i64]` / `&[f64]` per
 /// Migration shape (a). Retained for the eventual v2-raw `*mut TypedArray<T>`
 /// per-T monomorphic rebuild (cluster-2 v2-raw-heap-audit territory).
+// Intentional future-use: retained for the v2-raw per-T monomorphic rebuild.
+#[allow(dead_code)]
 #[inline]
-fn int_float_array_eq(
-    ints: &[i64],
-    floats: &[f64],
-) -> bool {
+fn int_float_array_eq(ints: &[i64], floats: &[f64]) -> bool {
     ints.len() == floats.len()
         && ints
             .iter()
@@ -4425,9 +5088,8 @@ impl fmt::Display for HeapValue {
             HeapValue::ClosureRaw(owned) => {
                 // SAFETY: OwnedClosureBlock's invariant guarantees the
                 // pointer is live for the duration of `&self`.
-                let fid = unsafe {
-                    crate::v2::closure_raw::typed_closure_function_id(owned.as_ptr())
-                };
+                let fid =
+                    unsafe { crate::v2::closure_raw::typed_closure_function_id(owned.as_ptr()) };
                 write!(f, "<closure:{}>", fid)
             }
             HeapValue::Decimal(d) => write!(f, "{}", d),
@@ -4471,17 +5133,27 @@ impl fmt::Display for HeapValue {
                 // SUPERSEDED + audit §C.4.
                 hashmap_kref_display(kref, f)
             }
-            // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
-            // 2026-05-10): one-keyspace mirror of HashMap's Display
-            // shape — `{"a", "b", ...}` braces with comma-separated
-            // quoted strings, no values.
+            // Wave 13 W13-hashset-rebuild plus W74B int-key redrive:
+            // braces with comma-separated elements, quoted for strings.
             HeapValue::HashSet(d) => {
                 write!(f, "{{")?;
-                for (i, k) in d.keys.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
+                match d.element_kind() {
+                    HashSetElementKind::String => {
+                        for (i, k) in d.string_keys().iter().enumerate() {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "\"{}\"", k)?;
+                        }
                     }
-                    write!(f, "\"{}\"", k)?;
+                    HashSetElementKind::I64 => {
+                        for (i, k) in d.i64_keys().iter().enumerate() {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "{k}")?;
+                        }
+                    }
                 }
                 write!(f, "}}")
             }
@@ -4600,11 +5272,7 @@ impl fmt::Display for HeapValue {
                 // construction; the `&HeapValue::TraitObject(t)` borrow
                 // holds the carrier live for this scope.
                 let inner_schema_id = unsafe { (*t.value).schema_id };
-                write!(
-                    f,
-                    "<dyn {} #{}>",
-                    trait_name, inner_schema_id
-                )
+                write!(f, "<dyn {} #{}>", trait_name, inner_schema_id)
             }
             // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): concurrency
             // primitives have no user-facing literal — render as opaque
@@ -4730,9 +5398,7 @@ impl HeapValue {
             // parents). Mirror of the pre-amendment TypedArrayData::Matrix /
             // FloatSlice equality semantics.
             (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
-            (HeapValue::MatrixSlice(a), HeapValue::MatrixSlice(b)) => {
-                a.as_slice() == b.as_slice()
-            }
+            (HeapValue::MatrixSlice(a), HeapValue::MatrixSlice(b)) => a.as_slice() == b.as_slice(),
             _ => false,
         }
     }
@@ -4757,19 +5423,20 @@ impl HeapValue {
                 if a.as_ptr() == b.as_ptr() {
                     return true;
                 }
+                let (a_slots, b_slots) = (a.slots(), b.slots());
                 if a.schema_id != b.schema_id
-                    || a.slots.len() != b.slots.len()
+                    || a_slots.len() != b_slots.len()
                     || a.heap_mask != b.heap_mask
                 {
                     return false;
                 }
-                for i in 0..a.slots.len() {
+                for i in 0..a_slots.len() {
                     // Both heap-mask and primitive-mask: compare raw bits
                     // for primitives. For heap slots, raw-bit equality is
                     // also conservatively correct since `ValueSlot` heap
                     // payloads are typed pointers — pointer-equality
                     // implies value-equality for shared Arc'd payloads.
-                    if a.slots[i].raw() != b.slots[i].raw() {
+                    if a_slots[i].raw() != b_slots[i].raw() {
                         return false;
                     }
                 }
@@ -4784,25 +5451,59 @@ impl HeapValue {
             }
             (HeapValue::Decimal(a), HeapValue::Decimal(b)) => a == b,
             (HeapValue::BigInt(a), HeapValue::BigInt(b)) => a == b,
-            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => bigint_decimal_eq(a.as_ref(), b.as_ref()),
-            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => bigint_decimal_eq(b.as_ref(), a.as_ref()),
+            (HeapValue::BigInt(a), HeapValue::Decimal(b)) => {
+                bigint_decimal_eq(a.as_ref(), b.as_ref())
+            }
+            (HeapValue::Decimal(a), HeapValue::BigInt(b)) => {
+                bigint_decimal_eq(b.as_ref(), a.as_ref())
+            }
             (HeapValue::DataTable(a), HeapValue::DataTable(b)) => Arc::ptr_eq(a, b),
             (HeapValue::TableView(a), HeapValue::TableView(b)) => match (a.as_ref(), b.as_ref()) {
                 (
-                    TableViewData::TypedTable { schema_id: s1, table: t1 },
-                    TableViewData::TypedTable { schema_id: s2, table: t2 },
+                    TableViewData::TypedTable {
+                        schema_id: s1,
+                        table: t1,
+                    },
+                    TableViewData::TypedTable {
+                        schema_id: s2,
+                        table: t2,
+                    },
                 ) => s1 == s2 && Arc::ptr_eq(t1, t2),
                 (
-                    TableViewData::RowView { schema_id: s1, row_idx: r1, table: t1 },
-                    TableViewData::RowView { schema_id: s2, row_idx: r2, table: t2 },
+                    TableViewData::RowView {
+                        schema_id: s1,
+                        row_idx: r1,
+                        table: t1,
+                    },
+                    TableViewData::RowView {
+                        schema_id: s2,
+                        row_idx: r2,
+                        table: t2,
+                    },
                 ) => s1 == s2 && r1 == r2 && Arc::ptr_eq(t1, t2),
                 (
-                    TableViewData::ColumnRef { schema_id: s1, col_id: c1, table: t1 },
-                    TableViewData::ColumnRef { schema_id: s2, col_id: c2, table: t2 },
+                    TableViewData::ColumnRef {
+                        schema_id: s1,
+                        col_id: c1,
+                        table: t1,
+                    },
+                    TableViewData::ColumnRef {
+                        schema_id: s2,
+                        col_id: c2,
+                        table: t2,
+                    },
                 ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
                 (
-                    TableViewData::IndexedTable { schema_id: s1, index_col: c1, table: t1 },
-                    TableViewData::IndexedTable { schema_id: s2, index_col: c2, table: t2 },
+                    TableViewData::IndexedTable {
+                        schema_id: s1,
+                        index_col: c1,
+                        table: t1,
+                    },
+                    TableViewData::IndexedTable {
+                        schema_id: s2,
+                        index_col: c2,
+                        table: t2,
+                    },
                 ) => s1 == s2 && c1 == c2 && Arc::ptr_eq(t1, t2),
                 _ => false,
             },
@@ -4829,12 +5530,14 @@ impl HeapValue {
             // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13): Matrix
             // and MatrixSlice equality match the structural_eq shape above.
             (HeapValue::Matrix(a), HeapValue::Matrix(b)) => matrix_eq(a, b),
-            (HeapValue::MatrixSlice(a), HeapValue::MatrixSlice(b)) => {
-                a.as_slice() == b.as_slice()
-            }
+            (HeapValue::MatrixSlice(a), HeapValue::MatrixSlice(b)) => a.as_slice() == b.as_slice(),
             // Cross-type numeric
-            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => native_scalar_bigint_eq(a, b.as_ref()),
-            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => native_scalar_bigint_eq(b, a.as_ref()),
+            (HeapValue::NativeScalar(a), HeapValue::BigInt(b)) => {
+                native_scalar_bigint_eq(a, b.as_ref())
+            }
+            (HeapValue::BigInt(a), HeapValue::NativeScalar(b)) => {
+                native_scalar_bigint_eq(b, a.as_ref())
+            }
             (HeapValue::NativeScalar(a), HeapValue::Decimal(b)) => {
                 native_scalar_decimal_eq(a, b.as_ref())
             }
@@ -4931,12 +5634,7 @@ mod typed_object_storage_drop {
         // Drop must not call Arc::decrement_strong_count on null.
         let slot = ValueSlot::from_raw(0);
         let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::String]);
-        let storage = TypedObjectStorage::new(
-            9,
-            vec![slot].into_boxed_slice(),
-            0b1,
-            kinds,
-        );
+        let storage = TypedObjectStorage::new(9, vec![slot].into_boxed_slice(), 0b1, kinds);
         drop(storage);
     }
 
@@ -4993,9 +5691,7 @@ mod typed_object_storage_drop {
             NativeKind::Bool,
         ]);
         let storage = TypedObjectStorage::new(
-            13,
-            slots,
-            0b010, // only bit 1 (the string) is heap
+            13, slots, 0b010, // only bit 1 (the string) is heap
             kinds,
         );
 
@@ -5062,6 +5758,84 @@ mod typed_object_storage_drop {
         }
     }
 
+    /// Miri-only nested TypedObject field sidecar probe.
+    ///
+    /// This isolates the highest-value unproven field-provenance boundary
+    /// after the stack-sidecar work: a `TypedObjectStorage` field whose
+    /// payload is another v2-raw `TypedObjectStorage`. It covers
+    /// `_new_with_miri_field_provenance` -> `clone_field_kinded` ->
+    /// `KindedSlot::Clone` / `Drop` for `Ptr(HeapKind::TypedObject)`, plus
+    /// outer `drop_fields` releasing the original field share through the
+    /// stored sidecar.
+    #[cfg(miri)]
+    #[test]
+    fn miri_typed_object_nested_field_clone_and_drop() {
+        use crate::v2::heap_element::HeapElement;
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+
+        unsafe {
+            let inner_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+            let inner_ptr = TypedObjectStorage::_new(
+                200,
+                vec![ValueSlot::from_int(7)].into_boxed_slice(),
+                0,
+                inner_kinds,
+            );
+            v2_retain(&(*inner_ptr).header);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                2,
+                "inner has one field-owned share plus one witness share"
+            );
+
+            let outer_kinds: Arc<[NativeKind]> =
+                Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+            let outer_ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+                201,
+                vec![ValueSlot::from_typed_object_raw(inner_ptr)].into_boxed_slice(),
+                0b1,
+                outer_kinds,
+                vec![MiriSlotProvenance::TypedObject(inner_ptr)].into_boxed_slice(),
+            );
+
+            let cloned = {
+                let outer_ref = &*outer_ptr;
+                outer_ref
+                    .clone_field_kinded(0)
+                    .expect("nested typed-object field should clone")
+            };
+            assert_eq!(cloned.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+            assert_eq!(
+                cloned
+                    .as_typed_object_storage()
+                    .expect("clone keeps typed-object provenance")
+                    .schema_id,
+                200
+            );
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                3,
+                "clone_field_kinded retained the nested typed-object share"
+            );
+
+            drop(cloned);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                2,
+                "dropping the cloned slot releases its retained share"
+            );
+
+            TypedObjectStorage::release_elem(outer_ptr);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                1,
+                "dropping outer storage releases the original field share"
+            );
+
+            TypedObjectStorage::release_elem(inner_ptr);
+        }
+    }
+
     // ── Wave 2 Agent D1 v2-raw HeapHeader-equipped shape change tests ──────────
 
     #[test]
@@ -5071,12 +5845,8 @@ mod typed_object_storage_drop {
         // Used by Arc<TypedObjectStorage>-path callers (the legacy path); the
         // header's refcount sits unused for the Arc lifetime.
         let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
-        let storage = TypedObjectStorage::new(
-            1,
-            vec![ValueSlot::from_int(0)].into_boxed_slice(),
-            0,
-            kinds,
-        );
+        let storage =
+            TypedObjectStorage::new(1, vec![ValueSlot::from_int(0)].into_boxed_slice(), 0, kinds);
         assert_eq!(
             storage.header.kind(),
             crate::v2::heap_header::HEAP_KIND_V2_TYPED_OBJECT,
@@ -5105,11 +5875,66 @@ mod typed_object_storage_drop {
             );
             assert_eq!((*ptr).header.get_refcount(), 1);
             assert_eq!((*ptr).schema_id, 7);
-            assert_eq!((&(*ptr).slots).len(), 1);
-            assert_eq!((&(*ptr).slots)[0].as_i64(), 42);
+            assert_eq!((*ptr).slots().len(), 1);
+            assert_eq!((*ptr).slots()[0].as_i64(), 42);
             TypedObjectStorage::_drop(ptr);
             // ptr is dangling; cannot dereference further.
         }
+    }
+
+    /// MIRI/Stacked+Tree-Borrows anchor (in-place-write soundness fix,
+    /// 2026-06-23).
+    ///
+    /// Drives `write_slot_in_place(this: *mut Self, ...)` through an
+    /// `Arc<TypedObjectStorage>` whose `strong_count >= 2` (a genuinely
+    /// SHARED allocation — exactly the Q14 projection-write shape), with a
+    /// shared read of the SAME storage interleaved before and after the
+    /// write. The receiver is reached via `Arc::as_ptr` (a raw `*const`, no
+    /// `&TypedObjectStorage` formed). The pre-fix body did
+    /// `self.slots.as_ptr() as *mut ValueSlot` and wrote through it; the
+    /// 32e9800a interim took a `&self` receiver (the outer caller retag still
+    /// froze the allocation). Both were UB ("SharedReadOnly->Write retag" /
+    /// "tag has state Frozen which forbids this child write access") — Miri
+    /// flagged it on the shape-vm caller path. Post-fix the write goes through
+    /// a raw `*mut Self` + `UnsafeCell::raw_get()` (interior-mutable
+    /// provenance, no freeze), so this test is CLEAN under both `cargo miri
+    /// test` (Stacked Borrows, default) and
+    /// `MIRIFLAGS=-Zmiri-tree-borrows cargo miri test`.
+    #[test]
+    fn write_slot_in_place_on_shared_arc_no_write_via_shared_ref_provenance() {
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64, NativeKind::Int64]);
+        let arc: Arc<TypedObjectStorage> = Arc::new(TypedObjectStorage::new(
+            5,
+            vec![ValueSlot::from_int(10), ValueSlot::from_int(20)].into_boxed_slice(),
+            0, // no heap slots — scalar fields; isolates the write-provenance UB
+            kinds,
+        ));
+        // Second owner — strong_count == 2; `arc` is now a genuinely shared
+        // allocation. Mutating inline data through a pointer narrowed from a
+        // shared `&` borrow would be UB.
+        let alias = Arc::clone(&arc);
+        assert_eq!(Arc::strong_count(&arc), 2);
+
+        // Shared read interleaved with the in-place write — the exact shape
+        // that makes Stacked/Tree Borrows reject a SharedReadOnly->Write retag.
+        assert_eq!(arc.slots()[0].as_i64(), 10);
+
+        // In-place write through a raw `*mut Self` (UnsafeCell::raw_get
+        // provenance post-fix) — `Arc::as_ptr` yields a `*const` WITHOUT
+        // forming a `&TypedObjectStorage`, so no freeze of the allocation.
+        let raw: *mut TypedObjectStorage = Arc::as_ptr(&arc) as *mut TypedObjectStorage;
+        let prior = unsafe { TypedObjectStorage::write_slot_in_place(raw, 0, 99u64) };
+        assert_eq!(prior, 10u64);
+
+        // Shared read again — observes the written value.
+        assert_eq!(arc.slots()[0].as_i64(), 99);
+        // The untouched sibling slot is unchanged.
+        assert_eq!(arc.slots()[1].as_i64(), 20);
+        // Read through the aliasing Arc owner too.
+        assert_eq!(alias.slots()[0].as_i64(), 99);
+
+        drop(alias);
+        drop(arc);
     }
 
     #[test]
@@ -5190,15 +6015,14 @@ mod typed_object_storage_drop {
         // to read the refcount at the v2-raw canonical offset (offset 0
         // mirrors StringObj / DecimalObj precedents).
         let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
-        let storage = TypedObjectStorage::new(
-            1,
-            vec![ValueSlot::from_int(0)].into_boxed_slice(),
-            0,
-            kinds,
-        );
+        let storage =
+            TypedObjectStorage::new(1, vec![ValueSlot::from_int(0)].into_boxed_slice(), 0, kinds);
         let base = &storage as *const _ as usize;
         let header_offset = &storage.header as *const _ as usize - base;
-        assert_eq!(header_offset, 0, "header must be at offset 0 (#[repr(C)] contract)");
+        assert_eq!(
+            header_offset, 0,
+            "header must be at offset 0 (#[repr(C)] contract)"
+        );
     }
 }
 
@@ -5246,8 +6070,49 @@ mod hashmap_mutation {
         // Bucket index has registrations for both keys' hashes.
         let h_a = fnv1a_hash(b"a");
         let h_b = fnv1a_hash(b"b");
-        assert!(m.index.get(&h_a).is_some());
-        assert!(m.index.get(&h_b).is_some());
+        assert!(unsafe { (*m.index).get(&h_a) }.is_some());
+        assert!(unsafe { (*m.index).get(&h_b) }.is_some());
+    }
+
+    /// MIRI/Stacked-Borrows anchor (U3-perf box-index, 2026-06-23).
+    ///
+    /// Drives `insert_at(this, ...)` where `this` is derived from
+    /// `Arc::as_ptr` of a map whose outer `Arc` strong_count >= 2 (a SHARED
+    /// borrow). The pre-fix code formed `&mut` to the inline `index` field via
+    /// this `this`, which is UB under Stacked/Tree Borrows (retags the whole
+    /// Arc allocation as uniquely-borrowed). Post-fix the index lives behind a
+    /// Copy `*mut` to a separate Box allocation, so the `&mut` carries Box
+    /// provenance and this test is clean under `cargo miri`.
+    ///
+    /// Exercises both branches: a new-key insert (grows the boxed index) and
+    /// an overwrite (reads the boxed index, no growth).
+    #[test]
+    fn insert_at_on_shared_arc_no_mut_via_arc_provenance() {
+        let arc: Arc<HashMapData<i64>> = Arc::new(HashMapData::new());
+        // Second owner — strong_count == 2; `arc` is now a genuinely shared
+        // allocation. `Arc::as_ptr` yields a pointer derived from a shared
+        // borrow; mutating inline data through it would be UB.
+        let alias = Arc::clone(&arc);
+        assert_eq!(Arc::strong_count(&arc), 2);
+
+        let this = Arc::as_ptr(&arc) as *mut HashMapData<i64>;
+        unsafe {
+            // New-key insert (boxed-index growth through Box provenance).
+            assert!(HashMapData::insert_at(this, "alpha", 1));
+            assert!(HashMapData::insert_at(this, "beta", 2));
+            // Overwrite (boxed-index read through Box provenance).
+            assert!(!HashMapData::insert_at(this, "alpha", 99));
+        }
+        assert_eq!(arc.len(), 2);
+        assert_eq!(arc.get_index("alpha"), Some(0));
+        assert_eq!(unsafe { arc.value_at_raw(0) }, 99);
+        assert_eq!(arc.get_index("beta"), Some(1));
+        // Bucket index reachable via the boxed pointer.
+        assert!(unsafe { (*arc.index).get(&fnv1a_hash(b"alpha")) }.is_some());
+        // Both Arc owners drop here — Drop frees the boxed index exactly once
+        // (the last owner). Element-Drop (SB-13) on the i64 values is a no-op.
+        drop(alias);
+        drop(arc);
     }
 
     #[test]
@@ -5476,21 +6341,15 @@ mod hashmap_mutation {
             inner_small.insert("a", 1);
             inner_small.insert("b", 2);
             inner_large.insert("c", 100);
-            outer.insert(
-                "small",
-                HashMapKindedRef::I64(Arc::new(inner_small)),
-            );
-            outer.insert(
-                "large",
-                HashMapKindedRef::I64(Arc::new(inner_large)),
-            );
+            outer.insert("small", HashMapKindedRef::I64(Arc::new(inner_small)));
+            outer.insert("large", HashMapKindedRef::I64(Arc::new(inner_large)));
         }
         assert_eq!(outer.len(), 2);
         // Bucket index has registrations for both group keys.
         let h_small = fnv1a_hash(b"small");
         let h_large = fnv1a_hash(b"large");
-        assert!(outer.index.get(&h_small).is_some());
-        assert!(outer.index.get(&h_large).is_some());
+        assert!(unsafe { (*outer.index).get(&h_small) }.is_some());
+        assert!(unsafe { (*outer.index).get(&h_large) }.is_some());
         // get_share returns a fresh per-variant Arc::clone-bumped copy.
         let small_ref = outer.get_share("small").expect("small bucket present");
         match small_ref {
@@ -5600,19 +6459,19 @@ mod hashset_mutation {
     #[test]
     fn insert_returns_true_for_new_key_false_for_duplicate() {
         let mut s = HashSetData::new();
-        assert!(s.insert(k("a")));
-        assert!(s.insert(k("b")));
+        assert!(s.insert(k("a")).unwrap());
+        assert!(s.insert(k("b")).unwrap());
         assert_eq!(s.len(), 2);
         // Duplicate insert is a no-op.
-        assert!(!s.insert(k("a")));
+        assert!(!s.insert(k("a")).unwrap());
         assert_eq!(s.len(), 2);
     }
 
     #[test]
     fn contains_finds_inserted_keys() {
         let mut s = HashSetData::new();
-        s.insert(k("a"));
-        s.insert(k("b"));
+        s.insert(k("a")).unwrap();
+        s.insert(k("b")).unwrap();
         assert!(s.contains("a"));
         assert!(s.contains("b"));
         assert!(!s.contains("c"));
@@ -5621,8 +6480,8 @@ mod hashset_mutation {
     #[test]
     fn remove_returns_true_for_present_false_for_missing() {
         let mut s = HashSetData::new();
-        s.insert(k("a"));
-        s.insert(k("b"));
+        s.insert(k("a")).unwrap();
+        s.insert(k("b")).unwrap();
         assert!(s.remove("a"));
         assert!(!s.contains("a"));
         assert!(s.contains("b"));
@@ -5636,9 +6495,31 @@ mod hashset_mutation {
     fn from_keys_collapses_duplicates_first_wins() {
         let s = HashSetData::from_keys(vec![k("a"), k("b"), k("a"), k("c")]);
         assert_eq!(s.len(), 3);
-        assert_eq!(s.keys[0].as_str(), "a");
-        assert_eq!(s.keys[1].as_str(), "b");
-        assert_eq!(s.keys[2].as_str(), "c");
+        assert_eq!(s.string_keys()[0].as_str(), "a");
+        assert_eq!(s.string_keys()[1].as_str(), "b");
+        assert_eq!(s.string_keys()[2].as_str(), "c");
+    }
+
+    #[test]
+    fn i64_set_preserves_static_arm() {
+        let mut s = HashSetData::new_i64();
+        assert!(s.insert_i64(1).unwrap());
+        assert!(s.insert_i64(2).unwrap());
+        assert!(!s.insert_i64(1).unwrap());
+        assert_eq!(s.len(), 2);
+        assert!(s.contains_i64(1));
+        assert!(s.contains_i64(2));
+        assert_eq!(s.i64_keys(), &[1, 2]);
+    }
+
+    #[test]
+    fn wrong_arm_insert_returns_error() {
+        let mut strings = HashSetData::new_string();
+        let mut ints = HashSetData::new_i64();
+        assert!(strings.insert_i64(1).is_err());
+        assert!(ints.insert(k("a")).is_err());
+        assert_eq!(strings.len(), 0);
+        assert_eq!(ints.len(), 0);
     }
 
     #[test]
@@ -5647,8 +6528,8 @@ mod hashset_mutation {
         // target: `let s = Set(); s.add("a"); s.add("b"); print(s.size())`
         // outputs 2.
         let mut s = HashSetData::new();
-        s.insert(k("a"));
-        s.insert(k("b"));
+        s.insert(k("a")).unwrap();
+        s.insert(k("b")).unwrap();
         assert_eq!(s.len(), 2);
     }
 
@@ -5660,10 +6541,10 @@ mod hashset_mutation {
         // immutable. Mirror of `hashmap_mutation`'s clone-on-write
         // test.
         let mut a = Arc::new(HashSetData::new());
-        Arc::make_mut(&mut a).insert(k("a"));
+        Arc::make_mut(&mut a).insert(k("a")).unwrap();
         let snapshot = Arc::clone(&a);
         // After the snapshot, mutating `a` clones the inner data.
-        Arc::make_mut(&mut a).insert(k("b"));
+        Arc::make_mut(&mut a).insert(k("b")).unwrap();
         assert_eq!(a.len(), 2);
         // Snapshot retains the pre-mutation length.
         assert_eq!(snapshot.len(), 1);
@@ -5794,6 +6675,7 @@ mod deque_mutation {
     }
 }
 
+#[cfg(test)]
 mod priority_queue_mutation {
     //! W15-priority-queue (ADR-006 §2.7.18 / Q19, 2026-05-10): pin the
     //! `push` / `pop` / `peek` / heap-invariant API contracts on
@@ -5801,7 +6683,6 @@ mod priority_queue_mutation {
     //! cardinality-amendment shape, with i64-priority-only payload
     //! semantics per the §2.7.18 ruling.
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn empty_pq_has_zero_len_and_is_empty() {
@@ -5857,9 +6738,9 @@ mod priority_queue_mutation {
         // Original PQ is undisturbed.
         assert_eq!(pq.len(), 8);
     }
-
 }
 
+#[cfg(test)]
 mod channel_storage {
     //! W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10): pin the
     //! `send` / `try_recv` / `close` / `is_closed` / `len` / `is_empty`
@@ -5884,7 +6765,8 @@ mod channel_storage {
         // Storage-layer counterpart of the W15-channel-rebuild smoke
         // target: `let c = Channel(); c.send(1); c.recv()` returns 1.
         let c = ChannelData::new();
-        c.send(KindedSlot::from_int(1)).expect("send on open channel");
+        c.send(KindedSlot::from_int(1))
+            .expect("send on open channel");
         let got = c.try_recv().expect("queued element");
         assert_eq!(got.as_i64(), Some(1));
         assert!(c.is_empty());
@@ -6069,8 +6951,7 @@ mod result_option_storage {
         let arc = Arc::new(ResultData::ok(KindedSlot::from_int(7)));
         let bits = Arc::into_raw(arc) as u64;
         // Recover and verify is_ok.
-        let arc2: Arc<ResultData> =
-            unsafe { Arc::from_raw(bits as *const ResultData) };
+        let arc2: Arc<ResultData> = unsafe { Arc::from_raw(bits as *const ResultData) };
         assert!(arc2.is_ok);
         assert_eq!(arc2.payload.as_i64(), Some(7));
         drop(arc2);
@@ -6336,7 +7217,7 @@ mod trait_object_storage {
         TypedObjectStorage::_new(
             42, // schema_id — arbitrary
             slots.into_boxed_slice(),
-            0,  // heap_mask: no heap slots
+            0, // heap_mask: no heap slots
             field_kinds,
         )
     }
@@ -6344,10 +7225,7 @@ mod trait_object_storage {
     /// Build a minimal `VTable` for tests — one `Direct` method entry.
     fn make_vtable(trait_name: &str, concrete_type_id: u32, method: &str) -> Arc<VTable> {
         let mut methods: HashMap<String, VTableEntry> = HashMap::new();
-        methods.insert(
-            method.to_string(),
-            VTableEntry::Direct { function_id: 7 },
-        );
+        methods.insert(method.to_string(), VTableEntry::Direct { function_id: 7 });
         Arc::new(VTable {
             trait_names: vec![trait_name.to_string()],
             concrete_type_id,
@@ -6505,10 +7383,15 @@ mod trait_object_storage {
 
     #[test]
     fn slot_bits_recover_to_typed_arc_via_canonical_pattern() {
-        // The canonical recovery pattern (per `3ac2f11` precedent):
-        // bits = slot.raw(), Arc::from_raw, clone, into_raw. Verify
-        // that round-tripping the raw bits through Arc::from_raw
-        // recovers an Arc with the expected vtable identity.
+        // R6 carrier-convention soundness (2026-06): production trait
+        // objects are v2-raw `_new`/HeapHeader carriers (see
+        // trait_object_ops.rs `TraitObjectStorage::_new` producers +
+        // the `release_elem` drop arm). Recovery for a read is a
+        // transient raw `&TraitObjectStorage`, NOT `Arc::from_raw`
+        // (which would `byte_sub(16)` into non-ArcInner memory on a
+        // `_new` carrier). This test pins that raw-read recovery
+        // round-trips the vtable identity without touching the
+        // refcount header.
         let obj = make_object(7);
         let vt = make_vtable("Animal", 100, "name");
         let storage = Arc::new(TraitObjectStorage::new(obj, vt));
@@ -6516,21 +7399,17 @@ mod trait_object_storage {
         let slot = KindedSlot::from_trait_object(Arc::clone(&storage));
         let bits = slot.slot().raw();
 
-        // SAFETY: bits came from KindedSlot::from_trait_object which
-        // stores `Arc::into_raw(Arc<TraitObjectStorage>)`. The slot
-        // owns the share; we leak the recovered Arc back to keep the
-        // slot's share intact for normal drop discipline.
-        let recovered: Arc<TraitObjectStorage> =
-            unsafe { Arc::from_raw(bits as *const TraitObjectStorage) };
-        let cloned = Arc::clone(&recovered);
-        let _ = Arc::into_raw(recovered); // restore slot's share
+        // SAFETY: bits point at a live TraitObjectStorage kept alive by
+        // `storage` + the slot's share. Borrow it transiently as a
+        // shared reference for the read — no refcount touch, no
+        // `Arc::from_raw`/`byte_sub(16)`.
+        let recovered: &TraitObjectStorage = unsafe { &*(bits as *const TraitObjectStorage) };
 
-        // Recovered Arc points to the same storage — same vtable Arc.
-        assert!(Arc::ptr_eq(&cloned.vtable, &storage.vtable));
+        // Recovered borrow points to the same storage — same vtable Arc.
+        assert!(Arc::ptr_eq(&recovered.vtable, &storage.vtable));
         // Pointer-equality on the inner vtable's raw pointer matches.
-        assert_eq!(Arc::as_ptr(&cloned.vtable), original_vt_ptr);
+        assert_eq!(Arc::as_ptr(&recovered.vtable), original_vt_ptr);
 
-        drop(cloned);
         drop(slot);
         drop(storage);
     }

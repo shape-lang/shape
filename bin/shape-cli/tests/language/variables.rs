@@ -13,5 +13,8 @@ fn test_variable_assignment() {
     init_runtime();
 
     assert_eq!(eval_to_number("let mut x = 5; x = 10; x"), 10.0);
-    assert_eq!(eval_to_number("let mut x = 1; x = x + 1; x = x + 1; x"), 3.0);
+    assert_eq!(
+        eval_to_number("let mut x = 1; x = x + 1; x = x + 1; x"),
+        3.0
+    );
 }

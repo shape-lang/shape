@@ -96,8 +96,8 @@ fn main() {
     let prelude_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("embedded/core_prelude.shapec");
     eprintln!("Building prelude SHAPEPKG bundle...");
-    let prelude_bundle = shape_vm::stdlib::build_core_prelude_bundle()
-        .expect("Failed to build prelude bundle");
+    let prelude_bundle =
+        shape_vm::stdlib::build_core_prelude_bundle().expect("Failed to build prelude bundle");
     let prelude_bytes = prelude_bundle
         .to_bytes()
         .expect("Failed to serialize prelude bundle");
@@ -113,9 +113,8 @@ fn main() {
         }
         let existing =
             std::fs::read(&prelude_path).expect("Failed to read existing prelude bundle");
-        let existing_bundle =
-            shape_runtime::package_bundle::PackageBundle::from_bytes(&existing)
-                .expect("Failed to deserialize existing prelude bundle");
+        let existing_bundle = shape_runtime::package_bundle::PackageBundle::from_bytes(&existing)
+            .expect("Failed to deserialize existing prelude bundle");
         let mut errors = Vec::new();
         let existing_iface_items = existing_bundle
             .manifests

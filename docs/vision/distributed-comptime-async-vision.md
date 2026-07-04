@@ -301,7 +301,7 @@ annotation cached() {
     before(args, ctx) {
         let key = hash(fn.name, args);
         let entry = ctx.cache.get_entry(key);
-        if entry != null { entry.value }
+        if entry != None { entry.value }
     }
     after(args, result, ctx) {
         ctx.cache.set(key, result);

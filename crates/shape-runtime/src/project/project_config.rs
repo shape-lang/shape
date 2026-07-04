@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::dependency_spec::{DependencySpec, NativeDependencySpec, parse_native_dependencies_section};
+use super::dependency_spec::{
+    DependencySpec, NativeDependencySpec, parse_native_dependencies_section,
+};
 use super::permissions::PermissionsSection;
 use super::sandbox::SandboxSection;
 

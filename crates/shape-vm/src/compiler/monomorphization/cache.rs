@@ -76,11 +76,13 @@ impl MonomorphizationCache {
     }
 
     /// Number of distinct specializations currently cached.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the cache is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -88,6 +90,7 @@ impl MonomorphizationCache {
     /// Iterate over `(mono_key, function_idx)` pairs.
     ///
     /// Useful for diagnostics and incremental-compilation snapshots.
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = (&String, &u16)> {
         self.entries.iter()
     }
@@ -301,15 +304,17 @@ impl BytecodeCompiler {
         // Look up the original FunctionDef AST. The bytecode compiler always
         // populates `function_defs` during `register_function`, so this is
         // the canonical store for substitution input.
-        let original_def = self.function_defs.get(base_fn_name).cloned().ok_or_else(|| {
-            ShapeError::SemanticError {
+        let original_def = self
+            .function_defs
+            .get(base_fn_name)
+            .cloned()
+            .ok_or_else(|| ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function: no FunctionDef AST recorded for '{}'",
                     base_fn_name
                 ),
                 location: None,
-            }
-        })?;
+            })?;
 
         // Build the {type-param-name -> ConcreteType} substitution map that
         // Agent 2's `substitute_function_def` consumes. This requires the
@@ -371,23 +376,24 @@ impl BytecodeCompiler {
         // `function_defs`, `function_arity_bounds`, etc.
         self.register_function(&specialized_def)?;
         let specialization_idx_usize =
-            self.find_function(&specialized_name).ok_or_else(|| {
-                ShapeError::SemanticError {
+            self.find_function(&specialized_name)
+                .ok_or_else(|| ShapeError::SemanticError {
                     message: format!(
                         "ensure_monomorphic_function: failed to register specialization '{}'",
                         specialized_name
                     ),
                     location: None,
-                }
-            })?;
+                })?;
         let specialization_idx: u16 =
-            specialization_idx_usize.try_into().map_err(|_| ShapeError::SemanticError {
-                message: format!(
-                    "ensure_monomorphic_function: function index {} for '{}' overflows u16",
-                    specialization_idx_usize, specialized_name
-                ),
-                location: None,
-            })?;
+            specialization_idx_usize
+                .try_into()
+                .map_err(|_| ShapeError::SemanticError {
+                    message: format!(
+                        "ensure_monomorphic_function: function index {} for '{}' overflows u16",
+                        specialization_idx_usize, specialized_name
+                    ),
+                    location: None,
+                })?;
 
         // Cache the index BEFORE compiling the body so recursive calls inside
         // the specialized function self-reference the same cache entry instead
@@ -413,24 +419,20 @@ impl BytecodeCompiler {
         // call. Without this guard the outer back-patcher pairs the wrong
         // `ClosureCapture` with the wrong `function_id`, tripping the
         // MIR-to-IR `capture-count mismatch` assertion.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
-        // v0.3 WS-6: save/restore the per-function local ConcreteType table
-        // across the nested specialized-body `compile_function`. That call
-        // clears + repopulates `current_function_local_concrete_types` for
-        // the specialization's own local slots; without the save/restore the
-        // OUTER (caller) function's compilation would resume with the
-        // specialization's slot entries still installed, mis-resolving a
-        // later monomorphization call site's argument types against a stale
-        // foreign-function slot index.
-        let saved_local_concrete_types =
-            std::mem::take(&mut self.current_function_local_concrete_types);
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+        // U4-6: save/restore per-function local ConcreteType facts across the
+        // nested specialized-body `compile_function`. Slot indices are local
+        // to each compiled function.
+        let saved_local_concrete_facts =
+            std::mem::take(&mut self.current_function_local_concrete_facts);
+        let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
         // Compile the specialized body. On failure, surface the error — the
         // caller is responsible for falling through to the generic path on
         // any failure mode it wants to tolerate.
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
-        self.current_function_local_concrete_types = saved_local_concrete_types;
+        self.current_function_local_concrete_facts = saved_local_concrete_facts;
+        self.local_binding_spans = saved_local_binding_spans;
         self.monomorphization_in_progress.remove(&mono_key);
         result?;
 
@@ -503,15 +505,17 @@ impl BytecodeCompiler {
             });
         }
 
-        let original_def = self.function_defs.get(base_fn_name).cloned().ok_or_else(|| {
-            ShapeError::SemanticError {
+        let original_def = self
+            .function_defs
+            .get(base_fn_name)
+            .cloned()
+            .ok_or_else(|| ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function_with_consts: no FunctionDef AST recorded for '{}'",
                     base_fn_name
                 ),
                 location: None,
-            }
-        })?;
+            })?;
 
         // Partition the declared generic params into type-kind names and
         // const-kind names (positional against `type_args` / `const_args`
@@ -609,15 +613,16 @@ impl BytecodeCompiler {
         self.monomorphization_in_progress.insert(mono_key.clone());
 
         // F7: see note in `ensure_monomorphic_function` above.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
-        // v0.3 WS-6: see `ensure_monomorphic_function` — save/restore the
-        // per-function local ConcreteType table across the nested compile.
-        let saved_local_concrete_types =
-            std::mem::take(&mut self.current_function_local_concrete_types);
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+        // U4-6: see `ensure_monomorphic_function` — save/restore the
+        // per-function local ConcreteType facts across the nested compile.
+        let saved_local_concrete_facts =
+            std::mem::take(&mut self.current_function_local_concrete_facts);
+        let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
-        self.current_function_local_concrete_types = saved_local_concrete_types;
+        self.current_function_local_concrete_facts = saved_local_concrete_facts;
+        self.local_binding_spans = saved_local_binding_spans;
         self.monomorphization_in_progress.remove(&mono_key);
         result?;
 
@@ -757,11 +762,7 @@ impl BytecodeCompiler {
                     })
                     .and_then(|p| p.type_annotation.as_ref())
                     .and_then(|ann| {
-                        if let shape_ast::ast::TypeAnnotation::Function {
-                            params: fps,
-                            ..
-                        } = ann
-                        {
+                        if let shape_ast::ast::TypeAnnotation::Function { params: fps, .. } = ann {
                             Some(
                                 fps.iter()
                                     .map(|fp| Some(fp.type_annotation.clone()))
@@ -825,22 +826,22 @@ impl BytecodeCompiler {
         self.monomorphization_cache
             .insert(mono_key.clone(), specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
-        self.closure_specialization_count =
-            self.closure_specialization_count.saturating_add(1);
+        self.closure_specialization_count = self.closure_specialization_count.saturating_add(1);
 
         // BUG3 — mark this key as in-progress while its body is compiled.
         self.monomorphization_in_progress.insert(mono_key.clone());
 
         // F7: see note in `ensure_monomorphic_function`.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
-        // v0.3 WS-6: see `ensure_monomorphic_function` — save/restore the
-        // per-function local ConcreteType table across the nested compile.
-        let saved_local_concrete_types =
-            std::mem::take(&mut self.current_function_local_concrete_types);
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+        // U4-6: see `ensure_monomorphic_function` — save/restore the
+        // per-function local ConcreteType facts across the nested compile.
+        let saved_local_concrete_facts =
+            std::mem::take(&mut self.current_function_local_concrete_facts);
+        let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
         let compile_result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
-        self.current_function_local_concrete_types = saved_local_concrete_types;
+        self.current_function_local_concrete_facts = saved_local_concrete_facts;
+        self.local_binding_spans = saved_local_binding_spans;
         self.monomorphization_in_progress.remove(&mono_key);
         if compile_result.is_err() {
             // Compilation failed — we already inserted the cache entry; the
@@ -856,9 +857,9 @@ impl BytecodeCompiler {
 /// B.3 — resolve a callee's const generic parameters from their declared
 /// default expressions.
 ///
-/// The grammar does not yet accept call-site turbofish (`::<4>`) for binding
-/// const generic args, so the only source we have for a const value today is
-/// the optional `default` on each `TypeParam::Const`. The rule:
+/// This entry point is the default-only route. Explicit call-site const
+/// arguments are resolved before dispatching to
+/// `ensure_monomorphic_function_with_consts`.
 ///
 ///   - `TypeParam::Const { default: Some(literal_expr), .. }` → bind that value.
 ///   - `TypeParam::Const { default: None, .. }`              → compile error.
@@ -881,7 +882,7 @@ fn resolve_const_defaults_or_error(
                 let Some(default_expr) = default else {
                     return Err(ShapeError::SemanticError {
                         message: format!(
-                            "const generic arg must be a compile-time constant: '{}' declares const generic parameter '{}' with no default value, and call-site const argument syntax is not yet supported",
+                            "const generic arg must be a compile-time constant: '{}' declares const generic parameter '{}' with no default value, and no explicit call-site const argument reached this default-only entry point",
                             base_fn_name, name
                         ),
                         location: None,
@@ -941,10 +942,7 @@ mod tests {
     fn multiple_instantiations_produce_distinct_keys() {
         let mut cache = MonomorphizationCache::new();
 
-        let key_int_string = build_mono_key(
-            "map",
-            &[ConcreteType::I64, ConcreteType::String],
-        );
+        let key_int_string = build_mono_key("map", &[ConcreteType::I64, ConcreteType::String]);
         let key_f64_bool = build_mono_key("map", &[ConcreteType::F64, ConcreteType::Bool]);
         let key_array_f64 = build_mono_key(
             "map",
@@ -1010,10 +1008,8 @@ mod tests {
     #[test]
     fn ensure_monomorphic_function_unknown_name_errors() {
         let mut compiler = BytecodeCompiler::new();
-        let result = compiler.ensure_monomorphic_function(
-            "definitely_not_a_function",
-            &[ConcreteType::I64],
-        );
+        let result =
+            compiler.ensure_monomorphic_function("definitely_not_a_function", &[ConcreteType::I64]);
         assert!(result.is_err(), "expected error for unknown function name");
         let msg = format!("{:?}", result.err().unwrap());
         assert!(
@@ -1035,11 +1031,7 @@ mod tests {
         // Simulate "repeat<3>(...)": the call site builds a mono_key via
         // build_mono_key_with_consts and inserts a specialization index.
         let mut cache = MonomorphizationCache::new();
-        let key = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(3)],
-        );
+        let key = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
         assert_eq!(key, "repeat::int_3");
         cache.insert(key.clone(), 11);
         assert_eq!(cache.lookup(&key), Some(11));
@@ -1049,16 +1041,8 @@ mod tests {
     #[test]
     fn const_generic_repeat_n_3_and_n_5_produce_two_entries() {
         let mut cache = MonomorphizationCache::new();
-        let k3 = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(3)],
-        );
-        let k5 = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(5)],
-        );
+        let k3 = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
+        let k5 = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(5)]);
         assert_ne!(k3, k5);
         cache.insert(k3.clone(), 11);
         cache.insert(k5.clone(), 12);
@@ -1073,11 +1057,7 @@ mod tests {
         // that by inserting twice with the same key and verifying the cache
         // length never grows past 1 (and the second insert overwrites).
         let mut cache = MonomorphizationCache::new();
-        let key = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(3)],
-        );
+        let key = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
         cache.insert(key.clone(), 11);
         cache.insert(key.clone(), 11);
         assert_eq!(cache.len(), 1);
@@ -1273,7 +1253,10 @@ mod tests {
             return_type: Some(TypeAnnotation::Basic("int".into())),
             where_clause: None,
             body: vec![shape_ast::ast::Statement::Return(
-                Some(shape_ast::ast::Expr::Identifier("x".into(), Span::default())),
+                Some(shape_ast::ast::Expr::Identifier(
+                    "x".into(),
+                    Span::default(),
+                )),
                 Span::default(),
             )],
             annotations: Vec::new(),
@@ -1288,7 +1271,8 @@ mod tests {
             span: Span::default(),
             doc_comment: None,
             ty: TypeAnnotation::Basic("int".into()),
-            default: default.map(|v| shape_ast::ast::Expr::Literal(Literal::Int(v), Span::default())),
+            default: default
+                .map(|v| shape_ast::ast::Expr::Literal(Literal::Int(v), Span::default())),
         }
     }
 
@@ -1327,7 +1311,10 @@ mod tests {
             Some(idx8)
         );
 
-        assert_ne!(idx4, idx8, "distinct const values must produce distinct specializations");
+        assert_ne!(
+            idx4, idx8,
+            "distinct const values must produce distinct specializations"
+        );
         assert_eq!(compiler.monomorphization_cache.len(), 2);
     }
 
@@ -1351,7 +1338,10 @@ mod tests {
                 &[ComptimeConstValue::Int(4)],
             )
             .unwrap();
-        assert_eq!(a, b, "identical const args must collapse to one cache entry");
+        assert_eq!(
+            a, b,
+            "identical const args must collapse to one cache entry"
+        );
         assert_eq!(compiler.monomorphization_cache.len(), 1);
     }
 
@@ -1422,15 +1412,18 @@ mod tests {
             "type-only entry must route through the const-aware mono key"
         );
         assert!(
-            compiler.monomorphization_cache.lookup("identity_n").is_none(),
+            compiler
+                .monomorphization_cache
+                .lookup("identity_n")
+                .is_none(),
             "bare `identity_n` key must NOT appear — const params always differentiate"
         );
     }
 
     #[test]
     fn b3_missing_const_default_errors_with_specific_message() {
-        // `identity_n<const N: int>` (no default) must error at the type-only
-        // entry point since there's no call-site turbofish syntax yet.
+        // `identity_n<const N: int>` (no default) must error at the default-only
+        // entry point when no explicit call-site const arg has been supplied.
         let mut compiler = BytecodeCompiler::new();
         let def = b3_identity_n_def(vec![const_param("N", None)]);
         compiler.function_defs.insert("identity_n".into(), def);
@@ -1478,11 +1471,8 @@ mod tests {
 
     // =====================================================================
     // B.5 — Track B close-out: end-to-end coverage for const generics via
-    // the default-value grammar route.
-    //
-    // Turbofish call-site syntax (`fn_name::<3>(...)`) is a separate grammar
-    // extension outside Track B's scope; the `const_generic_repeat_n_3_end_to_end`
-    // placeholder in `type_resolution.rs` tracks that follow-up work.
+    // the default-value grammar route. Explicit call-site const argument
+    // coverage lives with the call-site type-resolution tests.
     //
     // These tests drive the full pipeline parser → AST → cache key →
     // substituted body, using real Shape source text through
@@ -1575,9 +1565,18 @@ mod tests {
         let idx_4 = b5_register_and_monomorphize(&mut compiler, def_4).unwrap();
         let idx_8 = b5_register_and_monomorphize(&mut compiler, def_8).unwrap();
 
-        assert_eq!(compiler.monomorphization_cache.lookup("add_4::int_4"), Some(idx_4));
-        assert_eq!(compiler.monomorphization_cache.lookup("add_8::int_8"), Some(idx_8));
-        assert_ne!(idx_4, idx_8, "distinct defaults must produce distinct specializations");
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("add_4::int_4"),
+            Some(idx_4)
+        );
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("add_8::int_8"),
+            Some(idx_8)
+        );
+        assert_ne!(
+            idx_4, idx_8,
+            "distinct defaults must produce distinct specializations"
+        );
     }
 
     #[test]

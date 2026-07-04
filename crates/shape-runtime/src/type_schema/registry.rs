@@ -173,13 +173,13 @@ impl TypeSchemaRegistry {
         fields: Vec<(String, FieldType)>,
         field_annotations: Vec<Vec<FieldAnnotation>>,
     ) -> SchemaId {
-        let mut schema = TypeSchema::new(name, fields);
+        let id = self.allocate_id();
+        let mut schema = TypeSchema::with_id(id, name, fields);
         for (i, annotations) in field_annotations.into_iter().enumerate() {
             if i < schema.fields.len() && !annotations.is_empty() {
                 schema.fields[i].annotations = annotations;
             }
         }
-        let id = schema.id;
         self.register(schema);
         id
     }
@@ -192,6 +192,60 @@ impl TypeSchemaRegistry {
     /// Get schema by ID
     pub fn get_by_id(&self, id: SchemaId) -> Option<&TypeSchema> {
         self.by_id.get(&id).and_then(|name| self.by_name.get(name))
+    }
+
+    /// Resolve a bare capitalized identifier in pattern position to the enum
+    /// that declares it as a **unit** variant.
+    ///
+    /// A capitalized identifier like `Red` in a `match` arm is syntactically
+    /// ambiguous: the grammar parses it as `Pattern::Identifier` (a variable
+    /// binder / catch-all). If a registered enum declares `Red` as a unit
+    /// variant, the identifier must instead resolve to a refutable variant
+    /// pattern. This returns the declaring enum's name when exactly one such
+    /// enum exists. Only **unit** variants participate — tuple/struct variants
+    /// require a payload at the syntax level and are never bare identifiers.
+    ///
+    /// Returns `None` when no enum declares `name` as a unit variant, or when
+    /// the name is ambiguous across two or more enums (the caller leaves it a
+    /// binder rather than guessing).
+    pub fn enum_for_unit_variant(&self, name: &str) -> Option<String> {
+        let mut found: Option<String> = None;
+        for schema in self.by_name.values() {
+            let Some(enum_info) = schema.get_enum_info() else {
+                continue;
+            };
+            if let Some(variant) = enum_info.variant_by_name(name) {
+                if matches!(variant.kind, crate::type_schema::EnumVariantKind::Unit) {
+                    if found.is_some() && found.as_deref() != Some(schema.name.as_str()) {
+                        // Ambiguous across multiple enums — do not guess.
+                        return None;
+                    }
+                    found = Some(schema.name.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// Collect the names of every enum **unit** variant registered. Used by
+    /// the bytecode compiler to seed the MIR lowering layer (which has no
+    /// schema-registry access) so a bare `match l { Red => … }` arm resolves
+    /// `Red` as a refutable variant pattern rather than a catch-all binder.
+    /// Tuple/struct variants are excluded — they require a payload at the
+    /// syntax level and are never bare identifiers.
+    pub fn unit_variant_names(&self) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        for schema in self.by_name.values() {
+            let Some(enum_info) = schema.get_enum_info() else {
+                continue;
+            };
+            for variant in &enum_info.variants {
+                if matches!(variant.kind, crate::type_schema::EnumVariantKind::Unit) {
+                    names.insert(variant.name.clone());
+                }
+            }
+        }
+        names
     }
 
     /// Highest schema ID currently stored in this registry.
@@ -319,6 +373,44 @@ impl TypeSchemaRegistry {
         id
     }
 
+    /// Register or refresh a named type using this registry's local ID domain.
+    ///
+    /// If the schema already exists and contains every requested field, this is
+    /// a no-op. If requested fields are missing, the schema is rebuilt with the
+    /// same schema ID and the union of existing + requested fields. This is
+    /// used for synthetic module-object schemas whose export set may be
+    /// observed in more than one compiler phase.
+    pub fn upsert_type_scoped_union_fields(
+        &mut self,
+        name: impl Into<String>,
+        fields: Vec<(String, FieldType)>,
+    ) -> SchemaId {
+        let name = name.into();
+        if let Some(existing) = self.by_name.get(&name) {
+            let id = existing.id;
+            let mut merged: Vec<(String, FieldType)> = existing
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.field_type.clone()))
+                .collect();
+            let mut changed = false;
+            for (field_name, field_type) in fields {
+                if merged.iter().any(|(name, _)| name == &field_name) {
+                    continue;
+                }
+                merged.push((field_name, field_type));
+                changed = true;
+            }
+            if changed {
+                let schema = TypeSchema::with_id(id, name, merged);
+                self.register(schema);
+            }
+            return id;
+        }
+
+        self.register_type_scoped(name, fields)
+    }
+
     /// Register an enum whose ID is drawn from this registry's per-instance
     /// counter. See [`register_type_scoped`](Self::register_type_scoped).
     pub fn register_enum_scoped(
@@ -411,31 +503,45 @@ impl TypeSchemaRegistry {
         })
     }
 
-    /// Merge another registry into this one
+    /// Merge another registry into this one.
     ///
     /// Schemas from `other` are added to this registry. If a schema with the
     /// same name already exists, it is NOT overwritten (first registration
-    /// wins). If the incoming schema'''s numeric ID already maps to a
-    /// different name in `self.by_id`, it is skipped — this preserves the
-    /// first `by_id` binding so callers that resolve names through the
-    /// ID domain of the pre-existing registry still find what they
-    /// registered. (Pre-B1.7 this never happened because all registries
-    /// drew IDs from a single process-global counter; B1.7 retired that
-    /// counter in favour of per-instance ones, so fresh registries can
-    /// produce overlapping ID ranges when merged.)
-    pub fn merge(&mut self, other: TypeSchemaRegistry) {
-        for (name, schema) in other.by_name {
+    /// wins), and the returned remap points the incoming ID at the existing
+    /// ID. If the incoming schema's numeric ID already maps to a different
+    /// name in `self.by_id`, the incoming schema is kept under its name but
+    /// assigned a fresh ID from this registry's local counter.
+    ///
+    /// The returned map is old incoming ID -> final merged ID. Callers that
+    /// carry schema IDs outside the registry, such as bytecode operands, must
+    /// apply it to those carriers after merging.
+    pub fn merge(&mut self, other: TypeSchemaRegistry) -> HashMap<SchemaId, SchemaId> {
+        let mut id_remap = HashMap::new();
+        if let Some(max_id) = self.max_schema_id() {
+            self.ensure_next_id_above(max_id);
+        }
+
+        for (name, mut schema) in other.by_name {
             if self.by_name.contains_key(&name) {
+                let existing_id = self.by_name.get(&name).map(|schema| schema.id);
+                if let Some(existing_id) = existing_id {
+                    if existing_id != schema.id {
+                        id_remap.insert(schema.id, existing_id);
+                    }
+                }
                 continue;
             }
-            let id = schema.id;
+            let original_id = schema.id;
+            let mut id = original_id;
             if self.by_id.contains_key(&id) {
-                // ID collision with an existing schema under a different
-                // name — skip silently. The `resolve_builtin_schema_ids`
-                // path looks up builtins by name, so losing the ID mapping
-                // for builtins whose IDs collide with user schemas is
-                // acceptable; user lookups win.
-                continue;
+                loop {
+                    id = self.allocate_id();
+                    if !self.by_id.contains_key(&id) {
+                        break;
+                    }
+                }
+                schema.id = id;
+                id_remap.insert(original_id, id);
             }
             self.by_id.insert(id, name.clone());
             self.by_name.insert(name, schema);
@@ -457,6 +563,10 @@ impl TypeSchemaRegistry {
                 self_cache.entry(key.clone()).or_insert(*id);
             }
         }
+        if let Some(max_id) = self.max_schema_id() {
+            self.ensure_next_id_above(max_id);
+        }
+        id_remap
     }
 
     // -- Predeclared schema support (moved off process-global statics in B1.6) ---
@@ -490,11 +600,8 @@ impl TypeSchemaRegistry {
             .collect();
 
         let id = self.allocate_id();
-        let schema = TypeSchema::with_id(
-            id,
-            format!("__predecl_{}", fields.join("_")),
-            typed_fields,
-        );
+        let schema =
+            TypeSchema::with_id(id, format!("__predecl_{}", fields.join("_")), typed_fields);
 
         if let Ok(mut reg) = self.predeclared_by_id.write() {
             reg.insert(id, schema);
@@ -535,11 +642,8 @@ impl TypeSchemaRegistry {
             .map(|name| (name.clone(), FieldType::Any))
             .collect();
 
-        let schema = TypeSchema::with_id(
-            id,
-            format!("__predecl_{}", fields.join("_")),
-            typed_fields,
-        );
+        let schema =
+            TypeSchema::with_id(id, format!("__predecl_{}", fields.join("_")), typed_fields);
 
         if let Ok(mut reg) = self.predeclared_by_id.write() {
             reg.entry(id).or_insert(schema);
@@ -897,10 +1001,8 @@ mod tests {
         // User-registered schemas go through the per-registry counter and
         // therefore get IDs from disjoint domains when allocated back-to-back
         // on independent registries.
-        let r1_user =
-            r1.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
-        let r2_user =
-            r2.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+        let r1_user = r1.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+        let r2_user = r2.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
 
         // Both "UserA" schemas resolve within their own registry.
         assert_eq!(r1.get("UserA").unwrap().id, r1_user);
@@ -909,13 +1011,11 @@ mod tests {
         // The key invariant: r2's scoped ID is NOT advanced by allocations on
         // r1. Independent registries can produce equal IDs for the same name
         // without collision inside their own space.
-        let r1_user_b =
-            r1.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
+        let r1_user_b = r1.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
         assert_eq!(r1_user_b, r1_user + 1);
 
         // r2's counter is unaffected by r1_user_b.
-        let r2_user_b =
-            r2.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
+        let r2_user_b = r2.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
         assert_eq!(r2_user_b, r2_user + 1);
     }
 

@@ -36,7 +36,11 @@ fn test_module_exports_creation() {
         "hello",
         "Return a greeting",
         ConcreteType::String,
-        |_ctx| Ok(TypedReturn::Concrete(ConcreteReturn::String("world".to_string()))),
+        |_ctx| {
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                "world".to_string(),
+            )))
+        },
     );
 
     assert_eq!(module.name, "test");
@@ -54,7 +58,11 @@ fn test_registry() {
         "read",
         "Read a file (test stub)",
         ConcreteType::String,
-        |_ctx| Ok(TypedReturn::Concrete(ConcreteReturn::String("loaded".to_string()))),
+        |_ctx| {
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                "loaded".to_string(),
+            )))
+        },
     );
 
     registry.register(files_module);
@@ -153,7 +161,9 @@ fn test_check_fs_permission_enforces_scope_constraints() {
 
     // Denied paths
     assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/etc/passwd").is_err());
-    assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/home/user/file").is_err());
+    assert!(
+        check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/home/user/file").is_err()
+    );
 }
 
 #[test]
@@ -199,12 +209,20 @@ fn test_check_net_permission_enforces_scope_constraints() {
 
     // Allowed hosts
     assert!(
-        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "api.example.com:443")
-            .is_ok()
+        check_net_permission(
+            &ctx,
+            shape_abi_v1::Permission::NetConnect,
+            "api.example.com:443"
+        )
+        .is_ok()
     );
     assert!(
-        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "sub.trusted.io:8080")
-            .is_ok()
+        check_net_permission(
+            &ctx,
+            shape_abi_v1::Permission::NetConnect,
+            "sub.trusted.io:8080"
+        )
+        .is_ok()
     );
 
     // Denied hosts
@@ -212,8 +230,12 @@ fn test_check_net_permission_enforces_scope_constraints() {
         check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "evil.com:80").is_err()
     );
     assert!(
-        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "other.example.com:443")
-            .is_err()
+        check_net_permission(
+            &ctx,
+            shape_abi_v1::Permission::NetConnect,
+            "other.example.com:443"
+        )
+        .is_err()
     );
 }
 
@@ -235,8 +257,12 @@ fn test_check_net_permission_allows_all_when_no_constraints() {
     };
 
     assert!(
-        check_net_permission(&ctx, shape_abi_v1::Permission::NetConnect, "any.host.com:8080")
-            .is_ok()
+        check_net_permission(
+            &ctx,
+            shape_abi_v1::Permission::NetConnect,
+            "any.host.com:8080"
+        )
+        .is_ok()
     );
 }
 

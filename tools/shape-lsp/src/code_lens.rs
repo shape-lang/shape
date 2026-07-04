@@ -309,10 +309,7 @@ fn find_method_in_trait(text: &str, trait_name: &str, method_name: &str) -> Opti
 /// `name` in `tree`. Returns `None` when no module-scope binding with this
 /// name exists (caller falls back to text-search for robustness on
 /// resilient-parse partials).
-fn count_references_scope_aware(
-    tree: &crate::scope::ScopeTree,
-    name: &str,
-) -> Option<usize> {
+fn count_references_scope_aware(tree: &crate::scope::ScopeTree, name: &str) -> Option<usize> {
     let root = tree.scopes.first()?;
     let mut total: Option<usize> = None;
     for binding in &root.bindings {

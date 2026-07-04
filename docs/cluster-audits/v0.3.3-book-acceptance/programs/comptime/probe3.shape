@@ -1,0 +1,7 @@
+let cfg = comptime {
+  build_config()
+}
+print(cfg.debug)
+print(cfg.version)
+print(cfg.target_os)
+print(cfg.target_arch)

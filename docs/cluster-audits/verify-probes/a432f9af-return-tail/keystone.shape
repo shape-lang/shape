@@ -1,0 +1,31 @@
+enum Cmd { Inc(int), Dec(int), Reset }
+fn apply(state: int, c: Cmd) -> int {
+  match c {
+    Cmd::Inc(n) => state + n,
+    Cmd::Dec(n) => state - n,
+    Cmd::Reset => 0,
+  }
+}
+fn lookup(k: string) -> Result<Option<int>, string> {
+  match k {
+    "a" => Ok(Some(10)),
+    "b" => Ok(None),
+    _ => Err("missing"),
+  }
+}
+fn read(k: string) -> int {
+  match lookup(k) {
+    Ok(Some(v)) => v,
+    Ok(None) => -1,
+    Err(_) => -2,
+  }
+}
+let s1 = apply(5, Cmd::Inc(3))
+let s2 = apply(s1, Cmd::Dec(2))
+let s3 = apply(s2, Cmd::Reset)
+print(s1)
+print(s2)
+print(s3)
+print(read("a"))
+print(read("b"))
+print(read("z"))

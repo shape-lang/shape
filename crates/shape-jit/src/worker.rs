@@ -313,7 +313,8 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         foreign_functions: Vec::new(),
         native_struct_layouts: vec![],
         content_addressed: None,
-            top_level_mir: None,
+        top_level_mir: None,
+        top_level_has_comptime: false,
         function_blob_hashes: vec![],
         top_level_frame: None,
         top_level_local_concrete_types: vec![],
@@ -328,6 +329,8 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         has_imported_const_inline: program.has_imported_const_inline,
         has_w17_marshal_residual: program.has_w17_marshal_residual,
         has_try_unwrap_residual: program.has_try_unwrap_residual,
+        has_reference_escape_promotion: program.has_reference_escape_promotion,
+        has_null_coalesce_residual: program.has_null_coalesce_residual,
     }
 }
 
@@ -368,7 +371,7 @@ mod tests {
             captures_count: 0,
             is_async: false,
             ref_params: vec![],
-                    mir_data: None,
+            mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
@@ -399,6 +402,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -426,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "v2: Tier 1 whole-function JIT deprecated; test asserts on error message that no longer matches"]
+    #[ignore = "v2: deleted Tier 1 whole-function JIT (compile_single_function) deprecated; invalid-id validation belonged to the dead whole-function path, and the current selective JIT path does not expose this request shape"]
     fn test_backend_whole_function_invalid_id() {
         let mut backend = JitCompilationBackend::new().unwrap();
         let program = BytecodeProgram {
@@ -450,6 +454,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -502,7 +507,7 @@ mod tests {
             captures_count: 0,
             is_async: false,
             ref_params: vec![],
-                    mir_data: None,
+            mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: Some(FrameDescriptor::from_slots(vec![
@@ -534,6 +539,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -591,7 +597,7 @@ mod tests {
             captures_count: 0,
             is_async: false,
             ref_params: vec![],
-                    mir_data: None,
+            mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
             // W11: `NativeKind::Unknown` deleted; `Bool` is a benign stand-in
@@ -621,6 +627,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()

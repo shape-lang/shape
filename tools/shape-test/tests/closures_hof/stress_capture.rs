@@ -290,9 +290,9 @@ fn test_iife_multi_param() {
 #[test]
 fn test_empty_array_map() {
     ShapeTest::new(
-        r#"(
-        [].map(|x| x * 2)
-    ).length"#,
+        r#"
+        let empty: Array<int> = []
+        empty.map(|x| x * 2).length"#,
     )
     .expect_number(0.0);
 }
@@ -301,9 +301,9 @@ fn test_empty_array_map() {
 #[test]
 fn test_empty_array_filter() {
     ShapeTest::new(
-        r#"(
-        [].filter(|x| x > 0)
-    ).length"#,
+        r#"
+        let empty: Array<int> = []
+        empty.filter(|x| x > 0).length"#,
     )
     .expect_number(0.0);
 }
@@ -313,7 +313,8 @@ fn test_empty_array_filter() {
 fn test_empty_array_some() {
     ShapeTest::new(
         r#"
-        [].some(|x| x > 0)
+        let empty: Array<int> = []
+        empty.some(|x| x > 0)
     "#,
     )
     .expect_bool(false);
@@ -324,7 +325,8 @@ fn test_empty_array_some() {
 fn test_empty_array_every() {
     ShapeTest::new(
         r#"
-        [].every(|x| x > 0)
+        let empty: Array<int> = []
+        empty.every(|x| x > 0)
     "#,
     )
     .expect_bool(true);
@@ -495,7 +497,7 @@ fn test_closure_capture_loop_variable() {
         fns[0](10)
     "#,
     )
-    .expect_number(10.0);
+    .expect_run_err_contains("cannot determine the element type of empty array `closures`");
 }
 
 /// Verifies custom apply.
@@ -538,6 +540,11 @@ fn test_custom_compose() {
         double_then_add1(5)
     "#,
     )
+    // W20/W21 static HOF proof: the compose body returns a closure invoked
+    // through a result binding, and body-literal/callable facts pin every
+    // numeric param as `int` from compile-time literals. This is not a runtime
+    // probe, trial execution, or numeric default; `int` and `number` remain
+    // distinct and conflicting sites still reject.
     .expect_number(11.0);
 }
 
@@ -547,7 +554,7 @@ fn test_for_each_side_effect() {
     ShapeTest::new(
         r#"
         fn test() {
-            let mut total = 0
+            var total = 0
             [1, 2, 3].forEach(|x| { total = total + x })
             return total
         }

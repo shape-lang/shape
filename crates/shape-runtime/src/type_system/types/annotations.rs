@@ -60,6 +60,13 @@ pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
             .map(annotation_to_string)
             .collect::<Vec<_>>()
             .join(" + "),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            if *mutable {
+                format!("&mut {}", annotation_to_string(inner))
+            } else {
+                format!("&{}", annotation_to_string(inner))
+            }
+        }
         TypeAnnotation::Void => "()".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "None".to_string(),
@@ -106,7 +113,9 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
                     ok_type: Box::new(semantic_args[0].clone()),
                     err_type: semantic_args.get(1).cloned().map(Box::new),
                 },
-                "Vec" if semantic_args.len() == 1 => {
+                // U1: "Array" is the canonical collection base name; "Vec" is
+                // its alias. Both map to SemanticType::Array.
+                "Vec" | "Array" if semantic_args.len() == 1 => {
                     SemanticType::Array(Box::new(semantic_args[0].clone()))
                 }
                 "Table" if semantic_args.len() == 1 => SemanticType::Generic {
@@ -124,6 +133,14 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
             }
         }
         TypeAnnotation::Reference(name) => scalar_name_to_semantic(name),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            let inner_ty = Box::new(annotation_to_semantic(inner));
+            if *mutable {
+                SemanticType::RefMut(inner_ty)
+            } else {
+                SemanticType::Ref(inner_ty)
+            }
+        }
         TypeAnnotation::Void => SemanticType::Void,
         TypeAnnotation::Never => SemanticType::Never,
         TypeAnnotation::Function { params, returns } => {

@@ -3,6 +3,16 @@
 ///
 /// Basic Euler and RK4 integrators for scalar and vector systems.
 
+type OdePoint {
+    t: number,
+    y: number
+}
+
+type OdeVectorPoint {
+    t: number,
+    y: Array<number>
+}
+
 function vec_add(a: Array<number>, b: Array<number>) -> Array<number> {
     let mut out: Array<number> = [];
     for i in range(0, a.len()) {
@@ -25,14 +35,15 @@ function vec_add_scaled(a: Array<number>, b: Array<number>, s: number) -> Array<
 }
 
 /// Euler integrator for scalar ODE
-pub fn euler(f: (number, number) => number, y0: number, t_start: number, t_end: number, dt: number) {
+pub fn euler(f: (number, number) => number, y0: number, t_start: number, t_end: number, dt: number) -> Array<OdePoint> {
     let steps: int = floor((t_end - t_start) / dt) as int;
     let mut t: number = t_start;
     let mut y: number = y0;
-    let mut results: Array<{t: number, y: number}> = [];
+    let mut results: Array<OdePoint> = [];
 
     for i in range(0, steps + 1) {
-        results.push({ t: t, y: y });
+        let point: OdePoint = { t: t, y: y };
+        results.push(point);
         let fy: number = f(t, y);
         y = y + fy * dt;
         t = t + dt;
@@ -42,14 +53,15 @@ pub fn euler(f: (number, number) => number, y0: number, t_start: number, t_end: 
 }
 
 /// RK4 integrator for scalar ODE
-pub fn rk4(f: (number, number) => number, y0: number, t_start: number, t_end: number, dt: number) {
+pub fn rk4(f: (number, number) => number, y0: number, t_start: number, t_end: number, dt: number) -> Array<OdePoint> {
     let steps: int = floor((t_end - t_start) / dt) as int;
     let mut t: number = t_start;
     let mut y: number = y0;
-    let mut results: Array<{t: number, y: number}> = [];
+    let mut results: Array<OdePoint> = [];
 
     for i in range(0, steps + 1) {
-        results.push({ t: t, y: y });
+        let point: OdePoint = { t: t, y: y };
+        results.push(point);
 
         let k1: number = f(t, y);
         let k2: number = f(t + dt / 2.0, y + k1 * dt / 2.0);
@@ -64,18 +76,18 @@ pub fn rk4(f: (number, number) => number, y0: number, t_start: number, t_end: nu
 }
 
 /// Euler integrator for vector systems
-pub fn euler_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<number>, t_start: number, t_end: number, dt: number) {
+pub fn euler_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<number>, t_start: number, t_end: number, dt: number) -> Array<OdeVectorPoint> {
     let steps: int = floor((t_end - t_start) / dt) as int;
     let mut t: number = t_start;
     let mut y: Array<number> = y0_vec;
-    // NOTE: results seeded with first record rather than `[]` because v0.3
-    // inference cannot match Array<{t:number, y:Array<number>}> through push.
-    let mut results = [{ t: t, y: y }];
+    let initial: OdeVectorPoint = { t: t, y: y };
+    let mut results: Array<OdeVectorPoint> = [initial];
     let mut first: bool = true;
 
     for i in range(0, steps + 1) {
         if !first {
-            results.push({ t: t, y: y });
+            let point: OdeVectorPoint = { t: t, y: y };
+            results.push(point);
         }
         first = false;
         let dy: Array<number> = f(t, y);
@@ -87,17 +99,18 @@ pub fn euler_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<n
 }
 
 /// RK4 integrator for vector systems
-pub fn rk4_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<number>, t_start: number, t_end: number, dt: number) {
+pub fn rk4_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<number>, t_start: number, t_end: number, dt: number) -> Array<OdeVectorPoint> {
     let steps: int = floor((t_end - t_start) / dt) as int;
     let mut t: number = t_start;
     let mut y: Array<number> = y0_vec;
-    // NOTE: results seeded per v0.3 inference gap (see euler_system).
-    let mut results = [{ t: t, y: y }];
+    let initial: OdeVectorPoint = { t: t, y: y };
+    let mut results: Array<OdeVectorPoint> = [initial];
     let mut first: bool = true;
 
     for i in range(0, steps + 1) {
         if !first {
-            results.push({ t: t, y: y });
+            let point: OdeVectorPoint = { t: t, y: y };
+            results.push(point);
         }
         first = false;
 
@@ -153,7 +166,7 @@ function vec_norm(a: Array<number>) -> number {
 /// @param dt_min - minimum step size (default 1e-12)
 /// @param dt_max - maximum step size (default (t_end - t_start) / 4)
 /// @returns array of { t, y } records at each accepted step
-pub fn rk45(f: (number, number) => number, y0: number, t_start: number, t_end: number, tol: number = 0.000001, dt_init: number = 0.0, dt_min: number = 0.000000000001, dt_max: number = 0.0) {
+pub fn rk45(f: (number, number) => number, y0: number, t_start: number, t_end: number, tol: number = 0.000001, dt_init: number = 0.0, dt_min: number = 0.000000000001, dt_max: number = 0.0) -> Array<OdePoint> {
     let safety: number = 0.9;
     let max_factor: number = 5.0;
     let min_factor: number = 0.2;
@@ -169,8 +182,9 @@ pub fn rk45(f: (number, number) => number, y0: number, t_start: number, t_end: n
 
     let mut t: number = t_start;
     let mut y: number = y0;
-    let mut results: Array<{t: number, y: number}> = [];
-    results.push({ t: t, y: y });
+    let mut results: Array<OdePoint> = [];
+    let initial: OdePoint = { t: t, y: y };
+    results.push(initial);
 
     let max_steps = 100000;
     let mut step_count = 0;
@@ -209,7 +223,8 @@ pub fn rk45(f: (number, number) => number, y0: number, t_start: number, t_end: n
             // Accept step
             t = t + h;
             y = y5;
-            results.push({ t: t, y: y });
+            let point: OdePoint = { t: t, y: y };
+            results.push(point);
         }
 
         // Adjust step size
@@ -243,7 +258,7 @@ pub fn rk45(f: (number, number) => number, y0: number, t_start: number, t_end: n
 /// @param dt_min - minimum step size (default 1e-12)
 /// @param dt_max - maximum step size (default (t_end - t_start) / 4)
 /// @returns array of { t, y } records at each accepted step
-pub fn rk45_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<number>, t_start: number, t_end: number, tol: number = 0.000001, dt_init: number = 0.0, dt_min: number = 0.000000000001, dt_max: number = 0.0) {
+pub fn rk45_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<number>, t_start: number, t_end: number, tol: number = 0.000001, dt_init: number = 0.0, dt_min: number = 0.000000000001, dt_max: number = 0.0) -> Array<OdeVectorPoint> {
     let safety: number = 0.9;
     let max_factor: number = 5.0;
     let min_factor: number = 0.2;
@@ -259,8 +274,8 @@ pub fn rk45_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<nu
 
     let mut t: number = t_start;
     let mut y: Array<number> = y0_vec;
-    // NOTE: results seeded per v0.3 inference gap (see euler_system).
-    let mut results = [{ t: t, y: y }];
+    let initial: OdeVectorPoint = { t: t, y: y };
+    let mut results: Array<OdeVectorPoint> = [initial];
 
     let max_steps = 100000;
     let mut step_count = 0;
@@ -332,7 +347,8 @@ pub fn rk45_system(f: (number, Array<number>) => Array<number>, y0_vec: Array<nu
         if err <= tol {
             t = t + h;
             y = y_next;
-            results.push({ t: t, y: y });
+            let point: OdeVectorPoint = { t: t, y: y };
+            results.push(point);
         }
 
         let pow_factor: number = pow(tol / err, 0.2);

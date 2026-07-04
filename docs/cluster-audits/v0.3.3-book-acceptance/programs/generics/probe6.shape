@@ -1,0 +1,16 @@
+trait Named {
+  fn label() -> string;
+}
+type User { name: string }
+impl Named for User {
+  method label() -> string { self.name }
+}
+let users: Vec<dyn Named> = [User { name: "Alice" }, User { name: "Bob" }]
+for it in users {
+  print(it.label())        // direct print: book shape — works
+}
+// Can we bind it to a typed let?
+for it in users {
+  let s: string = it.label()   // explicit annotation to recover the type
+  print(s.len())
+}

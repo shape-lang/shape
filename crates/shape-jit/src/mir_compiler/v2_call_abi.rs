@@ -31,6 +31,7 @@
 //! uniform `AbiParam::new(types::I64)` loop.
 
 use cranelift::prelude::*;
+use shape_value::HeapKind;
 use shape_vm::bytecode::Function;
 use shape_vm::type_tracking::NativeKind;
 
@@ -58,8 +59,53 @@ impl TypedFunctionSignature {
     /// more information than the v1 ABI and can be compiled with the legacy
     /// uniform-I64 path.
     pub fn is_fully_untyped(&self) -> bool {
-        self.param_types.iter().all(|k| is_untyped_slot(*k))
-            && is_untyped_slot(self.return_type)
+        self.param_types.iter().all(|k| is_untyped_slot(*k)) && is_untyped_slot(self.return_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shape_value::HeapKind;
+    use shape_vm::type_tracking::{FrameDescriptor, FrameReturnWrapper};
+
+    fn function_with_frame(frame: FrameDescriptor) -> Function {
+        Function {
+            name: "callee".to_string(),
+            arity: 0,
+            param_names: Vec::new(),
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: Vec::new(),
+            ref_mutates: Vec::new(),
+            mutable_captures: Vec::new(),
+            frame_descriptor: Some(frame),
+            osr_entry_points: Vec::new(),
+            mir_data: None,
+        }
+    }
+
+    #[test]
+    fn resolve_signature_uses_canonical_typed_object_return_for_result_wrapper() {
+        let mut frame = FrameDescriptor::new();
+        frame.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
+        frame.return_wrapper = FrameReturnWrapper::Result;
+
+        let sig = resolve_function_signature(&function_with_frame(frame), &[]);
+        assert_eq!(sig.return_type, NativeKind::Ptr(HeapKind::TypedObject));
+    }
+
+    #[test]
+    fn resolve_signature_normalizes_legacy_result_return_kind() {
+        let mut frame = FrameDescriptor::new();
+        frame.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
+
+        let sig = resolve_function_signature(&function_with_frame(frame), &[]);
+        assert_eq!(sig.return_type, NativeKind::Ptr(HeapKind::TypedObject));
     }
 }
 
@@ -79,6 +125,48 @@ fn is_untyped_slot(kind: NativeKind) -> bool {
 // ---------------------------------------------------------------------------
 // NativeKind -> Cranelift type mapping
 // ---------------------------------------------------------------------------
+
+#[inline]
+fn heap_ptr_slot_to_clif_type(heap_kind: HeapKind) -> types::Type {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => types::I64,
+    }
+}
 
 /// Map a single `NativeKind` to the Cranelift IR type that should be used in
 /// the function signature.
@@ -104,19 +192,22 @@ pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
         | NativeKind::NullableUIntSize => types::I64,
 
         // --- 32-bit integers ---
-        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
-            types::I32
-        }
+        NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32 => types::I32,
 
         // --- 16-bit integers ---
-        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
-            types::I16
-        }
+        NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16 => types::I16,
 
         // --- 8-bit integers ---
-        NativeKind::Int8 | NativeKind::NullableInt8 | NativeKind::UInt8 | NativeKind::NullableUInt8 => {
-            types::I8
-        }
+        NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8 => types::I8,
 
         // --- boolean ---
         NativeKind::Bool => types::I8,
@@ -134,7 +225,8 @@ pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
         NativeKind::StringV2 | NativeKind::DecimalV2 => types::I64,
 
         // --- pointer-sized typed slots (heap arms + String) ---
-        NativeKind::String | NativeKind::Ptr(_) => types::I64,
+        NativeKind::String => types::I64,
+        NativeKind::Ptr(heap_kind) => heap_ptr_slot_to_clif_type(heap_kind),
 
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is a non-parametric
@@ -171,7 +263,9 @@ pub fn build_cranelift_signature(sig: &TypedFunctionSignature) -> Signature {
 
     // User arguments in their native representation.
     for kind in &sig.param_types {
-        clif_sig.params.push(AbiParam::new(slot_kind_to_clif_type(*kind)));
+        clif_sig
+            .params
+            .push(AbiParam::new(slot_kind_to_clif_type(*kind)));
     }
 
     // Signal return (same as v1 direct-call convention).
@@ -187,7 +281,7 @@ pub fn build_cranelift_signature(sig: &TypedFunctionSignature) -> Signature {
 /// Extract a `TypedFunctionSignature` from a bytecode `Function`.
 ///
 /// When the function carries a `FrameDescriptor`, the first `arity` slots
-/// are the parameter types and `return_kind` is the return type.  When no
+/// are the parameter types and `abi_return_kind()` is the return type.  When no
 /// descriptor is present (legacy code), all slots default to `Unknown`
 /// which produces a v1-compatible all-I64 signature.
 ///
@@ -226,7 +320,7 @@ pub fn resolve_function_signature(
         let return_type = func
             .frame_descriptor
             .as_ref()
-            .and_then(|fd| fd.return_kind)
+            .and_then(|fd| fd.abi_return_kind())
             .unwrap_or(legacy_default);
 
         return TypedFunctionSignature {
@@ -247,7 +341,7 @@ pub fn resolve_function_signature(
 
         TypedFunctionSignature {
             param_types,
-            return_type: fd.return_kind.unwrap_or(legacy_default),
+            return_type: fd.abi_return_kind().unwrap_or(legacy_default),
         }
     } else {
         // No type information at all — fully I64-ABI legacy.

@@ -1,0 +1,9 @@
+trait Display { fn display() -> string; }
+trait Serializable { fn serialize() -> string; }
+type Item { label: string }
+impl Display for Item { method display() -> string { self.label } }
+impl Serializable for Item { method serialize() -> string { self.label } }
+fn f<T: Display + Serializable>(x: T) -> string {
+  x.display()
+}
+print(f(Item { label: "ok" }))

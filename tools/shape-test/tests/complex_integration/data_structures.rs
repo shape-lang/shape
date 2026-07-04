@@ -227,22 +227,21 @@ fn test_complex_frequency_counter() {
     ShapeTest::new(
         r#"
         fn count_frequency(arr) {
-            let mut map = HashMap()
+            let mut map: HashMap<string, int> = HashMap()
             for item in arr {
-                let key = item + ""
+                let key = item
                 let current = map.get(key)
-                if current == None {
-                    map = map.set(key, 1)
-                } else {
-                    map = map.set(key, current + 1)
+                match current {
+                    Some(count) => { map = map.set(key, count + 1) },
+                    None => { map = map.set(key, 1) }
                 }
             }
             map
         }
         let freq = count_frequency(["a", "b", "a", "c", "b", "a"])
-        print(freq.get("a"))
-        print(freq.get("b"))
-        print(freq.get("c"))
+        print(match freq.get("a") { Some(count) => count, None => 0 })
+        print(match freq.get("b") { Some(count) => count, None => 0 })
+        print(match freq.get("c") { Some(count) => count, None => 0 })
     "#,
     )
     .expect_output("3\n2\n1");
@@ -297,14 +296,14 @@ fn test_complex_deep_nested_struct_access() {
 fn test_complex_trait_impl_dispatch() {
     // BUG: Multiple extend blocks with same method name cause type confusion
     // Test single extend block dispatch.
-    // v0.3.3 c2a-cluster sub-fix (i): int literal `5` for `radius: number` is
-    // compile-rejected; migrated to `5.0`.
+    // Strict numeric literals: `radius: number` and arithmetic with
+    // `self.radius` must use number literals, not int literals.
     ShapeTest::new(
         r#"
         type Circle { radius: number }
         extend Circle {
-            method area() { 3 * self.radius * self.radius }
-            method circumference() { 2 * 3 * self.radius }
+            method area() { 3.0 * self.radius * self.radius }
+            method circumference() { 2.0 * 3.0 * self.radius }
         }
         let c = Circle { radius: 5.0 }
         print(c.area())

@@ -211,9 +211,12 @@ fn test_match_typed_pattern_parses() {
             match &match_expr.arms[0].pattern {
                 crate::ast::Pattern::Typed {
                     name,
+                    name_span,
                     type_annotation,
                 } => {
                     assert_eq!(name, "n");
+                    let n_start = content.find("n: int").expect("typed binder in input");
+                    assert_eq!(*name_span, crate::ast::Span::new(n_start, n_start + 1));
                     assert_eq!(
                         type_annotation,
                         &crate::ast::TypeAnnotation::Basic("int".to_string())
@@ -999,6 +1002,67 @@ fn test_object_pattern_shorthand_parses() {
 }
 
 #[test]
+fn test_object_pattern_shorthand_binder_span() {
+    let input = r#"let out = match p { {x, y} => x + y };"#;
+    let items = parse_program_helper(input).expect("object shorthand should parse");
+    let crate::ast::Item::Statement(crate::ast::Statement::VariableDecl(decl, _), _) = &items[0]
+    else {
+        panic!("Expected Statement(VariableDecl)");
+    };
+    let crate::ast::Expr::Match(match_expr, _) = decl.value.as_ref().expect("expected match value")
+    else {
+        panic!("Expected match expression");
+    };
+    let crate::ast::Pattern::Object(fields) = &match_expr.arms[0].pattern else {
+        panic!("Expected object pattern");
+    };
+
+    let x_start = input.find("{x, y}").expect("object shorthand in input") + 1;
+    let y_start = input.find(", y}").expect("second shorthand field in input") + 2;
+    assert_eq!(fields[0].0, "x");
+    assert_eq!(
+        fields[0].1.binder_span(),
+        Some(crate::ast::Span::new(x_start, x_start + 1))
+    );
+    assert_eq!(fields[1].0, "y");
+    assert_eq!(
+        fields[1].1.binder_span(),
+        Some(crate::ast::Span::new(y_start, y_start + 1))
+    );
+}
+
+#[test]
+fn test_constructor_struct_shorthand_binder_span() {
+    let input = r#"let out = match shape { Circle { radius } => radius, _ => 0 };"#;
+    let items = parse_program_helper(input).expect("constructor shorthand should parse");
+    let crate::ast::Item::Statement(crate::ast::Statement::VariableDecl(decl, _), _) = &items[0]
+    else {
+        panic!("Expected Statement(VariableDecl)");
+    };
+    let crate::ast::Expr::Match(match_expr, _) = decl.value.as_ref().expect("expected match value")
+    else {
+        panic!("Expected match expression");
+    };
+    let crate::ast::Pattern::Constructor { fields, .. } = &match_expr.arms[0].pattern else {
+        panic!("Expected constructor pattern");
+    };
+    let crate::ast::PatternConstructorFields::Struct(fields) = fields else {
+        panic!("Expected struct constructor fields");
+    };
+    let radius_start = input
+        .find("radius")
+        .expect("constructor shorthand in input");
+    assert_eq!(fields[0].0, "radius");
+    assert_eq!(
+        fields[0].1.binder_span(),
+        Some(crate::ast::Span::new(
+            radius_start,
+            radius_start + "radius".len()
+        ))
+    );
+}
+
+#[test]
 fn test_object_pattern_shorthand_full_program() {
     let input = r#"
         let p = { x: 5, y: 3 }
@@ -1226,4 +1290,78 @@ fn test_enum_variant_path_with_keyword_variant() {
             result.err()
         );
     }
+}
+
+// =========================================================================
+// Maximal-munch / keyword-boundary tests
+//
+// A keyword is only a keyword when it is a COMPLETE token. An identifier that
+// merely STARTS with a keyword (`whileCount`, `ifX`, `forEach`) must not derail
+// the parser by having the keyword prefix greedily matched as a control-flow
+// construct. See `*_kw` boundary tokens in shape.pest.
+// =========================================================================
+
+#[test]
+fn test_keyword_prefixed_ident_in_if_condition() {
+    // `whileCount` in an if-condition must not be parsed as a `while` expr.
+    let content = "fn f() { let whileCount = 3; if whileCount > 0 { print(\"ok\"); } }";
+    let result = parse_program_helper(content);
+    assert!(
+        result.is_ok(),
+        "identifier starting with `while` must parse as a single ident: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_keyword_prefixed_ident_bare_if_condition() {
+    // No comparison — the bare `whileCount` condition still must not derail.
+    let content = "fn f() { let whileCount = 3; if whileCount { print(\"ok\"); } }";
+    let result = parse_program_helper(content);
+    assert!(
+        result.is_ok(),
+        "bare keyword-prefixed ident condition must parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_keyword_prefixed_identifiers_as_bindings() {
+    // Identifiers that start with each control-flow keyword must all bind.
+    for name in &[
+        "ifX",
+        "elseX",
+        "whileX",
+        "forEach",
+        "loopZ",
+        "matchY",
+        "letX",
+        "inItem",
+        "asValue",
+        "comptimeFlag",
+        "returnCode",
+        "breakPoint",
+        "continueFrom",
+    ] {
+        let content = format!("fn f() {{ let {name} = 1; print({name}); }}");
+        let result = parse_program_helper(&content);
+        assert!(
+            result.is_ok(),
+            "`{name}` must parse as a single identifier: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn test_keyword_prefixed_ident_as_while_counter() {
+    // `whileCount` used as the loop counter of a real `while` loop.
+    let content =
+        "fn f() { let mut whileCount = 3; while whileCount > 0 { whileCount = whileCount - 1; } }";
+    let result = parse_program_helper(content);
+    assert!(
+        result.is_ok(),
+        "while loop over a keyword-prefixed counter must parse: {:?}",
+        result.err()
+    );
 }

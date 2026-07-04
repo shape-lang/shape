@@ -21,6 +21,7 @@
 //! (operates only on `FunctionHash` / `Function` / IDs) and is kept
 //! intact. Its tests pass without exercising the snapshot pipeline.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use std::collections::HashMap;
 
 use shape_value::VMError;
@@ -31,6 +32,9 @@ use crate::bytecode::{Function, FunctionHash};
 ///
 /// Priority: `blob_hash` → `function_id` → `function_name`.
 /// Cross-validates when multiple identifiers are present.
+// Pure, value-tier-independent W17-snapshot-resume helper; currently exercised
+// only by its own unit tests pending the production restore-path wiring.
+#[allow(dead_code)]
 pub(crate) fn resolve_function_identity(
     function_id_by_hash: &HashMap<FunctionHash, u16>,
     functions: &[Function],
@@ -99,6 +103,9 @@ pub(crate) fn resolve_function_identity(
 /// `VMError::NotImplemented` rather than panicking — the strict
 /// improvement over the prior `todo!()` macros that aborted the VM
 /// thread on first invocation.
+// In-progress W17-snapshot-resume surface helper; wired in once snapshot()/
+// from_snapshot() route through it (release-blocking W17 territory).
+#[allow(dead_code)]
 fn w17_snapshot_surface(op: &str) -> String {
     format!(
         "VirtualMachine::{op}: W17-snapshot-resume surface — \
@@ -141,9 +148,17 @@ impl super::VirtualMachine {
         store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<shape_runtime::snapshot::VmSnapshot, VMError> {
         use shape_runtime::snapshot::{
-            SerializableExceptionHandler, SerializableLoopContext, VmSnapshot,
-            slot_to_serializable,
+            SerializableExceptionHandler, SerializableLoopContext, SerializeIdentityCtx,
+            VmSnapshot, slot_to_serializable_ctx,
         };
+
+        // STAGE-R5 (ADR-006 §2.7.30.5): ONE shared identity ctx threaded
+        // across every slot of this snapshot so a promoted-cell reference
+        // and the cell it points at — living in different slots (e.g. a
+        // `return &x` stack ref + the module binding holding the cell) —
+        // dedupe to one body + back-edges. The FIRST slot to reach a cell
+        // emits the body; later slots emit handle back-edges.
+        let mut ident = SerializeIdentityCtx::new();
 
         // Project the live `(stack[0..sp], kinds[0..sp])` pair through
         // the kind-threaded API. Per-slot errors surface as
@@ -154,7 +169,7 @@ impl super::VirtualMachine {
         for i in 0..self.sp {
             let bits = self.stack[i];
             let kind = self.kinds[i];
-            let sv = slot_to_serializable(bits, kind, store).map_err(|msg| {
+            let sv = slot_to_serializable_ctx(bits, kind, store, &mut ident).map_err(|msg| {
                 VMError::NotImplemented(format!(
                     "VirtualMachine::snapshot stack[{i}] kind={kind:?}: {msg}"
                 ))
@@ -172,7 +187,10 @@ impl super::VirtualMachine {
         for i in 0..mb_len {
             let bits = self.module_bindings[i];
             let kind = self.module_binding_kinds[i];
-            let sv = slot_to_serializable(bits, kind, store).map_err(|msg| {
+            // Same shared `ident` ctx as the stack walk above — this is
+            // where a module-binding SharedCell dedupes against a stack
+            // reference into the same cell (STAGE-R5, §2.7.30.5).
+            let sv = slot_to_serializable_ctx(bits, kind, store, &mut ident).map_err(|msg| {
                 VMError::NotImplemented(format!(
                     "VirtualMachine::snapshot module_binding[{i}] kind={kind:?}: {msg}"
                 ))
@@ -199,6 +217,13 @@ impl super::VirtualMachine {
         let _: &Vec<SerializableLoopContext> = &loop_stack;
         let _: &Vec<SerializableExceptionHandler> = &exception_handlers;
 
+        // STAGE-R5: persist the per-slot kind tracks so restore can
+        // disambiguate the carrier-ambiguous `SV::SharedCell` body arm
+        // (§2.7.30.5 / §2.7.7).
+        let stack_kinds: Vec<shape_value::NativeKind> = self.kinds[0..self.sp].to_vec();
+        let module_binding_kinds: Vec<shape_value::NativeKind> =
+            self.module_binding_kinds[0..mb_len].to_vec();
+
         Ok(VmSnapshot {
             ip: self.snapshot_ip(),
             stack,
@@ -211,6 +236,8 @@ impl super::VirtualMachine {
             ip_blob_hash: None,
             ip_local_offset: None,
             ip_function_id: None,
+            stack_kinds,
+            module_binding_kinds,
         })
     }
 
@@ -237,44 +264,84 @@ impl super::VirtualMachine {
         snapshot: &shape_runtime::snapshot::VmSnapshot,
         store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<Self, VMError> {
-        use shape_runtime::snapshot::serializable_to_slot;
+        use shape_runtime::snapshot::{
+            RestoreLinkCtx, materialize_cell_bodies, serializable_to_slot_ctx,
+        };
         use shape_value::NativeKind;
 
         let mut vm = super::VirtualMachine::new(crate::VMConfig::default());
         vm.load_program(program);
 
-        // Stack restoration: each `SerializableVMValue` arm picks its
-        // own kind from the discriminator. We use `expected_kind = Bool`
-        // for scalar/heap-light arms whose discriminator pins the kind
-        // unambiguously (Int→Int64, Number→Float64, etc.). The
-        // `serializable_to_slot` body either accepts a matching pair
-        // or surfaces a kind-mismatch error.
-        for (i, sv) in snapshot.stack.iter().enumerate() {
-            let expected = expected_kind_from_serializable(sv);
-            let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|msg| {
-                VMError::NotImplemented(format!(
-                    "VirtualMachine::from_snapshot stack[{i}]: {msg}"
-                ))
-            })?;
-            // push_kinded transfers the share into the stack.
-            vm.push_kinded(bits, kind)?;
-        }
-
-        // Module bindings: same per-slot kind threading.
-        if !snapshot.module_bindings.is_empty() {
-            // Pad the parallel tracks first per §2.7.8 / Q10 lockstep.
-            let needed = snapshot.module_bindings.len();
-            vm.module_binding_pad_to_kinded(needed);
-            for (i, sv) in snapshot.module_bindings.iter().enumerate() {
-                let expected = expected_kind_from_serializable(sv);
-                let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|msg| {
+        // STAGE-R5 two-pass restore (ADR-006 §2.7.30.5). Pass 1
+        // materializes every `SV::SharedCell` BODY into ONE Arc<SharedCell>
+        // per handle (recorded in `link.identity_map`, base share in the
+        // abort-ledger). Pass 2 builds each slot — body slots and
+        // back-edge slots resolve to that one cell via the identity-map,
+        // so a promoted return-ref and its referent dedupe to one cell.
+        // On ANY Pass-2 error the ledger reverse-walk (LIFO) releases every
+        // base share so no leak / no double-free; on success the base
+        // shares are surplus scaffolding and released identically.
+        let mut link = RestoreLinkCtx::new();
+        let restore_result = (|| -> Result<(), VMError> {
+            // Pass 1 — materialize bodies across stack + module bindings.
+            for (i, sv) in snapshot.stack.iter().enumerate() {
+                materialize_cell_bodies(sv, store, &mut link).map_err(|msg| {
                     VMError::NotImplemented(format!(
-                        "VirtualMachine::from_snapshot module_binding[{i}]: {msg}"
+                        "VirtualMachine::from_snapshot Pass1 stack[{i}]: {msg}"
                     ))
                 })?;
-                vm.module_binding_write_kinded(i, bits, kind);
             }
-        }
+            for (i, sv) in snapshot.module_bindings.iter().enumerate() {
+                materialize_cell_bodies(sv, store, &mut link).map_err(|msg| {
+                    VMError::NotImplemented(format!(
+                        "VirtualMachine::from_snapshot Pass1 module_binding[{i}]: {msg}"
+                    ))
+                })?;
+            }
+
+            // Pass 2 — build each slot. Use the REAL per-slot kind when
+            // persisted (STAGE-R5 `stack_kinds`/`module_binding_kinds`),
+            // else the SV-discriminator heuristic (pre-R5 snapshots).
+            for (i, sv) in snapshot.stack.iter().enumerate() {
+                let expected = snapshot
+                    .stack_kinds
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| expected_kind_from_serializable(sv));
+                let (bits, kind) = serializable_to_slot_ctx(sv, expected, store, &mut link)
+                    .map_err(|msg| {
+                        VMError::NotImplemented(format!(
+                            "VirtualMachine::from_snapshot stack[{i}]: {msg}"
+                        ))
+                    })?;
+                vm.push_kinded(bits, kind)?;
+            }
+
+            if !snapshot.module_bindings.is_empty() {
+                let needed = snapshot.module_bindings.len();
+                vm.module_binding_pad_to_kinded(needed);
+                for (i, sv) in snapshot.module_bindings.iter().enumerate() {
+                    let expected = snapshot
+                        .module_binding_kinds
+                        .get(i)
+                        .copied()
+                        .unwrap_or_else(|| expected_kind_from_serializable(sv));
+                    let (bits, kind) = serializable_to_slot_ctx(sv, expected, store, &mut link)
+                        .map_err(|msg| {
+                            VMError::NotImplemented(format!(
+                                "VirtualMachine::from_snapshot module_binding[{i}]: {msg}"
+                            ))
+                        })?;
+                    vm.module_binding_write_kinded(i, bits, kind);
+                }
+            }
+            Ok(())
+        })();
+
+        // Release base materialization shares (abort OR success — they are
+        // scaffolding; every real slot holds its own Pass-2 share).
+        link.release_base_shares();
+        restore_result?;
 
         // IP restoration.
         vm.snapshot_set_ip(snapshot.ip);
@@ -402,33 +469,32 @@ impl super::VirtualMachine {
                     // just installed on the frame.
                     let block = unsafe { OwnedClosureBlock::from_raw(ptr as *const u8, layout) };
                     closure_heap_bits = Some(block.as_ptr() as u64);
-                    closure_heap_kind = Some(NativeKind::Ptr(
-                        shape_value::HeapKind::Closure,
-                    ));
+                    closure_heap_kind = Some(NativeKind::Ptr(shape_value::HeapKind::Closure));
                     std::mem::forget(block);
                 } else {
                     // No layout — store the raw payload bits as the
                     // legacy Vec<u64> upvalue carrier so the frame
-                    // remains structurally complete. Heap-bearing
-                    // upvalues in this path surface clean on read.
+                    // remains structurally complete. A payload this
+                    // path cannot project surfaces-and-stops (no
+                    // Bool-default fabrication — ADR-006 §2.7.5.1 /
+                    // §2.7.7; matches the typed-closure branch above).
                     let mut raw: Vec<u64> = Vec::with_capacity(svec.len());
-                    for sv in svec {
-                        // Bool fallback is OK here: this branch is the
-                        // pre-typed-closure path that never carried
-                        // kind metadata anyway. Bool-zero-on-mismatch
-                        // is the legacy contract.
+                    for (i, sv) in svec.iter().enumerate() {
                         let expected = NativeKind::Bool;
-                        let (bits, _) =
-                            serializable_to_slot(sv, expected, store).unwrap_or((0, NativeKind::Bool));
+                        let (bits, _kind) =
+                            serializable_to_slot(sv, expected, store).map_err(|msg| {
+                                VMError::NotImplemented(format!(
+                                    "VirtualMachine::from_snapshot frame[{frame_idx}] \
+                                     legacy-upvalue[{i}]: {msg}"
+                                ))
+                            })?;
                         raw.push(bits);
                     }
                     upvalues_raw = Some(raw);
                 }
             }
 
-            let blob_hash = sframe
-                .blob_hash
-                .map(crate::bytecode::FunctionHash);
+            let blob_hash = sframe.blob_hash.map(crate::bytecode::FunctionHash);
 
             self.call_stack.push(super::CallFrame {
                 return_ip: sframe.return_ip,
@@ -476,9 +542,7 @@ impl super::VirtualMachine {
             .collect()
     }
 
-    fn snapshot_timeframe_stack_for_export(
-        &self,
-    ) -> Vec<Option<shape_ast::data::Timeframe>> {
+    fn snapshot_timeframe_stack_for_export(&self) -> Vec<Option<shape_ast::data::Timeframe>> {
         self.timeframe_stack.clone()
     }
 
@@ -608,23 +672,37 @@ fn expected_kind_from_serializable(
         SV::Number(_) => NativeKind::Float64,
         SV::Bool(_) => NativeKind::Bool,
         SV::String(_) => NativeKind::String,
-        SV::None | SV::Unit => NativeKind::Bool,
+        SV::None | SV::Unit => NativeKind::Null,
         SV::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
         SV::BigInt(_) => NativeKind::Ptr(HeapKind::BigInt),
         SV::Char(_) => NativeKind::Ptr(HeapKind::Char),
         SV::HashSet { .. } => NativeKind::Ptr(HeapKind::HashSet),
         SV::PriorityQueueHeap { .. } => NativeKind::Ptr(HeapKind::PriorityQueue),
         SV::AtomicI64 { .. } => NativeKind::Ptr(HeapKind::Atomic),
-        SV::ResultData { .. } => NativeKind::Ptr(HeapKind::Result),
-        SV::OptionData { .. } => NativeKind::Ptr(HeapKind::Option),
+        SV::ResultData { .. } | SV::OptionData { .. } => NativeKind::Ptr(HeapKind::TypedObject),
         SV::IteratorOpaque => NativeKind::Ptr(HeapKind::Iterator),
         SV::DequeOpaque { .. } => NativeKind::Ptr(HeapKind::Deque),
         SV::ChannelOpaque { .. } => NativeKind::Ptr(HeapKind::Channel),
-        SV::ReferenceOpaque => NativeKind::Ptr(HeapKind::Reference),
+        // STAGE-R5 serialize-through (ADR-006 §2.7.30.5). The back-edge
+        // arms pin their carrier unambiguously. The BODY arm
+        // (`SV::SharedCell`) is carrier-ambiguous from the discriminator
+        // alone — it may sit in a Reference-kinded slot (first-reach by a
+        // PromotedCell ref) OR a SharedCell-kinded slot. The whole-VM
+        // restore driver threads the REAL per-slot kind to
+        // `serializable_to_slot_ctx`; this heuristic is the fallback for
+        // callers that pass it directly and defaults to the cell carrier.
+        SV::Reference { .. } => NativeKind::Ptr(HeapKind::Reference),
+        SV::SharedCell { .. } => NativeKind::Ptr(HeapKind::SharedCell),
+        SV::SharedCellRef { .. } => NativeKind::Ptr(HeapKind::SharedCell),
         SV::FilterExprOpaque => NativeKind::Ptr(HeapKind::FilterExpr),
-        SV::SharedCellOpaque => NativeKind::Ptr(HeapKind::SharedCell),
         SV::MutexOpaque { .. } => NativeKind::Ptr(HeapKind::Mutex),
         SV::LazyOpaque { .. } => NativeKind::Ptr(HeapKind::Lazy),
+        // W17-snapshot-roundtrip container arms (2026-06-02): the four
+        // container/value shapes restored by `serializable_to_heap_slot`.
+        SV::TypedObject { .. } => NativeKind::Ptr(HeapKind::TypedObject),
+        SV::Range { .. } => NativeKind::Ptr(HeapKind::Range),
+        SV::HashMap { .. } => NativeKind::Ptr(HeapKind::HashMap),
+        SV::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
         // Pre-existing complex arms — surface clean rather than guess.
         _ => NativeKind::Bool,
     }
@@ -807,6 +885,7 @@ mod tests {
             ip_blob_hash: Some([0xAB; 32]),
             ip_local_offset: Some(10),
             ip_function_id: Some(1),
+            ..Default::default()
         };
         assert_eq!(snapshot.ip, 42);
         assert_eq!(snapshot.ip_blob_hash, Some([0xAB; 32]));
@@ -830,6 +909,7 @@ mod tests {
             ip_blob_hash: None,
             ip_local_offset: None,
             ip_function_id: None,
+            ..Default::default()
         };
         // Without relocation info, from_snapshot should fall back to absolute IP
         assert!(snapshot.ip_blob_hash.is_none());
@@ -851,6 +931,7 @@ mod tests {
             ip_blob_hash: Some([0xCD; 32]),
             ip_local_offset: Some(7),
             ip_function_id: Some(2),
+            ..Default::default()
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let restored: VmSnapshot = serde_json::from_str(&json).unwrap();
@@ -932,12 +1013,8 @@ mod tests {
         assert_eq!(snap.stack.len(), 3);
 
         // Restore on a fresh VM with an empty program.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore scalar state");
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore scalar state");
         let restored_snap = restored
             .snapshot(&store)
             .expect("re-snapshot restored state");
@@ -949,20 +1026,26 @@ mod tests {
         assert!(matches!(restored_snap.stack[2], SV::Bool(true)));
     }
 
-    /// W17 supported-kind round-trip: Result/Option carry inner
-    /// scalar payloads end-to-end.
+    /// W88B compatibility round-trip: old Result/Option carriers can still
+    /// be serialized, but restore normalizes them to schema-backed
+    /// `__Result` / `__Option` typed objects, even when the snapshot carries
+    /// the old persisted stack kind.
     #[test]
-    fn test_w17_snapshot_result_option_roundtrip() {
+    fn test_w17_snapshot_result_option_roundtrip_normalizes_legacy_carriers() {
         use crate::bytecode::BytecodeProgram;
+        use shape_runtime::type_schema::TypeSchemaRegistry;
+        use shape_runtime::type_schema::builtin_schemas::{
+            OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_VARIANT_OK,
+        };
         use shape_value::heap_value::{OptionData, ResultData};
         use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
         use std::sync::Arc;
 
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
         let mut vm = VirtualMachine::new(VMConfig::default());
 
         // Ok(42)
-        let payload =
-            KindedSlot::new(ValueSlot::from_raw(42u64), NativeKind::Int64);
+        let payload = KindedSlot::new(ValueSlot::from_raw(42u64), NativeKind::Int64);
         let ok = Arc::new(ResultData::ok(payload));
         let ok_bits = Arc::into_raw(ok) as u64;
         vm.push_kinded(ok_bits, NativeKind::Ptr(HeapKind::Result))
@@ -1015,22 +1098,101 @@ mod tests {
             other => panic!("expected None, got {other:?}"),
         }
 
-        // Restore via from_snapshot.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore result+option");
+        assert_eq!(
+            snap.stack_kinds,
+            vec![
+                NativeKind::Ptr(HeapKind::Result),
+                NativeKind::Ptr(HeapKind::Option),
+                NativeKind::Ptr(HeapKind::Option)
+            ]
+        );
+
+        // Restore via from_snapshot. The old stack kinds are compatibility
+        // inputs only; they must not cause fresh Arc<ResultData> /
+        // Arc<OptionData> allocation.
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore result+option");
         let restored_snap = restored.snapshot(&store).expect("re-snapshot");
         assert_eq!(restored_snap.stack.len(), 3);
-        // Round-trip preserves discriminator+payload.
         assert!(matches!(
             &restored_snap.stack[0],
-            SV::ResultData {
-                is_ok: true,
-                payload,
-            } if matches!(payload.as_ref(), SV::Int(42))
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.result as u64
+                && matches!(slot_data.first(), Some(SV::Int(RESULT_VARIANT_OK)))
+                && matches!(slot_data.get(1), Some(SV::Int(42)))
+        ));
+        assert!(matches!(
+            &restored_snap.stack[1],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.option as u64
+                && matches!(slot_data.first(), Some(SV::Int(OPTION_VARIANT_SOME)))
+                && matches!(slot_data.get(1), Some(SV::String(s)) if s == "hello")
+        ));
+        assert!(matches!(
+            &restored_snap.stack[2],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.option as u64
+                && matches!(slot_data.first(), Some(SV::Int(OPTION_VARIANT_NONE)))
+                && matches!(slot_data.get(1), Some(SV::None))
+        ));
+    }
+
+    #[test]
+    fn test_l5_legacy_result_option_snapshot_restore_uses_typed_objects_without_kind_track() {
+        use crate::bytecode::BytecodeProgram;
+        use shape_runtime::snapshot::{SerializableVMValue as SV, VmSnapshot};
+
+        let (_registry, schemas) =
+            shape_runtime::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let snap = VmSnapshot {
+            stack: vec![
+                SV::ResultData {
+                    is_ok: true,
+                    payload: Box::new(SV::Int(42)),
+                },
+                SV::OptionData {
+                    is_some: false,
+                    payload: None,
+                },
+            ],
+            stack_kinds: vec![],
+            ..Default::default()
+        };
+
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore legacy ResultData/OptionData");
+        let restored_snap = restored.snapshot(&store).expect("re-snapshot restored");
+        assert_eq!(restored_snap.stack.len(), 2);
+        assert!(matches!(
+            &restored_snap.stack[0],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.result as u64
+                && matches!(slot_data.first(), Some(SV::Int(0)))
+                && matches!(slot_data.get(1), Some(SV::Int(42)))
+        ));
+        assert!(matches!(
+            &restored_snap.stack[1],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.option as u64
+                && matches!(slot_data.first(), Some(SV::Int(1)))
+                && matches!(slot_data.get(1), Some(SV::None))
         ));
     }
 
@@ -1062,10 +1224,10 @@ mod tests {
             ip_blob_hash: None,
             ip_local_offset: None,
             ip_function_id: None,
+            ..Default::default()
         };
 
-        let result =
-            VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
+        let result = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
         let err = match result {
             Ok(_) => panic!("expected Err for incompatible snapshot"),
             Err(e) => e,
@@ -1074,6 +1236,71 @@ mod tests {
         assert!(
             msg.contains("W17-snapshot-roundtrip surface"),
             "expected W17 surface error, got: {msg}"
+        );
+    }
+
+    /// W17 A1 regression (Track A, 2026-06-02): the legacy no-ClosureLayout
+    /// upvalue branch in `restore_call_stack` must surface-and-stop on a
+    /// payload it cannot project — NOT fabricate a Bool-default slot.
+    ///
+    /// Pre-fix the branch defaulted `serializable_to_slot`'s failure to a
+    /// Bool-zero slot (the `.unwrap_or(...)`-with-a-Bool-zero-default shape),
+    /// swallowing the restore failure (ADR-006 §2.7.7 forbidden). Post-fix it
+    /// `?`-propagates a structured `NotImplemented` carrying the W17-snapshot
+    /// surface string.
+    ///
+    /// The frame carries `function_id = Some(0)` with an `IteratorOpaque`
+    /// upvalue; `BytecodeProgram::default()` has no `closure_function_layouts`
+    /// entry for id 0, so restoration takes the legacy branch, and the
+    /// opaque payload has no scalar projection under `expected = Bool`.
+    #[test]
+    fn test_w17_legacy_upvalue_unsupported_payload_surfaces_clean() {
+        use crate::bytecode::BytecodeProgram;
+        use shape_runtime::snapshot::{
+            SerializableCallFrame, SerializableVMValue as SV, VmSnapshot,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        let frame = SerializableCallFrame {
+            return_ip: 0,
+            locals_base: 0,
+            locals_count: 0,
+            // No registered ClosureLayout for id 0 in a default program →
+            // restore_call_stack takes the legacy no-layout upvalue branch.
+            function_id: Some(0),
+            upvalues: Some(vec![SV::IteratorOpaque]),
+            blob_hash: None,
+            local_ip: None,
+        };
+        let snap = VmSnapshot {
+            ip: 0,
+            stack: vec![],
+            locals: vec![],
+            module_bindings: vec![],
+            call_stack: vec![frame],
+            loop_stack: vec![],
+            timeframe_stack: vec![],
+            exception_handlers: vec![],
+            ip_blob_hash: None,
+            ip_local_offset: None,
+            ip_function_id: None,
+            ..Default::default()
+        };
+
+        let result = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
+        let err = match result {
+            Ok(_) => panic!(
+                "legacy-upvalue branch must surface-and-stop on an \
+                 unsupported payload, not Bool-default a slot"
+            ),
+            Err(e) => e,
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("legacy-upvalue") && msg.contains("W17-snapshot-roundtrip surface"),
+            "expected legacy-upvalue surface error, got: {msg}"
         );
     }
 
@@ -1145,18 +1372,17 @@ mod tests {
         let sframe = &snap.call_stack[0];
         assert_eq!(sframe.locals_count, 2);
         assert_eq!(sframe.locals_base, 0);
-        assert!(sframe.upvalues.is_none(), "non-closure frame has no upvalues");
+        assert!(
+            sframe.upvalues.is_none(),
+            "non-closure frame has no upvalues"
+        );
 
         // Restore on a fresh VM. Pre-pad stack so locals_base=0 +
         // locals_count=2 has space; the test asserts the frame restores
         // structurally (function_id, locals_base, locals_count) not the
         // raw stack window.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore non-closure callstack");
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore non-closure callstack");
         assert_eq!(restored.call_stack.len(), 1);
         let restored_frame = &restored.call_stack[0];
         assert_eq!(restored_frame.return_ip, 0);
@@ -1164,6 +1390,232 @@ mod tests {
         assert_eq!(restored_frame.locals_count, 2);
         assert!(restored_frame.upvalues.is_none());
         assert!(restored_frame.closure_heap_bits.is_none());
+    }
+
+    /// STAGE Snapshot-roundtrip (2026-06-02): the W17 deep-restore close.
+    ///
+    /// Captures a MULTI-FRAME VM whose live state carries non-trivial
+    /// module bindings (an `int` and a `string`), then round-trips it
+    /// through `vm.snapshot(&store)` → `VirtualMachine::from_snapshot`.
+    /// Asserts the restored VM observes BOTH call_stack AND module_bindings
+    /// restored NON-EMPTY with the correct values.
+    ///
+    /// This is the run-verified identity round-trip for the
+    /// `serializable_to_slot` container/value restore arms landed alongside
+    /// it (the Int + String module-binding arms; the call_stack restore is
+    /// the existing W17-state-tier path). `from_snapshot` is the capable
+    /// consumer; this test feeds it a POPULATED VmSnapshot produced by a
+    /// real live-state capture.
+    #[test]
+    fn test_snapshot_roundtrip_multiframe_bindings_nonempty() {
+        use crate::bytecode::BytecodeProgram;
+        use crate::executor::CallFrame;
+        use shape_runtime::snapshot::SerializableVMValue as SV;
+        use shape_value::NativeKind;
+        use std::sync::Arc;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Two module bindings: binding[0] = int 99, binding[1] = "world".
+        vm.module_binding_write_kinded(0, 99i64 as u64, NativeKind::Int64);
+        let str_arc = Arc::new("world".to_string());
+        let str_bits = Arc::into_raw(str_arc) as u64;
+        vm.module_binding_write_kinded(1, str_bits, NativeKind::String);
+
+        // Push four scalars to back two frames' local windows, then two
+        // non-closure CallFrames (a multi-frame call stack).
+        vm.push_kinded(7i64 as u64, NativeKind::Int64)
+            .expect("push 7");
+        vm.push_kinded(1, NativeKind::Bool).expect("push true");
+        vm.push_kinded(11i64 as u64, NativeKind::Int64)
+            .expect("push 11");
+        vm.push_kinded(2.5f64.to_bits(), NativeKind::Float64)
+            .expect("push 2.5");
+        vm.call_stack.push(CallFrame {
+            return_ip: 0,
+            base_pointer: 0,
+            locals_count: 2,
+            function_id: None,
+            upvalues: None,
+            blob_hash: None,
+            closure_heap_bits: None,
+            closure_heap_kind: None,
+        });
+        vm.call_stack.push(CallFrame {
+            return_ip: 5,
+            base_pointer: 2,
+            locals_count: 2,
+            function_id: None,
+            upvalues: None,
+            blob_hash: None,
+            closure_heap_bits: None,
+            closure_heap_kind: None,
+        });
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        // Capture: a populated VmSnapshot with multi-frame call stack +
+        // two module bindings.
+        let snap = vm.snapshot(&store).expect("snapshot multi-frame state");
+        assert_eq!(snap.call_stack.len(), 2, "two frames captured");
+        assert_eq!(snap.module_bindings.len(), 2, "two bindings captured");
+        assert!(matches!(snap.module_bindings[0], SV::Int(99)));
+        assert!(matches!(&snap.module_bindings[1], SV::String(s) if s == "world"));
+
+        // Restore: from_snapshot rebuilds the VM in place.
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore multi-frame state");
+
+        // call_stack restored NON-EMPTY with correct structural values.
+        assert_eq!(
+            restored.call_stack.len(),
+            2,
+            "call_stack restored non-empty"
+        );
+        assert_eq!(restored.call_stack[0].locals_count, 2);
+        assert_eq!(restored.call_stack[0].base_pointer, 0);
+        assert_eq!(restored.call_stack[1].return_ip, 5);
+        assert_eq!(restored.call_stack[1].base_pointer, 2);
+
+        // module_bindings restored NON-EMPTY with correct values — re-snapshot
+        // and read the projected arms back. `from_snapshot`'s
+        // `module_binding_pad_to_kinded(needed)` pads to `needed + 1`
+        // (the `while len <= index` semantics), so index `needed` is a
+        // trailing None-sentinel padding slot; the two written bindings
+        // (0, 1) carry the round-tripped values.
+        let re = restored
+            .snapshot(&store)
+            .expect("re-snapshot restored state");
+        assert!(
+            re.module_bindings.len() >= 2,
+            "module_bindings restored non-empty, got {}",
+            re.module_bindings.len()
+        );
+        assert!(
+            matches!(re.module_bindings[0], SV::Int(99)),
+            "binding[0] int 99 round-tripped, got {:?}",
+            re.module_bindings[0]
+        );
+        assert!(
+            matches!(&re.module_bindings[1], SV::String(s) if s == "world"),
+            "binding[1] string 'world' round-tripped, got {:?}",
+            re.module_bindings[1]
+        );
+        assert_eq!(re.call_stack.len(), 2, "call_stack survives re-snapshot");
+    }
+
+    /// STAGE Snapshot-roundtrip (2026-06-02): the four container/value
+    /// arms (`TypedObject` / `TypedArray` / `HashMap<string,string>` /
+    /// `Range`) round-trip through `slot_to_serializable` /
+    /// `serializable_to_slot` as live VM stack slots. Exercises the
+    /// serialize + restore directions for each new arm.
+    #[test]
+    fn test_snapshot_roundtrip_container_arms() {
+        use crate::bytecode::BytecodeProgram;
+        use shape_runtime::snapshot::SerializableVMValue as SV;
+        use shape_value::heap_value::{
+            HashMapData, HashMapKindedRef, RangeData, TypedObjectStorage,
+        };
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, stamp_elem_type};
+        use shape_value::{HeapKind, NativeKind, ValueSlot};
+        use std::sync::Arc;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // (1) Range 3..=7
+        let range = Arc::new(RangeData::new(3, 7, 1, true));
+        vm.push_kinded(
+            Arc::into_raw(range) as u64,
+            NativeKind::Ptr(HeapKind::Range),
+        )
+        .expect("push range");
+
+        // (2) TypedArray<i64> [10, 20, 30]
+        let arr = TypedArray::<i64>::from_slice(&[10, 20, 30]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+        vm.push_kinded(arr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))
+            .expect("push typed array");
+
+        // (3) HashMap<string,string> {"k" -> "v"}
+        let mut map: HashMapData<*const StringObj> = HashMapData::new();
+        unsafe {
+            map.insert("k", StringObj::new("v") as *const StringObj);
+        }
+        let kref = Arc::new(HashMapKindedRef::String(Arc::new(map)));
+        vm.push_kinded(
+            Arc::into_raw(kref) as u64,
+            NativeKind::Ptr(HeapKind::HashMap),
+        )
+        .expect("push hashmap");
+
+        // (4) TypedObject with two scalar fields {a: i64=5, b: f64=1.5}.
+        let slots: Box<[ValueSlot]> = vec![
+            ValueSlot::from_raw(5u64),
+            ValueSlot::from_raw(1.5f64.to_bits()),
+        ]
+        .into_boxed_slice();
+        let field_kinds: Arc<[NativeKind]> = vec![NativeKind::Int64, NativeKind::Float64].into();
+        // v2-raw `_new` carrier — matches the slot release path
+        // (`release_elem` + carrier-side `_drop`) per the allocator-pair
+        // contract (ADR-006 §2.3 amendment Wave 2 D1/D2).
+        let to_ptr = TypedObjectStorage::_new(42, slots, 0, field_kinds);
+        vm.push_kinded(to_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
+            .expect("push typed object");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        let snap = vm.snapshot(&store).expect("snapshot container arms");
+        assert_eq!(snap.stack.len(), 4);
+        // serialize-side projections
+        assert!(
+            matches!(&snap.stack[0], SV::Range { start, end, inclusive: true }
+                if matches!(start.as_deref(), Some(SV::Int(3)))
+                && matches!(end.as_deref(), Some(SV::Int(7)))),
+            "range arm, got {:?}",
+            snap.stack[0]
+        );
+        assert!(
+            matches!(&snap.stack[1], SV::Array(v)
+                if v.len() == 3
+                && matches!(v[0], SV::Int(10))
+                && matches!(v[2], SV::Int(30))),
+            "typed-array arm, got {:?}",
+            snap.stack[1]
+        );
+        assert!(
+            matches!(&snap.stack[2], SV::HashMap { keys, values }
+                if keys.len() == 1
+                && matches!(&keys[0], SV::String(k) if k == "k")
+                && matches!(&values[0], SV::String(v) if v == "v")),
+            "hashmap arm, got {:?}",
+            snap.stack[2]
+        );
+        assert!(
+            matches!(&snap.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
+                if slot_data.len() == 2
+                && matches!(slot_data[0], SV::Int(5))
+                && matches!(slot_data[1], SV::Number(f) if (f - 1.5).abs() < 1e-9)),
+            "typed-object arm, got {:?}",
+            snap.stack[3]
+        );
+
+        // restore-side: from_snapshot → re-snapshot → identical projections.
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore container arms");
+        let re = restored.snapshot(&store).expect("re-snapshot");
+        assert_eq!(re.stack.len(), 4);
+        assert!(matches!(&re.stack[0], SV::Range { start, .. }
+            if matches!(start.as_deref(), Some(SV::Int(3)))));
+        assert!(matches!(&re.stack[1], SV::Array(v) if v.len() == 3));
+        assert!(matches!(&re.stack[2], SV::HashMap { values, .. }
+            if matches!(&values[0], SV::String(v) if v == "v")));
+        assert!(
+            matches!(&re.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
+            if matches!(slot_data[0], SV::Int(5)))
+        );
     }
 
     /// W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12):

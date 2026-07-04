@@ -145,11 +145,9 @@ fn self_arg_identity_check_rejects_cross_impl_arg() {
     "#,
     );
     match result {
-        Ok(_) => {} // Direct-classified path
+        Ok(_) => {}                         // Direct-classified path
         Err(VMError::RuntimeError(_)) => {} // SelfArg-classified, identity mismatch
-        Err(VMError::NotImplemented(msg))
-            if msg.contains("§2.7.24") || msg.contains("Q25.C") =>
-        {
+        Err(VMError::NotImplemented(msg)) if msg.contains("§2.7.24") || msg.contains("Q25.C") => {
             // Structured surface acceptable.
         }
         Err(other) => panic!("cross-impl SelfArg unexpected error: {:?}", other),
@@ -230,10 +228,7 @@ fn boxed_return_result_self_rewraps_ok_payload() {
             let val = slot.as_str().unwrap_or("");
             // Either "cloned" (full path), or "src" if emission emitted
             // Direct and returned the boxed concrete (also a valid view).
-            assert!(
-                !val.is_empty(),
-                "Result<Self, E>: empty return value"
-            );
+            assert!(!val.is_empty(), "Result<Self, E>: empty return value");
         }
         Err(VMError::NotImplemented(msg)) | Err(VMError::RuntimeError(msg))
             if msg.contains("§2.7.24") || msg.contains("Q25.C") || msg.contains("SURFACE") =>

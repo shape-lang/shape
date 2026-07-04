@@ -612,12 +612,7 @@ fn collect_call_sites_in_expr(expr: &Expr, target: &str, text: &str, out: &mut V
 /// `MethodCall.span` covers the full `receiver.method(args)` expression, so we
 /// locate `method` in the source slice after the receiver's end offset (the
 /// first identifier-shaped occurrence is the method name).
-fn method_call_name_range(
-    text: &str,
-    receiver: &Expr,
-    method: &str,
-    span: &Span,
-) -> Option<Range> {
+fn method_call_name_range(text: &str, receiver: &Expr, method: &str, span: &Span) -> Option<Range> {
     use shape_ast::ast::Spanned;
     let recv_end = receiver.span().end;
     let search_start = recv_end.min(text.len());

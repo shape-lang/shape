@@ -124,7 +124,9 @@ pub enum TypeError {
     },
 
     /// Trait bound violation: type does not implement required trait
-    #[error("Type '{type_name}' does not implement trait '{trait_name}'")]
+    #[error(
+        "trait bound not satisfied: Type '{type_name}' does not implement trait '{trait_name}'"
+    )]
     TraitBoundViolation {
         type_name: String,
         trait_name: String,
@@ -199,6 +201,13 @@ fn format_annotation(ann: &TypeAnnotation) -> String {
     match ann {
         TypeAnnotation::Basic(name) => name.clone(),
         TypeAnnotation::Reference(name) => name.to_string(),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            if *mutable {
+                format!("&mut {}", format_annotation(inner))
+            } else {
+                format!("&{}", format_annotation(inner))
+            }
+        }
         TypeAnnotation::Array(inner) => format!("Vec<{}>", format_annotation(inner)),
         TypeAnnotation::Tuple(items) => format!(
             "({})",

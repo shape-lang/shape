@@ -131,16 +131,16 @@ times_two(7)
 /// F64 bit pattern to zero, and `result ?? 42.0` evaluated to 42.0 for
 /// every branch of the caller.
 ///
-/// Case 1: function returns `number?`, two `return` paths (literal F64
+/// Case 1: function returns `number?`, two `return` paths (`Some(F64)`
 /// and `None`). Pre-fix: returns 42.0 (None-ness was forced). Post-fix:
-/// returns 7.0.
+/// returns 7.0. Strict typing requires the option lift to be explicit.
 #[test]
 fn option_return_conditional_number_some() {
     jit_expect_number(
         r#"
 fn get_val(flag: bool) -> number? {
     if flag {
-        return 7.0
+        return Some(7.0)
     }
     return None
 }
@@ -162,7 +162,7 @@ fn option_return_conditional_number_none() {
         r#"
 fn get_val(flag: bool) -> number? {
     if flag {
-        return 7.0
+        return Some(7.0)
     }
     return None
 }
@@ -178,6 +178,10 @@ fn closure_non_jit_compiled_dispatches_through_trampoline_vm() {
     // `|| { x = x + base; x }` with `let base` (immutable capture) and
     // `let mut x` (OwnedMutable capture) exercises the exact shape from
     // the original bug report. Calling it twice sums base twice into x.
+    //
+    // Wave 33: the JIT-to-VM trampoline must borrow the original
+    // `OwnedClosureBlock`. Rebuilding a fresh owning block from raw capture
+    // bits double-frees the owned-mutable `x` cell after repeated calls.
     jit_expect_int(
         r#"
 fn main() -> int {
@@ -190,6 +194,24 @@ fn main() -> int {
 main()
 "#,
         20,
+    );
+}
+
+#[test]
+fn closure_trampoline_owned_mutable_capture_called_three_times() {
+    jit_expect_int(
+        r#"
+fn main() -> int {
+    let base: int = 10
+    let mut x: int = 0
+    let f = || { x = x + base; x }
+    f()
+    f()
+    f()
+}
+main()
+"#,
+        30,
     );
 }
 

@@ -246,7 +246,8 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
                 (OpCode::StoreLocal, Some(Operand::Local(slot)))
                 | (OpCode::StoreLocalTyped, Some(Operand::TypedLocal(slot, _))) => {
                     if let Some(&cand_idx) = slot_to_candidate.get(slot) {
-                        if candidates[cand_idx].new_array_idx == i - 1 && !candidates[cand_idx].escaped
+                        if candidates[cand_idx].new_array_idx == i - 1
+                            && !candidates[cand_idx].escaped
                         {
                             activated.insert(cand_idx);
                             active_slots.insert(*slot);
@@ -273,18 +274,14 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
                             let next2 = &instructions[i + 2];
                             if next2.opcode == OpCode::GetProp && next2.operand.is_none() {
                                 // Dynamic index read: check if index is constant.
-                                if let (
-                                    OpCode::PushConst,
-                                    Some(Operand::Const(const_idx)),
-                                ) = (next1.opcode, &next1.operand)
+                                if let (OpCode::PushConst, Some(Operand::Const(const_idx))) =
+                                    (next1.opcode, &next1.operand)
                                 {
                                     if let Some(elem_idx) =
                                         resolve_constant_index(program, *const_idx)
                                     {
                                         if elem_idx < candidates[cand_idx].element_count {
-                                            candidates[cand_idx]
-                                                .get_sites
-                                                .insert(i + 2, elem_idx);
+                                            candidates[cand_idx].get_sites.insert(i + 2, elem_idx);
                                             continue;
                                         }
                                     }
@@ -308,9 +305,7 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
                         // Look backwards for the index producer.
                         // The index is the second-from-top value. We scan back
                         // to find the PushConst that produced it.
-                        if let Some(const_index) =
-                            find_constant_index_for_set(program, i)
-                        {
+                        if let Some(const_index) = find_constant_index_for_set(program, i) {
                             if const_index < candidates[cand_idx].element_count {
                                 candidates[cand_idx].set_sites.insert(i, const_index);
                                 continue;
@@ -327,8 +322,7 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
             | (OpCode::StoreLocalTyped, Some(Operand::TypedLocal(slot, _))) => {
                 if let Some(&cand_idx) = slot_to_candidate.get(slot) {
                     // If this is the initial store (activating the candidate), skip.
-                    if activated.contains(&cand_idx)
-                        && candidates[cand_idx].new_array_idx + 1 != i
+                    if activated.contains(&cand_idx) && candidates[cand_idx].new_array_idx + 1 != i
                     {
                         candidates[cand_idx].escaped = true;
                     }
@@ -345,8 +339,14 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
                     }
                 }
             }
-            (OpCode::SetIndexRef | OpCode::MakeFieldRef | OpCode::MakeIndexRef
-             | OpCode::DerefLoad | OpCode::DerefStore, _) => {
+            (
+                OpCode::SetIndexRef
+                | OpCode::MakeFieldRef
+                | OpCode::MakeIndexRef
+                | OpCode::DerefLoad
+                | OpCode::DerefStore,
+                _,
+            ) => {
                 // Conservative: any reference manipulation while candidates are
                 // active causes all of them to escape (the reference could alias
                 // any candidate's local).
@@ -380,7 +380,14 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
             }
 
             // ArrayPush, ArrayPop, Length, SliceAccess on active candidates: escape.
-            (OpCode::ArrayPush | OpCode::ArrayPushLocal | OpCode::ArrayPop | OpCode::Length | OpCode::SliceAccess, _) => {
+            (
+                OpCode::ArrayPush
+                | OpCode::ArrayPushLocal
+                | OpCode::ArrayPop
+                | OpCode::Length
+                | OpCode::SliceAccess,
+                _,
+            ) => {
                 // These modify or read the array in ways we can't scalarize.
                 // Check if the operand references a candidate slot.
                 if let Some(Operand::Local(slot)) = &instr.operand {
@@ -393,7 +400,10 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
                 // For stack-based operations (ArrayPush, ArrayPop, Length, SliceAccess),
                 // the array might be from any active candidate.
                 // Conservative: mark all active.
-                if matches!(instr.opcode, OpCode::ArrayPush | OpCode::ArrayPop | OpCode::Length | OpCode::SliceAccess) {
+                if matches!(
+                    instr.opcode,
+                    OpCode::ArrayPush | OpCode::ArrayPop | OpCode::Length | OpCode::SliceAccess
+                ) {
                     for &slot in &active_slots {
                         if let Some(&cand_idx) = slot_to_candidate.get(&slot) {
                             candidates[cand_idx].escaped = true;
@@ -452,10 +462,7 @@ pub fn analyze_escape(program: &BytecodeProgram) -> EscapeAnalysisPlan {
 ///
 /// The stack layout before SetLocalIndex is: [..., index, value].
 /// We look for the instruction that produced the index (second from top).
-fn find_constant_index_for_set(
-    program: &BytecodeProgram,
-    set_idx: usize,
-) -> Option<usize> {
+fn find_constant_index_for_set(program: &BytecodeProgram, set_idx: usize) -> Option<usize> {
     // Walk backwards from set_idx to find the index producer.
     // The stack at set_idx has: [..., key, value] with key at depth 1 from top.
     // We need the producer of the second-from-top element.
@@ -600,26 +607,29 @@ mod tests {
         // x = arr[1]        =>  LoadLocal(0), PushConst(2=index1), GetProp
         let program = make_program(
             vec![
-                make_instr(OpCode::NewArray, Some(Operand::Count(2))),    // 0
+                make_instr(OpCode::NewArray, Some(Operand::Count(2))), // 0
                 make_instr(OpCode::StoreLocal, Some(Operand::Local(0))), // 1
                 make_instr(OpCode::PushConst, Some(Operand::Const(0))), // 2: index 0
                 make_instr(OpCode::PushConst, Some(Operand::Const(2))), // 3: value 42
                 make_instr(OpCode::SetLocalIndex, Some(Operand::Local(0))), // 4
                 make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 5
                 make_instr(OpCode::PushConst, Some(Operand::Const(1))), // 6: index 1
-                make_instr(OpCode::GetProp, None),                       // 7
-                make_instr(OpCode::Pop, None),                           // 8
+                make_instr(OpCode::GetProp, None),                     // 7
+                make_instr(OpCode::Pop, None),                         // 8
             ],
             vec![
-                Constant::Int(0), // const 0: index 0
-                Constant::Int(1), // const 1: index 1
+                Constant::Int(0),  // const 0: index 0
+                Constant::Int(1),  // const 1: index 1
                 Constant::Int(42), // const 2: value 42
             ],
         );
 
         let plan = analyze_escape(&program);
         assert!(plan.has_candidates());
-        let entry = plan.scalar_arrays.get(&0).expect("should have candidate at idx 0");
+        let entry = plan
+            .scalar_arrays
+            .get(&0)
+            .expect("should have candidate at idx 0");
         assert_eq!(entry.local_slot, 0);
         assert_eq!(entry.element_count, 2);
         assert_eq!(entry.set_sites.get(&4), Some(&0)); // SetLocalIndex at 4, element 0
@@ -630,10 +640,10 @@ mod tests {
     fn array_escapes_via_call() {
         let program = make_program(
             vec![
-                make_instr(OpCode::NewArray, Some(Operand::Count(2))),    // 0
+                make_instr(OpCode::NewArray, Some(Operand::Count(2))), // 0
                 make_instr(OpCode::StoreLocal, Some(Operand::Local(0))), // 1
                 make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 2
-                make_instr(OpCode::Call, Some(Operand::Count(1))),      // 3: escaping call
+                make_instr(OpCode::Call, Some(Operand::Count(1))),     // 3: escaping call
             ],
             vec![],
         );
@@ -646,7 +656,7 @@ mod tests {
     fn array_too_large_rejected() {
         let program = make_program(
             vec![
-                make_instr(OpCode::NewArray, Some(Operand::Count(9))),    // > MAX_SCALAR_ARRAY_ELEMENTS
+                make_instr(OpCode::NewArray, Some(Operand::Count(9))), // > MAX_SCALAR_ARRAY_ELEMENTS
                 make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),
                 make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),
                 make_instr(OpCode::PushConst, Some(Operand::Const(0))),
@@ -684,8 +694,8 @@ mod tests {
             vec![
                 make_instr(OpCode::NewArray, Some(Operand::Count(2))),
                 make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),
-                make_instr(OpCode::Jump, Some(Operand::Offset(0))),       // block boundary
-                make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),   // in new block
+                make_instr(OpCode::Jump, Some(Operand::Offset(0))), // block boundary
+                make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // in new block
                 make_instr(OpCode::PushConst, Some(Operand::Const(0))),
                 make_instr(OpCode::GetProp, None),
                 make_instr(OpCode::Pop, None),

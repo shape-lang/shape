@@ -50,8 +50,8 @@ use tower_lsp_server::ls_types::{
     DocumentLinkParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
     DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
     ExecuteCommandOptions, ExecuteCommandParams, FileChangeType, FileOperationFilter,
-    FileOperationPattern, FileOperationPatternKind, FileOperationRegistrationOptions,
-    FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
+    FileOperationPattern, FileOperationPatternKind, FileOperationRegistrationOptions, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
     InlayHint, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, LSPAny, Location,
@@ -65,8 +65,9 @@ use tower_lsp_server::ls_types::{
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     TypeDefinitionProviderCapability, Uri, WorkDoneProgressOptions, WorkspaceDiagnosticParams,
     WorkspaceDiagnosticReport, WorkspaceDiagnosticReportResult, WorkspaceDocumentDiagnosticReport,
-    WorkspaceFileOperationsServerCapabilities, WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport,
-    WorkspaceServerCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    WorkspaceEdit, WorkspaceFileOperationsServerCapabilities,
+    WorkspaceFullDocumentDiagnosticReport, WorkspaceServerCapabilities, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use tower_lsp_server::{Client, LanguageServer, jsonrpc::Result};
 
@@ -1605,8 +1606,7 @@ impl LanguageServer for ShapeLanguageServer {
 
         let tooltip = match kind {
             Some("chain") => Some(
-                "Inferred type of the intermediate method-chain step (W2.4 / 1.27)."
-                    .to_string(),
+                "Inferred type of the intermediate method-chain step (W2.4 / 1.27).".to_string(),
             ),
             Some("binding-kind") => Some(
                 "LSP-side approximation of BindingStorageClass (ADR-006 §2). \
@@ -1895,10 +1895,7 @@ impl LanguageServer for ShapeLanguageServer {
         }
     }
 
-    async fn document_link(
-        &self,
-        params: DocumentLinkParams,
-    ) -> Result<Option<Vec<DocumentLink>>> {
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
         let uri = params.text_document.uri;
 
         let doc = match self.documents.get(&uri) {
@@ -2066,10 +2063,7 @@ impl LanguageServer for ShapeLanguageServer {
     /// non-identifier path segments produce no edits — the client just
     /// renames the file and the user fixes any newly-broken imports by
     /// hand.
-    async fn will_rename_files(
-        &self,
-        params: RenameFilesParams,
-    ) -> Result<Option<WorkspaceEdit>> {
+    async fn will_rename_files(&self, params: RenameFilesParams) -> Result<Option<WorkspaceEdit>> {
         let Some(workspace_root) = self.project_root.get() else {
             return Ok(None);
         };
@@ -2090,16 +2084,14 @@ impl LanguageServer for ShapeLanguageServer {
             let Some(new_path) = new_uri.to_file_path() else {
                 continue;
             };
-            let Some(old_mod) = crate::module_cache::path_to_module_path(
-                &old_path,
-                workspace_root.as_path(),
-            ) else {
+            let Some(old_mod) =
+                crate::module_cache::path_to_module_path(&old_path, workspace_root.as_path())
+            else {
                 continue;
             };
-            let Some(new_mod) = crate::module_cache::path_to_module_path(
-                &new_path,
-                workspace_root.as_path(),
-            ) else {
+            let Some(new_mod) =
+                crate::module_cache::path_to_module_path(&new_path, workspace_root.as_path())
+            else {
                 continue;
             };
             if old_mod == new_mod {
@@ -2208,8 +2200,7 @@ fn collect_import_rewrites(text: &str, renames: &[(String, String)]) -> Vec<Text
     let mut edits = Vec::new();
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
-        let trimmed_offset = offset
-            + (line.len() - line.trim_start().len());
+        let trimmed_offset = offset + (line.len() - line.trim_start().len());
         let body = line.trim_start();
         // Quick-reject: the import statement must start with `from `.
         if let Some(rest) = body.strip_prefix("from ") {
@@ -2373,10 +2364,7 @@ fn compute_semantic_token_edits(
     let mut suffix = 0usize;
     let max_suffix = old.len().min(new.len()) - prefix;
     while suffix < max_suffix
-        && semantic_tokens_eq(
-            &old[old.len() - 1 - suffix],
-            &new[new.len() - 1 - suffix],
-        )
+        && semantic_tokens_eq(&old[old.len() - 1 - suffix], &new[new.len() - 1 - suffix])
     {
         suffix += 1;
     }
@@ -2394,8 +2382,7 @@ fn compute_semantic_token_edits(
     // Convert token-index range to flat-u32-index range.
     let start = (old_replace_start * 5) as u32;
     let delete_count = ((old_replace_end - old_replace_start) * 5) as u32;
-    let replacement: Vec<SemanticToken> =
-        new[new_replace_start..new_replace_end].to_vec();
+    let replacement: Vec<SemanticToken> = new[new_replace_start..new_replace_end].to_vec();
     let data = if replacement.is_empty() {
         None
     } else {
@@ -2910,12 +2897,7 @@ print("hello")
 
     // ------- W2.8 semantic-tokens delivery (range + delta) -------
 
-    fn mk_token(
-        delta_line: u32,
-        delta_start: u32,
-        length: u32,
-        token_type: u32,
-    ) -> SemanticToken {
+    fn mk_token(delta_line: u32, delta_start: u32, length: u32, token_type: u32) -> SemanticToken {
         SemanticToken {
             delta_line,
             delta_start,
@@ -2928,8 +2910,14 @@ print("hello")
     #[test]
     fn position_in_range_inclusive_start_exclusive_end() {
         let range = Range {
-            start: Position { line: 1, character: 0 },
-            end: Position { line: 3, character: 0 },
+            start: Position {
+                line: 1,
+                character: 0,
+            },
+            end: Position {
+                line: 3,
+                character: 0,
+            },
         };
         // Inside
         assert!(position_in_range(1, 0, &range));
@@ -2945,8 +2933,14 @@ print("hello")
     #[test]
     fn position_in_range_single_line() {
         let range = Range {
-            start: Position { line: 5, character: 2 },
-            end: Position { line: 5, character: 8 },
+            start: Position {
+                line: 5,
+                character: 2,
+            },
+            end: Position {
+                line: 5,
+                character: 8,
+            },
         };
         assert!(position_in_range(5, 2, &range));
         assert!(position_in_range(5, 7, &range));
@@ -2960,7 +2954,10 @@ print("hello")
     fn compute_semantic_token_edits_empty_when_identical() {
         let tokens = vec![mk_token(0, 0, 3, 8), mk_token(0, 4, 5, 5)];
         let edits = compute_semantic_token_edits(&tokens, &tokens);
-        assert!(edits.is_empty(), "identical sequences must produce zero edits");
+        assert!(
+            edits.is_empty(),
+            "identical sequences must produce zero edits"
+        );
     }
 
     #[test]

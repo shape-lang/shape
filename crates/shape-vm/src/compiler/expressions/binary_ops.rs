@@ -11,7 +11,7 @@ use super::super::BytecodeCompiler;
 use super::numeric_ops::{
     CoercionPlan, apply_coercion, inferred_type_to_numeric, is_function_type,
     is_ordered_comparison, is_strict_arithmetic, is_strict_bitwise, is_type_numeric,
-    plan_coercion, type_display_name, typed_opcode_for,
+    literal_numeric_type, plan_coercion, type_display_name, typed_opcode_for,
 };
 
 /// Map a BinaryOp to its operator trait name, if one exists.
@@ -33,9 +33,7 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::BitXor => Some("BitXor"),
         BinaryOp::BitShl => Some("Shl"),
         BinaryOp::BitShr => Some("Shr"),
-        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
-            Some("Ord")
-        }
+        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => Some("Ord"),
         // W1.7: Eq/Neq dispatch for user-defined types. Built-in
         // scalar types take typed `EqInt`/`EqString`/... before this
         // mapping is consulted (`compile_typed_equality` resolves
@@ -64,9 +62,7 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::BitXor => Some("bitxor"),
         BinaryOp::BitShl => Some("shl"),
         BinaryOp::BitShr => Some("shr"),
-        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
-            Some("cmp")
-        }
+        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => Some("cmp"),
         // W1.7: `Eq::eq(self, other) -> bool`. Both `==` and `!=` map
         // to the same method; the negation for `!=` is emitted by the
         // caller (`compile_typed_equality`) after the dispatch.
@@ -78,7 +74,10 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
 fn emit_cmp_result_comparison(compiler: &mut BytecodeCompiler, op: &BinaryOp) {
     use crate::bytecode::Constant;
     let zero_idx = compiler.program.add_constant(Constant::Int(0));
-    compiler.emit(Instruction::new(OpCode::PushConst, Some(Operand::Const(zero_idx))));
+    compiler.emit(Instruction::new(
+        OpCode::PushConst,
+        Some(Operand::Const(zero_idx)),
+    ));
     let cmp_op = match op {
         BinaryOp::Greater => OpCode::GtInt,
         BinaryOp::Less => OpCode::LtInt,
@@ -109,19 +108,49 @@ fn reference_operand_span(left: &Expr, right: &Expr) -> Option<Span> {
     None
 }
 
-fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_schema: Option<SchemaId>, left_expr: &Expr, op_span: Span) -> bool {
-    let trait_name = match operator_trait_for_op(op) { Some(t) => t, None => return false };
-    let method_name = match operator_trait_method_for_op(op) { Some(m) => m, None => return false };
+fn try_emit_trait_dispatch(
+    compiler: &mut BytecodeCompiler,
+    op: &BinaryOp,
+    left_schema: Option<SchemaId>,
+    left_expr: &Expr,
+    op_span: Span,
+) -> bool {
+    let trait_name = match operator_trait_for_op(op) {
+        Some(t) => t,
+        None => return false,
+    };
+    let method_name = match operator_trait_method_for_op(op) {
+        Some(m) => m,
+        None => return false,
+    };
     let has_trait_via_schema = left_schema
         .and_then(|sid| compiler.type_tracker.schema_registry().get_by_id(sid))
-        .is_some_and(|schema| compiler.type_inference.env.type_implements_trait(&schema.name, trait_name));
-    let has_trait = has_trait_via_schema || compiler.infer_expr_type(left_expr).ok().is_some_and(|ty| {
-        let name = type_display_name(&ty);
-        compiler.type_inference.env.type_implements_trait(&name, trait_name)
-    });
-    if !has_trait { return false; }
+        .is_some_and(|schema| {
+            compiler
+                .type_inference
+                .env
+                .type_implements_trait(&schema.name, trait_name)
+        });
+    let has_trait = has_trait_via_schema
+        || compiler.infer_expr_type(left_expr).ok().is_some_and(|ty| {
+            let name = type_display_name(&ty);
+            compiler
+                .type_inference
+                .env
+                .type_implements_trait(&name, trait_name)
+        });
+    if !has_trait {
+        return false;
+    }
     emit_operator_trait_call(compiler, method_name, op_span);
-    if is_ordered_comparison(op) { emit_cmp_result_comparison(compiler, op); }
+    if is_ordered_comparison(op) {
+        emit_cmp_result_comparison(compiler, op);
+    } else if let Some(left_id) = left_schema {
+        // Arithmetic operator trait result is `Self` — restore the left schema
+        // so chained / assigned uses resolve. (operators slice —
+        // compound-assign fix)
+        compiler.restore_operator_trait_result_schema(left_id);
+    }
     true
 }
 
@@ -137,7 +166,11 @@ fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_
 /// `Rvalue::BinaryOp` / `Rvalue::UnaryOp` site (keyed by the same span
 /// the MIR lowering at `crates/shape-vm/src/mir/lowering/expr.rs::
 /// lower_expr_to_temp` stamps on the statement via `expr.span()`).
-fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'static str, op_span: Span) {
+fn emit_operator_trait_call(
+    compiler: &mut BytecodeCompiler,
+    method_name: &'static str,
+    op_span: Span,
+) {
     let method_id = shape_value::MethodId::from_name(method_name);
     let string_id = compiler.program.add_string(method_name.to_string());
     compiler.emit(Instruction::new(
@@ -146,7 +179,8 @@ fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'stat
             method_id: method_id.0,
             arg_count: 1,
             string_id,
-         receiver_type_tag: 0xFF, }),
+            receiver_type_tag: 0xFF,
+        }),
     ));
     // ADR-006 §2.7.5 W10 conduit: persist the bytecode-time trait-dispatch
     // decision so the JIT MIR consumer can lift `Rvalue::BinaryOp` at the
@@ -158,7 +192,6 @@ fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'stat
         .insert(op_span, (method_name.to_string(), 1));
     compiler.last_expr_schema = None;
     compiler.last_expr_type_info = None;
-    compiler.last_expr_numeric_type = None;
 }
 
 fn combined_span(left: &Expr, right: &Expr) -> Span {
@@ -202,6 +235,45 @@ fn strict_typing_binop_error(
     }
 }
 
+/// Strict no-coercion ruling (user 2026-06-14): `string + non-string` is a
+/// compile error. Under strict typing there is no implicit auto-stringify of
+/// the non-string operand — the `op_string_concat_int/number/bool`
+/// auto-stringify handlers are no longer reachable from `+` for well-typed
+/// code. The fix is to use f-string interpolation (`f"{a}{b}"`) or an explicit
+/// string conversion.
+///
+/// Fires when exactly one operand of `+` is a string (or char) and the other
+/// is a non-string concrete type. Both string operands take the
+/// `StringConcatTyped` path before this; both non-string operands never reach
+/// it.
+fn string_plus_nonstring_error(
+    compiler: &mut BytecodeCompiler,
+    left: &Expr,
+    right: &Expr,
+    lhs_type: &str,
+    rhs_type: &str,
+) -> ShapeError {
+    ShapeError::SemanticError {
+        message: format!(
+            "Cannot apply `+` to a `string` and a `{}`. Strict typing does not \
+             implicitly convert `{}` to a string for concatenation. Use f-string \
+             interpolation, e.g. `f\"{{...}}\"`, or convert the value to a string \
+             explicitly before concatenating.",
+            if lhs_type == "string" || lhs_type == "char" {
+                rhs_type
+            } else {
+                lhs_type
+            },
+            if lhs_type == "string" || lhs_type == "char" {
+                rhs_type
+            } else {
+                lhs_type
+            },
+        ),
+        location: Some(compiler.span_to_source_location(combined_span(left, right))),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericEmitResult {
     EmittedTyped,
@@ -229,72 +301,69 @@ enum EqOperandType {
 }
 
 impl BytecodeCompiler {
-    /// ε-1 PART 1 — emit-side soundness guard.
-    ///
-    /// Returns a `ProofGap`-derived compile error when a typed numeric opcode
-    /// is about to be emitted for `operand` (its `numeric` hint is `Some`, so
-    /// a typed opcode WOULD fire) but the operand's actual compile-time type
-    /// is still an unresolved `Type::Variable`/`Type::Constrained`.
-    ///
-    /// That combination means the `NumericType` claim is *fabricated* — no
-    /// signal proved the kind, so emitting `MulInt`/`MulNumber`/... would
-    /// stamp a default kind on a value of unknown type (the exact silent-wrong
-    /// path that reinterpreted the integer `40` as the denormal `2e-321`).
-    ///
-    /// Restricted to identifiers bound to an *untyped function parameter slot*
-    /// with no tracker type info: those are the only operands whose numeric
-    /// hint can be set without a proving signal (literals, typed locals and
-    /// for-loop variables all carry a real proven kind). This keeps the guard
-    /// from false-positiving on ordinary well-typed code.
-    fn numeric_operand_proof_gap(
-        &mut self,
-        op: &BinaryOp,
-        operand: &Expr,
-        numeric: Option<NumericType>,
-    ) -> Option<ShapeError> {
-        // No typed opcode would fire for this operand → nothing to prove.
-        numeric?;
-
-        let Expr::Identifier(name, _) = operand else {
-            return None;
-        };
-        let local_idx = self.resolve_local(name)?;
-        // Only untyped function parameters can carry an unproven numeric hint.
-        if !self.param_locals.contains(&local_idx) {
-            return None;
+    /// After an operator-trait dispatch (`a + b` → `a.add(b)` etc.), restore
+    /// the expr-type tracking to the RESULT type so a chained or assigned use
+    /// sees a concrete type. For the arithmetic operator traits (`Add`/`Sub`/
+    /// `Mul`/`Div`/`BitAnd`/`BitOr`/`BitXor`) the result type is `Self` — the
+    /// LEFT operand's type — so `result_schema_id` is the left operand's schema
+    /// id. `emit_operator_trait_call` clears `last_expr_schema` /
+    /// `last_expr_type_info`; without this restore, `acc = acc + x` (and the
+    /// `acc += x` it desugars from) dropped `acc`'s schema, so the NEXT
+    /// `acc + y` could not resolve the operator trait and failed with
+    /// "operand types are unknown". (operators slice — compound-assign fix)
+    fn restore_operator_trait_result_schema(&mut self, result_schema_id: SchemaId) {
+        if let Some(schema) = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(result_schema_id)
+        {
+            let name = schema.name.clone();
+            self.last_expr_schema = Some(result_schema_id);
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+                result_schema_id,
+                name,
+            ));
         }
-        // A param with concrete tracker type info has a proven kind.
-        if let Some(info) = self.type_tracker.get_local_type(local_idx) {
-            if info.type_name.is_some() || info.storage_hint.is_some() {
-                return None;
-            }
-        }
+    }
 
-        // The decisive check: ask the inference engine for the operand's
-        // resolved type. A bare unresolved variable (or still-bounded
-        // constrained variable) is an unprovable kind.
-        let inferred = self.infer_expr_type(operand).ok()?;
-        if !matches!(
-            inferred,
-            shape_runtime::type_system::Type::Variable(_)
-                | shape_runtime::type_system::Type::Constrained { .. }
-        ) {
-            return None;
-        }
+    // U4-4: `numeric_operand_proof_gap` (the ε-1 ad-hoc emit-side soundness
+    // guard) is DELETED. It re-asked the inference engine to confirm a
+    // register-claimed `NumericType` was not fabricated — a check that only
+    // made sense while the standalone `last_expr_numeric_type` register was a
+    // SECOND source of truth competing with the engine Type table. With the
+    // register gone, operand kinds are derived directly from the one resolved
+    // Type (`numeric_type_of` → `infer_expr_type`); an un-inferable operand is
+    // a table miss → `None`, which the `NoPlan`/`CoercedNeedsGeneric` path
+    // turns into the strict `strict_typing_binop_error` surface-and-stop. The
+    // strictness the guard provided is preserved by the single source.
 
-        let gap = crate::type_tracking::proof_gap_unresolved_operand(
-            "emit_typed_arithmetic",
-            format!(
-                "operand `{}` of `{:?}` has an unresolved type — no signal \
-                 proves its NativeKind, so a typed numeric opcode cannot be \
-                 emitted. Add a type annotation to the parameter.",
-                name, op
-            ),
-        );
-        Some(ShapeError::SemanticError {
-            message: gap.to_string(),
-            location: Some(self.span_to_source_location(operand.span())),
-        })
+    /// A-final ROOT-C: deferred-template numeric-binop placeholder.
+    ///
+    /// Returns `true` (and emits a stack-balancing `Pop`) when this binop is
+    /// being compiled inside the body of an *uninstantiated implicit-generic*
+    /// function (`fn add(a, b) { a + b }`, never called, params stay
+    /// unresolved type variables — see `is_uninstantiated_implicit_generic`).
+    /// Such a body is a deferred template whose bytecode is DEAD (re-emitted
+    /// with proven kinds per concrete call site), so the polymorphic-numeric
+    /// proof-gap (no proven `NativeKind` on the operands) must NOT abort
+    /// compilation with a typed-opcode / strict-typing error.
+    ///
+    /// Both operand values are already on the stack at every binop terminal
+    /// that calls this (compiled before the numeric-emit decision), so a single
+    /// `Pop` (2 → 1) keeps the dead blob stack-balanced. NO fabricated typed
+    /// numeric opcode, no default kind, no int-VALUE->number widening is
+    /// emitted — and the blob never runs. STRUCTURAL/schema body checks
+    /// (object-spread-without-known-schema, etc.) are unaffected: they
+    /// `return Err` from their own emit paths and never reach this numeric-only
+    /// deferral. This narrows the prior whole-body skip so a genuine structural
+    /// error is no longer suppressed alongside the benign numeric proof-gap.
+    fn defer_template_numeric_binop(&mut self) -> bool {
+        if !self.deferring_uninstantiated_template_body {
+            return false;
+        }
+        self.emit(Instruction::new(OpCode::Pop, None));
+        self.last_expr_schema = None;
+        true
     }
 
     fn infer_numeric_pair(
@@ -302,15 +371,196 @@ impl BytecodeCompiler {
         left: &Expr,
         right: &Expr,
     ) -> (Option<NumericType>, Option<NumericType>) {
-        let inferred_left = self
-            .infer_expr_type(left)
+        (self.numeric_type_of(left), self.numeric_type_of(right))
+    }
+
+    /// U4-4: the SOLE Type→NumericType derivation point. Resolves `expr`'s
+    /// type from the one engine span-table (via `infer_expr_type`) and projects
+    /// it to a `NumericType` for typed-opcode selection.
+    ///
+    /// This REPLACES the deleted standalone `last_expr_numeric_type` register
+    /// (the SB-7 second source of truth). A genuinely un-inferable numeric
+    /// operand returns `None` here → the strict-arithmetic emit path raises the
+    /// U4-3 table-miss surface-and-stop compile error, so numeric strictness is
+    /// preserved without the old `numeric_operand_proof_gap` guard.
+    pub(crate) fn numeric_type_of(&mut self, expr: &Expr) -> Option<NumericType> {
+        // A numeric LITERAL's kind is statically known from its AST node — no
+        // inference required. The engine span-table does not always carry a
+        // literal that lives in a body it did not walk (extend-method bodies,
+        // comprehension element exprs, desugared nodes), and `infer_expr_type`
+        // has no literal arm, so consult the AST directly first. This is the
+        // literal kind the deleted `last_expr_numeric_type` register stamped at
+        // `compile_expr_literal` time. (`int`/`number`/`decimal`/width-typed.)
+        if let Some(nt) = literal_numeric_type(expr) {
+            return Some(nt);
+        }
+        // Identifier proven-slot kind (U4-4): a local/param whose tracker slot
+        // carries a PROVEN numeric storage hint is the authoritative kind for
+        // that read — it takes priority over the engine span-table. This is
+        // load-bearing for MONOMORPHIZED generic bodies: a specialization
+        // (`clamp::<int>`) substitutes the param's type to `int` in the tracker
+        // slot, but the shared template-body AST span still maps to the
+        // ORIGINAL (cross-specialization-conflicted) entry in the engine table.
+        // Serving the engine entry would read the conflicted `T` and reject the
+        // `x < lo` comparison; the specialized slot hint is the proven kind the
+        // deleted register held. Non-numeric / unproven slots fall through.
+        if let Some(nt) = self.identifier_slot_numeric_type(expr) {
+            return Some(nt);
+        }
+        // Binop-result proof (U4-4): an arithmetic binop over locally proven
+        // operands has a result kind determined by operand coercion. This must
+        // beat the engine span-table for returned/factory closures, where the
+        // shared unspecialized body span can be broader than the closure's
+        // call-site-pinned parameter locals.
+        if let Some(nt) = self.binop_result_numeric_type(expr) {
+            return Some(nt);
+        }
+        // WS-9b fallback (U4-4): a field read `a.x` on an unannotated parameter
+        // `a` is resolved by `infer_expr_type` only after the engine widens `a`
+        // to its call-site struct type — which the engine span-table does not
+        // capture for a param widened purely from the tracker schema. The
+        // deleted `last_expr_numeric_type` register carried the field's numeric
+        // type, resolved from the tracker schema by the property-access
+        // compiler. Re-source the SAME tracker-schema field type here (one
+        // model: the proven schema's `FieldType`), keeping numeric strictness
+        // for genuinely un-annotatable field reads (which have no tracker
+        // schema and stay `None` → table-miss surface-and-stop).
+        if let Some(nt) = self.property_access_field_numeric_type(expr) {
+            return Some(nt);
+        }
+        self.infer_expr_type(expr)
             .ok()
-            .and_then(|t| inferred_type_to_numeric(&t));
-        let inferred_right = self
-            .infer_expr_type(right)
-            .ok()
-            .and_then(|t| inferred_type_to_numeric(&t));
-        (inferred_left, inferred_right)
+            .and_then(|t| inferred_type_to_numeric(&t))
+    }
+
+    /// Result `NumericType` of an arithmetic binop expr, derived by coercing
+    /// its operand kinds (U4-4 — the result kind the deleted register stamped
+    /// after a binop compiled). Returns `None` for non-arithmetic binops
+    /// (comparisons yield `bool`, not a NumericType) and unresolvable operands.
+    fn binop_result_numeric_type(&mut self, expr: &Expr) -> Option<NumericType> {
+        let Expr::BinaryOp {
+            op, left, right, ..
+        } = expr
+        else {
+            return None;
+        };
+        // Only the arithmetic ops produce a numeric result; comparisons /
+        // logical / bitwise are handled by their own kind paths.
+        if !is_strict_arithmetic(op) && !matches!(op, BinaryOp::Add) {
+            return None;
+        }
+        let l = self.numeric_type_of(left)?;
+        let r = self.numeric_type_of(right)?;
+        match plan_coercion(Some(l), Some(r))? {
+            CoercionPlan::NoCoercion(nt)
+            | CoercionPlan::CoerceLeft(nt)
+            | CoercionPlan::CoerceRight(nt) => Some(nt),
+            CoercionPlan::IncompatibleWidths(_, _) => None,
+        }
+    }
+
+    /// Resolve the `NumericType` of an `Identifier` read from its typed storage
+    /// proof: a captured cell's recorded `FieldKind`, or a tracker slot's
+    /// PROVEN storage hint (U4-4 — the kind the deleted register stamped at
+    /// variable-load time). Width-aware. Returns `None` for non-identifiers,
+    /// unresolvable names, or slots with no proven numeric storage hint. This
+    /// takes priority over the engine span-table specifically so a monomorphized
+    /// specialization's substituted param kind wins over the shared
+    /// template-body span's conflicted engine entry.
+    fn identifier_slot_numeric_type(&self, expr: &Expr) -> Option<NumericType> {
+        use crate::type_tracking::StorageHint;
+        let Expr::Identifier(name, _) = expr else {
+            return None;
+        };
+        if let Some(nt) = self.capture_cell_numeric_type(name) {
+            return Some(nt);
+        }
+        let hint = if let Some(local_idx) = self.resolve_local(name) {
+            self.type_tracker.get_local_storage_hint(local_idx)
+        } else {
+            let scoped = self
+                .resolve_scoped_module_binding_name(name)
+                .unwrap_or_else(|| name.to_string());
+            self.module_bindings
+                .get(&scoped)
+                .or_else(|| self.module_bindings.get(name))
+                .and_then(|&idx| self.type_tracker.get_binding_type(idx))
+                .and_then(|info| info.storage_hint)
+        }?;
+        use shape_ast::IntWidth;
+        match hint {
+            StorageHint::Int64 => Some(NumericType::Int),
+            StorageHint::Float64 => Some(NumericType::Number),
+            StorageHint::Int8 => Some(NumericType::IntWidth(IntWidth::I8)),
+            StorageHint::UInt8 => Some(NumericType::IntWidth(IntWidth::U8)),
+            StorageHint::Int16 => Some(NumericType::IntWidth(IntWidth::I16)),
+            StorageHint::UInt16 => Some(NumericType::IntWidth(IntWidth::U16)),
+            StorageHint::Int32 => Some(NumericType::IntWidth(IntWidth::I32)),
+            StorageHint::UInt32 => Some(NumericType::IntWidth(IntWidth::U32)),
+            StorageHint::UInt64 => Some(NumericType::IntWidth(IntWidth::U64)),
+            _ => None,
+        }
+    }
+
+    fn capture_cell_numeric_type(&self, name: &str) -> Option<NumericType> {
+        use shape_ast::IntWidth;
+        use shape_value::v2::struct_layout::FieldKind;
+
+        // Mutable/shared closure captures are already lowered through typed
+        // per-FieldKind load/store opcodes. Reuse that compile-time capture
+        // stamp for binary-op opcode selection; this is not a runtime probe.
+        let kind = self
+            .owned_mutable_capture_inner_kinds
+            .get(name)
+            .copied()
+            .or_else(|| self.shared_capture_inner_kinds.get(name).copied())?;
+
+        match kind {
+            FieldKind::F64 => Some(NumericType::Number),
+            FieldKind::I64 => Some(NumericType::Int),
+            FieldKind::I32 => Some(NumericType::IntWidth(IntWidth::I32)),
+            FieldKind::I16 => Some(NumericType::IntWidth(IntWidth::I16)),
+            FieldKind::I8 => Some(NumericType::IntWidth(IntWidth::I8)),
+            FieldKind::U64 => Some(NumericType::IntWidth(IntWidth::U64)),
+            FieldKind::U32 => Some(NumericType::IntWidth(IntWidth::U32)),
+            FieldKind::U16 => Some(NumericType::IntWidth(IntWidth::U16)),
+            FieldKind::U8 => Some(NumericType::IntWidth(IntWidth::U8)),
+            FieldKind::Bool | FieldKind::Ptr => None,
+        }
+    }
+
+    /// Resolve the `NumericType` of a `a.x` property read from the proven
+    /// tracker schema of `a` (U4-4 WS-9b derivation, replacing the deleted
+    /// register stamp). Returns `None` for non-PropertyAccess exprs, an
+    /// untracked receiver, or a non-numeric field type.
+    fn property_access_field_numeric_type(&mut self, expr: &Expr) -> Option<NumericType> {
+        use shape_runtime::type_schema::FieldType;
+        let Expr::PropertyAccess {
+            object, property, ..
+        } = expr
+        else {
+            return None;
+        };
+        let schema_id = self.tracker_schema_id_for_expr(object)?;
+        let field_type = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(property))
+            .map(|field| field.field_type.clone())?;
+        match field_type {
+            FieldType::I64 | FieldType::Timestamp => Some(NumericType::Int),
+            FieldType::I8 => Some(NumericType::IntWidth(shape_ast::IntWidth::I8)),
+            FieldType::U8 => Some(NumericType::IntWidth(shape_ast::IntWidth::U8)),
+            FieldType::I16 => Some(NumericType::IntWidth(shape_ast::IntWidth::I16)),
+            FieldType::U16 => Some(NumericType::IntWidth(shape_ast::IntWidth::U16)),
+            FieldType::I32 => Some(NumericType::IntWidth(shape_ast::IntWidth::I32)),
+            FieldType::U32 => Some(NumericType::IntWidth(shape_ast::IntWidth::U32)),
+            FieldType::U64 => Some(NumericType::IntWidth(shape_ast::IntWidth::U64)),
+            FieldType::F64 => Some(NumericType::Number),
+            FieldType::Decimal => Some(NumericType::Decimal),
+            _ => None,
+        }
     }
 
     fn adopt_missing_numeric_operand_hint(
@@ -323,6 +573,12 @@ impl BytecodeCompiler {
         if let (Some(known), None) = (*left_numeric, *right_numeric)
             && matches!(right, Expr::Identifier(..) | Expr::IndexAccess { .. })
             && self.last_expr_schema.is_none()
+            // Strict no-coercion ruling (user 2026-06-14): never seed a numeric
+            // hint onto an operand the compiler has proven to be a `string`.
+            // Doing so misclassifies `s + n` (string + number) as a numeric add
+            // and defers the failure to a runtime `TypeError` instead of the
+            // clean compile-time `string + non-string` rejection below.
+            && !self.expr_is_proven_string(right)
         {
             // Adopt Int only if the identifier has a confirmed Int type.
             // Otherwise promote to Number to avoid misclassifying floats as ints.
@@ -349,7 +605,11 @@ impl BytecodeCompiler {
             } else {
                 false
             };
-            if !has_object_schema {
+            // Strict no-coercion ruling (user 2026-06-14): same guard as the
+            // symmetric branch — a proven-`string` LHS must not adopt the RHS
+            // numeric hint, or `s + n` becomes a numeric add that fails at
+            // runtime instead of rejecting at compile time.
+            if !has_object_schema && !self.expr_is_proven_string(left) {
                 let safe = self.safe_adopt_numeric_hint(left, known);
                 // Only adopt if the type didn't change (confirmed match).
                 if safe == known {
@@ -358,6 +618,30 @@ impl BytecodeCompiler {
                 }
             }
         }
+    }
+
+    /// Strict no-coercion ruling (user 2026-06-14): true when `expr` is proven
+    /// to be a `string` (or `char`) at compile time. Used to keep numeric-hint
+    /// adoption from misclassifying a string operand of `+` as numeric, so the
+    /// `string + non-string` rejection in the `Add` arm fires at compile time
+    /// rather than deferring to a runtime `TypeError`.
+    fn expr_is_proven_string(&mut self, expr: &Expr) -> bool {
+        if matches!(expr, Expr::Literal(Literal::String(_), _)) {
+            return true;
+        }
+        if matches!(
+            self.storage_hint_for_expr(expr),
+            Some(crate::type_tracking::NativeKind::String)
+        ) {
+            return true;
+        }
+        matches!(
+            self.infer_expr_type(expr)
+                .ok()
+                .map(|t| type_display_name(&t))
+                .as_deref(),
+            Some("string") | Some("char")
+        )
     }
 
     /// When adopting a numeric hint from one operand to another, check if adopting
@@ -384,6 +668,47 @@ impl BytecodeCompiler {
         }
         // For unconfirmed types, use Number (safe for both int and float values)
         NumericType::Number
+    }
+
+    /// Numeric-conversion §4 literal adoption support: whether `expr` is PROVEN
+    /// to carry the `number`/`f64` floating-point family at compile time. Used to
+    /// gate the binary-operand int-literal → `number` widening: a bare int
+    /// literal whose partner proves float adopts the float family.
+    ///
+    /// A bare `Int`/`UInt` literal is explicitly NOT counted as proving float
+    /// (it has no committed family until a context pins it), so `5 / 2` with no
+    /// surrounding number context stays integer division — only a genuine float
+    /// operand (a `number`-typed binding, a float literal, a `number`-returning
+    /// call, etc.) drives the sibling literal to adopt `number`.
+    pub(crate) fn expr_proves_float(&mut self, expr: &Expr) -> bool {
+        if matches!(
+            expr,
+            Expr::Literal(shape_ast::ast::Literal::Int(_), _)
+                | Expr::Literal(shape_ast::ast::Literal::UInt(_), _)
+        ) {
+            return false;
+        }
+        // A float literal proves float directly.
+        if matches!(expr, Expr::Literal(shape_ast::ast::Literal::Number(_), _)) {
+            return true;
+        }
+        // Locally proven numeric facts beat the program-wide span table here
+        // for the same reason they do in `numeric_type_of`: returned/factory
+        // closures share unspecialized body spans, while their locals and
+        // parameters have already been pinned from call-site facts.
+        if let Some(nt) = self
+            .identifier_slot_numeric_type(expr)
+            .or_else(|| self.property_access_field_numeric_type(expr))
+            .or_else(|| self.binop_result_numeric_type(expr))
+        {
+            return matches!(nt, NumericType::Number);
+        }
+        matches!(
+            self.infer_expr_type(expr)
+                .ok()
+                .and_then(|t| super::numeric_ops::inferred_type_to_numeric(&t)),
+            Some(NumericType::Number)
+        )
     }
 
     /// Returns `true` when the expression is syntactically guaranteed to be numeric.
@@ -484,8 +809,8 @@ impl BytecodeCompiler {
             Expr::Identifier(name, _) => {
                 let local_idx = self.resolve_local(name)?;
                 // Don't trust storage hints for function parameters with no explicit
-                // type annotation — their inferred types (from inferred_param_type_hints)
-                // can be wrong (e.g., a string param inferred as numeric → B19).
+                // type annotation. Even when function-signature facts pin a tracker
+                // name, typed numeric opcodes require direct operand proof (B19).
                 if self.param_locals.contains(&local_idx) {
                     return None;
                 }
@@ -593,20 +918,14 @@ impl BytecodeCompiler {
             // falls back to passthrough on raw native 0u64/1u64 bits and
             // `as_bool()` returns `None`.
             if is_comparison {
-                self.last_expr_type_info = Some(
-                    crate::type_tracking::VariableTypeInfo::with_storage(
+                self.last_expr_type_info =
+                    Some(crate::type_tracking::VariableTypeInfo::with_storage(
                         "bool".to_string(),
                         crate::type_tracking::StorageHint::Bool,
-                    ),
-                );
+                    ));
             } else {
                 self.last_expr_type_info = None;
             }
-            self.last_expr_numeric_type = if is_comparison {
-                None
-            } else {
-                Some(result_type)
-            };
             NumericEmitResult::EmittedTyped
         } else {
             NumericEmitResult::CoercedNeedsGeneric
@@ -650,7 +969,6 @@ impl BytecodeCompiler {
             }
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = None;
             return Ok(true);
         }
         if matches!(left, Expr::Literal(Literal::None, _)) {
@@ -661,7 +979,6 @@ impl BytecodeCompiler {
             }
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = None;
             return Ok(true);
         }
 
@@ -724,13 +1041,10 @@ impl BytecodeCompiler {
             // Result is bool — record so the implicit-return path
             // emits `ReturnValueBool` and the host-boundary synthesizer
             // re-tags the raw native bool bits.
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::with_storage(
-                    "bool".to_string(),
-                    crate::type_tracking::StorageHint::Bool,
-                ),
-            );
-            self.last_expr_numeric_type = None;
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                crate::type_tracking::StorageHint::Bool,
+            ));
             return Ok(true);
         }
 
@@ -770,13 +1084,14 @@ impl BytecodeCompiler {
             // Result is bool — record so the implicit-return path
             // emits `ReturnValueBool` and the host-boundary synthesizer
             // re-tags the raw native bool bits.
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::with_storage(
-                    "bool".to_string(),
-                    crate::type_tracking::StorageHint::Bool,
-                ),
-            );
-            self.last_expr_numeric_type = None;
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                crate::type_tracking::StorageHint::Bool,
+            ));
+            return Ok(true);
+        }
+
+        if self.try_compile_same_enum_equality(op, left, right)? {
             return Ok(true);
         }
 
@@ -810,9 +1125,11 @@ impl BytecodeCompiler {
         } else {
             None
         };
-        let mut has_eq_impl = slot_type_name
-            .as_ref()
-            .is_some_and(|name| self.type_inference.env.type_implements_trait(name, trait_name));
+        let mut has_eq_impl = slot_type_name.as_ref().is_some_and(|name| {
+            self.type_inference
+                .env
+                .type_implements_trait(name, trait_name)
+        });
         if !has_eq_impl {
             has_eq_impl = self.infer_expr_type(left).ok().is_some_and(|ty| {
                 let name = type_display_name(&ty);
@@ -833,13 +1150,10 @@ impl BytecodeCompiler {
             // `ReturnValueBool` and the host-boundary synthesizer
             // re-tags the raw native bool bits.
             self.last_expr_schema = None;
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::with_storage(
-                    "bool".to_string(),
-                    crate::type_tracking::StorageHint::Bool,
-                ),
-            );
-            self.last_expr_numeric_type = None;
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                crate::type_tracking::StorageHint::Bool,
+            ));
             return Ok(true);
         }
 
@@ -848,8 +1162,158 @@ impl BytecodeCompiler {
         // `emit_binary_op` shim with `BinOperandKind::Unknown` operands and
         // emitted `EqDynamic` / `NeqDynamic`. That dynamic-fallback path is
         // now a hard compile error.
-        let typed_op = if is_neq { BinaryOp::NotEqual } else { BinaryOp::Equal };
+        let typed_op = if is_neq {
+            BinaryOp::NotEqual
+        } else {
+            BinaryOp::Equal
+        };
         Err(strict_typing_binop_error(self, &typed_op, left, right))
+    }
+
+    /// Strict structural-unification proof for equality over same-schema enums.
+    ///
+    /// This is a positive static proof, not a runtime tag fallback: both
+    /// operands must resolve to the same registered `ConcreteType::Enum` (or
+    /// an inference type whose display name resolves to that enum schema).
+    /// The lowering emits typed-object equality over the full enum object, so
+    /// data variants compare both discriminator and payload slots.
+    fn try_compile_same_enum_equality(
+        &mut self,
+        op: &BinaryOp,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<bool> {
+        if !matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
+            return Ok(false);
+        }
+
+        let Some(left_enum) = self.equality_enum_type_name(left) else {
+            return Ok(false);
+        };
+        let Some(right_enum) = self.equality_enum_type_name(right) else {
+            return Ok(false);
+        };
+        if left_enum != right_enum {
+            return Ok(false);
+        }
+
+        let Some(schema) = self.type_tracker.schema_registry().get(left_enum.as_str()) else {
+            return Ok(false);
+        };
+        if schema.get_enum_info().is_none() {
+            return Ok(false);
+        }
+
+        self.compile_expr(left)?;
+        self.compile_expr(right)?;
+        self.emit(Instruction::simple(OpCode::EqTypedObject));
+        if matches!(op, BinaryOp::NotEqual) {
+            self.emit(Instruction::simple(OpCode::Not));
+        }
+        self.last_expr_schema = None;
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+            "bool".to_string(),
+            crate::type_tracking::StorageHint::Bool,
+        ));
+        Ok(true)
+    }
+
+    fn equality_enum_type_name(&mut self, expr: &Expr) -> Option<String> {
+        if let Some(shape_value::v2::ConcreteType::Enum(named)) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)
+        {
+            if let Some(name) = named.name_str() {
+                let resolved = self.resolve_type_name(name);
+                if self
+                    .type_tracker
+                    .schema_registry()
+                    .get(resolved.as_str())
+                    .is_some_and(|schema| schema.get_enum_info().is_some())
+                {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        if let Some(enum_name) = self.equality_enum_constructor_type_name(expr) {
+            return Some(enum_name);
+        }
+
+        if let Some(enum_name) = self.equality_property_enum_type_name(expr) {
+            return Some(enum_name);
+        }
+
+        let ty = self.infer_expr_type(expr).ok()?;
+        let display = type_display_name(&ty);
+        let resolved = self.resolve_type_name(&display);
+        self.type_tracker
+            .schema_registry()
+            .get(resolved.as_str())
+            .and_then(|schema| schema.get_enum_info().map(|_| resolved))
+    }
+
+    fn equality_enum_schema_name_if_known(&self, enum_name: &str) -> Option<String> {
+        let resolved = self.resolve_type_name(enum_name);
+        self.type_tracker
+            .schema_registry()
+            .get(resolved.as_str())
+            .and_then(|schema| schema.get_enum_info().map(|_| resolved))
+    }
+
+    fn equality_enum_constructor_type_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::EnumConstructor {
+                enum_name, variant, ..
+            } => {
+                let resolved = self.equality_enum_schema_name_if_known(enum_name.as_str())?;
+                let schema = self.type_tracker.schema_registry().get(resolved.as_str())?;
+                schema
+                    .get_enum_info()
+                    .and_then(|info| info.variant_by_name(variant).map(|_| resolved))
+            }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                const_args,
+                args,
+                named_args,
+                ..
+            } if const_args.is_empty() && args.is_empty() && named_args.is_empty() => {
+                let resolved = self.equality_enum_schema_name_if_known(namespace)?;
+                let schema = self.type_tracker.schema_registry().get(resolved.as_str())?;
+                schema
+                    .get_enum_info()
+                    .and_then(|info| info.variant_by_name(function).map(|_| resolved))
+            }
+            _ => None,
+        }
+    }
+
+    fn equality_property_enum_type_name(&mut self, expr: &Expr) -> Option<String> {
+        let Expr::PropertyAccess {
+            object,
+            property,
+            optional,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        if *optional {
+            return None;
+        }
+
+        let schema_id = self.tracker_schema_id_for_expr(object)?;
+        let field_type = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(property))
+            .map(|field| field.field_type.clone())?;
+        let FieldType::Object(enum_name) = field_type else {
+            return None;
+        };
+        self.equality_enum_schema_name_if_known(&enum_name)
     }
 
     /// Resolve the equality-relevant type of an expression from multiple
@@ -874,7 +1338,16 @@ impl BytecodeCompiler {
             }
         }
 
-        // Source 2: AST literal type
+        // Source 2: schema-backed field access type. Generated annotation
+        // methods are compiled immediately after `extend target`, and the
+        // shared inference span table may not carry `self.id` / `other.id`
+        // field results yet. The receiver's tracker schema plus field schema
+        // is the static proof; untracked receivers fall through.
+        if let Some(eq_type) = self.property_access_field_eq_type(expr) {
+            return Some(eq_type);
+        }
+
+        // Source 3: AST literal type
         match expr {
             Expr::Literal(Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(..), _) => {
                 Some(EqOperandType::Int)
@@ -886,6 +1359,195 @@ impl BytecodeCompiler {
             // source (handles `x == true` where `x` is untyped).
             Expr::Literal(Literal::Bool(_), _) => Some(EqOperandType::Bool),
             _ => None,
+        }
+    }
+
+    fn property_access_field_eq_type(&mut self, expr: &Expr) -> Option<EqOperandType> {
+        use shape_runtime::type_schema::FieldType;
+        let Expr::PropertyAccess {
+            object, property, ..
+        } = expr
+        else {
+            return None;
+        };
+        let schema_id = self.tracker_schema_id_for_expr(object)?;
+        let field_type = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(property))
+            .map(|field| field.field_type.clone())?;
+        match field_type {
+            FieldType::I64
+            | FieldType::Timestamp
+            | FieldType::I8
+            | FieldType::U8
+            | FieldType::I16
+            | FieldType::U16
+            | FieldType::I32
+            | FieldType::U32
+            | FieldType::U64 => Some(EqOperandType::Int),
+            FieldType::F64 => Some(EqOperandType::Number),
+            FieldType::Decimal => Some(EqOperandType::Decimal),
+            FieldType::String => Some(EqOperandType::String),
+            FieldType::Bool => Some(EqOperandType::Bool),
+            _ => None,
+        }
+    }
+
+    /// R4 c6-widen helper. Return the span of a reference-TYPED binop
+    /// operand (one whose inferred type is `&T` / `&mut T`, expressible in
+    /// type position after R1), if either side has such a type. Used by
+    /// `compile_expr_binary_op` to refuse e.g. `make() + 1` where
+    /// `fn make() -> &int`. The syntactic `&x` form is caught separately by
+    /// `reference_operand_span`; this covers the typed form that has no
+    /// immediate `&` token. Returns the operand's own span so the diagnostic
+    /// underlines the offending operand.
+    fn reference_typed_operand_span(&mut self, left: &Expr, right: &Expr) -> Option<Span> {
+        for operand in [left, right] {
+            if self.expr_has_reference_type(operand) {
+                return Some(operand.span());
+            }
+        }
+        None
+    }
+
+    /// True iff the inferred type of `expr` is a borrow (`&T` / `&mut T`).
+    /// The borrow type flows as `Type::Concrete(TypeAnnotation::Borrow{..})`
+    /// (R1) — no parallel `Type` enum variant.
+    fn expr_has_reference_type(&mut self, expr: &Expr) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        matches!(
+            self.infer_expr_type(expr),
+            Ok(Type::Concrete(TypeAnnotation::Borrow { .. }))
+        )
+    }
+
+    /// True iff `ty` is a concrete `Option<T>` carrier type — i.e. the
+    /// runtime value is an `Arc<OptionData>` (`Some(v)` / `None`), as
+    /// opposed to a plain nullable `T?` (which is null-coded at runtime).
+    /// Used by the `??` lowering to decide whether the JIT must deopt: the
+    /// JIT MIR `lower_null_coalesce` `Eq None` path matches the VM for a
+    /// nullable but leaks the `Some(v)` wrapper for an Option carrier.
+    ///
+    /// Note: `T?` desugars to `Option<T>` in the type lattice, so the two
+    /// are not distinguishable purely from the unwrapped annotation. We
+    /// treat any `Option<T>`-shaped inferred type as a carrier (the
+    /// conservative, sound choice — deopt is always correctness-preserving;
+    /// the common nullable-index `ctx[...] ?? d` infers to the element type
+    /// or a bare nullable scalar, not an `Option<_>` generic, so it is NOT
+    /// flagged and keeps its JIT path).
+    fn type_is_option_carrier(ty: &shape_runtime::type_system::Type) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        match ty {
+            Type::Generic { base, args } if args.len() == 1 => matches!(
+                base.as_ref(),
+                Type::Concrete(ann) if ann.as_type_name_str() == Some("Option")
+            ),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if name == "Option" && args.len() == 1 =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// True iff a `TypeAnnotation` is an `Option<T>` / `T?` carrier shape.
+    /// `T?` desugars to `TypeAnnotation::Generic { name: "Option", .. }`
+    /// (`TypeAnnotation::option`), so a single arm covers both surface forms.
+    fn annotation_is_option_carrier(ann: &shape_ast::ast::TypeAnnotation) -> bool {
+        ann.is_option()
+    }
+
+    /// A-2 `??` JIT-residual detection. Returns `true` when the STATIC type of
+    /// a `??` left operand is an `Option<T>` carrier (`Arc<OptionData>` at
+    /// runtime — `Some(v)` / `None`), so the JIT must whole-program deopt to
+    /// the interpreter (the JIT MIR `lower_null_coalesce` `Eq None` path leaks
+    /// the `Some(v)` wrapper that the VM `CoalesceProbe` unwraps).
+    ///
+    /// The prior detection consulted only `infer_expr_type(left)` →
+    /// `type_is_option_carrier`, which catches an inline `Some(..)` constructor
+    /// but MISSES a let-bound Option-typed local (`let x: int?`): `int?` is
+    /// tracked as the lowercased wrapper name `"option"` (an
+    /// `is_integer/number/...`-miss in `infer_expr_type`'s identifier branch),
+    /// so the runtime inference engine — which never sees the function-body
+    /// `let` — returns `Type::Variable` and the carrier is never recognised.
+    ///
+    /// This widens the gate to the additional static sources that genuinely
+    /// prove an Option carrier WITHOUT weakening the plain-nullable `??`
+    /// (non-Option `T?`-as-null-sentinel) JIT path — every source below
+    /// requires a declared/recorded `Option<T>` shape, never a bare nullable
+    /// scalar:
+    ///   1. `infer_expr_type` → `type_is_option_carrier` (inline `Some(..)`,
+    ///      Option-returning expressions the engine resolves).
+    ///   2. Identifier: the recorded `ConcreteType::Option(_)` from a declared
+    ///      `let x: int?` (local or module binding), or the tracker type-name
+    ///      `"option"` stamped by `tracked_type_name_from_annotation`.
+    ///   3. `FunctionCall`: the callee's declared return annotation is
+    ///      `Option<T>` / `T?` (a `T?`-returning fn then `?? d`).
+    ///   4. `PropertyAccess`: the receiver-schema field type is
+    ///      `FieldType::Option(_)` (a `T?` field then `?? d`).
+    ///
+    /// Deopt is always correctness-preserving; conservative over-detection of a
+    /// carrier only loses the JIT path for that one program, never diverges.
+    fn null_coalesce_lhs_is_option_carrier(&mut self, left: &Expr) -> bool {
+        // Source 1: inference engine (inline `Some(..)`, resolvable exprs).
+        if self
+            .infer_expr_type(left)
+            .ok()
+            .as_ref()
+            .is_some_and(Self::type_is_option_carrier)
+        {
+            return true;
+        }
+
+        match left {
+            // Source 2: a let-bound Option-typed local / module binding.
+            Expr::Identifier(name, _) => {
+                use shape_value::v2::ConcreteType;
+                // Recorded ConcreteType from the binding fact or declared
+                // annotation (`let x: int?` → `ConcreteType::Option(_)`).
+                let recorded_option =
+                    crate::compiler::monomorphization::type_resolution::identifier_concrete_type_pub(
+                        self, name,
+                    )
+                    .is_some_and(|ct| matches!(ct, ConcreteType::Option(_)));
+                if recorded_option {
+                    return true;
+                }
+                // Tracker type-name wrapper: `tracked_type_name_from_annotation`
+                // stamps a declared `T?` local as the lowercased `"option"`.
+                if self.tracker_type_name_for_identifier(name).as_deref() == Some("option") {
+                    return true;
+                }
+                false
+            }
+            // Source 3: a `T?`-returning function then `?? d`.
+            Expr::FunctionCall { name, .. } => self
+                .function_defs
+                .get(name)
+                .and_then(|def| def.return_type.as_ref())
+                .is_some_and(Self::annotation_is_option_carrier),
+            // Source 4: a `T?`-typed schema field then `?? d`.
+            Expr::PropertyAccess {
+                object,
+                property,
+                optional,
+                ..
+            } => {
+                if *optional {
+                    return false;
+                }
+                use shape_runtime::type_schema::FieldType;
+                self.tracker_schema_id_for_expr(object)
+                    .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
+                    .and_then(|schema| schema.get_field(property))
+                    .is_some_and(|field| matches!(field.field_type, FieldType::Option(_)))
+            }
+            _ => false,
         }
     }
 
@@ -933,6 +1595,28 @@ impl BytecodeCompiler {
                 location: Some(self.span_to_source_location(ref_span)),
             });
         }
+        // R4 c6-widen (v0.3.3 strict-flip): the syntactic check above only
+        // catches `&x` operands. Now that `&T` / `&mut T` is expressible in
+        // type position (R1), a reference-TYPED operand — e.g. the result of
+        // `fn make() -> &int { ... }` used as `make() + 1` — must be refused
+        // here too, before any code reaches the JIT `jit_call_method`
+        // misaligned-pointer dispatch. Same diagnostic shape as the
+        // syntactic case; underline the operator span (the typed operand has
+        // no single `&` token to point at).
+        if let Some(ref_span) = self.reference_typed_operand_span(left, right) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot apply binary operator `{:?}` to a reference-typed \
+                     operand. The operand has a reference (borrow) type `&T` — \
+                     arithmetic, comparison, and other binary operators are not \
+                     defined on references. Hint: dereference the operand with \
+                     `*ref` to use its underlying value, or restructure to keep \
+                     refs out of binary expressions.",
+                    op
+                ),
+                location: Some(self.span_to_source_location(ref_span)),
+            });
+        }
         match op {
             BinaryOp::And => {
                 self.compile_expr(left)?;
@@ -948,7 +1632,6 @@ impl BytecodeCompiler {
                 self.patch_jump(end_jump);
                 // Boolean result — not a TypedObject or numeric
                 self.last_expr_schema = None;
-                self.last_expr_numeric_type = None;
             }
             BinaryOp::Or => {
                 self.compile_expr(left)?;
@@ -964,35 +1647,69 @@ impl BytecodeCompiler {
                 self.patch_jump(end_jump);
                 // Boolean result — not a TypedObject or numeric
                 self.last_expr_schema = None;
-                self.last_expr_numeric_type = None;
             }
             BinaryOp::NullCoalesce => {
                 // Short-circuit null coalescing: a ?? b
-                // Only evaluate RHS if LHS is None.
+                // Only evaluate RHS if LHS is None/absent.
                 //
-                // Stack discipline (Stage 2.6.5.2: typed IsNull replaces PushNull;Eq):
+                // Stack discipline (v0.3.3 book-gate fix: `CoalesceProbe`
+                // replaces `Dup; IsNull` so that an `Option<T>` carrier
+                // `Some(v)` is UNWRAPPED to `v` instead of leaking the
+                // wrapper — `Some(5) ?? 99 -> 5`):
                 //   1. compile LHS          -> [lhs]
-                //   2. Dup                   -> [lhs, lhs]
-                //   3. IsNull                -> [lhs, is_none]
-                //   4. JumpIfFalse use_lhs   -> [lhs]  (lhs is not None)
-                //   5. Pop                   -> []      (discard None lhs)
-                //   6. compile RHS           -> [rhs]
-                //   7. Jump end
-                //   use_lhs:                 -> [lhs]   (already on stack)
+                //   2. CoalesceProbe         -> [present_lhs, is_absent]
+                //        present_lhs = unwrapped inner of Some(v) / bare lhs;
+                //        a Null placeholder on the absent branch.
+                //   3. JumpIfFalse use_lhs   -> [present_lhs]  (lhs present)
+                //   4. Pop                   -> []   (discard absent placeholder)
+                //   5. compile RHS           -> [rhs]
+                //   6. Jump end
+                //   use_lhs:                 -> [present_lhs] (already on stack)
                 //   end:
+                // The VM↔JIT divergence is specific to an `Option<T>`
+                // carrier LHS (`Some(v)` → `Arc<OptionData>`): the VM
+                // `CoalesceProbe` unwraps it, but the JIT MIR
+                // `lower_null_coalesce` models `??` as `Eq` against
+                // `MirConstant::None` with no `Arc<OptionData>` unwrap, so
+                // it would leak the `Some(v)` wrapper. For a plain nullable
+                // (`T?`) LHS the JIT `Eq None` path already matches the VM
+                // (the null sentinel IS comparable to None), so NO deopt is
+                // needed — gating on the Option-carrier case avoids a
+                // blanket JIT regression for every `??` (e.g. the stdlib's
+                // `ctx[...] ?? default` nullable-index pattern).
+                // A-2 (2026-06-17): the residual flag must fire whenever the
+                // `??` LHS STATIC type is an Option carrier — not only the
+                // inline `Some(..)` shape the prior `infer_expr_type` check
+                // caught, but also a let-bound `x: int?` local, a
+                // `T?`-returning function call, and a `T?`-typed field. See
+                // `null_coalesce_lhs_is_option_carrier`.
+                let lhs_is_option_carrier = self.null_coalesce_lhs_is_option_carrier(left);
                 self.compile_expr(left)?;
-                self.emit(Instruction::simple(OpCode::Dup));
-                self.emit(Instruction::simple(OpCode::IsNull));
+                self.emit(Instruction::simple(OpCode::CoalesceProbe));
+                if lhs_is_option_carrier {
+                    // JIT MIR has no Option-unwrap lowering for `??`; deopt
+                    // the whole program to the (correct) interpreter so
+                    // VM == JIT. Same surface-and-stop shape as the `?`
+                    // operator's `has_try_unwrap_residual` flag.
+                    self.program.has_null_coalesce_residual = true;
+                }
                 let use_lhs_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
-                // LHS was None — pop it, compile RHS
+                // LHS was absent — pop the placeholder, compile RHS
                 self.emit(Instruction::simple(OpCode::Pop));
                 self.compile_expr(right)?;
+                // U4-4: `a ?? b` yields the present value, whose numeric kind
+                // equals the default `b`'s (both branches agree by type — strict
+                // typing requires it). The result type no longer needs the
+                // deleted `last_expr_numeric_type` register propagation: a
+                // downstream `h + 1` on `let h = m.get(k) ?? 0` derives `h`'s
+                // numeric kind from the one resolved Type (`numeric_type_of` →
+                // `infer_expr_type`), which carries the `?? `-expression's
+                // resolved type.
                 let end_jump = self.emit_jump(OpCode::Jump, 0);
-                // LHS was not None — it's already on the stack
+                // LHS was present — the unwrapped value is already on the stack
                 self.patch_jump(use_lhs_jump);
                 self.patch_jump(end_jump);
                 self.last_expr_schema = None;
-                self.last_expr_numeric_type = None;
             }
             BinaryOp::ErrorContext => {
                 // WS-3 F3: the `!!` error-context operator. Before this
@@ -1004,19 +1721,23 @@ impl BytecodeCompiler {
                 // `value !! context`: the `op_error_context` handler
                 // (`executor/exceptions/mod.rs`) pops `context` (top of
                 // stack) then `value`, so we compile `left` (value) then
-                // `right` (context). On the success leg the handler
-                // unwraps to the inner value (`Ok(v) => v`, `Some(v) => v`,
-                // bare `v => v`); on the failure leg it builds an AnyError
-                // and throws. The opcode + handler already exist; this arm
-                // is the only missing dispatch piece.
+                // `right` (context). That opcode builds the contexted
+                // Result/AnyError carrier. `!!` is a wrap operator; an
+                // explicit outer `?` is what unwraps or propagates it.
                 self.compile_expr(left)?;
                 self.compile_expr(right)?;
                 self.emit(Instruction::simple(OpCode::ErrorContext));
-                // `!!` yields the UNWRAPPED success value `T` (same as `?`
-                // — both unwrap `Ok(v)`/`Some(v)` to `v` on success).
-                // Stamp the tracker with the unwrapped success type so a
-                // downstream `let v = expr !! "ctx"` records `v`'s type.
-                self.stamp_unwrapped_success_type(left);
+                self.last_expr_schema = None;
+                self.last_expr_type_info = self
+                    .infer_expr_type(&Expr::BinaryOp {
+                        left: Box::new(left.clone()),
+                        op: op.clone(),
+                        right: Box::new(right.clone()),
+                        span: op_span,
+                    })
+                    .ok()
+                    .and_then(|ty| ty.to_annotation())
+                    .map(|ann| VariableTypeInfo::named(ann.to_type_string()));
             }
             BinaryOp::Pipe => {
                 // Pipe operator: a |> f transforms to f(a)
@@ -1024,6 +1745,7 @@ impl BytecodeCompiler {
                 match right {
                     Expr::FunctionCall {
                         name,
+                        const_args,
                         args,
                         named_args,
                         span,
@@ -1033,6 +1755,7 @@ impl BytecodeCompiler {
                         new_args.extend(args.iter().cloned());
                         let new_call = Expr::FunctionCall {
                             name: name.clone(),
+                            const_args: const_args.clone(),
                             args: new_args,
                             named_args: named_args.clone(),
                             span: *span,
@@ -1064,6 +1787,7 @@ impl BytecodeCompiler {
                         // a |> f -> f(a)
                         let new_call = Expr::FunctionCall {
                             name: name.clone(),
+                            const_args: Vec::new(),
                             args: vec![left.clone()],
                             named_args: vec![],
                             span: *span,
@@ -1101,11 +1825,11 @@ impl BytecodeCompiler {
                 // For Add, check if we can do typed merge optimization
                 self.compile_expr(left)?;
                 let left_schema = self.last_expr_schema.take();
-                let mut left_numeric = self.last_expr_numeric_type;
-
                 self.compile_expr(right)?;
                 let right_schema = self.last_expr_schema.take();
-                let mut right_numeric = self.last_expr_numeric_type;
+                // U4-4: operand NumericType derived from the one resolved Type.
+                let mut left_numeric = self.numeric_type_of(left);
+                let mut right_numeric = self.numeric_type_of(right);
 
                 // If one side is numeric and the other is an identifier/index read with no
                 // hint yet, adopt the known numeric kind and seed slot hints.
@@ -1145,9 +1869,17 @@ impl BytecodeCompiler {
                         // The left operand (receiver) and right operand (arg)
                         // are already on the stack from compile_expr above.
                         emit_operator_trait_call(self, "add", op_span);
+                        // The result of `impl Add for T` is `T` (the receiver
+                        // type). `emit_operator_trait_call` clears the
+                        // expr-type tracking; restore the LEFT schema so a
+                        // chained / assigned use sees the result type. Without
+                        // this, `acc = acc + x` (or `acc += x`) lost `acc`'s
+                        // schema and the NEXT `acc + y` failed to resolve the
+                        // operator trait ("operand types are unknown").
+                        // (operators slice — compound-assign fix)
+                        self.restore_operator_trait_result_schema(left_id);
                     } else {
                         self.compile_typed_merge(left_id, right_id)?;
-                        self.last_expr_numeric_type = None;
                     }
                 }
                 // Priority 2: typed numeric add (same types or mixed Int/Number with coercion)
@@ -1158,8 +1890,8 @@ impl BytecodeCompiler {
                 // is either a numeric literal or an immutable local whose
                 // storage hint is a numeric family.  Without that evidence the
                 // `last_expr_numeric_type` values may come from speculative
-                // inference hints (inferred_param_type_hints) which can be wrong
-                // when a param is actually a string.
+                // param-local tracker stamps which can be wrong when a param is
+                // actually a string.
                 else {
                     // Priority 1.5: dedicated StringConcat / ArrayConcat for
                     // built-in heap types whose operand kinds the compiler can
@@ -1187,96 +1919,54 @@ impl BytecodeCompiler {
                         // propagate so chained concats and assignment-target
                         // type tracking see the type.
                         self.last_expr_type_info = Some(
-                            crate::type_tracking::VariableTypeInfo::named(
-                                "string".to_string(),
-                            ),
+                            crate::type_tracking::VariableTypeInfo::named("string".to_string()),
                         );
-                        self.last_expr_numeric_type = None;
                         return Ok(());
                     }
 
-                    // R5.5: typed string + scalar concat. When LHS is proved
-                    // `string` and RHS is a scalar primitive (`int`, `number`,
-                    // or `bool`), emit a dedicated typed opcode instead of
-                    // falling through to the dynamic `AddDynamic` handler's
-                    // string-coercion branch (`try_heap_arithmetic` Case 2 at
-                    // arithmetic/mod.rs:1815).
-                    //
-                    // Gate: `SHAPE_V2_STRING_COERCE_CONCAT` (default ON via
-                    // `typed_string_coerce_concat_enabled()`). With the flag
-                    // off, emission is byte-identical to pre-R5.5 (falls
-                    // through to the generic AddDynamic path below).
-                    //
-                    // Asymmetric: only string-LHS fires the typed path. The
-                    // commutative form `int + string` is rare in Shape code
-                    // and continues to work via the dynamic fallback. See
-                    // R5.5 commit body.
-                    //
-                    // Resolve operand types via multiple sources — the
-                    // order matches the surrounding arithmetic branch:
-                    //   1. `infer_expr_type` when it produces a display
-                    //      name (often `None` for locals whose tracker
-                    //      info came from an annotation rather than
-                    //      full inference).
-                    //   2. `storage_hint_for_expr` fallback, which reads
-                    //      the tracker's `NativeKind` hint (set by
-                    //      `let x: string = ...` annotations and by
-                    //      literals). This is the same helper the numeric
-                    //      path uses via `storage_hint_for_expr` below.
-                    let lhs_is_string = matches!(lhs_name.as_deref(), Some("string"))
+                    // Strict no-coercion ruling (user 2026-06-14): resolve
+                    // string-ness via the same multi-source order the
+                    // surrounding arithmetic branch uses, but do not lower
+                    // mixed string + scalar `+` to the old auto-stringify
+                    // opcodes. Exactly-one-string rejects below.
+                    let lhs_is_string = is_strish(&lhs_name)
                         || matches!(
                             self.storage_hint_for_expr(left),
                             Some(crate::type_tracking::NativeKind::String)
                         );
-                    if lhs_is_string
-                        && crate::compiler::helpers::typed_string_coerce_concat_enabled()
-                    {
-                        let rhs_hint = self.storage_hint_for_expr(right);
-                        let typed_opcode = match rhs_name.as_deref() {
-                            Some("int") => Some(OpCode::StringConcatInt),
-                            Some("number") => Some(OpCode::StringConcatNumber),
-                            Some("bool") => Some(OpCode::StringConcatBool),
-                            _ => match rhs_hint {
-                                Some(crate::type_tracking::NativeKind::Int64) => {
-                                    Some(OpCode::StringConcatInt)
-                                }
-                                Some(crate::type_tracking::NativeKind::Float64) => {
-                                    Some(OpCode::StringConcatNumber)
-                                }
-                                Some(crate::type_tracking::NativeKind::Bool) => {
-                                    Some(OpCode::StringConcatBool)
-                                }
-                                _ => None,
-                            },
-                        };
-                        if let Some(op) = typed_opcode {
-                            self.emit(Instruction::simple(op));
-                            self.last_expr_schema = None;
-                            // Phase 3e: result of string + scalar concat is
-                            // a string — propagate the type so chained
-                            // concats track it.
-                            self.last_expr_type_info = Some(
-                                crate::type_tracking::VariableTypeInfo::named(
-                                    "string".to_string(),
-                                ),
-                            );
-                            // Result is a freshly-allocated string; clear
-                            // the numeric hint so downstream Add chains
-                            // don't think the result is a scalar.
-                            self.last_expr_numeric_type = None;
-                            return Ok(());
-                        }
+                    let rhs_is_string = is_strish(&rhs_name)
+                        || matches!(
+                            self.storage_hint_for_expr(right),
+                            Some(crate::type_tracking::NativeKind::String)
+                        );
+                    // Exactly one side is a string. The other operand's type is
+                    // resolved (numeric/bool/heap) — there is no valid `+` here.
+                    if lhs_is_string != rhs_is_string {
+                        let lhs_disp = lhs_name.as_deref().unwrap_or("unknown");
+                        let rhs_disp = rhs_name.as_deref().unwrap_or("unknown");
+                        let (lhs_disp, rhs_disp) = (
+                            if lhs_is_string { "string" } else { lhs_disp },
+                            if rhs_is_string { "string" } else { rhs_disp },
+                        );
+                        return Err(string_plus_nonstring_error(
+                            self, left, right, lhs_disp, rhs_disp,
+                        ));
                     }
 
-                    // Array concat: both operands proven to be arrays. We
-                    // intentionally only fire for the generic `Array<T>` shape,
-                    // not for `Vec<number>`-style FloatArray/IntArray/BoolArray
-                    // (which use element-wise SIMD broadcast for `+`, not concat).
-                    // Display name comes from `type_display_name`: a generic
-                    // `Array<T>` formats as "Array", and a legacy `T[]` formats
-                    // as "T[]".
+                    // Array concat: both operands proven to be arrays. Fires
+                    // for every array element kind — numeric (`int[]` /
+                    // `number[]`), string, and struct arrays all concatenate
+                    // uniformly (USER RULING 2026-06-17: numeric-array `+` is
+                    // CONCATENATION, not element-wise add). The element-wise
+                    // SIMD `IntrinsicVec*` path no longer claims `+`; it is
+                    // reserved for a future `Vec`-type / method form. Display
+                    // name comes from `type_display_name`: a generic `Array<T>`
+                    // formats as "Array", and a legacy `T[]` formats as "T[]".
                     let is_arrayish = |n: &Option<String>| match n.as_deref() {
                         Some("Array") => true,
+                        Some("Vec") => true,
+                        Some(s) if s.starts_with("Array<") => true,
+                        Some(s) if s.starts_with("Vec<") => true,
                         Some(s) if s.ends_with("[]") => true,
                         _ => false,
                     };
@@ -1284,7 +1974,6 @@ impl BytecodeCompiler {
                         self.emit(Instruction::simple(OpCode::ArrayConcat));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
                         return Ok(());
                     }
 
@@ -1300,19 +1989,28 @@ impl BytecodeCompiler {
                     let is_temporal = |n: &Option<String>| {
                         matches!(
                             n.as_deref(),
-                            Some("DateTime") | Some("Duration") | Some("TimeSpan")
-                                | Some("datetime") | Some("duration") | Some("timespan")
+                            Some("DateTime")
+                                | Some("Duration")
+                                | Some("TimeSpan")
+                                | Some("datetime")
+                                | Some("duration")
+                                | Some("timespan")
                         )
                     };
                     if is_temporal(&lhs_name) || is_temporal(&rhs_name) {
                         let method_id = shape_value::MethodId::from_name("add");
                         let string_id = self.program.add_string("add".to_string());
-                        self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
-                            method_id: method_id.0, arg_count: 1, string_id,
-                         receiver_type_tag: 0xFF, })));
+                        self.emit(Instruction::new(
+                            OpCode::CallMethod,
+                            Some(Operand::TypedMethodCall {
+                                method_id: method_id.0,
+                                arg_count: 1,
+                                string_id,
+                                receiver_type_tag: 0xFF,
+                            }),
+                        ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
                         return Ok(());
                     }
 
@@ -1367,8 +2065,12 @@ impl BytecodeCompiler {
                                 if let Some(info) = self.type_tracker.get_local_type(idx) {
                                     if let Some(ref tn) = info.type_name {
                                         return match tn.as_str() {
-                                            "int" | "Int" | "Integer" | "i64" => Some(NumericType::Int),
-                                            "number" | "Number" | "Float" | "f64" => Some(NumericType::Number),
+                                            "int" | "Int" | "Integer" | "i64" => {
+                                                Some(NumericType::Int)
+                                            }
+                                            "number" | "Number" | "Float" | "f64" => {
+                                                Some(NumericType::Number)
+                                            }
                                             "decimal" | "Decimal" => Some(NumericType::Decimal),
                                             _ => None,
                                         };
@@ -1438,7 +2140,19 @@ impl BytecodeCompiler {
                             // mixed string, polyglot value). Strict-typing
                             // sweep (Phase 1): that dynamic-fallback emission
                             // is now a hard compile error.
-                            if !try_emit_trait_dispatch(self, &BinaryOp::Add, left_schema, left, op_span) {
+                            if !try_emit_trait_dispatch(
+                                self,
+                                &BinaryOp::Add,
+                                left_schema,
+                                left,
+                                op_span,
+                            ) {
+                                // A-final ROOT-C: defer the dead deferred-template
+                                // body's unprovable-kind `a + b` (emit Pop, no
+                                // typed opcode) instead of the strict-typing error.
+                                if self.defer_template_numeric_binop() {
+                                    return Ok(());
+                                }
                                 return Err(strict_typing_binop_error(
                                     self,
                                     &BinaryOp::Add,
@@ -1470,10 +2184,11 @@ impl BytecodeCompiler {
                 // `typed_bitwise_enabled()`). With the flag off, emission
                 // is byte-identical to pre-R5.1C.
                 self.compile_expr(left)?;
-                let mut left_numeric = self.last_expr_numeric_type;
                 let left_schema = self.last_expr_schema;
                 self.compile_expr(right)?;
-                let mut right_numeric = self.last_expr_numeric_type;
+                // U4-4: operand NumericType derived from the one resolved Type.
+                let left_numeric = self.numeric_type_of(left);
+                let right_numeric = self.numeric_type_of(right);
 
                 // W1.9: user-defined `impl BitAnd / BitOr / BitXor for X`
                 // dispatch — if the left-operand's TypedObject schema
@@ -1484,10 +2199,9 @@ impl BytecodeCompiler {
                 // pattern at L756-790 and Sub/Mul/Div/Mod's trait
                 // dispatch at L1462-1475.
                 if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
-                    if let (Some(trait_name), Some(method_name)) = (
-                        operator_trait_for_op(op),
-                        operator_trait_method_for_op(op),
-                    ) {
+                    if let (Some(trait_name), Some(method_name)) =
+                        (operator_trait_for_op(op), operator_trait_method_for_op(op))
+                    {
                         let left_implements = left_schema
                             .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
                             .is_some_and(|schema| {
@@ -1502,40 +2216,12 @@ impl BytecodeCompiler {
                     }
                 }
 
-                // Don't trust inferred numeric types for untyped function
-                // parameters (same rationale as the `param_locals` guard
-                // in the `_ => {}` arithmetic branch below).
-                if let Expr::Identifier(name, _) = left {
-                    if let Some(local_idx) = self.resolve_local(name) {
-                        if self.param_locals.contains(&local_idx) {
-                            left_numeric = None;
-                        }
-                    }
-                }
-                if let Expr::Identifier(name, _) = right {
-                    if let Some(local_idx) = self.resolve_local(name) {
-                        if self.param_locals.contains(&local_idx) {
-                            right_numeric = None;
-                        }
-                    }
-                }
-
-                // Fall back to the inference engine when slot tracking
-                // did not produce a numeric hint. This mirrors the
-                // `NoPlan` path in the `_ => {}` arithmetic branch.
-                if left_numeric.is_none() {
-                    left_numeric = self
-                        .infer_expr_type(left)
-                        .ok()
-                        .and_then(|t| inferred_type_to_numeric(&t));
-                }
-                if right_numeric.is_none() {
-                    right_numeric = self
-                        .infer_expr_type(right)
-                        .ok()
-                        .and_then(|t| inferred_type_to_numeric(&t));
-                }
-
+                // U4-4: `left_numeric`/`right_numeric` are already the engine
+                // answer (`numeric_type_of` → `infer_expr_type`). The former
+                // register-read + `param_locals` null + infer fallback collapse
+                // into the single derivation above: an untyped param the engine
+                // could not pin is a `None` here (table miss), never a
+                // fabricated hint.
                 let both_int = matches!(left_numeric, Some(NumericType::Int))
                     && matches!(right_numeric, Some(NumericType::Int));
 
@@ -1558,28 +2244,21 @@ impl BytecodeCompiler {
                 if !both_int && matches!(op, BinaryOp::BitShl | BinaryOp::BitShr) {
                     let trait_name = operator_trait_for_op(op);
                     let method_name = operator_trait_method_for_op(op);
-                    if let (Some(trait_name), Some(method_name)) =
-                        (trait_name, method_name)
-                    {
+                    if let (Some(trait_name), Some(method_name)) = (trait_name, method_name) {
                         let has_trait_via_schema = left_schema
-                            .and_then(|sid| {
-                                self.type_tracker.schema_registry().get_by_id(sid)
-                            })
+                            .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
                             .is_some_and(|schema| {
                                 self.type_inference
                                     .env
                                     .type_implements_trait(&schema.name, trait_name)
                             });
                         let has_trait = has_trait_via_schema
-                            || self
-                                .infer_expr_type(left)
-                                .ok()
-                                .is_some_and(|ty| {
-                                    let name = type_display_name(&ty);
-                                    self.type_inference
-                                        .env
-                                        .type_implements_trait(&name, trait_name)
-                                });
+                            || self.infer_expr_type(left).ok().is_some_and(|ty| {
+                                let name = type_display_name(&ty);
+                                self.type_inference
+                                    .env
+                                    .type_implements_trait(&name, trait_name)
+                            });
                         if has_trait {
                             emit_operator_trait_call(self, method_name, op_span);
                             return Ok(());
@@ -1651,9 +2330,7 @@ impl BytecodeCompiler {
                              (e.g. `(x as int) {} (y as int)`) when intentional.",
                             op_symbol, left_desc, right_desc, op_symbol,
                         ),
-                        location: Some(
-                            self.span_to_source_location(combined_span(left, right)),
-                        ),
+                        location: Some(self.span_to_source_location(combined_span(left, right))),
                     });
                 }
 
@@ -1674,7 +2351,6 @@ impl BytecodeCompiler {
                 // working (e.g. (a & b) + c stays on the int path).
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = Some(NumericType::Int);
             }
             _ => {
                 // Typed matrix kernels: Mat<number> * Vec<number>/Mat<number>.
@@ -1722,7 +2398,9 @@ impl BytecodeCompiler {
                 // ordered comparison (>, <, >=, <=), emit the specialized
                 // string comparison opcode for zero-dispatch execution.
                 if is_ordered_comparison(op) {
-                    if let (Ok(lt), Ok(rt)) = (self.infer_expr_type(left), self.infer_expr_type(right)) {
+                    if let (Ok(lt), Ok(rt)) =
+                        (self.infer_expr_type(left), self.infer_expr_type(right))
+                    {
                         let lt_name = type_display_name(&lt);
                         let rt_name = type_display_name(&rt);
                         let is_strish = |n: &str| matches!(n, "string" | "char");
@@ -1739,7 +2417,6 @@ impl BytecodeCompiler {
                             self.emit(Instruction::simple(string_cmp_op));
                             self.last_expr_schema = None;
                             self.last_expr_type_info = None;
-                            self.last_expr_numeric_type = None;
                             return Ok(());
                         }
                     }
@@ -1750,7 +2427,9 @@ impl BytecodeCompiler {
                 // CallMethod instead of falling through to the strict
                 // arithmetic check which would reject non-numeric types.
                 if matches!(op, BinaryOp::Sub) {
-                    if let (Ok(lt), Ok(rt)) = (self.infer_expr_type(left), self.infer_expr_type(right)) {
+                    if let (Ok(lt), Ok(rt)) =
+                        (self.infer_expr_type(left), self.infer_expr_type(right))
+                    {
                         let lt_name = type_display_name(&lt);
                         let rt_name = type_display_name(&rt);
                         // Phase 3e: accept both PascalCase ("DateTime") and
@@ -1758,22 +2437,33 @@ impl BytecodeCompiler {
                         // tracker uses PascalCase but the runtime
                         // inference engine returns lowercase for
                         // Expr::DateTime / Expr::Duration literals.
-                        let is_temporal = |n: &str| matches!(
-                            n,
-                            "DateTime" | "Duration" | "TimeSpan"
-                                | "datetime" | "duration" | "timespan"
-                        );
+                        let is_temporal = |n: &str| {
+                            matches!(
+                                n,
+                                "DateTime"
+                                    | "Duration"
+                                    | "TimeSpan"
+                                    | "datetime"
+                                    | "duration"
+                                    | "timespan"
+                            )
+                        };
                         if is_temporal(&lt_name) || is_temporal(&rt_name) {
                             self.compile_expr(left)?;
                             self.compile_expr(right)?;
                             let method_id = shape_value::MethodId::from_name("sub");
                             let string_id = self.program.add_string("sub".to_string());
-                            self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
-                                method_id: method_id.0, arg_count: 1, string_id,
-                             receiver_type_tag: 0xFF, })));
+                            self.emit(Instruction::new(
+                                OpCode::CallMethod,
+                                Some(Operand::TypedMethodCall {
+                                    method_id: method_id.0,
+                                    arg_count: 1,
+                                    string_id,
+                                    receiver_type_tag: 0xFF,
+                                }),
+                            ));
                             self.last_expr_schema = None;
                             self.last_expr_type_info = None;
-                            self.last_expr_numeric_type = None;
                             return Ok(());
                         }
                     }
@@ -1844,33 +2534,66 @@ impl BytecodeCompiler {
                     }
                 }
 
-                // ── Compile operands, capture numeric types and schemas ──
+                // Numeric-conversion §4 literal adoption (binary-operand
+                // widening, THE RULE user 2026-06-01): in an arithmetic /
+                // ordered-comparison op, a bare int literal whose PARTNER operand
+                // is proven `number`/`f64` IS the number literal (`n / 2` where
+                // `n: number` ⇒ `2` is `2.0`). Re-lower the literal to a `Number`
+                // constant BEFORE compiling it, so the operand carries Float64
+                // bits and the op lowers to the `*Number` opcode with two real
+                // f64 operands. Without this, the literal pushes Int64 bits, the
+                // VM `DivNumber` handler tolerantly coerces (→ 2.5) but the JIT
+                // does not (int-divides → 2) — a VM≠JIT divergence AND, at sites
+                // with no VM coercion, a raw-bits reinterpret. Compile-time
+                // literal re-typing, NOT a runtime coercion opcode.
+                let widen_l;
+                let widen_r;
+                let (left, right): (&Expr, &Expr) = if is_strict_arithmetic(op)
+                    || is_ordered_comparison(op)
+                {
+                    let left = if self.expr_proves_float(right) {
+                        match crate::compiler::literal_widen::widen_int_literal_to_number(left) {
+                            Some(w) => {
+                                widen_l = w;
+                                &widen_l
+                            }
+                            None => left,
+                        }
+                    } else {
+                        left
+                    };
+                    let right = if self.expr_proves_float(left) {
+                        match crate::compiler::literal_widen::widen_int_literal_to_number(right) {
+                            Some(w) => {
+                                widen_r = w;
+                                &widen_r
+                            }
+                            None => right,
+                        }
+                    } else {
+                        right
+                    };
+                    (left, right)
+                } else {
+                    (left, right)
+                };
+
+                // ── Compile operands, derive numeric types and schemas ──
+                // U4-4: operand NumericType is derived from the one resolved
+                // Type (engine span-table) via `numeric_type_of`, NOT from the
+                // deleted ambient `last_expr_numeric_type` register. A
+                // table-miss → `None` → the strict-arithmetic NoPlan path raises
+                // the surface-and-stop compile error (replacing the deleted
+                // `numeric_operand_proof_gap` guard). An untyped function param
+                // that the engine could not pin is therefore a genuine miss,
+                // not a fabricated hint — so the old `param_locals` nulling
+                // guard is no longer needed.
                 self.compile_expr(left)?;
-                let mut left_numeric = self.last_expr_numeric_type;
                 let left_schema = self.last_expr_schema;
                 self.compile_expr(right)?;
-                let mut right_numeric = self.last_expr_numeric_type;
                 let right_schema = self.last_expr_schema;
-
-                // Don't trust inferred numeric types for untyped function parameters.
-                // Their inferred_param_type_hints can be wrong (same rationale as the
-                // param_locals guard in storage_hint_for_expr for Add).  Without an
-                // explicit type annotation the parameter may receive values of any
-                // type at runtime, so fall back to generic opcodes.
-                if let Expr::Identifier(name, _) = left {
-                    if let Some(local_idx) = self.resolve_local(name) {
-                        if self.param_locals.contains(&local_idx) {
-                            left_numeric = None;
-                        }
-                    }
-                }
-                if let Expr::Identifier(name, _) = right {
-                    if let Some(local_idx) = self.resolve_local(name) {
-                        if self.param_locals.contains(&local_idx) {
-                            right_numeric = None;
-                        }
-                    }
-                }
+                let mut left_numeric = self.numeric_type_of(left);
+                let mut right_numeric = self.numeric_type_of(right);
 
                 // WS-9 / WS-9b: an access operand (`a[0]` index access, or
                 // `a.lo` property access) carries no numeric hint from
@@ -1896,10 +2619,7 @@ impl BytecodeCompiler {
                 //   default is introduced for property access).
                 if is_strict_arithmetic(op) || is_ordered_comparison(op) {
                     let is_access = |e: &Expr| {
-                        matches!(
-                            e,
-                            Expr::IndexAccess { .. } | Expr::PropertyAccess { .. }
-                        )
+                        matches!(e, Expr::IndexAccess { .. } | Expr::PropertyAccess { .. })
                     };
                     if left_numeric.is_none() && is_access(left) {
                         left_numeric = self
@@ -2006,26 +2726,29 @@ impl BytecodeCompiler {
                             emit_operator_trait_call(self, method_name, op_span);
                             if is_ordered_comparison(op) {
                                 emit_cmp_result_comparison(self, op);
+                            } else if let Some(left_id) = left_schema {
+                                // Arithmetic operator trait (`Sub`/`Mul`/...)
+                                // result is `Self` — restore the left schema so
+                                // chained / assigned uses resolve. (operators
+                                // slice — compound-assign fix)
+                                self.restore_operator_trait_result_schema(left_id);
                             }
                             return Ok(());
                         }
                     }
                 }
 
-                // ── ε-1 PART 1: emit-side soundness guard ──
-                // A typed numeric opcode requires the compiler to PROVE both
-                // operand kinds (CLAUDE.md §Mechanical enforcement). If an
-                // operand's compile-time type is still an unresolved
-                // `Type::Variable` the `NumericType` claim is fabricated —
-                // surface a clean `ProofGap` diagnostic instead of stamping a
-                // default kind and emitting a typed opcode (the silent-wrong
-                // path that produced the `2e-321` denormal).
-                if let Some(gap) = self.numeric_operand_proof_gap(op, left, left_numeric) {
-                    return Err(gap);
-                }
-                if let Some(gap) = self.numeric_operand_proof_gap(op, right, right_numeric) {
-                    return Err(gap);
-                }
+                // ── U4-4: numeric-operand strictness via the one Type table ──
+                // The deleted `numeric_operand_proof_gap` guard existed ONLY
+                // because the standalone `last_expr_numeric_type` register and
+                // the engine Type table could disagree — it re-asked the engine
+                // to confirm a register-claimed kind was not fabricated. With
+                // the register gone, `left_numeric`/`right_numeric` ARE the
+                // engine answer (`numeric_type_of` → `infer_expr_type`). An
+                // un-inferable numeric operand is a `None` here, which drives
+                // the `NoPlan`/`CoercedNeedsGeneric` path below to the strict
+                // `strict_typing_binop_error` surface-and-stop. There is no
+                // second source to reconcile, so the ad-hoc guard dissolves.
 
                 // ── Emit typed opcode (with coercion for mixed Int/Number) ──
                 let is_comparison = is_ordered_comparison(op);
@@ -2044,6 +2767,10 @@ impl BytecodeCompiler {
                         // Strict-typing sweep (Phase 1): the historical
                         // dynamic-opcode fallback is now a hard compile error.
                         if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
+                            // A-final ROOT-C: defer dead-template numeric binop.
+                            if self.defer_template_numeric_binop() {
+                                return Ok(());
+                            }
                             return Err(strict_typing_binop_error(self, op, left, right));
                         }
                     }
@@ -2063,9 +2790,11 @@ impl BytecodeCompiler {
                                 // Strict-typing sweep (Phase 1): the historical
                                 // dynamic-opcode fallback is now a hard compile error.
                                 if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
-                                    return Err(strict_typing_binop_error(
-                                        self, op, left, right,
-                                    ));
+                                    // A-final ROOT-C: defer dead-template numeric binop.
+                                    if self.defer_template_numeric_binop() {
+                                        return Ok(());
+                                    }
+                                    return Err(strict_typing_binop_error(self, op, left, right));
                                 }
                             }
                         }
@@ -2365,10 +3094,21 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Compile a typed object merge (a + b where both are TypedObjects)
+    /// Compile a typed object merge (a + b where both are TypedObjects).
     ///
-    /// This registers the intersection schema at compile time and emits
-    /// TypedMergeObject for O(1) memcpy-based merge.
+    /// Object-literal merge OVERRIDES on duplicate keys (right wins): the
+    /// merged field set is `left-fields-not-in-right ++ all-right-fields`,
+    /// preserving left order then right order. A shared key (`{x,y} + {y,z}`
+    /// shares `y`) appears ONCE, carrying the right operand's value and type.
+    ///
+    /// This registers that deduplicated merged schema at compile time under the
+    /// `__intersection_{left}_{right}` name that the runtime
+    /// `derive_merged_schema` looks up, then emits `MergeObject` — the
+    /// deduplicating runtime merge (`build_named_merged_storage`, layout
+    /// `keep_left ++ right`). The former `TypedMergeObject` path naively
+    /// CONCATENATED both field lists, so `{x:1,y:2}+{y:20,z:30}` produced a
+    /// schema with a DUPLICATE `y` (`{x, y, y, z}`) instead of the correct
+    /// `{x:1, y:20, z:30}`. (operators slice — merge override fix)
     fn compile_typed_merge(&mut self, left_id: SchemaId, right_id: SchemaId) -> Result<()> {
         let registry = self.type_tracker.schema_registry();
 
@@ -2386,42 +3126,40 @@ impl BytecodeCompiler {
                     location: None,
                 })?;
 
-        // Calculate sizes (8 bytes per field)
-        let left_size = left_schema.fields.len() * 8;
-        let right_size = right_schema.fields.len() * 8;
-
-        // Build merged field list
+        // Deduplicated merge layout (right wins on shared keys): match the
+        // runtime `op_merge_object` / `build_named_merged_storage` order —
+        // left fields whose name is NOT in the right schema (in left order),
+        // then ALL right fields (in right order).
+        let right_names: std::collections::HashSet<&str> = right_schema
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         let mut merged_fields: Vec<(String, FieldType)> = Vec::new();
         for f in &left_schema.fields {
-            merged_fields.push((f.name.clone(), f.field_type.clone()));
+            if !right_names.contains(f.name.as_str()) {
+                merged_fields.push((f.name.clone(), f.field_type.clone()));
+            }
         }
         for f in &right_schema.fields {
             merged_fields.push((f.name.clone(), f.field_type.clone()));
         }
 
-        // Register intersection schema
+        // Register the merged schema under the name the runtime's
+        // `derive_merged_schema` resolves for `MergeObject`.
         let merged_name = format!("__intersection_{}_{}", left_id, right_id);
         let target_id = self
             .type_tracker
             .schema_registry_mut()
-            .register_type(merged_name, merged_fields);
+            .register_type(merged_name.clone(), merged_fields);
 
-        // Emit TypedMergeObject
-        self.emit(Instruction::new(
-            OpCode::TypedMergeObject,
-            Some(Operand::TypedMerge {
-                target_schema_id: target_id as u16,
-                left_size: left_size as u16,
-                right_size: right_size as u16,
-            }),
-        ));
+        // Emit MergeObject (deduplicating runtime merge). It reads both operand
+        // schemas at runtime and derives the merged schema by name.
+        self.emit(Instruction::new(OpCode::MergeObject, None));
 
         // Track result schema for chained operations (e.g., a + b + c)
         self.last_expr_schema = Some(target_id);
-        self.last_expr_type_info = Some(VariableTypeInfo::known(
-            target_id,
-            format!("__intersection_{}_{}", left_id, right_id),
-        ));
+        self.last_expr_type_info = Some(VariableTypeInfo::known(target_id, merged_name));
 
         Ok(())
     }
@@ -2484,7 +3222,14 @@ mod u64_literal_inference_tests {
     #[test]
     fn narrow_sibling_promotes_int_literal() {
         // `x + 28`: x:i8, 28:Int literal → 28 adopts IntWidth(I8).
-        for w in [IntWidth::I8, IntWidth::I16, IntWidth::I32, IntWidth::U8, IntWidth::U16, IntWidth::U32] {
+        for w in [
+            IntWidth::I8,
+            IntWidth::I16,
+            IntWidth::I32,
+            IntWidth::U8,
+            IntWidth::U16,
+            IntWidth::U32,
+        ] {
             let mut l = Some(NumericType::IntWidth(w));
             let mut r = Some(NumericType::Int);
             BytecodeCompiler::promote_int_literal_to_width_sibling(
@@ -2513,7 +3258,11 @@ mod u64_literal_inference_tests {
             &mut l,
             &mut r,
         );
-        assert_eq!(r, Some(NumericType::Int), "negative literal stays Int for u64 sibling");
+        assert_eq!(
+            r,
+            Some(NumericType::Int),
+            "negative literal stays Int for u64 sibling"
+        );
     }
 
     #[test]
@@ -2542,7 +3291,11 @@ mod u64_literal_inference_tests {
             &mut l,
             &mut r,
         );
-        assert_eq!(r, Some(NumericType::Int), "non-literal Int sibling stays Int");
+        assert_eq!(
+            r,
+            Some(NumericType::Int),
+            "non-literal Int sibling stays Int"
+        );
     }
 
     #[test]
@@ -2585,9 +3338,7 @@ mod u64_literal_inference_tests {
     fn u64_var_div_literal_emits_div_typed_u64() {
         // `a / 2` on `a: u64` must emit `DivTyped` width U64 — the unsigned
         // carrier — NOT the signed `DivInt`.
-        let instrs = compile_top_level(
-            "let a: u64 = 100\nlet b: u64 = a / 2\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 100\nlet b: u64 = a / 2\n");
         assert!(
             has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U64),
             "u64 / literal must emit DivTyped(U64): {:?}",
@@ -2601,9 +3352,7 @@ mod u64_literal_inference_tests {
 
     #[test]
     fn u64_var_mod_literal_emits_mod_typed_u64() {
-        let instrs = compile_top_level(
-            "let a: u64 = 100\nlet b: u64 = a % 10\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 100\nlet b: u64 = a % 10\n");
         assert!(
             has_width_typed(&instrs, OpCode::ModTyped, NumericWidth::U64),
             "u64 % literal must emit ModTyped(U64)"
@@ -2614,9 +3363,7 @@ mod u64_literal_inference_tests {
     #[test]
     fn u64_literal_on_left_emits_div_typed_u64() {
         // `100 / a` — literal on the LEFT.
-        let instrs = compile_top_level(
-            "let a: u64 = 7\nlet b: u64 = 100 / a\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 7\nlet b: u64 = 100 / a\n");
         assert!(
             has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U64),
             "literal / u64 must emit DivTyped(U64)"
@@ -2626,9 +3373,7 @@ mod u64_literal_inference_tests {
     #[test]
     fn u64_var_add_literal_stays_u64_carrier() {
         // `a + 1` on `a: u64` must emit `AddTyped` width U64.
-        let instrs = compile_top_level(
-            "let a: u64 = 100\nlet b: u64 = a + 1\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 100\nlet b: u64 = a + 1\n");
         assert!(
             has_width_typed(&instrs, OpCode::AddTyped, NumericWidth::U64),
             "u64 + literal must emit AddTyped(U64)"
@@ -2648,9 +3393,7 @@ mod u64_literal_inference_tests {
     fn narrow_var_add_literal_stays_narrow_carrier() {
         // `x + 28` on `x: i8` must emit `AddTyped` width I8 — the truncating
         // narrow carrier — NOT the signed-default `AddInt`.
-        let instrs = compile_top_level(
-            "let x: i8 = 100\nlet y: i8 = x + 28\n",
-        );
+        let instrs = compile_top_level("let x: i8 = 100\nlet y: i8 = x + 28\n");
         assert!(
             has_width_typed(&instrs, OpCode::AddTyped, NumericWidth::I8),
             "i8 + literal must emit AddTyped(I8): {:?}",
@@ -2661,9 +3404,7 @@ mod u64_literal_inference_tests {
 
     #[test]
     fn narrow_u32_div_literal_stays_narrow_carrier() {
-        let instrs = compile_top_level(
-            "let x: u32 = 4000000000\nlet y: u32 = x / 4\n",
-        );
+        let instrs = compile_top_level("let x: u32 = 4000000000\nlet y: u32 = x / 4\n");
         assert!(
             has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U32),
             "u32 / literal must emit DivTyped(U32)"
@@ -2751,6 +3492,7 @@ mod ws3_f3_error_context_tests {
     //! at all. The opcode (`OpCode::ErrorContext`) and the runtime
     //! handler (`op_error_context`) already existed; only the
     //! compiler-dispatch arm was missing.
+    use crate::bytecode::OpCode;
     use crate::compiler::BytecodeCompiler;
     use shape_ast::parser::parse_program;
 
@@ -2774,13 +3516,59 @@ mod ws3_f3_error_context_tests {
     }
 
     #[test]
-    fn ws3_f3_error_context_unwrapped_type_propagates_to_binding() {
-        // `!!` yields the UNWRAPPED success value `T` (`Ok(v) => v`), so
-        // a downstream `v + 1` must type-check as `int + int`.
+    fn ws3_f3_error_context_wraps_result_for_match_recovery() {
         let code = r#"
             fn good() -> Result<int, string> { Ok(99) }
             fn main() -> Result<int, string> {
-                let v = good() !! "ctx"
+                let r = good() !! "ctx"
+                let w = match r {
+                    Ok(v) => v + 1
+                    Err(_) => -1
+                }
+                print(w)
+                Ok(0)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`!!` must leave a Result wrapper that can be matched: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn ws3_f3_error_context_does_not_emit_implicit_try_unwrap() {
+        let code = r#"
+            let r = Ok(42) !! "ctx"
+            print(r)
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("`!!` should compile");
+        let error_context_idx = bytecode
+            .instructions
+            .iter()
+            .position(|instr| instr.opcode == OpCode::ErrorContext)
+            .expect("expected ErrorContext opcode");
+        assert_ne!(
+            bytecode
+                .instructions
+                .get(error_context_idx + 1)
+                .map(|instr| instr.opcode),
+            Some(OpCode::TryUnwrap),
+            "`!!` is a wrap operator; only an explicit outer `?` may emit TryUnwrap"
+        );
+    }
+
+    #[test]
+    fn ws3_f3_error_context_explicit_try_threads_success_type() {
+        let code = r#"
+            fn good() -> Result<int, string> { Ok(99) }
+            fn main() -> Result<int, string> {
+                let v = (good() !! "ctx")?
                 let w = v + 1
                 print(w)
                 Ok(0)
@@ -2790,7 +3578,7 @@ mod ws3_f3_error_context_tests {
         let result = BytecodeCompiler::new().compile(&program);
         assert!(
             result.is_ok(),
-            "`!!`-unwrapped value must keep its type for a downstream binop: {:?}",
+            "`(expr !! ctx)?` must keep the unwrapped success type: {:?}",
             result.err()
         );
     }
@@ -2863,5 +3651,834 @@ mod ws9c_anonymous_object_factory_tests {
             print(xs)
             "#
         ));
+    }
+}
+
+#[cfg(test)]
+mod r1_r4_reference_type_tests {
+    //! R1 grammar (`&T` / `&mut T` in type position) + R4 reference-operand
+    //! auto-deref.
+    //!
+    //! R1: `fn f(x: &int) -> int` and `-> &int` must PARSE (were E0001
+    //! parse errors before the `reference_type` grammar alternative +
+    //! `TypeAnnotation::Borrow` cascade landed).
+    //!
+    //! R4 (reconciled F4, 2026-06-18): a reference-TYPED binop operand
+    //! (`fn use_ref(x: &int) -> int { x + 1 }`) AUTO-DEREFS — it reads the
+    //! referent value THROUGH the reference and computes correctly, mirroring
+    //! the already-auto-derefing first-class reference-BOUND path
+    //! (`let r = &n; r + 1`, see `borrow_refs/operator_deref.rs`) and method
+    //! dispatch (`r.len()`). This is the behavior the book documents:
+    //! `fundamentals/references-borrowing.mdx` "Returning a value through a
+    //! reference" — `fn read_val(&x) { return x }` "returns the dereferenced
+    //! value, not the reference"; `advanced/ownership-deep-dive.mdx`
+    //! "First-Class References" shows `let val = r + 1` "reads through r via
+    //! DerefLoad", never `*r + 1` (explicit `*r` does not even parse).
+    //!
+    //! The earlier stage of this test asserted the OPPOSITE (a Rust-shaped
+    //! compile-REJECT requiring explicit `*x`). That assertion was already
+    //! FAILING on baseline (its guard never fired) and contradicted the
+    //! shipped auto-deref behavior + the book; it is rebaselined here to the
+    //! shipped behavior. The hard binder is *no SIGSEGV / no corruption* —
+    //! satisfied because the operand resolves to the referent scalar type and
+    //! emits the typed numeric opcode (VM==JIT==6), not a raw-pointer read.
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn r1_reference_param_and_return_type_parse() {
+        // Was E0001 (parse error). After R1 the `&int` param and `&int`
+        // return both parse — `parse_program` returns `Ok`.
+        let code = r#"
+            fn f(x: &int) -> int { 5 }
+            fn g() -> &int { let a = 3; &a }
+            fn main() { print(0) }
+        "#;
+        let parsed = parse_program(code);
+        assert!(
+            parsed.is_ok(),
+            "`&int` in param and return position must PARSE (R1): {:?}",
+            parsed.err()
+        );
+    }
+
+    #[test]
+    fn r1_reference_mut_type_parses() {
+        let code = r#"
+            fn h(x: &mut int) -> int { 7 }
+            fn main() { print(0) }
+        "#;
+        let parsed = parse_program(code);
+        assert!(
+            parsed.is_ok(),
+            "`&mut int` in param position must PARSE (R1): {:?}",
+            parsed.err()
+        );
+    }
+
+    #[test]
+    fn r4_reference_typed_operand_auto_derefs() {
+        // `x` has reference type `&int`; `x + 1` AUTO-DEREFS — the operand
+        // resolves to the referent scalar `int`, emits the typed numeric
+        // opcode, and COMPILES cleanly. This mirrors the reference-BOUND path
+        // (`let r = &n; r + 1`) and method dispatch (`r.len()`), and matches
+        // the book (`fn read_val(&x) { return x }` returns the dereferenced
+        // value; `let val = r + 1` "reads through r via DerefLoad"). No
+        // explicit `*x` is required (and `*x` does not parse). The earlier
+        // Rust-shaped compile-REJECT assertion was stale (already failing on
+        // baseline) and is rebaselined to the shipped auto-deref behavior.
+        let code = r#"
+            fn use_ref(x: &int) -> int { x + 1 }
+            fn main() { print(0) }
+        "#;
+        let program = parse_program(code).expect("R1: `&int` param must parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "a reference-typed binop operand must auto-deref and compile (R4): {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod s4_type_erasure_dispatch_tests {
+    //! S4: the type-erasure dispatch tail surfacing in collection / trait /
+    //! null-coalesce contexts.
+    //!
+    //! - D1: `Array<int>.sum()/.min()/.max()` return `int` (element type),
+    //!   `Array<number>` returns `number`; mixed int/number programs no longer
+    //!   collide via the shared `_oob` placeholder var.
+    //! - traits: an `extend`/`impl Trait` method's DECLARED return type
+    //!   propagates to an un-annotated call-site binding (no silent
+    //!   `int → number` float corruption).
+    //! - D4: `a ?? b` preserves the right operand's numeric kind, so a
+    //!   `let h = m.get(k) ?? 0` binding stays `int` inside a loop body (no
+    //!   runtime "no method 'add' on receiver kind Int64").
+    //! - functions: a free-function call with named arguments is a clean
+    //!   compile error (was silent-discard → wrong result).
+    use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::eval_typed_i64;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn s4_d1_array_int_sum_min_max_return_int() {
+        assert_eq!(eval_typed_i64("let s: int = [1, 2, 3].sum()\ns"), 6);
+        assert_eq!(
+            eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.min()\nm"),
+            1
+        );
+        assert_eq!(
+            eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.max()\nm"),
+            9
+        );
+    }
+
+    #[test]
+    fn s4_d1_mixed_int_and_number_sum_do_not_collide() {
+        // Both call sites hit the receiver-element projection; the `_oob`
+        // placeholder must be freshened per call so `int` and `number`
+        // results don't unify.
+        let code = "let s: int = [1, 2, 3].sum()\nlet fs: number = [1.0, 2.0].sum()\ns";
+        assert_eq!(eval_typed_i64(code), 6);
+    }
+
+    #[test]
+    fn s4_traits_extend_method_int_return_propagates_to_binding() {
+        // `p.tot()` declared `-> int`; an un-annotated `let a = p.tot()`
+        // must track `int` so `a + a` emits `AddInt` → 28 (not 28.0).
+        let code = "type P { x: int, y: int }\n\
+                    extend P { method tot() -> int { self.x + self.y } }\n\
+                    let p = P { x: 6, y: 8 }\n\
+                    let a = p.tot()\n\
+                    a + a";
+        assert_eq!(eval_typed_i64(code), 28);
+    }
+
+    #[test]
+    fn s4_d4_null_coalesce_preserves_int_kind_in_loop() {
+        // `m.get(k) ?? 0` must keep `int` across loop iterations.
+        let code = "let mut m: HashMap<string,int> = HashMap()\n\
+                    m.set(\"x\", 3)\n\
+                    let mut acc = 0\n\
+                    for i in [0, 1] {\n\
+                      let h = m.get(\"x\") ?? 0\n\
+                      acc = acc + h\n\
+                    }\n\
+                    acc";
+        assert_eq!(eval_typed_i64(code), 6);
+    }
+
+    // STAGE T4 (2026-06-22): named call arguments are now SUPPORTED on free
+    // functions — they bind to parameters by name. The former S4 reject test
+    // is rebaselined to assert the bound value.
+    #[test]
+    fn t4_named_args_on_free_fn_bind_by_name() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    bv(w: 2, h: 3, d: 4)";
+        assert_eq!(eval_typed_i64(code), 24);
+    }
+
+    #[test]
+    fn t4_named_args_out_of_order_bind_by_name() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    bv(d: 4, w: 2, h: 3)";
+        assert_eq!(eval_typed_i64(code), 24);
+    }
+
+    #[test]
+    fn t4_leading_positional_then_named() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    bv(2, d: 4, h: 3)";
+        assert_eq!(eval_typed_i64(code), 24);
+    }
+
+    #[test]
+    fn t4_named_arg_fills_default_for_omitted_param() {
+        let code = "fn f(x: int, y: int = 10) -> int { return x + y }\nf(x: 5)";
+        assert_eq!(eval_typed_i64(code), 15);
+    }
+
+    #[test]
+    fn t4_named_arg_overrides_default() {
+        let code = "fn f(x: int, y: int = 10) -> int { return x + y }\nf(5, y: 20)";
+        assert_eq!(eval_typed_i64(code), 25);
+    }
+
+    #[test]
+    fn t4_unknown_named_arg_is_clean_compile_error() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    print(bv(w: 2, bad: 3))";
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "an unknown named argument must be a clean compile error"
+        );
+    }
+
+    #[test]
+    fn t4_duplicate_positional_and_named_is_clean_compile_error() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    print(bv(2, w: 5, h: 3, d: 4))";
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "a parameter supplied positionally and by name must be a clean compile error"
+        );
+    }
+
+    #[test]
+    fn t4_functions_positional_args_still_work() {
+        let code =
+            "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\nbv(2, 3, 4)";
+        assert_eq!(eval_typed_i64(code), 24);
+    }
+}
+
+#[cfg(test)]
+mod operator_trait_dispatch_completeness_tests {
+    //! Operators slice — operator-trait dispatch COMPLETENESS (4 findings):
+    //!  1. MERGE-HIJACK: an untyped object-literal merge must NOT be hijacked
+    //!     by a structurally-matching in-scope `impl Add`; the merge builtin
+    //!     wins for untyped object literals and OVERRIDES on shared keys.
+    //!  2. operator-trait dispatch works for `+=` / compound-assign on a `mut`
+    //!     user-type receiver, and for chained `acc = acc + x`.
+    //!  3. an inline struct-LITERAL as the LEFT operand of `Sub`/`Mul` resolves
+    //!     the user impl (like the variable form, and like Add).
+    //!  4. operator-trait resolution is declaration-ORDER INDEPENDENT (an impl
+    //!     declared AFTER a fn that uses it still resolves).
+    use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::eval_typed_i64;
+    use shape_ast::parser::parse_program;
+
+    fn compiles(code: &str) -> bool {
+        let program = parse_program(code).expect("Failed to parse");
+        BytecodeCompiler::new().compile(&program).is_ok()
+    }
+
+    const MONEY_ADD: &str = "type Money { cents: int }\n\
+        impl Add for Money {\n\
+          method add(other: Money) -> Money { Money { cents: self.cents + other.cents } }\n\
+        }\n";
+
+    // ── Finding 1: object-literal merge is NOT hijacked by impl Add ──
+
+    #[test]
+    fn merge_not_hijacked_by_structural_impl_add_overrides_shared_key() {
+        // `{x:1,y:2} + {y:20,z:30}` must FIELD-MERGE (right wins on `y`, `z`
+        // kept) — NOT be hijacked into a structurally-matching `impl Add for
+        // Vec2 {x,y}` (which would positionally add and drop `z`).
+        let code = "type Vec2 { x: int, y: int }\n\
+            impl Add for Vec2 {\n\
+              method add(other: Vec2) -> Vec2 { Vec2 { x: self.x + other.x, y: self.y + other.y } }\n\
+            }\n\
+            let m = {x:1, y:2} + {y:20, z:30}\n\
+            m.x + m.y * 100 + m.z * 10000";
+        // x=1, y=20, z=30  → 1 + 2000 + 300000 = 302001
+        assert_eq!(eval_typed_i64(code), 302001);
+    }
+
+    #[test]
+    fn plain_object_merge_overrides_shared_key_right_wins() {
+        // No impl in scope: the merge builtin still overrides (no duplicate
+        // key). `{a:1,b:2} + {b:9,c:3}` → b=9.
+        let code = "let m = {a:1, b:2} + {b:9, c:3}\n\
+                    m.a + m.b * 10 + m.c * 100";
+        // a=1, b=9, c=3 → 1 + 90 + 300 = 391
+        assert_eq!(eval_typed_i64(code), 391);
+    }
+
+    // ── Finding 2: compound-assign + mut receiver on a user operator type ──
+
+    #[test]
+    fn compound_assign_on_mut_user_type_compiles() {
+        let code = format!(
+            "{MONEY_ADD}\
+             let a = Money {{ cents: 5 }}\n\
+             let mut acc = Money {{ cents: 0 }}\n\
+             acc += a\n\
+             acc.cents"
+        );
+        assert_eq!(eval_typed_i64(&code), 5);
+    }
+
+    #[test]
+    fn chained_mut_assign_then_add_keeps_user_type() {
+        // `acc += a` (desugars to `acc = acc + a`) must restore `acc`'s schema
+        // so the NEXT `acc = acc + b` still resolves the operator trait.
+        let code = format!(
+            "{MONEY_ADD}\
+             let a = Money {{ cents: 5 }}\n\
+             let b = Money {{ cents: 7 }}\n\
+             let mut acc = Money {{ cents: 0 }}\n\
+             acc += a\n\
+             acc = acc + b\n\
+             acc.cents"
+        );
+        assert_eq!(eval_typed_i64(&code), 12);
+    }
+
+    #[test]
+    fn immutable_let_user_add_still_works() {
+        let code = format!(
+            "{MONEY_ADD}\
+             let a = Money {{ cents: 5 }}\n\
+             let b = Money {{ cents: 7 }}\n\
+             let c = a + b\n\
+             c.cents"
+        );
+        assert_eq!(eval_typed_i64(&code), 12);
+    }
+
+    // ── Finding 3: inline struct-literal LEFT operand of Sub / Mul ──
+
+    #[test]
+    fn inline_struct_literal_left_of_sub_resolves_impl() {
+        let code = "type Money { cents: int }\n\
+            impl Sub for Money {\n\
+              method sub(other: Money) -> Money { Money { cents: self.cents - other.cents } }\n\
+            }\n\
+            let v = Money { cents: 3 }\n\
+            let r = Money { cents: 10 } - v\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 7);
+    }
+
+    #[test]
+    fn inline_struct_literal_both_operands_of_sub_resolves_impl() {
+        let code = "type Money { cents: int }\n\
+            impl Sub for Money {\n\
+              method sub(other: Money) -> Money { Money { cents: self.cents - other.cents } }\n\
+            }\n\
+            let r = Money { cents: 10 } - Money { cents: 3 }\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 7);
+    }
+
+    #[test]
+    fn inline_struct_literal_left_of_mul_resolves_impl() {
+        let code = "type Money { cents: int }\n\
+            impl Mul for Money {\n\
+              method mul(other: Money) -> Money { Money { cents: self.cents * other.cents } }\n\
+            }\n\
+            let v = Money { cents: 3 }\n\
+            let r = Money { cents: 10 } * v\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 30);
+    }
+
+    // ── Finding 4: declaration-order independence ──
+
+    #[test]
+    fn operator_trait_impl_declared_after_use_site_resolves() {
+        // `fn double` uses `m + m` and is declared BEFORE `impl Add for Money`.
+        let code = "type Money { cents: int }\n\
+            fn double(m: Money) -> Money { m + m }\n\
+            impl Add for Money {\n\
+              method add(other: Money) -> Money { Money { cents: self.cents + other.cents } }\n\
+            }\n\
+            let r = double(Money { cents: 4 })\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 8);
+    }
+
+    // ── Negative: a struct WITHOUT an Add impl in `+` is still rejected ──
+
+    #[test]
+    fn struct_without_add_impl_in_plus_is_compile_error() {
+        let code = "type P { a: int }\n\
+            let x = P { a: 1 }\n\
+            let y = P { a: 2 }\n\
+            let z = x + y\n\
+            z.a";
+        assert!(
+            !compiles(code),
+            "`+` on a struct with no `impl Add` must be a compile error"
+        );
+    }
+}
+
+#[cfg(test)]
+mod forwarded_hof_closure_kind_soundness_tests {
+    //! S1 (strict-flip): an untyped higher-order-function param (`fn apply(f,
+    //! x) { f(x) }`) must NOT silently widen the forwarded closure's `int`
+    //! return to `number` and leak the f64 bit-pattern as raw i64. The closure
+    //! return kind is preserved through the untyped HOF param: when the
+    //! closure body proves `int`/`number` (an int/number literal pairing) the
+    //! param adopts the body-proven type; a genuinely un-inferable closure
+    //! (no literal pairing — `|x| x * x`) is a COMPILE ERROR, never a silent
+    //! number-default / bit-leak. int != number is preserved.
+    use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::{eval_typed_f64, eval_typed_i64};
+    use shape_ast::parser::parse_program;
+
+    fn compiles(code: &str) -> bool {
+        let program = parse_program(code).expect("Failed to parse");
+        BytecodeCompiler::new().compile(&program).is_ok()
+    }
+
+    #[test]
+    fn int_closure_forwarded_through_untyped_hof_stays_int() {
+        // `apply(double, 21)` where `double: int -> int` must return int 42,
+        // NOT 42.0 / the f64 bit-pattern. `eval_typed_i64` decodes the result
+        // as native i64 — a leaked f64(42.0) would decode to a huge garbage
+        // integer, so an exact `42` proves no widen / no bit-leak.
+        let code = "fn apply(f, x) { f(x) }\n\
+                    fn double(n: int) -> int { n * 2 }\n\
+                    apply(double, 21)";
+        assert_eq!(eval_typed_i64(code), 42);
+    }
+
+    #[test]
+    fn int_bodied_closure_literal_forwarded_stays_int_no_bit_leak() {
+        // `let mul = |x| x * 2; use_it(mul)` — the closure is forwarded by NAME
+        // through an untyped HOF param and never called directly. Its body
+        // proves `int` via the bare literal `2`, so the result is int 10 — the
+        // pre-fix bug returned `10.0` (the f64 bits read back as i64 garbage).
+        let code = "fn use_it(f) { f(5) }\n\
+                    fn main() -> int { let mul = |x| x * 2\n use_it(mul) }\n\
+                    main()";
+        assert_eq!(eval_typed_i64(code), 10);
+    }
+
+    #[test]
+    fn number_bodied_closure_forwarded_stays_number() {
+        // The mirror case: a `number`-bodied closure (`x * 2.0`) forwarded
+        // through the same untyped HOF stays `number` — int != number is
+        // preserved in BOTH directions, no collapse to a single default.
+        let code = "fn use_it(f) { f(5.0) }\n\
+                    fn main() -> number { let mul = |x| x * 2.0\n use_it(mul) }\n\
+                    main()";
+        assert_eq!(eval_typed_f64(code), 10.0);
+    }
+
+    #[test]
+    fn two_level_forwarded_int_pipeline_no_bit_leak() {
+        // The confirmed soundness anchor: a value forwarded through TWO untyped
+        // HOFs (`apply` then `twice`) into int-bodied closures in a `-> int`
+        // fn. Pre-fix leaked the f64 bit-pattern (pipeline_5 got
+        // 4622945017495814146 = 14.0 bits). Must be exact int 14.
+        let code = "fn apply(f, x) { f(x) }\n\
+                    fn twice(f, x) { f(f(x)) }\n\
+                    fn double(n: int) -> int { n * 2 }\n\
+                    fn run_pipeline(start: int) -> int {\n\
+                      let inc = |x| x + 1\n\
+                      let dbl = |x| x * 2\n\
+                      let s1 = apply(inc, start)\n\
+                      let s2 = apply(dbl, s1)\n\
+                      let s3 = twice(inc, s2)\n\
+                      s3\n\
+                    }\n\
+                    fn main() -> int { let _ = apply(double, 21)\n run_pipeline(5) }\n\
+                    main()";
+        assert_eq!(eval_typed_i64(code), 14);
+    }
+
+    #[test]
+    fn genuinely_uninferable_forwarded_closure_is_compile_error() {
+        // `use_it(f) { f(5) }` is now statically provable: the HOF body calls
+        // the forwarded closure with an int literal. Keep the strict rejection
+        // guard on a true no-callsite shape, where the HOF only stores/returns
+        // the callable and `|x| x * x` still has no literal pairing.
+        let code = "fn keep(f) { f }\n\
+                    fn main() { let sq = |x| x * x\n let kept = keep(sq)\n 0 }\n\
+                    main()";
+        assert!(
+            !compiles(code),
+            "a forwarded closure whose numeric param kind cannot be proven from \
+             its body must be a compile error, not a silent number-default"
+        );
+    }
+}
+
+#[cfg(test)]
+mod u4_4_numeric_opcode_golden {
+    //! U4-4 parity oracle. Captures the exact arithmetic/comparison/coercion
+    //! opcode sequence the compiler emits for a representative numeric corpus.
+    //! Run BEFORE and AFTER deleting the `last_expr_numeric_type` register;
+    //! the sequences MUST be byte-identical (NumericType selects the opcode).
+    use super::*;
+    use crate::compiler::BytecodeCompiler;
+
+    fn compile_ok(code: &str) -> Vec<Instruction> {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bc = compiler.compile(&program).expect("compile failed");
+        bc.instructions
+    }
+
+    /// The arithmetic/comparison/coercion opcodes NumericType is responsible
+    /// for selecting. We filter to these so unrelated emit churn does not
+    /// pollute the golden.
+    fn is_numeric_selected(op: OpCode) -> bool {
+        use OpCode::*;
+        matches!(
+            op,
+            AddInt
+                | AddNumber
+                | AddDecimal
+                | SubInt
+                | SubNumber
+                | SubDecimal
+                | MulInt
+                | MulNumber
+                | MulDecimal
+                | DivInt
+                | DivNumber
+                | DivDecimal
+                | ModInt
+                | ModNumber
+                | ModDecimal
+                | PowInt
+                | PowNumber
+                | PowDecimal
+                | GtInt
+                | GtNumber
+                | GtDecimal
+                | LtInt
+                | LtNumber
+                | LtDecimal
+                | GteInt
+                | GteNumber
+                | GteDecimal
+                | LteInt
+                | LteNumber
+                | LteDecimal
+                | EqInt
+                | EqNumber
+                | EqDecimal
+                | NeqInt
+                | NeqNumber
+                | AddI32
+                | SubI32
+                | MulI32
+                | DivI32
+                | ModI32
+                | GtI32
+                | LtI32
+                | GteI32
+                | LteI32
+                | EqI32
+                | NeqI32
+                | AddTyped
+                | SubTyped
+                | MulTyped
+                | DivTyped
+                | ModTyped
+                | IntToNumber
+                | NumberToInt
+                | Swap
+        )
+    }
+
+    fn numeric_seq(code: &str) -> Vec<(OpCode, Option<NumericWidth>)> {
+        compile_ok(code)
+            .iter()
+            .filter(|i| is_numeric_selected(i.opcode))
+            .map(|i| {
+                let w = match i.operand {
+                    Some(Operand::Width(w)) => Some(w),
+                    _ => None,
+                };
+                (i.opcode, w)
+            })
+            .collect()
+    }
+
+    /// Emit the golden to stderr for capture. Always passes; used to record
+    /// the baseline, then frozen into `EXPECTED` below.
+    #[test]
+    fn dump_golden() {
+        for (name, code) in CORPUS {
+            let seq = numeric_seq(code);
+            eprintln!("GOLDEN[{name}] = {seq:?}");
+        }
+    }
+
+    /// Render a numeric sequence as a stable string for golden comparison.
+    fn render(seq: &[(OpCode, Option<NumericWidth>)]) -> String {
+        seq.iter()
+            .map(|(op, w)| match w {
+                Some(w) => format!("{op:?}({w:?})"),
+                None => format!("{op:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Frozen U4-4 baseline (captured at HEAD 3523953e, BEFORE deleting the
+    /// `last_expr_numeric_type` register). The deletion must reproduce these
+    /// byte-for-byte — NumericType selects the arithmetic/comparison opcode,
+    /// so any drift here is a wrong-arithmetic regression.
+    const EXPECTED: &[(&str, &str)] = &[
+        ("int_add", "AddInt"),
+        ("int_sub_mul", "MulInt,SubInt"),
+        ("number_add", "AddNumber"),
+        ("number_div", "DivNumber"),
+        ("decimal_add", "AddDecimal"),
+        ("int_cmp", "LtInt"),
+        ("number_cmp", "GtNumber"),
+        ("int_eq", "EqInt"),
+        ("number_eq", "EqNumber"),
+        ("number_var_plus_int_lit", "IntToNumber,AddNumber"),
+        ("closure_int", "AddInt"),
+        ("closure_number", "AddNumber"),
+        ("i32_add", "AddI32(I32)"),
+        ("i8_add_lit", "AddTyped(I8)"),
+        ("u64_div_lit", "DivTyped(U64)"),
+        ("for_loop_accum", "LtInt,AddInt,AddInt"),
+        ("fn_int_param", "AddInt"),
+        ("fn_number_param", "AddNumber"),
+    ];
+
+    #[test]
+    fn golden_numeric_opcode_parity() {
+        for (name, expected) in EXPECTED {
+            let code = CORPUS
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, c)| *c)
+                .unwrap_or_else(|| panic!("corpus entry `{name}` missing"));
+            let got = render(&numeric_seq(code));
+            assert_eq!(
+                &got, expected,
+                "U4-4 numeric-opcode drift for `{name}`: NumericType selected a \
+                 different opcode after deleting the register (wrong arithmetic). \
+                 expected `{expected}`, got `{got}`"
+            );
+        }
+    }
+
+    const CORPUS: &[(&str, &str)] = &[
+        ("int_add", "let a: int = 3\nlet b: int = 4\na + b\n"),
+        (
+            "int_sub_mul",
+            "let a: int = 10\nlet b: int = 3\na - b * 2\n",
+        ),
+        (
+            "number_add",
+            "let a: number = 3.0\nlet b: number = 4.0\na + b\n",
+        ),
+        (
+            "number_div",
+            "let a: number = 7.0\nlet b: number = 2.0\na / b\n",
+        ),
+        (
+            "decimal_add",
+            "let a: decimal = 1.5D\nlet b: decimal = 2.5D\na + b\n",
+        ),
+        ("int_cmp", "let a: int = 3\nlet b: int = 4\na < b\n"),
+        (
+            "number_cmp",
+            "let a: number = 3.0\nlet b: number = 4.0\na > b\n",
+        ),
+        ("int_eq", "let a: int = 3\nlet b: int = 3\na == b\n"),
+        (
+            "number_eq",
+            "let a: number = 3.0\nlet b: number = 3.0\na == b\n",
+        ),
+        // int + number does NOT unify under strict no-coercion (compile error),
+        // so the legitimate mixed case is int-literal adopting a number sibling:
+        ("number_var_plus_int_lit", "let b: number = 4.0\nb + 1\n"),
+        ("closure_int", "let f = |x: int| { x + 1 }\nf(23)\n"),
+        (
+            "closure_number",
+            "let f = |x: number| { x + 1.0 }\nf(23.0)\n",
+        ),
+        ("i32_add", "let a: i32 = 100\nlet b: i32 = 50\na + b\n"),
+        ("i8_add_lit", "let x: i8 = 100\nlet y: i8 = x + 28\n"),
+        ("u64_div_lit", "let a: u64 = 100\nlet b: u64 = a / 2\n"),
+        (
+            "for_loop_accum",
+            "let mut sum: int = 0\nfor i in 0..10 { sum = sum + i }\nsum\n",
+        ),
+        (
+            "fn_int_param",
+            "fn add(a: int, b: int) -> int { a + b }\nadd(2, 3)\n",
+        ),
+        (
+            "fn_number_param",
+            "fn add(a: number, b: number) -> number { a + b }\nadd(2.0, 3.0)\n",
+        ),
+    ];
+}
+
+#[cfg(test)]
+mod strict_string_concat_tests {
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn string_plus_scalar_rejects_without_implicit_stringify() {
+        for code in [
+            "let v: int = 1\n\"ok: \" + v\n",
+            "let v: number = 1.5\n\"ok: \" + v\n",
+            "let v: bool = true\n\"ok: \" + v\n",
+        ] {
+            let program = parse_program(code).expect("parse");
+            let err = BytecodeCompiler::new()
+                .compile(&program)
+                .expect_err("string + scalar must remain a compile error");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("Strict typing does not implicitly convert"),
+                "unexpected diagnostic for `{code}`: {msg}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod u4_4_regression_probe {
+    use crate::compiler::BytecodeCompiler;
+    #[test]
+    fn bare_let_int_then_expr_compiles() {
+        let code = "let a: int = 3\nlet b: int = 4\na + b\n";
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let r = BytecodeCompiler::new().compile(&program);
+        assert!(r.is_ok(), "compile failed: {:?}", r.err());
+    }
+    #[test]
+    fn print_call_compiles() {
+        let code = "let a: int = 3\nprint(a)\n";
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let r = BytecodeCompiler::new().compile(&program);
+        assert!(r.is_ok(), "compile failed: {:?}", r.err());
+    }
+}
+
+#[cfg(test)]
+mod w28_enum_field_equality_static_proof_tests {
+    use crate::bytecode::OpCode;
+    use crate::test_utils::compile_with_prelude;
+
+    #[test]
+    fn specialized_extend_method_compares_enum_field_to_unit_variant() {
+        let src = r#"
+            enum Status {
+                Active,
+                Inactive,
+                Pending
+            }
+
+            type User {
+                name: string,
+                age: int,
+                status: Status
+            }
+
+            extend User {
+                method is_active() {
+                    self.status == Status::Active
+                }
+            }
+
+            fn make_user(name, age, active) {
+                User {
+                    name: name,
+                    age: age,
+                    status: if active { Status::Active } else { Status::Inactive }
+                }
+            }
+
+            fn count_active(users) {
+                users.filter(|u| u.is_active()).length
+            }
+
+            let users = [
+                make_user("a", 20, true),
+                make_user("b", 30, false)
+            ]
+            print(count_active(users))
+        "#;
+
+        assert!(
+            compile_with_prelude(src).is_ok(),
+            "specialized extend method enum-field equality should compile"
+        );
+    }
+
+    #[test]
+    fn same_enum_data_equality_emits_typed_object_equality() {
+        let src = r#"
+            enum Status {
+                Ok(int),
+                Error(string)
+            }
+
+            let a = Status::Ok(1)
+            let b = Status::Ok(2)
+            print(a == b)
+        "#;
+
+        let bytecode = compile_with_prelude(src).expect("same-enum equality should compile");
+        assert!(
+            bytecode
+                .instructions
+                .iter()
+                .any(|instr| instr.opcode == OpCode::EqTypedObject),
+            "same-enum data equality should lower through EqTypedObject"
+        );
+    }
+
+    #[test]
+    fn cross_enum_equality_still_rejects() {
+        let src = r#"
+            enum A { X }
+            enum B { X }
+            let a = A::X
+            let b = B::X
+            print(a == b)
+        "#;
+
+        let err = compile_with_prelude(src).expect_err("cross-enum equality must reject");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("A is not compatible with B")
+                || msg.contains("Cannot infer types for binary operation"),
+            "unexpected cross-enum equality diagnostic: {msg}"
+        );
     }
 }

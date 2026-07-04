@@ -2,6 +2,7 @@ mod arithmetic;
 mod basic;
 mod collections;
 mod complex;
+mod keystone_expr_type_table;
 mod stress_annotations;
 mod stress_generics;
 mod stress_inference;

@@ -9,8 +9,8 @@ use sha2::{Digest, Sha256};
 use shape_ast::parser::parse_program;
 use shape_runtime::module_manifest::ModuleManifest;
 use shape_runtime::package_bundle::{
-    BundleMetadata, BundledModule, BundledNativeDependencyScope, ExportVisibility, PackageBundle,
-    ResolvedInterface, KNOWN_INTERFACE_SCHEMA,
+    BundleMetadata, BundledModule, BundledNativeDependencyScope, ExportVisibility,
+    KNOWN_INTERFACE_SCHEMA, PackageBundle, ResolvedInterface,
 };
 use shape_runtime::project::ProjectRoot;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1058,8 +1058,8 @@ mod tests {
     /// round-trip (DESIGN §1.1 AMENDMENT A: the single source-ordered list is
     /// load-bearing for trait/impl/enum registration).
     fn interface_item_label(item: &shape_ast::ast::Item) -> String {
-        use shape_ast::ast::types::TypeName;
         use shape_ast::ast::Item;
+        use shape_ast::ast::types::TypeName;
 
         fn type_name_label(tn: &TypeName) -> String {
             match tn {
@@ -1154,8 +1154,7 @@ pub fn run() -> int { 42 }
             "enum:Color".to_string(),
             "fn:run".to_string(),
         ];
-        let produced_order: Vec<String> =
-            iface.items.iter().map(interface_item_label).collect();
+        let produced_order: Vec<String> = iface.items.iter().map(interface_item_label).collect();
         assert_eq!(
             produced_order, expected_order,
             "producer must carry interface items in EXACT source order \
@@ -1164,11 +1163,8 @@ pub fn run() -> int { 42 }
 
         // The export surface carries the public `run` function.
         assert!(
-            iface
-                .exports
-                .iter()
-                .any(|(name, vis)| name == "run"
-                    && *vis == shape_runtime::package_bundle::ExportVisibility::Public),
+            iface.exports.iter().any(|(name, vis)| name == "run"
+                && *vis == shape_runtime::package_bundle::ExportVisibility::Public),
             "exports must record `run` as Public, got {:?}",
             iface.exports
         );
@@ -1213,7 +1209,10 @@ pub fn run() -> int { 42 }
             .expect("rewrite dep source");
         let h2 = recompute_dir_source_hash(&dep).expect("hash v2");
 
-        assert_ne!(h1, h2, "editing a dep .shape file must change its source hash");
+        assert_ne!(
+            h1, h2,
+            "editing a dep .shape file must change its source hash"
+        );
 
         // Stable when unchanged.
         let h3 = recompute_dir_source_hash(&dep).expect("hash v3");

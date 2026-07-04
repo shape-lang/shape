@@ -17,6 +17,22 @@ use super::super::super::context::JITContext;
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
+#[cold]
+#[track_caller]
+fn unsupported_legacy_heap_kind(func_name: &str, kind: Option<u16>) -> ! {
+    match kind {
+        Some(kind) => panic!(
+            "SURFACE: {func_name} received unsupported legacy JIT heap kind {kind}; \
+             ADR-006 section 2.7.5/2.7.10 requires a kinded object entry or an explicit HK arm."
+        ),
+        None => panic!(
+            "SURFACE: {func_name} received non-heap bits where a legacy JIT object carrier \
+             was required; ADR-006 section 2.7.5 requires the caller to pass a NativeKind \
+             companion instead of probing raw bits."
+        ),
+    }
+}
+
 // ============================================================================
 // Object Creation and Manipulation
 // ============================================================================
@@ -64,7 +80,8 @@ pub extern "C" fn jit_new_object(ctx: *mut JITContext, field_count: usize) -> u6
 #[inline(always)]
 pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) -> u64 {
     unsafe {
-        match heap_kind(obj_bits) {
+        let kind = heap_kind(obj_bits);
+        match kind {
             Some(HK_JIT_OBJECT) => {
                 // Object with string key
                 if !is_heap_kind(key_bits, HK_STRING) {
@@ -93,11 +110,11 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
                     "phase-2c §2.7.4 / W10 jit-playbook §5: JitArray \
                      rebuild — jit_set_prop (HK_ARRAY arm). The deleted \
                      UnifiedArray layout blocks index/range writes; \
-                     kinded rebuild reads Arc<TypedArrayData> per \
+                    kinded rebuild reads Arc<TypedArrayData> per \
                      ADR-006 §2.7.6/Q8."
                 )
             }
-            _ => obj_bits,
+            other => unsupported_legacy_heap_kind("jit_set_prop", other),
         }
     }
 }

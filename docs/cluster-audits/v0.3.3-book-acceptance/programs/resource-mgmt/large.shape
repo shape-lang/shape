@@ -1,0 +1,980 @@
+// =============================================================================
+// large.shape -- Resource Management slice (fundamentals/resource-management.mdx)
+//
+// A deterministic transactional "unit-of-work" / resource-pool engine where
+// RAII drop order is the load-bearing correctness property. Models a stack of
+// dependent resources (connection -> transaction -> cursor, plus file handles
+// and locks). Every acquire and every Drop is appended to a global event log;
+// each scenario asserts the EXACT event sequence against an expected sequence
+// DERIVED FROM BOOK SEMANTICS and written before the first run.
+//
+// Book invariants exercised (fundamentals/resource-management.mdx):
+//   - "Automatic Scope-Based Drop": let bindings implementing Drop run drop()
+//     at scope exit (block, return, break, continue).
+//   - "Multiple Resources and Reverse Drop Order": last declared, first dropped.
+//   - "Block Scoping": inner block resources drop at block end, before outer.
+//   - "Drop in Loops": loop-body bindings drop at end of each iteration;
+//     break/continue trigger cleanup.
+//   - "Early Return": all pending drops for exited scopes run before return.
+//   - "Nested Scopes": value-producing block drops its resource at block end.
+//   - "Custom Connection Type": conditional behavior inside drop().
+//
+// Determinism: pure. No stdin / network / clock. The "external resources" are
+// simulated by appending strings to a global log -- the proof object.
+//
+// NOTE (author finding, NOT a book topic): under strict-flip collection
+// dispatch, an unannotated `let x = a.len()` or `let x = a[i]` yields an
+// `unknown` type that fails a downstream `!=`. We therefore annotate every
+// binding fed from `.len()`/index (`let n: int = ...`, `let s: string = ...`),
+// which is a legitimate strict-typing idiom and does not mask any
+// resource-management behavior.
+// =============================================================================
+
+// ---- Global event log (the proof object) -----------------------------------
+
+let mut LOG: Array<string> = []
+
+fn emit(ev: string) {
+  LOG.push(ev)
+}
+
+// emit a tag:n event. Used inside loop-break branches: building the f-string
+// into a `let` and then emitting it sidesteps a strict-flip codegen
+// non-termination bug triggered when an interpolated f-string is passed
+// DIRECTLY as a call argument inside the break-branch of a Drop-bearing loop
+// whose fall-through branch also passes an interpolated f-string directly, with
+// a statement after the loop (see REPORT.md, FN-REG-CORRECTNESS). The book's
+// "Drop in Loops" break-triggers-cleanup semantics are unchanged.
+fn emit_tag(tag: string, n: int) {
+  let m: string = f"{tag}:{n}"
+  emit(m)
+}
+
+fn log_len() -> int {
+  let n: int = LOG.len()
+  n
+}
+
+fn log_at(i: int) -> string {
+  let s: string = LOG[i]
+  s
+}
+
+// The log is never cleared (reassigning `[]` to a typed module array hits an
+// unimplemented op_new_array(0) SURFACE under V3-S5 -- see REPORT.md, V0.4-DEFER).
+// Instead each scenario records BASE = current length before running, then
+// compares the suffix LOG[BASE..] against its expected sequence.
+
+let mut BASE: int = 0
+
+fn mark_base() {
+  BASE = log_len()
+}
+
+// snapshot the suffix produced since the last mark_base()
+fn log_suffix() -> Array<string> {
+  let mut out: Array<string> = []
+  let n: int = log_len()
+  for i in BASE..n {
+    let s: string = log_at(i)
+    out.push(s)
+  }
+  out
+}
+
+// ---- Assertion harness ------------------------------------------------------
+
+let mut FAILS: int = 0
+let mut CHECKS: int = 0
+
+fn arr_eq(a: Array<string>, b: Array<string>) -> bool {
+  let al: int = a.len()
+  let bl: int = b.len()
+  if al != bl {
+    return false
+  }
+  for i in 0..al {
+    let x: string = a[i]
+    let y: string = b[i]
+    if x != y {
+      return false
+    }
+  }
+  true
+}
+
+fn join_arr(a: Array<string>) -> string {
+  let mut acc: string = "["
+  let n: int = a.len()
+  for i in 0..n {
+    let s: string = a[i]
+    if i == 0 {
+      acc = acc + s
+    } else {
+      acc = acc + "," + s
+    }
+  }
+  acc + "]"
+}
+
+fn check_seq(name: string, expected: Array<string>) {
+  CHECKS = CHECKS + 1
+  let actual: Array<string> = log_suffix()
+  let ok: bool = arr_eq(actual, expected)
+  if !ok {
+    FAILS = FAILS + 1
+    let e: string = join_arr(expected)
+    let g: string = join_arr(actual)
+    print(f"CHECK_FAILED: {name} expected={e} got={g}")
+  }
+}
+
+fn check_int(name: string, expected: int, got: int) {
+  CHECKS = CHECKS + 1
+  if expected != got {
+    FAILS = FAILS + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn check_str(name: string, expected: string, got: string) {
+  CHECKS = CHECKS + 1
+  if expected != got {
+    FAILS = FAILS + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+// ---- Resource types (each impl Drop) ----------------------------------------
+
+// A pooled connection. Drop returns it to the pool only when active.
+type Connection {
+  pool: string,
+  id: int,
+  active: bool
+}
+
+impl Drop for Connection {
+  method drop() {
+    if self.active {
+      emit(f"conn:return:{self.pool}:{self.id}")
+    } else {
+      emit(f"conn:skip:{self.pool}:{self.id}")
+    }
+  }
+}
+
+trait Named {
+  fn name(self) -> string;
+}
+
+impl Named for Connection {
+  method name() -> string {
+    f"conn({self.id}@{self.pool})"
+  }
+}
+
+// A transaction depends on a connection (declared after it).
+type Transaction {
+  conn_id: int,
+  committed: bool
+}
+
+impl Drop for Transaction {
+  method drop() {
+    if self.committed {
+      emit(f"tx:finalize:{self.conn_id}")
+    } else {
+      emit(f"tx:rollback:{self.conn_id}")
+    }
+  }
+}
+
+// A cursor depends on a transaction (declared after it).
+type Cursor {
+  tx_conn: int,
+  rows: int
+}
+
+impl Drop for Cursor {
+  method drop() {
+    emit(f"cursor:close:{self.tx_conn}:{self.rows}")
+  }
+}
+
+// A file handle.
+type FileHandle {
+  path: string
+}
+
+impl Drop for FileHandle {
+  method drop() {
+    emit(f"file:close:{self.path}")
+  }
+}
+
+// An advisory lock.
+type Lock {
+  resource: string
+}
+
+impl Drop for Lock {
+  method drop() {
+    emit(f"lock:release:{self.resource}")
+  }
+}
+
+// ---- Constructors that also log acquisition --------------------------------
+
+fn open_conn(pool: string, id: int) -> Connection {
+  emit(f"conn:open:{pool}:{id}")
+  Connection { pool: pool, id: id, active: true }
+}
+
+fn begin_tx(conn_id: int) -> Transaction {
+  emit(f"tx:begin:{conn_id}")
+  Transaction { conn_id: conn_id, committed: false }
+}
+
+fn open_cursor(tx_conn: int, rows: int) -> Cursor {
+  emit(f"cursor:open:{tx_conn}:{rows}")
+  Cursor { tx_conn: tx_conn, rows: rows }
+}
+
+fn open_file(path: string) -> FileHandle {
+  emit(f"file:open:{path}")
+  FileHandle { path: path }
+}
+
+fn acquire_lock(resource: string) -> Lock {
+  emit(f"lock:acquire:{resource}")
+  Lock { resource: resource }
+}
+
+print("== resource-management RAII engine ==")
+
+// =============================================================================
+// SCENARIO 1: Reverse drop order for a dependent resource stack.
+// Book "Multiple Resources and Reverse Drop Order" + best-practice "transact":
+// declare conn, then tx, then cursor; drop runs cursor, tx, conn (reverse).
+// =============================================================================
+
+fn scenario_dependent_stack() {
+  let conn: Connection = open_conn("analytics", 1)
+  let tx: Transaction = begin_tx(1)
+  let cur: Cursor = open_cursor(1, 5)
+  emit("body:work")
+}
+
+fn run_scenario_dependent_stack() {
+  mark_base()
+  scenario_dependent_stack()
+  let expected: Array<string> = [
+    "conn:open:analytics:1",
+    "tx:begin:1",
+    "cursor:open:1:5",
+    "body:work",
+    "cursor:close:1:5",
+    "tx:rollback:1",
+    "conn:return:analytics:1"
+  ]
+  check_seq("dependent_stack_reverse_order", expected)
+}
+
+// =============================================================================
+// SCENARIO 2: Block scoping releases the inner resource early.
+// Book "Block Scoping" / "Use blocks to limit resource lifetimes".
+// The block produces an int; the connection inside drops at block end.
+// =============================================================================
+
+fn scenario_block_scoping() {
+  let row_count: int = {
+    let conn: Connection = open_conn("staging", 2)
+    emit("body:query-in-block")
+    3
+  }
+  emit(f"body:after-block:{row_count}")
+  let f: FileHandle = open_file("/tmp/out.csv")
+  emit("body:write")
+}
+
+fn run_scenario_block_scoping() {
+  mark_base()
+  scenario_block_scoping()
+  let expected: Array<string> = [
+    "conn:open:staging:2",
+    "body:query-in-block",
+    "conn:return:staging:2",
+    "body:after-block:3",
+    "file:open:/tmp/out.csv",
+    "body:write",
+    "file:close:/tmp/out.csv"
+  ]
+  check_seq("block_scoping_early_release", expected)
+}
+
+// =============================================================================
+// SCENARIO 3: Drop in loops -- per-iteration cleanup with continue and break.
+// Book "Drop in Loops": break and continue both trigger cleanup; binding drops
+// at end of each iteration.
+// counts = [0, 7, 2000000, 9]
+//   i=0 -> count 0   -> continue (drop conn)
+//   i=1 -> count 7   -> process  (drop conn)
+//   i=2 -> count 2000000 -> break (drop conn, loop exits) -- index 3 never seen
+// =============================================================================
+
+fn scenario_loop_drops() {
+  let counts: Array<int> = [0, 7, 2000000, 9]
+  let n: int = counts.len()
+  for i in 0..n {
+    let conn: Connection = open_conn("loop", i)
+    let c: int = counts[i]
+    if c == 0 {
+      emit(f"body:skip:{i}")
+      continue
+    }
+    if c > 1000000 {
+      emit(f"body:abort:{i}")
+      break
+    }
+    emit(f"body:process:{i}:{c}")
+  }
+  emit("body:loop-done")
+}
+
+fn run_scenario_loop_drops() {
+  mark_base()
+  scenario_loop_drops()
+  let expected: Array<string> = [
+    "conn:open:loop:0",
+    "body:skip:0",
+    "conn:return:loop:0",
+    "conn:open:loop:1",
+    "body:process:1:7",
+    "conn:return:loop:1",
+    "conn:open:loop:2",
+    "body:abort:2",
+    "conn:return:loop:2",
+    "body:loop-done"
+  ]
+  check_seq("loop_drops_continue_break", expected)
+}
+
+// =============================================================================
+// SCENARIO 4: Early return runs all pending drops before returning.
+// Book "Early Return". Returns from inside a for-loop; the conn (declared before
+// the loop) and the per-iteration cursor both drop before return completes.
+// =============================================================================
+
+fn find_first(target: int) -> string {
+  let conn: Connection = open_conn("search", 4)
+  let rows: Array<int> = [11, 22, 33]
+  let n: int = rows.len()
+  for i in 0..n {
+    let cur: Cursor = open_cursor(4, i)
+    let v: int = rows[i]
+    if v == target {
+      emit(f"body:match:{v}")
+      return f"found:{v}"
+    }
+  }
+  emit("body:nomatch")
+  "not-found"
+}
+
+fn run_scenario_early_return() {
+  mark_base()
+  let result: string = find_first(22)
+  // i=0: cursor open(0), v=11 no match, cursor close(0)
+  // i=1: cursor open(1), v=22 match -> body:match, then drops before return:
+  //      cursor(1) closes, then conn returns (reverse order across exited scopes)
+  let expected: Array<string> = [
+    "conn:open:search:4",
+    "cursor:open:4:0",
+    "cursor:close:4:0",
+    "cursor:open:4:1",
+    "body:match:22",
+    "cursor:close:4:1",
+    "conn:return:search:4"
+  ]
+  check_seq("early_return_drops_all", expected)
+  check_str("early_return_value", "found:22", result)
+}
+
+// =============================================================================
+// SCENARIO 5: Nested scopes -- value escapes the block, resource drops at block
+// end. Book "Nested Scopes" / "load_and_transform".
+// =============================================================================
+
+fn load_and_transform() -> int {
+  let data: int = {
+    let src: Connection = open_conn("source", 5)
+    emit("body:read")
+    42
+  }
+  // src dropped here
+  let dest: Connection = open_conn("dest", 6)
+  emit(f"body:bulk-insert:{data}")
+  data
+}
+
+fn run_scenario_nested_scopes() {
+  mark_base()
+  let out: int = load_and_transform()
+  let expected: Array<string> = [
+    "conn:open:source:5",
+    "body:read",
+    "conn:return:source:5",
+    "conn:open:dest:6",
+    "body:bulk-insert:42",
+    "conn:return:dest:6"
+  ]
+  check_seq("nested_scopes_value_escape", expected)
+  check_int("nested_scopes_value", 42, out)
+}
+
+print("== scenarios defined (part 2) ==")
+
+// =============================================================================
+// SCENARIO 6: Conditional drop body (active vs inactive).
+// Book "Custom Connection Type": drop() returns to pool only when active.
+// We build an inactive connection by constructing the type directly.
+// =============================================================================
+
+fn scenario_conditional_drop() {
+  let live: Connection = open_conn("live", 10)
+  let dead: Connection = Connection { pool: "dead", id: 11, active: false }
+  emit("conn:make:dead:11")
+  emit("body:done")
+}
+
+fn run_scenario_conditional_drop() {
+  mark_base()
+  scenario_conditional_drop()
+  // reverse order: dead (declared last) drops first -> conn:skip, then live -> conn:return
+  let expected: Array<string> = [
+    "conn:open:live:10",
+    "conn:make:dead:11",
+    "body:done",
+    "conn:skip:dead:11",
+    "conn:return:live:10"
+  ]
+  check_seq("conditional_drop_active_flag", expected)
+}
+
+// =============================================================================
+// SCENARIO 7: Multiple homogeneous resources -- three files, reverse drop.
+// Book reverse-order guarantee generalizes to N bindings.
+// =============================================================================
+
+fn scenario_multi_file() {
+  let f1: FileHandle = open_file("a.log")
+  let f2: FileHandle = open_file("b.log")
+  let f3: FileHandle = open_file("c.log")
+  emit("body:fan-out")
+}
+
+fn run_scenario_multi_file() {
+  mark_base()
+  scenario_multi_file()
+  let expected: Array<string> = [
+    "file:open:a.log",
+    "file:open:b.log",
+    "file:open:c.log",
+    "body:fan-out",
+    "file:close:c.log",
+    "file:close:b.log",
+    "file:close:a.log"
+  ]
+  check_seq("multi_file_reverse", expected)
+}
+
+// =============================================================================
+// SCENARIO 8: Lock + nested block. A lock is held for the whole function; an
+// inner block acquires a connection that drops before the lock is released.
+// =============================================================================
+
+fn scenario_lock_nested() {
+  let lk: Lock = acquire_lock("table:records")
+  {
+    let conn: Connection = open_conn("locked", 12)
+    emit("body:critical-section")
+  }
+  emit("body:after-critical")
+}
+
+fn run_scenario_lock_nested() {
+  mark_base()
+  scenario_lock_nested()
+  let expected: Array<string> = [
+    "lock:acquire:table:records",
+    "conn:open:locked:12",
+    "body:critical-section",
+    "conn:return:locked:12",
+    "body:after-critical",
+    "lock:release:table:records"
+  ]
+  check_seq("lock_nested_block", expected)
+}
+
+// =============================================================================
+// SCENARIO 9: Full unit-of-work -- conn -> tx -> cursor with an inner staging
+// block, exercising reverse order across the whole stack plus a scoped block.
+// This is the "transact" best-practice composed with "Block Scoping".
+// =============================================================================
+
+fn unit_of_work() -> int {
+  let conn: Connection = open_conn("uow", 20)
+  let tx: Transaction = begin_tx(20)
+  let staged: int = {
+    let cur: Cursor = open_cursor(20, 8)
+    emit("body:stage")
+    8
+  }
+  // cur dropped here, before commit
+  emit(f"body:commit:{staged}")
+  staged
+}
+
+fn run_scenario_unit_of_work() {
+  mark_base()
+  let rows: int = unit_of_work()
+  let expected: Array<string> = [
+    "conn:open:uow:20",
+    "tx:begin:20",
+    "cursor:open:20:8",
+    "body:stage",
+    "cursor:close:20:8",
+    "body:commit:8",
+    "tx:rollback:20",
+    "conn:return:uow:20"
+  ]
+  check_seq("unit_of_work_full_stack", expected)
+  check_int("unit_of_work_rows", 8, rows)
+}
+
+// =============================================================================
+// SCENARIO 10: Loop that opens a connection AND a cursor each iteration --
+// per-iteration reverse drop (cursor before conn) at the end of every pass.
+// =============================================================================
+
+fn scenario_loop_pair() {
+  for i in 0..3 {
+    let conn: Connection = open_conn("batch", i)
+    let cur: Cursor = open_cursor(i, i)
+    emit(f"body:row:{i}")
+  }
+}
+
+fn run_scenario_loop_pair() {
+  mark_base()
+  scenario_loop_pair()
+  let expected: Array<string> = [
+    "conn:open:batch:0", "cursor:open:0:0", "body:row:0", "cursor:close:0:0", "conn:return:batch:0",
+    "conn:open:batch:1", "cursor:open:1:1", "body:row:1", "cursor:close:1:1", "conn:return:batch:1",
+    "conn:open:batch:2", "cursor:open:2:2", "body:row:2", "cursor:close:2:2", "conn:return:batch:2"
+  ]
+  check_seq("loop_pair_per_iter_reverse", expected)
+}
+
+print("== scenarios defined (part 3) ==")
+
+// =============================================================================
+// SCENARIO 11: Deeply nested blocks -- three levels, each with its own resource.
+// Innermost drops first as each block exits, outermost last.
+// =============================================================================
+
+fn scenario_deep_nest() {
+  let l1: Lock = acquire_lock("L1")
+  {
+    let l2: Lock = acquire_lock("L2")
+    {
+      let l3: Lock = acquire_lock("L3")
+      emit("body:innermost")
+    }
+    emit("body:mid")
+  }
+  emit("body:outer")
+}
+
+fn run_scenario_deep_nest() {
+  mark_base()
+  scenario_deep_nest()
+  let expected: Array<string> = [
+    "lock:acquire:L1",
+    "lock:acquire:L2",
+    "lock:acquire:L3",
+    "body:innermost",
+    "lock:release:L3",
+    "body:mid",
+    "lock:release:L2",
+    "body:outer",
+    "lock:release:L1"
+  ]
+  check_seq("deep_nested_blocks", expected)
+}
+
+// =============================================================================
+// SCENARIO 12: Function call boundary -- a callee that opens and drops its own
+// resource returns to the caller, then the caller's resource drops. Verifies
+// drops are bounded by each function's own scope.
+// =============================================================================
+
+fn helper_open(tag: int) -> int {
+  let conn: Connection = open_conn("helper", tag)
+  emit(f"body:helper:{tag}")
+  tag * 10
+}
+
+fn scenario_call_boundary() {
+  let outer: FileHandle = open_file("outer.dat")
+  let v1: int = helper_open(1)
+  let v2: int = helper_open(2)
+  emit(f"body:caller:{v1}:{v2}")
+}
+
+fn run_scenario_call_boundary() {
+  mark_base()
+  scenario_call_boundary()
+  // each helper call fully opens+drops its conn before returning
+  let expected: Array<string> = [
+    "file:open:outer.dat",
+    "conn:open:helper:1",
+    "body:helper:1",
+    "conn:return:helper:1",
+    "conn:open:helper:2",
+    "body:helper:2",
+    "conn:return:helper:2",
+    "body:caller:10:20",
+    "file:close:outer.dat"
+  ]
+  check_seq("call_boundary_scoped_drops", expected)
+}
+
+// =============================================================================
+// SCENARIO 13: Retry loop -- attempts until success, breaks out. Each attempt
+// holds a connection that is dropped per iteration; the successful attempt
+// breaks (drop runs on break).
+// success_on = 2  ->  attempt 0 fail, attempt 1 fail, attempt 2 success+break
+// =============================================================================
+
+fn scenario_retry() {
+  let success_on: int = 2
+  for attempt in 0..5 {
+    let conn: Connection = open_conn("retry", attempt)
+    if attempt == success_on {
+      emit_tag("body:success", attempt)
+      break
+    }
+    emit_tag("body:fail", attempt)
+  }
+  emit("body:retry-done")
+}
+
+fn run_scenario_retry() {
+  mark_base()
+  scenario_retry()
+  let expected: Array<string> = [
+    "conn:open:retry:0",
+    "body:fail:0",
+    "conn:return:retry:0",
+    "conn:open:retry:1",
+    "body:fail:1",
+    "conn:return:retry:1",
+    "conn:open:retry:2",
+    "body:success:2",
+    "conn:return:retry:2",
+    "body:retry-done"
+  ]
+  check_seq("retry_loop_break", expected)
+}
+
+// =============================================================================
+// SCENARIO 14: Mixed resource kinds in one scope -- conn, file, lock declared
+// in that order; reverse drop is lock, file, conn.
+// =============================================================================
+
+fn scenario_mixed_kinds() {
+  let conn: Connection = open_conn("mixed", 30)
+  let file: FileHandle = open_file("mixed.log")
+  let lock: Lock = acquire_lock("mixed:res")
+  emit("body:mixed-work")
+}
+
+fn run_scenario_mixed_kinds() {
+  mark_base()
+  scenario_mixed_kinds()
+  let expected: Array<string> = [
+    "conn:open:mixed:30",
+    "file:open:mixed.log",
+    "lock:acquire:mixed:res",
+    "body:mixed-work",
+    "lock:release:mixed:res",
+    "file:close:mixed.log",
+    "conn:return:mixed:30"
+  ]
+  check_seq("mixed_resource_kinds_reverse", expected)
+}
+
+print("== scenarios defined (part 4) ==")
+
+// =============================================================================
+// SCENARIO 15: Composite ETL job -- iterate over a fixed dataset, for each
+// partition open a connection + cursor, "process" rows (sum), and let RAII
+// close them per partition. Also assert the computed numeric aggregate, so the
+// program proves both ordering AND data correctness.
+//
+// dataset partitions (deterministic fixtures):
+//   p0: [1, 2, 3]      sum = 6
+//   p1: [10, 20]       sum = 30
+//   p2: [5]            sum = 5
+//   total = 41
+// =============================================================================
+
+fn partition_sum(values: Array<int>) -> int {
+  let mut acc: int = 0
+  let n: int = values.len()
+  for i in 0..n {
+    let v: int = values[i]
+    acc = acc + v
+  }
+  acc
+}
+
+fn etl_job() -> int {
+  let p0: Array<int> = [1, 2, 3]
+  let p1: Array<int> = [10, 20]
+  let p2: Array<int> = [5]
+  let parts: Array<Array<int>> = [p0, p1, p2]
+  let np: int = parts.len()
+  let mut total: int = 0
+  for pi in 0..np {
+    let conn: Connection = open_conn("etl", pi)
+    let part: Array<int> = parts[pi]
+    let plen: int = part.len()
+    let cur: Cursor = open_cursor(pi, plen)
+    let s: int = partition_sum(part)
+    emit(f"body:partition:{pi}:{s}")
+    total = total + s
+    // cur then conn drop at end of iteration (reverse)
+  }
+  emit(f"body:etl-total:{total}")
+  total
+}
+
+fn run_scenario_etl() {
+  mark_base()
+  let total: int = etl_job()
+  let expected: Array<string> = [
+    "conn:open:etl:0", "cursor:open:0:3", "body:partition:0:6", "cursor:close:0:3", "conn:return:etl:0",
+    "conn:open:etl:1", "cursor:open:1:2", "body:partition:1:30", "cursor:close:1:2", "conn:return:etl:1",
+    "conn:open:etl:2", "cursor:open:2:1", "body:partition:2:5", "cursor:close:2:1", "conn:return:etl:2",
+    "body:etl-total:41"
+  ]
+  check_seq("etl_job_order", expected)
+  check_int("etl_job_total", 41, total)
+}
+
+// =============================================================================
+// SCENARIO 16: Early return from a NON-loop guard, before vs after a block.
+// Verifies the resource declared BEFORE an early return drops, and a resource
+// that would be declared AFTER never gets created.
+// =============================================================================
+
+fn guarded(abort: bool) -> string {
+  let pre: Lock = acquire_lock("pre")
+  if abort {
+    emit("body:abort")
+    return "aborted"
+  }
+  let post: Lock = acquire_lock("post")
+  emit("body:full")
+  "completed"
+}
+
+fn run_scenario_guarded_abort() {
+  mark_base()
+  let r: string = guarded(true)
+  let expected: Array<string> = [
+    "lock:acquire:pre",
+    "body:abort",
+    "lock:release:pre"
+  ]
+  check_seq("guarded_abort_path", expected)
+  check_str("guarded_abort_value", "aborted", r)
+}
+
+fn run_scenario_guarded_full() {
+  mark_base()
+  let r: string = guarded(false)
+  let expected: Array<string> = [
+    "lock:acquire:pre",
+    "lock:acquire:post",
+    "body:full",
+    "lock:release:post",
+    "lock:release:pre"
+  ]
+  check_seq("guarded_full_path", expected)
+  check_str("guarded_full_value", "completed", r)
+}
+
+// =============================================================================
+// SCENARIO 18: Committed transaction vs rolled-back -- exercises the two drop
+// branches of Transaction. A committed tx finalizes; an uncommitted one rolls
+// back. We build a committed tx directly and verify the drop branch.
+// =============================================================================
+
+fn scenario_tx_commit() {
+  let conn: Connection = open_conn("txpool", 40)
+  let tx: Transaction = Transaction { conn_id: 40, committed: true }
+  emit("tx:begin:40")
+  emit("body:commit-work")
+}
+
+fn run_scenario_tx_commit() {
+  mark_base()
+  scenario_tx_commit()
+  // reverse drop: tx first (committed -> finalize), then conn
+  let expected: Array<string> = [
+    "conn:open:txpool:40",
+    "tx:begin:40",
+    "body:commit-work",
+    "tx:finalize:40",
+    "conn:return:txpool:40"
+  ]
+  check_seq("tx_commit_branch", expected)
+}
+
+// =============================================================================
+// SCENARIO 19: Trait method alongside Drop. A type can implement both Drop and
+// another trait (Named). Calling the trait method does not affect drop order;
+// the Drop still fires at scope exit. Book "Custom Connection Type" shows a
+// type implementing Drop and Display together.
+// =============================================================================
+
+fn scenario_named_drop() {
+  let conn: Connection = open_conn("named", 50)
+  let label: string = conn.name()
+  emit(f"body:label:{label}")
+}
+
+fn run_scenario_named_drop() {
+  mark_base()
+  scenario_named_drop()
+  let expected: Array<string> = [
+    "conn:open:named:50",
+    "body:label:conn(50@named)",
+    "conn:return:named:50"
+  ]
+  check_seq("named_trait_with_drop", expected)
+}
+
+// =============================================================================
+// SCENARIO 20: Combined nested block + early return. An outer lock is held; an
+// inner block opens and releases a connection; then an early return fires while
+// the lock is still held. The inner conn drops at block end (before the return
+// region), and the outer lock drops on the early return.
+// =============================================================================
+
+fn nested_then_return(skip: bool) -> string {
+  let lk: Lock = acquire_lock("outer")
+  let staged: int = {
+    let conn: Connection = open_conn("inner", 60)
+    emit("body:stage")
+    7
+  }
+  // conn dropped here
+  if skip {
+    emit(f"body:early:{staged}")
+    return "early"
+  }
+  emit(f"body:full:{staged}")
+  "full"
+}
+
+fn run_scenario_nested_then_return() {
+  mark_base()
+  let r: string = nested_then_return(true)
+  let expected: Array<string> = [
+    "lock:acquire:outer",
+    "conn:open:inner:60",
+    "body:stage",
+    "conn:return:inner:60",
+    "body:early:7",
+    "lock:release:outer"
+  ]
+  check_seq("nested_block_then_early_return", expected)
+  check_str("nested_then_return_value", "early", r)
+}
+
+// =============================================================================
+// SCENARIO 21: Nested loops, each level holding a resource. Inner-loop bindings
+// drop at the end of every inner iteration; outer-loop bindings drop at the end
+// of every outer iteration -- after all inner work for that pass.
+// =============================================================================
+
+fn scenario_nested_loops() {
+  for outer in 0..2 {
+    let oconn: Connection = open_conn("outer", outer)
+    for inner in 0..2 {
+      let icur: Cursor = open_cursor(outer, inner)
+      emit_tag2("body:cell", outer, inner)
+    }
+  }
+}
+
+fn emit_tag2(tag: string, a: int, b: int) {
+  let m: string = f"{tag}:{a}:{b}"
+  emit(m)
+}
+
+fn run_scenario_nested_loops() {
+  mark_base()
+  scenario_nested_loops()
+  // outer=0: open outer:0; inner 0 (cur close 0:0), inner 1 (cur close 0:1); conn return outer:0
+  // outer=1: open outer:1; inner 0 (cur close 1:0), inner 1 (cur close 1:1); conn return outer:1
+  let expected: Array<string> = [
+    "conn:open:outer:0",
+    "cursor:open:0:0", "body:cell:0:0", "cursor:close:0:0",
+    "cursor:open:0:1", "body:cell:0:1", "cursor:close:0:1",
+    "conn:return:outer:0",
+    "conn:open:outer:1",
+    "cursor:open:1:0", "body:cell:1:0", "cursor:close:1:0",
+    "cursor:open:1:1", "body:cell:1:1", "cursor:close:1:1",
+    "conn:return:outer:1"
+  ]
+  check_seq("nested_loops_per_level_drop", expected)
+}
+
+// =============================================================================
+// MAIN DRIVER
+// =============================================================================
+
+run_scenario_dependent_stack()
+run_scenario_block_scoping()
+run_scenario_loop_drops()
+run_scenario_early_return()
+run_scenario_nested_scopes()
+run_scenario_conditional_drop()
+run_scenario_multi_file()
+run_scenario_lock_nested()
+run_scenario_unit_of_work()
+run_scenario_loop_pair()
+run_scenario_deep_nest()
+run_scenario_call_boundary()
+run_scenario_retry()
+run_scenario_mixed_kinds()
+run_scenario_etl()
+run_scenario_guarded_abort()
+run_scenario_guarded_full()
+run_scenario_tx_commit()
+run_scenario_named_drop()
+run_scenario_nested_then_return()
+run_scenario_nested_loops()
+
+print(f"checks_run={CHECKS}")
+if FAILS == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILS={FAILS}")
+}

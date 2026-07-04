@@ -1,6 +1,58 @@
 use super::*;
 
 impl BytecodeProgram {
+    fn remap_u16_schema_id(
+        id: &mut u16,
+        id_remap: &std::collections::HashMap<
+            shape_runtime::type_schema::SchemaId,
+            shape_runtime::type_schema::SchemaId,
+        >,
+    ) {
+        if let Some(&new_id) = id_remap.get(&(*id as shape_runtime::type_schema::SchemaId)) {
+            *id = u16::try_from(new_id).expect("merged schema ID exceeds u16 operand width");
+        }
+    }
+
+    fn remap_schema_ids(
+        &mut self,
+        id_remap: &std::collections::HashMap<
+            shape_runtime::type_schema::SchemaId,
+            shape_runtime::type_schema::SchemaId,
+        >,
+    ) {
+        if id_remap.is_empty() {
+            return;
+        }
+
+        for instr in &mut self.instructions {
+            let Some(operand) = instr.operand.as_mut() else {
+                continue;
+            };
+            match operand {
+                Operand::TypedField { type_id, .. } => {
+                    Self::remap_u16_schema_id(type_id, id_remap);
+                }
+                Operand::TypedObjectAlloc { schema_id, .. } => {
+                    Self::remap_u16_schema_id(schema_id, id_remap);
+                }
+                Operand::TypedMerge {
+                    target_schema_id, ..
+                } => {
+                    Self::remap_u16_schema_id(target_schema_id, id_remap);
+                }
+                _ => {}
+            }
+        }
+
+        for foreign in &mut self.foreign_functions {
+            if let Some(schema_id) = foreign.return_type_schema_id.as_mut() {
+                if let Some(&new_id) = id_remap.get(schema_id) {
+                    *schema_id = new_id;
+                }
+            }
+        }
+    }
+
     fn trait_method_symbol_key(
         trait_name: &str,
         type_name: &str,
@@ -239,6 +291,14 @@ impl BytecodeProgram {
             }
         }
 
+        // Merge type schema registry before appending schema-bearing metadata.
+        // Independent module compiles have independent schema-ID domains; the
+        // registry returns the remap needed to keep `other`'s bytecode aligned
+        // with the final merged registry.
+        let other_registry = std::mem::take(&mut other.type_schema_registry);
+        let schema_id_remap = self.type_schema_registry.merge(other_registry);
+        other.remap_schema_ids(&schema_id_remap);
+
         // Append constants, strings, functions, instructions
         self.constants.append(&mut other.constants);
         self.strings.append(&mut other.strings);
@@ -257,9 +317,6 @@ impl BytecodeProgram {
                 self.module_binding_names.push(name);
             }
         }
-
-        // Merge type schema registry
-        self.type_schema_registry.merge(other.type_schema_registry);
 
         // Merge trait method symbols (self wins on collision)
         for (key, value) in other.trait_method_symbols {

@@ -75,10 +75,7 @@ fn is_typed_float_arith(op: OpCode) -> bool {
 }
 
 fn is_generic_numeric(op: OpCode) -> bool {
-    matches!(
-        op,
-        OpCode::IntToNumber | OpCode::NumberToInt
-    )
+    matches!(op, OpCode::IntToNumber | OpCode::NumberToInt)
 }
 
 fn is_comparison(op: OpCode) -> bool {

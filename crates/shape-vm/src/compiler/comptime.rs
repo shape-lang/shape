@@ -8,8 +8,7 @@ use crate::compiler::BytecodeCompiler;
 use crate::executor::{VMConfig, VirtualMachine};
 use shape_ast::ast::{
     AnnotationHandlerParam, DestructurePattern, Expr, FunctionDef, FunctionParameter, Item,
-    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind,
-    VariableDecl,
+    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind, VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_value::heap_value::{HeapKind, HeapValue};
@@ -134,6 +133,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
             let body_expr = Expr::QualifiedFunctionCall {
                 namespace: "__comptime__".to_string(),
                 function: (*target_method).to_string(),
+                const_args: Vec::new(),
                 args,
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -297,6 +297,7 @@ fn rewrite_type_info_in_expr(expr: &mut Expr) {
 /// `populate_module_objects()` wraps them with `block_in_place` + `block_on`,
 /// which requires a tokio runtime. If no runtime exists (e.g., running from
 /// tests or non-async CLI), a temporary single-threaded runtime is created.
+#[allow(dead_code)]
 pub(crate) fn execute_comptime(
     statements: &[Statement],
     comptime_helpers: &[FunctionDef],
@@ -404,6 +405,7 @@ pub(crate) fn execute_comptime_with_context(
     items.push(Item::Expression(
         Expr::FunctionCall {
             name: func_name,
+            const_args: Vec::new(),
             args: Vec::new(),
             named_args: Vec::new(),
             span: Span::DUMMY,
@@ -522,10 +524,7 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
         // need re-pointing into the fresh bytecode registry. Other
         // kinds (scalars, strings, arrays, etc.) are independent of
         // the bytecode's `TypeSchemaRegistry`.
-        if !matches!(
-            value.kind(),
-            NativeKind::Ptr(HeapKind::TypedObject)
-        ) {
+        if !matches!(value.kind(), NativeKind::Ptr(HeapKind::TypedObject)) {
             continue;
         }
         let src_bits = value.slot().raw();
@@ -547,8 +546,7 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
         // `TypedObjectStorage`. The binding owns one strong-count share
         // on the HeapHeader-at-offset-0 refcount for the duration of
         // this iteration; the storage cannot be deallocated under us.
-        let src_storage: &TypedObjectStorage =
-            unsafe { &*(src_bits as *const TypedObjectStorage) };
+        let src_storage: &TypedObjectStorage = unsafe { &*(src_bits as *const TypedObjectStorage) };
 
         // Resolve the source schema (the ambient registry holds both
         // stdlib + predeclared schemas, including any registered by
@@ -617,7 +615,7 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
                 break;
             };
             let src_idx = src_field.index as usize;
-            if src_idx >= src_storage.slots.len() || src_idx >= src_storage.field_kinds.len() {
+            if src_idx >= src_storage.slots().len() || src_idx >= src_storage.field_kinds.len() {
                 bail = true;
                 break;
             }
@@ -627,13 +625,9 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
             // shape), `to_native_kind()` refuses; we trust the
             // construction-side parallel kind table (§2.7.7 / Q9).
             let src_kind = src_storage.field_kinds[src_idx];
-            let src_slot = src_storage.slots[src_idx];
-            let kinded = read_typed_object_field(
-                src_slot,
-                src_kind,
-                src_storage.heap_mask,
-                src_idx,
-            );
+            let src_slot = src_storage.slots()[src_idx];
+            let kinded =
+                read_typed_object_field(src_slot, src_kind, src_storage.heap_mask, src_idx);
 
             // Transfer the share into `new_slots`; the rebuilt
             // TypedObject's `_drop` releases it via `drop_fields`.
@@ -689,10 +683,6 @@ fn ensure_module_object_schema(
     module: &shape_runtime::module_exports::ModuleExports,
 ) {
     let schema_name = format!("__mod_{}", module.name);
-    if bytecode.type_schema_registry.get(&schema_name).is_some() {
-        return;
-    }
-
     let mut export_names: Vec<String> = module
         .export_names_available(true)
         .into_iter()
@@ -707,7 +697,7 @@ fn ensure_module_object_schema(
         .collect();
     bytecode
         .type_schema_registry
-        .register_type(schema_name, fields);
+        .upsert_type_scoped_union_fields(schema_name, fields);
 }
 
 /// Execute a comptime handler with a target parameter bound.
@@ -719,6 +709,7 @@ fn ensure_module_object_schema(
 ///
 /// Returns the `KindedSlot` result of the handler execution (ADR-006 §2.7).
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn execute_comptime_with_target(
     handler_body: &Expr,
     handler_param: &str,
@@ -940,6 +931,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     items.push(Item::Expression(
         Expr::FunctionCall {
             name: func_name,
+            const_args: Vec::new(),
             args: call_args,
             named_args: Vec::new(),
             span: Span::DUMMY,
@@ -1086,12 +1078,13 @@ pub(crate) fn nb_to_literal(nb: &KindedSlot) -> shape_ast::ast::Literal {
         NativeKind::Int64 => return Literal::Int(nb.as_i64().unwrap_or(0)),
         NativeKind::Float64 => return Literal::Number(nb.as_f64().unwrap_or(0.0)),
         NativeKind::Bool => {
-            // KindedSlot::none() is Bool-kinded zero bits by convention
-            // (`kinded_slot.rs:262`); treat zero-bits as None at the
-            // literal boundary.
-            if nb.raw() == 0 {
-                return Literal::None;
-            }
+            // A `Bool`-kinded slot always materializes as a Bool literal,
+            // including `false` (raw 0). The none sentinel is `NativeKind::Null`
+            // (`KindedSlot::none()` → `NativeKind::Null`, kinded_slot.rs:565),
+            // NOT a Bool-kinded zero, so it never reaches this arm — it falls
+            // through to the heap path where `bits == 0 ≡ None`. Treating a
+            // Bool-kinded zero as None here mis-rendered `comptime { false }`
+            // (and `build_config().debug` in a release build) as `null`.
             return Literal::Bool(nb.as_bool().unwrap_or(false));
         }
         NativeKind::String => {
@@ -1104,6 +1097,17 @@ pub(crate) fn nb_to_literal(nb: &KindedSlot) -> shape_ast::ast::Literal {
             if let Some(c) = nb.as_char() {
                 return Literal::Char(c);
             }
+            return Literal::None;
+        }
+        // R2 (2026-06-18): TypedObject is NOT routable through
+        // `as_heap_value()` — its bits are `*const TypedObjectStorage`, not
+        // `Arc::into_raw(Arc<HeapValue>)`, so the deref would reinterpret
+        // `schema_id` as a HeapValue discriminator and segfault. A
+        // TypedObject has no single-literal representation; the
+        // expression-form path (`nb_to_expr` / `typed_object_to_object_expr`)
+        // is the only valid materialization. Returning `None` here keeps the
+        // last-resort literal path sound (callers prefer `nb_to_expr` first).
+        NativeKind::Ptr(HeapKind::TypedObject) => {
             return Literal::None;
         }
         _ => {}
@@ -1130,10 +1134,7 @@ pub(crate) fn nb_to_literal(nb: &KindedSlot) -> shape_ast::ast::Literal {
 
 /// Public entry point for converting a comptime KindedSlot to an AST
 /// expression.
-pub(crate) fn nb_to_expr_public(
-    nb: &KindedSlot,
-    span: Span,
-) -> std::result::Result<Expr, String> {
+pub(crate) fn nb_to_expr_public(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> {
     nb_to_expr(nb, span)
 }
 
@@ -1165,11 +1166,12 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
             ));
         }
         NativeKind::Bool => {
-            if nb.raw() == 0 {
-                // KindedSlot::none() convention: Bool-kinded zero bits ≡
-                // the unit/none sentinel.
-                return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
-            }
+            // A `Bool`-kinded slot always materializes as a Bool literal,
+            // including `false` (raw 0). The none sentinel is `NativeKind::Null`
+            // (`KindedSlot::none()` → `NativeKind::Null`, kinded_slot.rs:565),
+            // NOT a Bool-kinded zero, so it never reaches this arm. Treating a
+            // Bool-kinded zero as None here mis-rendered `comptime { false }`
+            // (and `build_config().debug`) as `null`.
             return Ok(Expr::Literal(
                 shape_ast::ast::Literal::Bool(nb.as_bool().unwrap_or(false)),
                 span,
@@ -1189,6 +1191,36 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
                 return Ok(Expr::Literal(shape_ast::ast::Literal::Char(c), span));
             }
             return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
+        }
+        // R2 (2026-06-18): TypedObject readback via direct typed-pointer
+        // recovery — NOT `slot.as_heap_value()`. A `Ptr(HeapKind::TypedObject)`
+        // slot's bits are `*const TypedObjectStorage` (the v2-raw
+        // `from_typed_object_raw` carrier per ADR-006 §2.3 amendment Wave 2
+        // Round 4 D4), never `Arc::into_raw(Arc<HeapValue>)`. Routing through
+        // `as_heap_value()` reinterprets the storage's first 8 bytes
+        // (`schema_id: u64`) as a `HeapValue` discriminator and segfaults
+        // (§2.7.16 receiver-recovery soundness rule). This was the
+        // `comptime { build_config() }` SIGSEGV.
+        //
+        // Per-field kinds come from the storage's own
+        // `field_kinds: Arc<[NativeKind]>` (stamped at construction by
+        // `typed_object_from_pairs`), NOT the schema's `FieldType` — the
+        // comptime predeclared schemas register every field as
+        // `FieldType::Any`, which has no kinded projection, but the storage
+        // carries the proven per-slot kind.
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            let bits = nb.slot().raw();
+            if bits == 0 {
+                return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
+            }
+            // SAFETY: `NativeKind::Ptr(HeapKind::TypedObject)` is the kind
+            // table's witness that these bits point to a live
+            // `TypedObjectStorage`. `nb` owns one strong-count share on the
+            // HeapHeader-at-offset-0 refcount for the duration of this call,
+            // so the storage cannot be deallocated under us.
+            let storage: &shape_value::TypedObjectStorage =
+                unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
+            return typed_object_to_object_expr(storage, span);
         }
         _ => {}
     }
@@ -1214,46 +1246,10 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
         // layer per W12 audit §3.6. Comptime materialization of v2-raw
         // `TypedArray<T>` arrays lands at ckpt-6 STRICT close.
         //   HeapValue::TypedArray(arr) => { ... }
-        HeapValue::TypedObject(storage) => {
-            // Read fields back via the schema's `FieldType`. The schema
-            // is looked up by id from the ambient registry. Field
-            // ordering follows the schema's declared order.
-            let schema_id = storage.schema_id as u32;
-            let schema = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
-                .ok_or_else(|| {
-                    format!(
-                        "TypedObject schema id {} not found while materializing \
-                         comptime literal — playbook §7 surface, ADR-006 §2.7.4 \
-                         (schema rebind deferred)",
-                        schema_id
-                    )
-                })?;
-            let mut entries = Vec::with_capacity(schema.fields.len());
-            for field_def in schema.fields.iter() {
-                let idx = field_def.index as usize;
-                if idx >= storage.slots.len() {
-                    return Err(format!(
-                        "TypedObject slot index {} out of bounds (len={}) — \
-                         schema/storage mismatch",
-                        idx,
-                        storage.slots.len()
-                    ));
-                }
-                let slot = storage.slots[idx];
-                let kind = field_kind_for_readback(&field_def.field_type)?;
-                let kinded_slot = read_typed_object_field(slot, kind, storage.heap_mask, idx);
-                let value_expr = nb_to_expr(&kinded_slot, span)?;
-                // `kinded_slot` Drop runs at scope exit and retires its
-                // share (heap arms used `Arc::increment_strong_count` in
-                // the readback — see `read_typed_object_field`).
-                entries.push(ObjectEntry::Field {
-                    key: field_def.name.clone(),
-                    value: value_expr,
-                    type_annotation: None,
-                });
-            }
-            Ok(Expr::Object(entries, span))
-        }
+        // TypedObject is handled earlier by the `Ptr(HeapKind::TypedObject)`
+        // kind-arm (direct typed-pointer recovery, NOT `as_heap_value()`),
+        // so it can never reach this `HeapValue` match. The compiler keeps
+        // the arm absent — any TypedObject-kinded slot returns before here.
         // Cold fallthrough — closures, futures, data tables, etc. are
         // not valid comptime literals.
         other => Err(format!(
@@ -1263,33 +1259,93 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
     }
 }
 
+/// Materialize a comptime `TypedObject` into an `Expr::Object` literal.
+///
+/// R2 (2026-06-18). Reads each field through the storage's own
+/// `field_kinds: Arc<[NativeKind]>` (stamped at construction in
+/// `typed_object_from_pairs`), NOT the schema's `FieldType`. The comptime
+/// predeclared schemas register every field as `FieldType::Any` (which has
+/// no kinded projection), so the prior schema-driven readback would have
+/// errored even after the segfault fix; the storage's proven per-slot kind
+/// is the authoritative source per ADR-006 §2.7.5.
+///
+/// Field ordering follows the schema's declared order so the emitted object
+/// literal is stable across runs. `read_typed_object_field` bumps one
+/// independent share per heap-kinded slot; the returned `KindedSlot`'s Drop
+/// retires it at scope exit.
+fn typed_object_to_object_expr(
+    storage: &shape_value::TypedObjectStorage,
+    span: Span,
+) -> std::result::Result<Expr, String> {
+    let schema_id = storage.schema_id as u32;
+    let schema =
+        shape_runtime::type_schema::lookup_schema_by_id_public(schema_id).ok_or_else(|| {
+            format!(
+                "TypedObject schema id {} not found while materializing \
+                 comptime literal — playbook §7 surface, ADR-006 §2.7.4 \
+                 (schema rebind deferred)",
+                schema_id
+            )
+        })?;
+    if storage.slots().len() != storage.field_kinds.len() {
+        return Err(format!(
+            "TypedObject storage slots/field_kinds length mismatch \
+             (slots={}, field_kinds={}) — corrupt carrier",
+            storage.slots().len(),
+            storage.field_kinds.len()
+        ));
+    }
+    let mut entries = Vec::with_capacity(schema.fields.len());
+    for field_def in schema.fields.iter() {
+        let idx = field_def.index as usize;
+        if idx >= storage.slots().len() {
+            return Err(format!(
+                "TypedObject slot index {} out of bounds (len={}) — \
+                 schema/storage mismatch",
+                idx,
+                storage.slots().len()
+            ));
+        }
+        let slot = storage.slots()[idx];
+        // Authoritative per-slot kind from the storage carrier (§2.7.5),
+        // not the predeclared schema's `FieldType::Any`.
+        let kind = storage.field_kinds[idx];
+        let kinded_slot = read_typed_object_field(slot, kind, storage.heap_mask, idx);
+        // A genuine `Bool` field must materialize as a Bool literal even when
+        // its value is `false`. `nb_to_expr`'s scalar arm treats Bool-kinded
+        // zero bits as the `KindedSlot::none()` sentinel (it cannot tell
+        // `false` from none without the surrounding kind context), so a
+        // `false` field (e.g. `debug` in a release build) would otherwise bake
+        // as `None` — silent data loss. The storage's `field_kinds` proves the
+        // field IS a Bool here, so project it directly. Other kinds keep the
+        // shared `nb_to_expr` path.
+        let value_expr = if matches!(kind, NativeKind::Bool) {
+            Expr::Literal(shape_ast::ast::Literal::Bool(kinded_slot.raw() != 0), span)
+        } else {
+            nb_to_expr(&kinded_slot, span)?
+        };
+        entries.push(ObjectEntry::Field {
+            key: field_def.name.clone(),
+            value: value_expr,
+            type_annotation: None,
+        });
+    }
+    Ok(Expr::Object(entries, span))
+}
+
 // V3-S5 ckpt-5 (2026-05-15): `typed_array_len` + `typed_array_element_kinded`
 // helpers DELETED. Both consumed `&TypedArrayData` (deleted at ckpt-1) for
 // the deleted `HeapValue::TypedArray` arm in `nb_to_expr` (lines 924-931
 // above). Comptime materialization of v2-raw `TypedArray<T>` arrays lands
 // at ckpt-6 STRICT close per W12-typed-array-data-deletion audit §B.
 
-/// Project a `FieldType` to the `NativeKind` used to interpret slot bits
-/// at TypedObject readback.
-///
-/// `FieldType::Any` is rejected — comptime predeclared schemas use Any,
-/// and slot bits without kind metadata cannot be safely re-typed at the
-/// literal-readback layer. The caller surfaces this as a structured
-/// error so the comptime substitution fails fast rather than emitting
-/// a placeholder.
-fn field_kind_for_readback(
-    field_type: &shape_runtime::type_schema::FieldType,
-) -> std::result::Result<NativeKind, String> {
-    field_type.to_native_kind().map_err(|_| {
-        format!(
-            "comptime literal: field type {:?} has no kinded projection \
-             (FieldType::Any cannot be read back without kind metadata — \
-             ADR-006 §2.7.4 follow-up to land schema rebind / predeclared \
-             schema kind-narrowing for comptime objects)",
-            field_type
-        )
-    })
-}
+// R2 (2026-06-18): `field_kind_for_readback` (schema `FieldType` →
+// `NativeKind`) DELETED. TypedObject readback now sources per-slot kinds
+// from the storage's own `field_kinds: Arc<[NativeKind]>` carrier
+// (`typed_object_to_object_expr`) — the comptime predeclared schemas use
+// `FieldType::Any`, which has no kinded projection, so the schema was never
+// a usable kind source. The storage's stamped kind is authoritative
+// (ADR-006 §2.7.5).
 
 /// Read a `TypedObjectStorage` slot at index `idx` as an owned
 /// `KindedSlot`, bumping the heap refcount when applicable so the
@@ -1338,9 +1394,18 @@ fn read_typed_object_field(
                     shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::TypedObject => {
-                    Arc::increment_strong_count(
-                        bits as *const shape_value::TypedObjectStorage,
-                    );
+                    // R6 carrier-convention soundness (2026-06): TypedObject
+                    // slot bits are the v2-raw `*const TypedObjectStorage`
+                    // produced by `TypedObjectStorage::_new` (HeapHeader at
+                    // offset 0), NOT `Arc::into_raw(Arc::new(...))`. The
+                    // refcount lives on the HeapHeader; an `Arc::increment_
+                    // strong_count` here would `byte_sub(16)` into non-ArcInner
+                    // memory (the same UB the adjacent TypedArray arm avoids).
+                    // Retain via `v2_retain` against the HeapHeader — pairs
+                    // with the `TypedObjectStorage::release_elem` drop arm in
+                    // vm_impl/stack.rs.
+                    let hdr = bits as *const shape_value::v2::heap_header::HeapHeader;
+                    shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -1348,7 +1413,37 @@ fn read_typed_object_field(
                 HeapKind::BigInt => {
                     Arc::increment_strong_count(bits as *const i64);
                 }
-                _ => {
+                HeapKind::Closure
+                | HeapKind::DataTable
+                | HeapKind::Future
+                | HeapKind::TaskGroup
+                | HeapKind::Temporal
+                | HeapKind::TableView
+                | HeapKind::Content
+                | HeapKind::Instant
+                | HeapKind::IoHandle
+                | HeapKind::NativeScalar
+                | HeapKind::NativeView
+                | HeapKind::Char
+                | HeapKind::HashMap
+                | HeapKind::FilterExpr
+                | HeapKind::Reference
+                | HeapKind::SharedCell
+                | HeapKind::HashSet
+                | HeapKind::Iterator
+                | HeapKind::Deque
+                | HeapKind::Channel
+                | HeapKind::PriorityQueue
+                | HeapKind::Range
+                | HeapKind::Result
+                | HeapKind::Option
+                | HeapKind::TraitObject
+                | HeapKind::Mutex
+                | HeapKind::Atomic
+                | HeapKind::Lazy
+                | HeapKind::ModuleFn
+                | HeapKind::Matrix
+                | HeapKind::MatrixSlice => {
                     // Other heap kinds aren't produced by the comptime
                     // predeclared schemas at landing; surface rather
                     // than fabricate a refcount bump.
@@ -1373,6 +1468,56 @@ mod tests {
     #[test]
     #[ignore = "phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4"]
     fn placeholder_phase_2c_comptime_tests() {}
+
+    // Regression (2026-06-21): a comptime block evaluating to `false` (and
+    // `build_config().debug` in a release build) was baked as `null` at the
+    // print / f-string boundary. Root cause: the `NativeKind::Bool` arm in
+    // `nb_to_literal` / `nb_to_expr` short-circuited a Bool-kinded zero-bit
+    // slot to `Literal::None`, conflating a genuine `false` with the none
+    // sentinel. The none sentinel is `NativeKind::Null` (kinded_slot.rs:565),
+    // NOT a Bool-kinded zero, so the two are distinguishable by kind. These
+    // tests pin the distinction at the materialization layer shared by VM
+    // and JIT (comptime is resolved at compile time, before either runs).
+    #[test]
+    fn comptime_false_bool_materializes_as_false_not_null() {
+        use shape_value::KindedSlot;
+
+        // nb_to_literal: false bool → Literal::Bool(false), not None.
+        let lit_false = super::nb_to_literal(&KindedSlot::from_bool(false));
+        assert_eq!(
+            lit_false,
+            Literal::Bool(false),
+            "comptime `false` must bake as Bool(false), not null"
+        );
+        let lit_true = super::nb_to_literal(&KindedSlot::from_bool(true));
+        assert_eq!(lit_true, Literal::Bool(true));
+
+        // The none sentinel (NativeKind::Null) still materializes as None.
+        let lit_none = super::nb_to_literal(&KindedSlot::none());
+        assert_eq!(
+            lit_none,
+            Literal::None,
+            "NativeKind::Null sentinel must still bake as None"
+        );
+    }
+
+    #[test]
+    fn comptime_false_bool_nb_to_expr_is_bool_literal() {
+        use shape_value::KindedSlot;
+
+        let expr =
+            super::nb_to_expr_public(&KindedSlot::from_bool(false), Span::DUMMY).expect("ok");
+        match expr {
+            Expr::Literal(Literal::Bool(false), _) => {}
+            other => panic!("expected Bool(false) literal, got {:?}", other),
+        }
+
+        let none_expr = super::nb_to_expr_public(&KindedSlot::none(), Span::DUMMY).expect("ok");
+        match none_expr {
+            Expr::Literal(Literal::None, _) => {}
+            other => panic!("expected None literal for none sentinel, got {:?}", other),
+        }
+    }
 
     // W17-comptime-vm-dispatch smoke tests (ADR-006 §2.7.26, 2026-05-12).
     // Verify the 4 comptime introspection forms wired by
@@ -1427,6 +1572,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "build_config".to_string(),
+                const_args: Vec::new(),
                 args: Vec::new(),
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -1468,14 +1614,107 @@ mod tests {
         }
     }
 
-    /// `comptime { implements("int", "Add") }` dispatches end-to-end —
-    /// the registered-trait-keyspace is empty so it returns false. No
-    /// `populate_module_objects` no-op surface, no NotImplemented.
+    /// STAGE R2 (2026-06-18) regression: `comptime { build_config() }`
+    /// SIGSEGV'd because `nb_to_expr` routed the `TypedObject` result through
+    /// `slot.as_heap_value()`. A `Ptr(HeapKind::TypedObject)` slot's bits are
+    /// `*const TypedObjectStorage` (whose first 8 bytes are `schema_id`), NOT
+    /// `Arc::into_raw(Arc<HeapValue>)`; `as_heap_value()` reinterprets them as
+    /// a `HeapValue` discriminator and dereferences — heap corruption /
+    /// segfault (forbidden per ADR-006 §2.7.16 receiver-recovery soundness
+    /// rule). The fix recovers the storage via a direct typed-pointer cast and
+    /// reads each field through the storage's own `field_kinds` carrier.
+    ///
+    /// This test drives the exact crash locus: it runs `build_config()` via
+    /// `execute_comptime` and feeds the result `KindedSlot` to
+    /// `nb_to_expr_public`. Pre-fix this segfaulted the test process; post-fix
+    /// it returns an `Expr::Object` whose string fields carry real values.
+    #[test]
+    fn r2_build_config_nb_to_expr_no_segfault() {
+        let stmts = vec![Statement::Return(
+            Some(Expr::FunctionCall {
+                name: "build_config".to_string(),
+                const_args: Vec::new(),
+                args: Vec::new(),
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        )];
+        let exec = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .expect("build_config() comptime evaluation should succeed");
+
+        // The crash site: materialize the comptime result into an AST literal.
+        // Pre-fix `as_heap_value()` segfaulted here; post-fix it must return
+        // a structured object literal.
+        let expr = super::nb_to_expr_public(&exec.value, Span::DUMMY)
+            .expect("TypedObject result must materialize into an object literal");
+
+        let entries = match expr {
+            Expr::Object(entries, _) => entries,
+            other => panic!("expected Expr::Object from build_config(), got {:?}", other),
+        };
+
+        // Collect (field name -> string literal value) for the string fields.
+        let mut os_val: Option<String> = None;
+        let mut arch_val: Option<String> = None;
+        let mut version_val: Option<String> = None;
+        let mut saw_debug_bool = false;
+        for entry in &entries {
+            if let shape_ast::ast::ObjectEntry::Field { key, value, .. } = entry {
+                match (key.as_str(), value) {
+                    ("target_os", Expr::Literal(Literal::String(s), _)) => os_val = Some(s.clone()),
+                    ("target_arch", Expr::Literal(Literal::String(s), _)) => {
+                        arch_val = Some(s.clone())
+                    }
+                    ("version", Expr::Literal(Literal::String(s), _)) => {
+                        version_val = Some(s.clone())
+                    }
+                    ("debug", Expr::Literal(Literal::Bool(_), _)) => saw_debug_bool = true,
+                    _ => {}
+                }
+            }
+        }
+
+        // String fields must round-trip their real (non-empty) values rather
+        // than baking `None` (the silent-data-loss symptom in the prior bug).
+        assert_eq!(
+            os_val.as_deref(),
+            Some(std::env::consts::OS),
+            "target_os must read back the real platform string"
+        );
+        assert_eq!(
+            arch_val.as_deref(),
+            Some(std::env::consts::ARCH),
+            "target_arch must read back the real architecture string"
+        );
+        assert_eq!(
+            version_val.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "version must read back the real package version"
+        );
+        assert!(
+            saw_debug_bool,
+            "debug must read back as a typed Bool literal (from the storage's \
+             field_kinds carrier), not Any/None"
+        );
+    }
+
+    /// `comptime { implements("T", "Trait") }` dispatches end-to-end
+    /// through typed string arguments. Empty keyspace returns false; a
+    /// matching registered trait key returns true.
     #[test]
     fn w17_comptime_implements_dispatches_end_to_end() {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "implements".to_string(),
+                const_args: Vec::new(),
                 args: vec![
                     Expr::Literal(Literal::String("int".to_string()), Span::DUMMY),
                     Expr::Literal(Literal::String("Add".to_string()), Span::DUMMY),
@@ -1492,12 +1731,35 @@ mod tests {
             Default::default(),
             Default::default(),
             Default::default(),
-        );
-        assert!(
-            result.is_ok(),
-            "implements() should dispatch end-to-end: {:?}",
-            result.err()
-        );
+        )
+        .expect("implements() should dispatch end-to-end");
+        assert_eq!(result.value.as_bool(), Some(false));
+
+        let stmts = vec![Statement::Return(
+            Some(Expr::FunctionCall {
+                name: "implements".to_string(),
+                const_args: Vec::new(),
+                args: vec![
+                    Expr::Literal(Literal::String("Dog".to_string()), Span::DUMMY),
+                    Expr::Literal(Literal::String("Speak".to_string()), Span::DUMMY),
+                ],
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        )];
+        let mut trait_impl_keys = std::collections::HashSet::new();
+        trait_impl_keys.insert("Speak::Dog".to_string());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            trait_impl_keys,
+            Default::default(),
+            Default::default(),
+        )
+        .expect("implements() should see typed string args and registered impl keys");
+        assert_eq!(result.value.as_bool(), Some(true));
     }
 
     /// `comptime { warning("hello") }` dispatches end-to-end and
@@ -1508,6 +1770,7 @@ mod tests {
         let stmts = vec![Statement::Expression(
             Expr::FunctionCall {
                 name: "warning".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("W17 test warning".to_string()),
                     Span::DUMMY,
@@ -1541,6 +1804,7 @@ mod tests {
         let stmts = vec![Statement::Expression(
             Expr::FunctionCall {
                 name: "error".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("W17 test error".to_string()),
                     Span::DUMMY,
@@ -1596,8 +1860,7 @@ mod tests {
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("comptime-only builtin")
-                || err_msg.contains("comptime { }"),
+            err_msg.contains("comptime-only builtin") || err_msg.contains("comptime { }"),
             "Error should surface the comptime-only-builtin gate (W7): {}",
             err_msg
         );
@@ -1665,8 +1928,7 @@ mod tests {
             Ok(Err(e)) => {
                 let msg = format!("{:?}", e);
                 assert!(
-                    !msg.contains("populate_module_objects")
-                        && !msg.contains("NotImplemented"),
+                    !msg.contains("populate_module_objects") && !msg.contains("NotImplemented"),
                     "{ctx}: dispatch chain must not surface the pre-§2.7.26 \
                      NotImplemented stub: {msg}",
                 );
@@ -1686,7 +1948,10 @@ mod tests {
         }
     }
 
-    fn snapshot_with_struct(name: &str, fields: &[(&str, TypeAnn)]) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
+    fn snapshot_with_struct(
+        name: &str,
+        fields: &[(&str, TypeAnn)],
+    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
         let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
         let ordered: Vec<(String, TypeAnn)> = fields
             .iter()
@@ -1696,7 +1961,10 @@ mod tests {
         snapshot
     }
 
-    fn snapshot_with_enum(name: &str, variants: &[&str]) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
+    fn snapshot_with_enum(
+        name: &str,
+        variants: &[&str],
+    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
         let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
         snapshot.enum_defs.insert(
             name.to_string(),
@@ -1718,6 +1986,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Point".to_string()),
                         Span::DUMMY,
@@ -1755,6 +2024,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Point".to_string()),
                         Span::DUMMY,
@@ -1768,10 +2038,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1796,6 +2063,7 @@ mod tests {
                     type_annotation: None,
                     value: Some(Expr::FunctionCall {
                         name: "type_info".to_string(),
+                        const_args: Vec::new(),
                         args: vec![Expr::Literal(
                             Literal::String("Point".to_string()),
                             Span::DUMMY,
@@ -1817,10 +2085,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1847,6 +2112,7 @@ mod tests {
                     type_annotation: None,
                     value: Some(Expr::FunctionCall {
                         name: "build_config".to_string(),
+                        const_args: Vec::new(),
                         args: Vec::new(),
                         named_args: Vec::new(),
                         span: Span::DUMMY,
@@ -1858,6 +2124,7 @@ mod tests {
             Statement::Return(
                 Some(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Point".to_string()),
                         Span::DUMMY,
@@ -1868,10 +2135,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1897,6 +2161,7 @@ mod tests {
                     value: Some(Expr::PropertyAccess {
                         object: Box::new(Expr::FunctionCall {
                             name: "build_config".to_string(),
+                            const_args: Vec::new(),
                             args: Vec::new(),
                             named_args: Vec::new(),
                             span: Span::DUMMY,
@@ -1913,6 +2178,7 @@ mod tests {
                 Some(Expr::PropertyAccess {
                     object: Box::new(Expr::FunctionCall {
                         name: "type_info".to_string(),
+                        const_args: Vec::new(),
                         args: vec![Expr::Literal(
                             Literal::String("Point".to_string()),
                             Span::DUMMY,
@@ -1927,10 +2193,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1954,6 +2217,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Array<int>".to_string()),
                     Span::DUMMY,
@@ -1979,6 +2243,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Option<Point>".to_string()),
                     Span::DUMMY,
@@ -1988,10 +2253,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2009,6 +2271,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Result<int, string>".to_string()),
                     Span::DUMMY,
@@ -2036,6 +2299,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("HashMap<string, int>".to_string()),
                         Span::DUMMY,
@@ -2069,6 +2333,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Color".to_string()),
                     Span::DUMMY,
@@ -2097,6 +2362,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Color".to_string()),
                         Span::DUMMY,
@@ -2133,6 +2399,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("UndefinedXYZ".to_string()),
                     Span::DUMMY,
@@ -2163,6 +2430,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Identifier("UndefinedXYZ".to_string(), Span::DUMMY)],
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -2211,8 +2479,7 @@ const KIND = comptime {
             "W14.2-C1: chained `type_info(Point).kind` must parse: {:?}",
             program.err()
         );
-        let result =
-            crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
         // Compile may fail due to documented pre-existing gaps; but it
         // MUST NOT surface either retired legacy gate.
         if let Err(e) = result {
@@ -2255,8 +2522,7 @@ const COMBO = comptime {
             "W14.2-C1: build_config + type_info combo must parse: {:?}",
             program.err()
         );
-        let result =
-            crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
         if let Err(e) = result {
             let msg = format!("{}", e);
             assert!(
@@ -2317,6 +2583,89 @@ const X = comptime {
             program.err()
         );
     }
+
+    // R6 carrier-convention soundness (2026-06): `read_typed_object_field`
+    // retains a TypedObject heap field on read. TypedObject slot bits are
+    // the v2-raw `*const TypedObjectStorage` produced by
+    // `TypedObjectStorage::_new` (HeapHeader at offset 0). The pre-fix code
+    // applied an `Arc` strong-count bump to those raw `_new` bits, whose
+    // `byte_sub(16)` to reach the (non-existent) ArcInner header is
+    // out-of-allocation UB on a `_new` carrier. The fix retains via
+    // `v2_retain` against the HeapHeader. This test builds a parent
+    // TypedObject with a nested `_new` TypedObject heap field, reads the
+    // field (retain), then drops both the read-out KindedSlot and the parent
+    // via the canonical `release_elem`/Drop path — Miri (SB + TB) flags the
+    // byte_sub(16) UB if the Arc op ever returns.
+    #[test]
+    fn r6_read_typed_object_field_retains_nested_typed_object_via_header() {
+        use super::read_typed_object_field;
+        use shape_value::v2::heap_element::HeapElement;
+        use shape_value::{HeapKind, NativeKind, TypedObjectStorage, ValueSlot};
+        use std::sync::Arc;
+
+        // Nested child: an empty-field `_new` TypedObject (schema 7000).
+        let child_ptr =
+            TypedObjectStorage::_new(7000, Box::new([]), 0, Arc::from(Vec::<NativeKind>::new()));
+        // Parent: one heap field (idx 0) pointing at the child, heap_mask bit 0.
+        let parent_slot = ValueSlot::from_raw(child_ptr as u64);
+        let field_kind = NativeKind::Ptr(HeapKind::TypedObject);
+
+        // Read the field — the fixed retain path bumps the child's HeapHeader
+        // refcount (1 -> 2) via v2_retain. Pre-fix this was the byte_sub(16)
+        // Arc::increment UB.
+        let read_out = read_typed_object_field(parent_slot, field_kind, /*heap_mask*/ 1, 0);
+        assert_eq!(read_out.kind, field_kind);
+
+        // Drop the read-out KindedSlot: canonical Drop -> drop_with_kind ->
+        // release_elem on the HeapHeader (2 -> 1). Balanced against the retain.
+        drop(read_out);
+
+        // Now release the original share (1 -> 0) -> _drop deallocates via the
+        // `_new` Layout. A double-free / wrong-allocator free here is Miri UB.
+        unsafe {
+            TypedObjectStorage::release_elem(child_ptr as *const TypedObjectStorage);
+        }
+    }
+
+    #[test]
+    fn w83e_const_accepts_comptime_block_initializer() {
+        let code = r#"
+            const BUILD_TAG = comptime {
+                "dev"
+            }
+
+            BUILD_TAG
+        "#;
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`const` initialized by a comptime block should compile: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn w83e_comptime_fn_body_allows_comptime_only_builtin_calls() {
+        let code = r#"
+            comptime fn require_const_host() {
+                if false {
+                    error("not executed")
+                }
+            }
+
+            comptime {
+                require_const_host()
+            }
+        "#;
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "comptime fn bodies should allow comptime-only builtins: {:?}",
+            result.err()
+        );
+    }
 }
 
 #[cfg(any())]
@@ -2334,7 +2683,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -2353,7 +2709,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -2379,7 +2742,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime arithmetic should succeed: {:?}",
@@ -2402,7 +2772,8 @@ mod tests_deferred {
         use shape_runtime::module_exports::ModuleExports;
 
         let mut ext = ModuleExports::new("mock_db");
-        register_test_function(&mut ext, 
+        register_test_function(
+            &mut ext,
             "get_schema",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(ValueWord::from_string(Arc::new(
@@ -2453,7 +2824,8 @@ mod tests_deferred {
         use shape_runtime::module_exports::ModuleExports;
 
         let mut ext = ModuleExports::new("test_ext");
-        register_test_function(&mut ext, 
+        register_test_function(
+            &mut ext,
             "version",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(ValueWord::from_string(Arc::new("1.0".to_string())))
@@ -2522,7 +2894,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime multiplication should succeed: {:?}",
@@ -2545,14 +2924,22 @@ mod tests_deferred {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "build_config".to_string(),
+                const_args: Vec::new(),
                 args: Vec::new(),
                 named_args: Vec::new(),
                 span: Span::DUMMY,
             }),
             Span::DUMMY,
         )];
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default())
-            .map(|r| r.value);
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .map(|r| r.value);
         assert!(
             result.is_ok(),
             "build_config() should work in comptime: {:?}",
@@ -2578,8 +2965,10 @@ mod tests_deferred {
         let stmts = vec![Statement::Expression(
             Expr::FunctionCall {
                 name: "print".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::FunctionCall {
                     name: "build_config".to_string(),
+                    const_args: Vec::new(),
                     args: Vec::new(),
                     named_args: Vec::new(),
                     span: Span::DUMMY,
@@ -2590,7 +2979,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "print(build_config()) should execute in comptime: {:?}",
@@ -2641,11 +3037,23 @@ mod tests_deferred {
                 "name",
                 ValueWord::from_string(Arc::new("my_func".to_string())),
             ),
-            ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
-            ("params", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
+            (
+                "fields",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
+            (
+                "params",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
             ("return_type", ValueWord::none()),
-            ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
-            ("captures", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
+            (
+                "annotations",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
+            (
+                "captures",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
         ]);
 
         let result = execute_comptime_with_target(

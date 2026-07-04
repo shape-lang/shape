@@ -25,12 +25,15 @@ impl BytecodeCompiler {
             let mut ref_borrow = None;
             if let Some(value) = &let_expr.value {
                 let saved_pending_variable_name = self.pending_variable_name.clone();
+                let saved_pending_variable_span = self.pending_variable_span;
                 self.pending_variable_name = let_expr
                     .pattern
                     .as_simple_name()
                     .map(|name| name.to_string());
+                self.pending_variable_span = let_expr.pattern.binder_span();
                 let compile_result = self.compile_expr_for_reference_binding(value);
                 self.pending_variable_name = saved_pending_variable_name;
+                self.pending_variable_span = saved_pending_variable_span;
                 ref_borrow = compile_result?;
             } else {
                 self.emit(Instruction::simple(OpCode::PushNull));
@@ -134,6 +137,52 @@ impl BytecodeCompiler {
                         if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                             if recv_name == name {
                                 let source_loc = self.span_to_source_location(*id_span);
+                                // R1 empty-array-push let-gen (2026-06-14):
+                                // `a = a.push(x)` (assignment EXPRESSION form —
+                                // this is the path a loop-body `a = a.push(x*x)`
+                                // takes) where `a` is a bare empty-array
+                                // accumulator (`let mut a = []`, placeholder
+                                // `NewArray(0)`). The v1 `ArrayPushLocal` path
+                                // below assumes a materialized array carrier in
+                                // the slot; the unpromoted accumulator slot is
+                                // not yet a typed array — at MODULE scope it read
+                                // None and SIGSEGV'd. Route the first such self-
+                                // push through the accumulator finalizer: it
+                                // resolves the element kind from `x`'s producer-
+                                // side proof, PATCHES the placeholder allocator to
+                                // the typed `NewTypedArray*` opcode AFTER the
+                                // element type resolves, emits the typed push, and
+                                // leaves the typed array on the stack. Store it
+                                // back into the slot, then re-load so the
+                                // assignment-expression result (the updated array)
+                                // is on the stack — matching the v1-path contract.
+                                if self.compile_first_push_to_empty_accumulator(
+                                    recv_name,
+                                    &args[0],
+                                    Some(source_loc.clone()),
+                                )? {
+                                    if let Some(local_idx) = self.resolve_local(name) {
+                                        self.emit(Instruction::new(
+                                            OpCode::StoreLocal,
+                                            Some(Operand::Local(local_idx)),
+                                        ));
+                                        self.emit(Instruction::new(
+                                            OpCode::LoadLocal,
+                                            Some(Operand::Local(local_idx)),
+                                        ));
+                                    } else {
+                                        let binding_idx = self.get_or_create_module_binding(name);
+                                        self.emit(Instruction::new(
+                                            OpCode::StoreModuleBinding,
+                                            Some(Operand::ModuleBinding(binding_idx)),
+                                        ));
+                                        self.emit(Instruction::new(
+                                            OpCode::LoadModuleBinding,
+                                            Some(Operand::ModuleBinding(binding_idx)),
+                                        ));
+                                    }
+                                    return Ok(());
+                                }
                                 if let Some(local_idx) = self.resolve_local(name) {
                                     if !self.ref_locals.contains(&local_idx) {
                                         self.check_named_binding_write_allowed(
@@ -141,7 +190,8 @@ impl BytecodeCompiler {
                                             Some(source_loc),
                                         )?;
                                         self.compile_expr(&args[0])?;
-                                        let pushed_numeric = self.last_expr_numeric_type;
+                                        // U4-4: pushed element kind from the one resolved Type.
+                                        let pushed_numeric = self.numeric_type_of(&args[0]);
                                         self.emit(Instruction::new(
                                             OpCode::ArrayPushLocal,
                                             Some(Operand::Local(local_idx)),
@@ -170,7 +220,8 @@ impl BytecodeCompiler {
                                     // ModuleBinding variable: same optimization with ModuleBinding operand
                                     let binding_idx = self.get_or_create_module_binding(name);
                                     self.compile_expr(&args[0])?;
-                                    let pushed_numeric = self.last_expr_numeric_type;
+                                    // U4-4: pushed element kind from the one resolved Type.
+                                    let pushed_numeric = self.numeric_type_of(&args[0]);
                                     self.emit(Instruction::new(
                                         OpCode::ArrayPushLocal,
                                         Some(Operand::ModuleBinding(binding_idx)),
@@ -200,9 +251,12 @@ impl BytecodeCompiler {
                 }
 
                 let saved_pending_variable_name = self.pending_variable_name.clone();
+                let saved_pending_variable_span = self.pending_variable_span;
                 self.pending_variable_name = Some(name.clone());
+                self.pending_variable_span = Some(*id_span);
                 let compile_result = self.compile_expr_for_reference_binding(&assign_expr.value);
                 self.pending_variable_name = saved_pending_variable_name;
+                self.pending_variable_span = saved_pending_variable_span;
                 let ref_borrow = compile_result?;
                 // Phase V1.2C/D — Site B: a `var`-like assignment whose
                 // target is `SharedCow` (Arc-shared) receives a freshly-
@@ -286,16 +340,13 @@ impl BytecodeCompiler {
                         // `FieldKind` from `shared_capture_inner_kinds`.
                         // Falls back to legacy `StoreSharedCapture` (0x135)
                         // for unresolved capture types.
-                        let opcode = match self
-                            .shared_capture_inner_kinds
-                            .get(name.as_str())
-                            .copied()
-                        {
-                            Some(kind) => {
-                                crate::compiler::helpers::shared_typed_store_opcode(kind)
-                            }
-                            None => OpCode::StoreSharedCapture,
-                        };
+                        let opcode =
+                            match self.shared_capture_inner_kinds.get(name.as_str()).copied() {
+                                Some(kind) => {
+                                    crate::compiler::helpers::shared_typed_store_opcode(kind)
+                                }
+                                None => OpCode::StoreSharedCapture,
+                            };
                         self.emit(Instruction::new(opcode, Some(Operand::Local(shared_idx))));
                         return Ok(());
                     }
@@ -314,8 +365,7 @@ impl BytecodeCompiler {
                     // The Shared (`var`) write path above stays on the
                     // legacy `StoreSharedCapture` (0x135) — atomic flip
                     // is follow-up #17.
-                    if let Some(&owned_idx) =
-                        self.owned_mutable_closure_captures.get(name.as_str())
+                    if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name.as_str())
                     {
                         debug_assert_eq!(upvalue_idx, owned_idx);
                         let opcode = match self
@@ -492,7 +542,7 @@ impl BytecodeCompiler {
                         &assign_expr.value,
                     );
                 }
-                self.propagate_assignment_type_to_identifier(name);
+                self.propagate_assignment_type_to_identifier(name, Some(&assign_expr.value));
                 Ok(())
             }
             Expr::PropertyAccess {
@@ -547,9 +597,23 @@ impl BytecodeCompiler {
                     if let Some(inferred) =
                         super::collections::infer_field_type_from_expr(&assign_expr.value)
                     {
-                        if inferred != place.field_type_info {
-                            let value_loc =
-                                self.span_to_source_location(assign_expr.value.span());
+                        // Numeric-conversion §4 literal adoption (field-assignment
+                        // context, THE RULE user 2026-06-01): a bare int-literal RHS
+                        // into a numeric field (`p.x = 10` where `x: number`) adopts
+                        // the field type when the literal value is losslessly
+                        // representable — the construction-side twin
+                        // (`collections.rs::int_literal_adopts_field_type`, used at
+                        // the struct-literal producer) already accepts `P { x: 1 }`,
+                        // so the mutation form must agree. An out-of-range literal
+                        // (`p.x = 300` into u8) does NOT adopt and still rejects;
+                        // a non-literal int VAR keeps the §2 value-level reject in
+                        // the `else` arm below.
+                        let literal_adopts = super::collections::int_literal_adopts_field_type(
+                            &assign_expr.value,
+                            &place.field_type_info,
+                        );
+                        if inferred != place.field_type_info && !literal_adopts {
+                            let value_loc = self.span_to_source_location(assign_expr.value.span());
                             let mut loc = value_loc;
                             loc.hints.push(format!(
                                 "expected `{}`, found `{}`",
@@ -562,10 +626,7 @@ impl BytecodeCompiler {
                             return Err(ShapeError::SemanticError {
                                 message: format!(
                                     "type mismatch: cannot assign `{}` to field `{}.{}` of type `{}`",
-                                    inferred,
-                                    place.root_name,
-                                    property,
-                                    place.field_type_info
+                                    inferred, place.root_name, property, place.field_type_info
                                 ),
                                 location: Some(loc),
                             });
@@ -614,8 +675,7 @@ impl BytecodeCompiler {
                         // CLAUDE.md §Forbidden Patterns); no producer-side fabrication
                         // of NativeKind at emit time; no defection-attractor descriptor
                         // (per §Renames-to-refuse-on-sight family).
-                        let rhs_field_type =
-                            Self::primitive_type_to_field_type(&rhs_ty);
+                        let rhs_field_type = Self::primitive_type_to_field_type(&rhs_ty);
                         if let Some(rhs_ft) = rhs_field_type {
                             // Only fire when BOTH sides resolve to a primitive — the
                             // generic / object / unresolved cases are conservatively
@@ -651,10 +711,7 @@ impl BytecodeCompiler {
                                 return Err(ShapeError::SemanticError {
                                     message: format!(
                                         "type mismatch: cannot assign `{}` to field `{}.{}` of type `{}`",
-                                        rhs_ft,
-                                        place.root_name,
-                                        property,
-                                        place.field_type_info
+                                        rhs_ft, place.root_name, property, place.field_type_info
                                     ),
                                     location: Some(loc),
                                 });
@@ -683,18 +740,14 @@ impl BytecodeCompiler {
                     // double-free SIGABRT). For a non-nested write the
                     // chain has a single entry and the emission shape is
                     // identical to the pre-fix code path.
-                    let field_chain =
-                        self.collect_property_access_chain(object, property);
+                    let field_chain = self.collect_property_access_chain(object, property);
                     debug_assert!(
                         !field_chain.is_empty(),
                         "JOINT-FIX #2: collect_property_access_chain produced \
                          an empty chain for a resolved typed_field_place",
                     );
                     for field_operand in field_chain {
-                        self.emit(Instruction::new(
-                            OpCode::MakeFieldRef,
-                            Some(field_operand),
-                        ));
+                        self.emit(Instruction::new(OpCode::MakeFieldRef, Some(field_operand)));
                     }
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
@@ -705,7 +758,41 @@ impl BytecodeCompiler {
                         &assign_expr.value,
                         OBJECT_REF_STORAGE_ERROR,
                     )?;
-                    self.compile_expr(&assign_expr.value)?;
+                    // Numeric-conversion §4 literal adoption (field-assignment
+                    // widening, THE RULE user 2026-06-01): when a bare int-literal
+                    // RHS adopts a `number`(F64) field, it IS the number literal —
+                    // compile it as a `Number` constant so the value laid into the
+                    // F64 slot is f64-kinded, not Int64 (the assignment path has no
+                    // construction-side `kinded_to_slot` runtime widen, so without
+                    // this the DerefStore lays Int64 bits into the F64 place and the
+                    // §2.7.13 kind-drift invariant fires). This is compile-time
+                    // literal re-typing, NOT a runtime coercion opcode (the literal
+                    // `10` is exactly `10.0` in a number context) — no W4-δ Convert
+                    // defection. Width-int / decimal fields keep their natural
+                    // literal lowering (Int64 bits are the correct slot payload).
+                    let widened_literal = if place.field_type_info == FieldType::F64 {
+                        if let Expr::Literal(lit, lit_span) = assign_expr.value.as_ref() {
+                            match lit {
+                                shape_ast::ast::Literal::Int(v) => Some(Expr::Literal(
+                                    shape_ast::ast::Literal::Number(*v as f64),
+                                    *lit_span,
+                                )),
+                                shape_ast::ast::Literal::UInt(v) => Some(Expr::Literal(
+                                    shape_ast::ast::Literal::Number(*v as f64),
+                                    *lit_span,
+                                )),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    match &widened_literal {
+                        Some(num_lit) => self.compile_expr(num_lit)?,
+                        None => self.compile_expr(&assign_expr.value)?,
+                    }
                     let value_local = self.declare_temp_local("__assign_value_")?;
                     self.emit(Instruction::simple(OpCode::Dup));
                     self.emit(Instruction::new(
@@ -826,9 +913,7 @@ impl BytecodeCompiler {
                 // (receiver, key, value) onto the stack, then preserves
                 // the value as the assignment-expression result. Sibling
                 // of the `Index` dispatch in `property_access.rs:compile_expr_index_access`.
-                if typed_kind.is_none()
-                    && self.receiver_type_implements_trait(object, "IndexMut")
-                {
+                if typed_kind.is_none() && self.receiver_type_implements_trait(object, "IndexMut") {
                     self.reject_direct_reference_storage(
                         &assign_expr.value,
                         ARRAY_REF_STORAGE_ERROR,
@@ -1258,9 +1343,7 @@ impl BytecodeCompiler {
     /// but diverge on generic shapes and tuple syntax. Sub-fix (ii) only
     /// needs the primitive cohort — keeping the helper scoped here documents
     /// the scope and avoids drift across the boundary.
-    fn primitive_type_to_field_type(
-        ty: &shape_runtime::type_system::Type,
-    ) -> Option<FieldType> {
+    fn primitive_type_to_field_type(ty: &shape_runtime::type_system::Type) -> Option<FieldType> {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
         let name = match ty {
@@ -1276,9 +1359,7 @@ impl BytecodeCompiler {
             "i32" => FieldType::I32,
             "u32" => FieldType::U32,
             "u64" => FieldType::U64,
-            "int" | "i64" | "integer" | "isize" | "usize" | "byte" | "char" => {
-                FieldType::I64
-            }
+            "int" | "i64" | "integer" | "isize" | "usize" | "byte" | "char" => FieldType::I64,
             "string" | "str" => FieldType::String,
             "decimal" => FieldType::Decimal,
             "bool" | "boolean" => FieldType::Bool,

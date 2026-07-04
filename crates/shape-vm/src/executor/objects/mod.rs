@@ -188,55 +188,33 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, ValueSlot, VMError};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TemporalData, VMError, ValueSlot};
 
 /// Select the method-registry PHF lookup for a v2-raw `TypedArray<T>`
 /// receiver, classified by its stamped element-type discriminant.
 ///
-/// **W16.2-J.1 (2026-05-22):** the per-kind PHF registries
-/// `TYPED_INT_ARRAY_METHODS` + `TYPED_NUMBER_ARRAY_METHODS` were deleted
-/// alongside their handler module files (`typed_int_array_methods.rs` /
-/// `typed_number_array_methods.rs`, 667 LoC combined). The prereq W16.2-J.0
-/// (commit `fbe86020`) migrated the kind-generic counterparts in
-/// `array_aggregation::handle_{sum,avg,min,max,count,reduce}_v2` +
-/// `array_basic::handle_{len,is_empty,first,last,push,pop,get,set,clone}_v2`
-/// from `ckpt[2-5]_surface` stubs to real bodies delegating to the
-/// `v2_array_detect::{sum,avg,min,max,push,pop,read,write}_element(s)`
-/// primitives — those entries live in `ARRAY_METHODS`.
-///
-/// Result: every numeric `V2ElemType` arm now returns `None`; the caller
-/// falls back to `ARRAY_METHODS` for the kind-generic implementation. The
-/// surviving non-`None` arm is `V2ElemType::Bool` → `BOOL_ARRAY_METHODS`,
-/// which carries closure-callback / aggregation residuals (`count`, `any`,
-/// `all`, `toArray`) tracked by the W17 typed-carrier-monomorphization
-/// workstream and still routes through the bool-specific handler set.
+/// Numeric and bool element kinds use typed-specific PHFs only where the
+/// method surface has typed-array semantics (`dot`, `norm`, `abs`, bool
+/// `count`, no-arg `any`/`all`, `toArray`, etc.). Any name absent from a
+/// typed-specific PHF falls through to `ARRAY_METHODS`, whose handlers are
+/// kind-generic over the same stamped v2 carrier.
 fn typed_array_method_registry(
     elem_type: crate::executor::v2_handlers::v2_array_detect::V2ElemType,
     method_name: &str,
 ) -> Option<method_registry::MethodHandler> {
     use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
     match elem_type {
-        // Numeric element kinds — fall through to ARRAY_METHODS via the
-        // caller's `.or_else(...)` chain. W16.2-J.1 deleted the per-kind
-        // PHFs that previously lived here; the kind-generic
-        // `array_aggregation::*` / `array_basic::*` handlers in
-        // ARRAY_METHODS now cover len/length/push/pop/first/last/get/set/
-        // sum/avg/mean/min/max/clone uniformly.
-        V2ElemType::I64
-        | V2ElemType::I32
+        V2ElemType::F64 => method_registry::FLOAT_ARRAY_METHODS
+            .get(method_name)
+            .copied(),
+        V2ElemType::I64 => method_registry::INT_ARRAY_METHODS.get(method_name).copied(),
+        V2ElemType::I32
         | V2ElemType::I8
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
         | V2ElemType::U32
-        | V2ElemType::F64
         | V2ElemType::F32 => None,
-        // Bool carries closure-callback / aggregation residuals
-        // (count / any / all / toArray) — W17 typed-carrier-
-        // monomorphization territory. The kind-generic len/first/last/
-        // isEmpty entries in BOOL_ARRAY_METHODS still alias to
-        // `array_basic::handle_*_v2`, so semantics are uniform with
-        // ARRAY_METHODS for those names.
         V2ElemType::Bool => method_registry::BOOL_ARRAY_METHODS
             .get(method_name)
             .copied(),
@@ -245,7 +223,14 @@ fn typed_array_method_registry(
         V2ElemType::Char
         | V2ElemType::String
         | V2ElemType::Decimal
-        | V2ElemType::TypedObject => None,
+        | V2ElemType::TypedObject
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // no dedicated TRAIT_OBJECT_ARRAY_METHODS PHF at HEAD; `arr[i].method()`
+        // lowers to `TypedArrayGetTraitObject` then `DynMethodCall`. Generic
+        // ARRAY_METHODS covers `.length`/`.first`/etc.
+        | V2ElemType::TraitObject
+        | V2ElemType::TypedArray
+        | V2ElemType::Callable => None,
     }
 }
 
@@ -434,9 +419,7 @@ impl VirtualMachine {
         if self.sp >= arg_count + 1 {
             let receiver_idx_check = self.sp - arg_count - 1;
             let (_, receiver_kind_peek) = self.stack_read_kinded_raw(receiver_idx_check);
-            if receiver_kind_peek
-                == NativeKind::Ptr(shape_value::HeapKind::TraitObject)
-            {
+            if receiver_kind_peek == NativeKind::Ptr(shape_value::HeapKind::TraitObject) {
                 // Reconstruct the instruction with `arg_count` /
                 // `string_id` operands and call into the dyn dispatch
                 // path. The TypedMethodCall operand layout matches
@@ -475,18 +458,18 @@ impl VirtualMachine {
         // owned `String` to release the immutable borrow on
         // `self.program.strings` before the `dispatch_method_kinded`
         // call below takes a mutable borrow on `self`.
-        let method_name: String = self
-            .program
-            .strings
-            .get(string_id)
-            .cloned()
-            .ok_or_else(|| {
-                VMError::RuntimeError(format!(
-                    "op_call_method: string_id {} out of bounds (pool size {})",
-                    string_id,
-                    self.program.strings.len()
-                ))
-            })?;
+        let method_name: String =
+            self.program
+                .strings
+                .get(string_id)
+                .cloned()
+                .ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "op_call_method: string_id {} out of bounds (pool size {})",
+                        string_id,
+                        self.program.strings.len()
+                    ))
+                })?;
 
         // Classify the receiver, resolve the handler, and dispatch via
         // the shared `dispatch_method_kinded` entry — borrow-only ABI per
@@ -584,11 +567,7 @@ impl VirtualMachine {
     /// per §2.3 typed-Arc invariant + Wave 2 Round 4 D4 ckpt-3 v2-raw
     /// migration; the borrowed `KindedSlot` in `args[0]` owns one share
     /// so the pointee stays live for this scope.
-    fn resolve_typed_object_ufcs(
-        &self,
-        args: &[KindedSlot],
-        method_name: &str,
-    ) -> Option<u16> {
+    fn resolve_typed_object_ufcs(&self, args: &[KindedSlot], method_name: &str) -> Option<u16> {
         let receiver_bits = args[0].slot.raw();
         if receiver_bits == 0 {
             return None;
@@ -599,9 +578,8 @@ impl VirtualMachine {
         // `heap_value.rs:3497`); the borrowed `KindedSlot` carrier in
         // `args[0]` owns one share so the pointee stays live for this
         // scope. Transient borrow — no Arc reconstruction.
-        let schema_id = unsafe {
-            (*(receiver_bits as *const shape_value::TypedObjectStorage)).schema_id
-        };
+        let schema_id =
+            unsafe { (*(receiver_bits as *const shape_value::TypedObjectStorage)).schema_id };
         let concrete_type_name = self
             .program
             .type_schema_registry
@@ -713,7 +691,9 @@ impl VirtualMachine {
             | NativeKind::IntSize
             | NativeKind::NullableIntSize
             | NativeKind::UIntSize
-            | NativeKind::NullableUIntSize => method_registry::NUMBER_METHODS.get(method_name).copied(),
+            | NativeKind::NullableUIntSize => {
+                method_registry::NUMBER_METHODS.get(method_name).copied()
+            }
             NativeKind::Bool => method_registry::BOOL_METHODS.get(method_name).copied(),
             NativeKind::String => method_registry::STRING_METHODS.get(method_name).copied(),
             // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
@@ -767,7 +747,43 @@ impl VirtualMachine {
                 // Genuine scalar `u64` — numeric method surface only.
                 method_registry::NUMBER_METHODS.get(method_name).copied()
             }
-            NativeKind::Ptr(_) => None,
+            NativeKind::Ptr(
+                HeapKind::String
+                | HeapKind::TypedObject
+                | HeapKind::Closure
+                | HeapKind::Decimal
+                | HeapKind::BigInt
+                | HeapKind::DataTable
+                | HeapKind::Future
+                | HeapKind::TaskGroup
+                | HeapKind::Temporal
+                | HeapKind::TableView
+                | HeapKind::Content
+                | HeapKind::Instant
+                | HeapKind::IoHandle
+                | HeapKind::NativeScalar
+                | HeapKind::NativeView
+                | HeapKind::Char
+                | HeapKind::HashMap
+                | HeapKind::FilterExpr
+                | HeapKind::Reference
+                | HeapKind::SharedCell
+                | HeapKind::HashSet
+                | HeapKind::Iterator
+                | HeapKind::Deque
+                | HeapKind::Channel
+                | HeapKind::PriorityQueue
+                | HeapKind::Range
+                | HeapKind::Result
+                | HeapKind::Option
+                | HeapKind::TraitObject
+                | HeapKind::Mutex
+                | HeapKind::Atomic
+                | HeapKind::Lazy
+                | HeapKind::ModuleFn
+                | HeapKind::Matrix
+                | HeapKind::MatrixSlice,
+            ) => None,
             // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
             // §2.7.7/Q9, 2026-05-19): `NativeKind::Null` receivers have
             // no method dispatch surface — null has no methods.
@@ -861,13 +877,25 @@ impl VirtualMachine {
                     }
                 }
                 HeapKind::TypedObject => {
-                    // User-defined object methods land here. The
-                    // built-in DataTable PHF covers shared table-shape
-                    // methods; UFCS resolution below catches user-
-                    // defined `fn TypeName.method(self, ...)` shapes.
-                    method_registry::DATATABLE_METHODS
-                        .get(method_name)
-                        .copied()
+                    // REAL-MOVE keep-both (v0.3.3, user 2026-06-21):
+                    // `clone p` desugars to `p.clone()`. A user-defined
+                    // struct has no PHF `clone` entry; route it to the
+                    // recursive, refcount-balanced deep-clone handler so
+                    // `let q = clone p` yields an independent copy (mirror
+                    // of Array.clone / String.clone). Checked before the
+                    // DataTable PHF so it applies to every TypedObject.
+                    if method_name == "clone" {
+                        Some(crate::executor::objects::object_operations::handle_clone_typed_object
+                            as method_registry::MethodHandler)
+                    } else {
+                        // User-defined object methods land here. The
+                        // built-in DataTable PHF covers shared table-shape
+                        // methods; UFCS resolution below catches user-
+                        // defined `fn TypeName.method(self, ...)` shapes.
+                        method_registry::DATATABLE_METHODS
+                            .get(method_name)
+                            .copied()
+                    }
                 }
                 HeapKind::TableView => method_registry::DATATABLE_METHODS
                     .get(method_name)
@@ -995,7 +1023,8 @@ impl VirtualMachine {
                 return Err(VMError::RuntimeError(
                     "MakeRange: inclusive flag operand must be Bool (kind-source bug \
                      at compile site — `compiler/expressions/misc.rs` emits a \
-                     `PushConst<Bool>` for the inclusive flag)".into(),
+                     `PushConst<Bool>` for the inclusive flag)"
+                        .into(),
                 ));
             }
         };

@@ -106,16 +106,22 @@ mod array_builder_regression_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod groupby_surface_regression_tests;
 
+// W10 fuzzy-comparison VM/JIT divergence regression. The bytecode VM carries
+// tolerance-aware fuzzy semantics; current JIT MIR drops the tolerance, so the
+// executor must deopt before MIR codegen. Gated behind `deep-tests` for the
+// same JITExecutor full-pipeline cost as the adjacent modules.
+#[cfg(all(test, feature = "deep-tests"))]
+mod fuzzy_comparison_regression_tests;
+
 // γ-CP5 jit-typedarray-ptr regression tests (v0.3-gating
 // NO-KNOWN-INCORRECTNESS). Pin two JIT bugs un-masked by the Family-α
 // TypedArray fix: 7a — `Place::Index` codegen on a `Place::Field` base
 // (`b.items[i]` for a struct field of type `Array<int>`) must use the
 // v2 `TypedArray` layout (data@8/len@16), recognised via the
-// schema-derived `field_array_elem_kinds` map; 7b — `jit_call_value`
-// must retain each heap-typed closure capture (kind-driven
-// `KindedSlot::clone`) before handing it to `jit_trampoline_call_closure`,
-// which builds a fresh `OwnedClosureBlock` whose `Drop` releases each
-// capture. Gated behind `deep-tests` for the same reason as
+// schema-derived `field_array_elem_kinds` map; 7b — raw-Arc closure calls
+// must borrow the existing `OwnedClosureBlock` into the trampoline VM rather
+// than rebuilding a fresh owning block from raw captures. Gated behind
+// `deep-tests` for the same reason as
 // `field_ref_regression_tests`: `JITExecutor::execute_program`
 // JIT-compiles the stdlib on every test.
 #[cfg(all(test, feature = "deep-tests"))]
@@ -139,9 +145,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
+use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::ClosureLayout;
 use shape_value::v2::struct_layout::FieldKind;
-use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
@@ -218,6 +224,8 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) user_func_refs: HashMap<u16, FuncRef>,
     /// Function index → arity for call validation.
     pub(crate) user_func_arities: HashMap<u16, u16>,
+    /// Function index → statically proven return kind from FrameDescriptor.
+    pub(crate) user_func_return_kinds: HashMap<u16, NativeKind>,
 
     // ── Borrow support ──────────────────────────────────────────────
     /// MIR SlotId → (Cranelift StackSlot, Cranelift Type) for references
@@ -307,8 +315,7 @@ pub struct MirToIR<'a, 'b> {
     /// stack pointer (no NaN-box tag, no `HK_CLOSURE` header) that the
     /// FFI dispatcher can't recognise — the fix is to not dispatch through
     /// the FFI at all when the JIT itself built the closure.
-    pub(crate) stack_closure_call_info:
-        HashMap<SlotId, StackClosureCallInfo>,
+    pub(crate) stack_closure_call_info: HashMap<SlotId, StackClosureCallInfo>,
 
     // ── Phase 4b Round 5c-2-α jit-ref-param-chain-stamp ────────────
     /// Param slots whose source-declaration carries a reference borrow kind
@@ -553,8 +560,7 @@ pub struct MirToIR<'a, 'b> {
     /// `expr.span()`). Empty when the program has no user-type operator
     /// overloading — JIT falls through to the existing typed-arith /
     /// typed-cmp / unop lowering paths.
-    pub(crate) operator_trait_dispatch_sites:
-        HashMap<shape_ast::ast::span::Span, (String, u16)>,
+    pub(crate) operator_trait_dispatch_sites: HashMap<shape_ast::ast::span::Span, (String, u16)>,
 }
 
 /// Result of MIR preflight check.
@@ -577,10 +583,7 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
             match &stmt.kind {
                 StatementKind::Assign(place, rvalue) => {
                     if !is_simple_place(place) {
-                        blockers.push(format!(
-                            "complex place in assignment at {:?}",
-                            stmt.span
-                        ));
+                        blockers.push(format!("complex place in assignment at {:?}", stmt.span));
                     }
                     match rvalue {
                         // W15.2-LANG-5 (Phase 4b, 2026-05-18). MIR-level
@@ -594,7 +597,9 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                         // `compiler/patterns/checking.rs`. ADR-006 §2.7.5
                         // producer-side classification: the annotation is
                         // carried verbatim from `ast::Pattern::Typed`.
-                        Rvalue::TypePatternTest { type_annotation, .. } => {
+                        Rvalue::TypePatternTest {
+                            type_annotation, ..
+                        } => {
                             blockers.push(format!(
                                 "TypePatternTest (W15.2-LANG-5): \
                                  `Pattern::Typed` codegen pending, \
@@ -673,6 +678,39 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                         // ADR-006 §2.7.5 — is v0.4 per
                         // `docs/v0.3-close-summary.md` §5.16 JIT-lowering
                         // followup workstream.
+                        // f-string bool-as-int VM!=JIT divergence fix
+                        // (2026-06). `Rvalue::PrimitiveCast` is the MIR
+                        // marker for a primitive infallible `as`-cast
+                        // (`true as int`, `1 as number`, …) whose result
+                        // kind differs from the source. The JIT has no typed
+                        // convert body — `vm_only_opcode_reason` already lists
+                        // the bytecode `OpCode::ConvertTo*` family as VM-only,
+                        // and the opcode-FFI trampoline passes operand bits
+                        // through UNCHANGED, so a JIT'd `f"{true as int}"`
+                        // formatted with the SOURCE kind (`Bool`) renders
+                        // `true` instead of `1`. Pre-fix the MIR lowering
+                        // mirrored that pass-through (`Rvalue::Use(arg)`);
+                        // now it emits this marker and preflight REJECTS so
+                        // the W12 `[jit-fallback]` path routes the whole
+                        // program to the bytecode interpreter, where
+                        // `ConvertTo*` restamps the result kind correctly.
+                        // Surface-and-stop (the typed JIT convert is a v0.4
+                        // follow-up), NOT a dynamic-fallback shim. Mirrors
+                        // the TypePatternTest / EnumDiscriminantTest /
+                        // EnumPayload preflight-reject precedent.
+                        Rvalue::PrimitiveCast { target, .. } => {
+                            blockers.push(format!(
+                                "PrimitiveCast (f-string bool-as-int fix): \
+                                 `expr as {}` has no typed JIT convert body \
+                                 (the bytecode `OpCode::ConvertTo*` family is \
+                                 VM-only per `vm_only_opcode_reason`); \
+                                 whole-program deopt via W12 `[jit-fallback]` \
+                                 routes to the bytecode interpreter (which \
+                                 restamps the cast result kind). Tracked v0.4 \
+                                 JIT-lowering followup. at {:?}",
+                                target, stmt.span
+                            ));
+                        }
                         Rvalue::EnumPayload { variant, .. } => {
                             blockers.push(format!(
                                 "EnumPayload (R8 W9 G.2 Step 2 Bucket 2): \
@@ -823,6 +861,43 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         user_func_arities: HashMap<u16, u16>,
         closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
     ) -> Self {
+        Self::new_with_closure_layouts_and_function_returns(
+            builder,
+            ctx_ptr,
+            ffi,
+            mir_data,
+            slot_kinds,
+            concrete_types,
+            strings,
+            entry_block,
+            function_indices,
+            user_func_refs,
+            user_func_arities,
+            HashMap::new(),
+            closure_function_layouts,
+        )
+    }
+
+    /// Same as `new_with_closure_layouts`, plus the compile-time return
+    /// kind table for named user functions. The table is consumed only for
+    /// MIR `MirConstant::Function` call-site destination stamping; missing
+    /// entries remain unproven and surface through the normal strict path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_closure_layouts_and_function_returns(
+        builder: &'a mut FunctionBuilder<'b>,
+        ctx_ptr: Value,
+        ffi: FFIFuncRefs,
+        mir_data: &'a MirFunctionData,
+        slot_kinds: Vec<Option<NativeKind>>,
+        concrete_types: Vec<ConcreteType>,
+        strings: &'a [String],
+        entry_block: Block,
+        function_indices: &'a HashMap<String, u16>,
+        user_func_refs: HashMap<u16, FuncRef>,
+        user_func_arities: HashMap<u16, u16>,
+        user_func_return_kinds: HashMap<u16, NativeKind>,
+        closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
+    ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
         // Slot-numbering correction: the bytecode compiler's
         // `FrameDescriptor.slots` and the MIR's local slots use different
@@ -840,9 +915,25 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // F64 through `ensure_kind(_, Bool)` truncated to 0 and
         // `None ?? 42.0` then evaluated to 42.0 for every branch.
         //
-        // Until the two tables share a slot-numbering convention, drop
-        // the bytecode seed and rely on MIR-level inference only.
-        let _ = slot_kinds;
+        // Shift the bytecode frame seed only onto MIR parameter slots.
+        // `FrameDescriptor.slots[0]` is the first ABI parameter, while MIR
+        // reserves `SlotId(0)` for `__mir_return`. Whole-frame seeding is
+        // unsound (see above), but param-slot seeding is a direct
+        // compile-time proof of the argument kinds consumed by this body.
+        let mut frame_seed: Vec<Option<NativeKind>> = vec![None; mir_data.mir.num_locals as usize];
+        for (param_idx, mir_slot) in mir_data.mir.param_slots.iter().enumerate() {
+            let dst_idx = mir_slot.0 as usize;
+            if dst_idx < frame_seed.len() {
+                frame_seed[dst_idx] = slot_kinds.get(param_idx).copied().flatten();
+            }
+        }
+        if let Some(current_fn_idx) = function_indices.get(mir_data.mir.name.as_str()) {
+            if let Some(return_kind) = user_func_return_kinds.get(current_fn_idx).copied() {
+                if !frame_seed.is_empty() {
+                    frame_seed[0] = Some(return_kind);
+                }
+            }
+        }
         // ADR-006 §2.7.7 / §2.7.11 kind-source seed: when the bytecode
         // compiler has populated `concrete_types[slot]` with a precise
         // `ConcreteType`, project it to `NativeKind` for the parallel-kind
@@ -852,10 +943,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `Function<(int), int>` / `ConcreteType::Closure`), which
         // `infer_slot_kinds` alone cannot derive from MIR-observable
         // statements.
-        let concrete_seed: Vec<Option<NativeKind>> = concrete_types
+        let mut concrete_seed: Vec<Option<NativeKind>> = concrete_types
             .iter()
             .map(|ct| types::native_kind_from_concrete_type(ct))
             .collect();
+        if concrete_seed.len() < frame_seed.len() {
+            concrete_seed.resize(frame_seed.len(), None);
+        }
+        for (idx, kind) in frame_seed.into_iter().enumerate() {
+            if let Some(kind) = kind {
+                if idx < concrete_seed.len() {
+                    concrete_seed[idx] = Some(kind);
+                }
+            }
+        }
         // ADR-006 §2.7.5 producing-site classification: pass the per-
         // slot `ConcreteType` map into the inference so two projections
         // both work end-to-end —
@@ -872,17 +973,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `v2_typed_array_elem_kind` projection uses. Without this seed
         // `print(xs[0])` on `xs: Array<int>` falls into the kind-blind
         // print decoder.
-        let slot_kinds = types::infer_slot_kinds_with_concrete(
+        let slot_kinds = types::infer_slot_kinds_with_concrete_and_function_returns(
             &mir_data.mir,
             &concrete_seed,
             &concrete_types,
+            Some(function_indices),
+            Some(&user_func_return_kinds),
         );
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy
         // `jit_make_closure` FFI path (Phase H will delete that).
-        let non_escaping_closure_slots =
-            mir_data.storage_plan.non_escaping_closure_slots.clone();
+        let non_escaping_closure_slots = mir_data.storage_plan.non_escaping_closure_slots.clone();
 
         // Session 1 Commit 3: scan `storage_plan` for outer-scope
         // local slots that actually get promoted to
@@ -918,8 +1020,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // that is an operand of a `ClosureCapture` whose layout
         // declares a `CaptureKind::Shared` capture at that position.
         use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
-        let param_slot_set: HashSet<SlotId> =
-            mir_data.mir.param_slots.iter().copied().collect();
+        let param_slot_set: HashSet<SlotId> = mir_data.mir.param_slots.iter().copied().collect();
         let mut shared_local_slots: HashSet<SlotId> = HashSet::new();
         for (slot, class) in &mir_data.storage_plan.slot_classes {
             if !matches!(class, BindingStorageClass::SharedCow) {
@@ -991,12 +1092,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         continue;
                     }
                     let root = match op {
-                        MirOperand::Copy(p)
-                        | MirOperand::Move(p)
-                        | MirOperand::MoveExplicit(p) => match p {
-                            MirPlace::Local(s) => Some(*s),
-                            _ => None,
-                        },
+                        MirOperand::Copy(p) | MirOperand::Move(p) | MirOperand::MoveExplicit(p) => {
+                            match p {
+                                MirPlace::Local(s) => Some(*s),
+                                _ => None,
+                            }
+                        }
                         MirOperand::Constant(_) => None,
                     };
                     if let Some(slot) = root {
@@ -1033,8 +1134,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // available for cross-block field reads, mirroring how
         // `infer_slot_kinds` and the §2.7.5 conduit's
         // `infer_top_level_concrete_types_from_mir` already work.
-        let field_native_kinds =
-            types::infer_field_native_kinds(&mir_data.mir, &slot_kinds);
+        let field_native_kinds = types::infer_field_native_kinds(&mir_data.mir, &slot_kinds);
 
         // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006 §2.7.13
         // ref-chain stamp + §2.7.5 producer-side stamp; supervisor ratify
@@ -1071,6 +1171,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             function_indices,
             user_func_refs,
             user_func_arities,
+            user_func_return_kinds,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
             field_native_kinds,
@@ -1397,13 +1498,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // clamp to the smaller of the two so no out-of-bounds panics
         // slip into release builds.
         let len = captures_count.min(layout.capture_kinds.len());
-        for (i, &param_slot) in self
-            .mir
-            .param_slots
-            .iter()
-            .take(len)
-            .enumerate()
-        {
+        for (i, &param_slot) in self.mir.param_slots.iter().take(len).enumerate() {
             let capture_kind = layout.capture_storage_kind(i);
             let is_cell_capture = matches!(
                 capture_kind,
@@ -1466,6 +1561,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Called after the caller has optionally stored function params to local variables.
     /// `param_count` indicates how many leading slots are function params (skip init).
     pub fn compile_body(&mut self) -> Result<(), String> {
+        // v0.3.3 move-semantics JIT-divergence surface-and-stop
+        // (ADR-006 §2.7.14, CLAUDE.md surface-and-stop discipline).
+        //
+        // `compile_operand` nulls every `Move`/`MoveExplicit` source slot to
+        // prevent double-drop, but the VM ownership model keeps the source
+        // value live when the "move" is really a Copy/Clone (still-live or
+        // Copy-typed source). A subsequent read of the nulled slot diverges
+        // from the VM: `let b = a; print(a)` (VM 42 / JIT 0) and `a = i`
+        // inside a `while` loop (VM terminates / JIT nulls the counter and
+        // hangs). Whole-function deopt to the bytecode interpreter (which
+        // honours the VM ownership model) preserves VM == JIT. The structured
+        // `Err` routes through the established `[jit-fallback]` path in
+        // `executor.rs`. Root-cause fix (per-point Copy/Clone/Move liveness
+        // in JIT operand lowering) is v0.4.
+        if self.mir_has_move_then_read_divergence() {
+            return Err(
+                "v0.3.3 move-semantics SURFACE (ADR-006 §2.7.14): a slot is \
+                 `Move`/`MoveExplicit`-sourced and read again at a later program \
+                 point. `compile_operand` nulls the moved source slot, but the VM \
+                 ownership model (`compute_ownership_decisions`) keeps the value \
+                 live for Copy/still-live-Clone sources — the JIT would read the \
+                 nulled slot and diverge (silent-wrong-output, or an infinite loop \
+                 when the nulled slot is a live loop counter). Whole-program \
+                 deopting to the bytecode interpreter preserves VM == JIT. \
+                 Root-cause fix (per-point Copy/Clone/Move liveness in JIT operand \
+                 lowering) is v0.4."
+                    .to_string(),
+            );
+        }
+
         // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
         // replaces SHAPE_JIT_MIR_TRACE env-var. CLI selector is
         // `--trace-jit=shape_jit::mir=trace`. The enabled-check gates the

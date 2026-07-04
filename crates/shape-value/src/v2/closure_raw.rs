@@ -33,7 +33,9 @@
 //! `I16`/`U16` use 2; `I8`/`U8`/`Bool` use 1; `Ptr` uses 8 and participates
 //! in the `heap_capture_mask` retain/release cycle.
 
-use super::closure_layout::{ClosureLayout, SHARED_CELL_VALUE_OFFSET, SharedCell, TypedClosureHeader};
+use super::closure_layout::{
+    ClosureLayout, SHARED_CELL_VALUE_OFFSET, SharedCell, TypedClosureHeader,
+};
 use super::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
 use super::struct_layout::FieldKind;
 use crate::kinded_slot::KindedSlot;
@@ -163,13 +165,33 @@ impl OwnedClosureBlock {
             self.layout.capture_count()
         );
         let off = self.layout.heap_capture_offset(idx);
-        // SAFETY: caller upholds the construction-side init contract; the
-        // 8-byte read at `heap_capture_offset(idx)` is in-bounds per the
-        // layout's geometry (every capture slot is at least 8 bytes wide
-        // — narrower kinds zero-extend in the `read_capture_as_value_bits`
-        // path; this raw read sees the same on-block bytes the JIT and
-        // VM consumers see).
-        let bits = unsafe { std::ptr::read(self.ptr.add(off) as *const u64) };
+        let slot_kind = self.layout.capture_kind(idx);
+        // SAFETY: caller upholds the construction-side init contract. The
+        // read width is dictated by the capture's *slot* `FieldKind`
+        // (`capture_kind`), NOT a blanket 8-byte read: a narrow trailing
+        // capture (e.g. `Bool`/`I8` = 1 byte, `I32`/`U32` = 4 bytes) may
+        // sit in the final slot with fewer than 8 bytes to the end of the
+        // allocation, so an unconditional 8-byte `read` overruns the
+        // `alloc_zeroed` block. This mirrors `read_capture_as_value_bits`'s
+        // per-kind sign/zero-extend so the round-trip with
+        // `write_capture_typed` is bit-identical for every kind while every
+        // read stays in-bounds. `OwnedMutable`/`Shared` captures carry a
+        // `Ptr` slot kind (8 bytes), so they take the verbatim 8-byte read.
+        let bits = unsafe {
+            let field_ptr = self.ptr.add(off);
+            match slot_kind {
+                FieldKind::F64 | FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => {
+                    std::ptr::read(field_ptr as *const u64)
+                }
+                FieldKind::I32 => std::ptr::read(field_ptr as *const i32) as i64 as u64,
+                FieldKind::U32 => std::ptr::read(field_ptr as *const u32) as u64,
+                FieldKind::I16 => std::ptr::read(field_ptr as *const i16) as i64 as u64,
+                FieldKind::U16 => std::ptr::read(field_ptr as *const u16) as u64,
+                FieldKind::I8 => std::ptr::read(field_ptr as *const i8) as i64 as u64,
+                FieldKind::U8 => std::ptr::read(field_ptr as *const u8) as u64,
+                FieldKind::Bool => (std::ptr::read(field_ptr as *const u8) != 0) as u64,
+            }
+        };
         let kind = self.layout.capture_native_kind(idx);
         (bits, kind)
     }
@@ -854,42 +876,31 @@ pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usiz
         return;
     }
 
-    // For Ptr payloads we must release the heap refcount share encoded in
-    // the cell's 8-byte payload before reclaiming the cell allocation
-    // itself. Other interior kinds are scalar bytes — no refcount.
-    let inner_kind = layout.capture_inner_kind(i);
-    if inner_kind == FieldKind::Ptr {
-        // SAFETY: cell_ptr is non-null and was produced by Arc::into_raw,
-        // so reborrowing it as `&SharedCell` is sound while the strong
-        // count is still ≥ 1 (it is — we still hold the share we are
-        // about to reclaim).
-        let cell_ref = unsafe { &*cell_ptr };
-        let bits = {
-            let _g = cell_ref.lock();
-            // SAFETY: payload offset is 8, payload is 8 bytes wide.
-            unsafe { std::ptr::read(shared_cell_payload_ptr(cell_ptr) as *const u64) }
-        };
-        // ADR-006 §2.7.8 / Q10: route the Ptr-payload share retire through
-        // the per-capture `NativeKind` carried by the layout's
-        // `capture_native_kinds[i]` track. Same canonical
-        // `KindedSlot::Drop` dispatch as the Immutable-Ptr branch in
-        // `release_typed_closure`. The `SharedCell` itself also carries a
-        // single-slot `kind` companion (set at construction per §2.7.8 /
-        // Q10 — see `closure_layout::SharedCell::new`); the layout's
-        // per-capture kind and the cell's per-slot kind are required to
-        // agree by the §2.7.8 lockstep invariant. Reading from the layout
-        // keeps this single-sourced — the layout is the storage-tier
-        // descriptor for the closure block.
-        let kind = layout.capture_native_kind(i);
-        // SAFETY: `inner_kind == FieldKind::Ptr` confirms the cell payload
-        // is an `Arc<T>` share owned by this slot for the `T` matching
-        // `kind` (per the construction-side contract).
-        unsafe { drop_with_kind(bits, kind) };
-    }
+    // CaptureCarrier F1 (ADR-006 §2.7.8 / Q10, 2026-06-18): the cell's
+    // 8-byte PAYLOAD heap-refcount share is owned by the `SharedCell`
+    // itself, NOT by each closure that captures it. A `SharedCell` is
+    // shared (`Arc<SharedCell>`) across the module-binding / outer-local
+    // slot AND every closure that captured it; the payload share is
+    // retired exactly once by `SharedCell::Drop` when the cell's LAST Arc
+    // strong-count share retires. Releasing the payload here — on every
+    // capturing closure's drop, regardless of whether this is the last
+    // cell share — double-releases the payload `Arc<T>` for every heap
+    // interior kind (String / Ptr(TypedArray) / Ptr(TypedObject) / …),
+    // freeing the live value out from under the still-alive outer binding
+    // (UAF: string corrupts, array segfaults, struct mis-reads). The
+    // closure slot owns exactly ONE thing: one `Arc<SharedCell>` strong-
+    // count share. Reclaim only that — `SharedCell::Drop` owns the payload.
+    //
+    // `layout.capture_inner_kind(i)` / `capture_native_kind(i)` are no
+    // longer read here; the cell's own `kind` companion (set at
+    // `SharedCell::new`) drives the payload retire inside `SharedCell::Drop`.
+    let _ = layout;
+    let _ = i;
 
     // Reclaim the Arc strong-count share. If we held the last share the
-    // SharedCell is freed here; otherwise the strong count just drops by
-    // one.
+    // SharedCell is freed here (and `SharedCell::Drop` retires the payload
+    // share exactly once); otherwise the strong count just drops by one
+    // and the payload stays live for the remaining holders.
     // SAFETY: cell_ptr came from `Arc::into_raw(Arc::new(SharedCell::new(...)))`
     // (per the Shared-capture construction contract) and represents
     // exactly one strong-count share owned by this slot.
@@ -1538,15 +1549,13 @@ pub(crate) unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
     // bumped share) and leak the original via `mem::forget` so the borrowed
     // `bits` continue to represent the original share owned by the caller's
     // cell.
-    unsafe {
-        let original = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let cloned = original.clone();
-        std::mem::forget(original);
-        // `cloned` carries the +1 strong-count we added; dropping it would
-        // cancel the retain we just performed, so leak it. The caller's
-        // freshly-cloned slot owns the new share.
-        std::mem::forget(cloned);
-    }
+    let original = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+    let cloned = original.clone();
+    std::mem::forget(original);
+    // `cloned` carries the +1 strong-count we added; dropping it would
+    // cancel the retain we just performed, so leak it. The caller's
+    // freshly-cloned slot owns the new share.
+    std::mem::forget(cloned);
 }
 
 /// WB2.4 release-on-overwrite mirror of `KindedSlot::Drop`. Decrements the
@@ -1571,9 +1580,7 @@ pub(crate) unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
     // SAFETY: caller upholds that `bits` is one strong-count share for
     // `kind`; reconstructing the `KindedSlot` and letting it drop retires
     // exactly one share via the canonical dispatch table.
-    unsafe {
-        let _retire = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-    }
+    let _retire = KindedSlot::new(ValueSlot::from_raw(bits), kind);
 }
 
 /// Kind-aware closure capture cell store (§2.7.8 / Q10).
@@ -1760,12 +1767,7 @@ impl ClosureCell {
     ///
     /// Panics if `idx >= self.len()`.
     #[inline]
-    pub unsafe fn replace(
-        &mut self,
-        idx: usize,
-        bits: u64,
-        kind: NativeKind,
-    ) -> (u64, NativeKind) {
+    pub unsafe fn replace(&mut self, idx: usize, bits: u64, kind: NativeKind) -> (u64, NativeKind) {
         debug_assert_eq!(
             self.bits.len(),
             self.kinds.len(),
@@ -1830,6 +1832,8 @@ impl Drop for ClosureCell {
 }
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod closure_cell_tests {
     //! §2.7.8 / Q10 structural-extension tests for `ClosureCell`.
     //!
@@ -2021,11 +2025,8 @@ mod owned_closure_block_kinded_tests {
         // Mixed-kind layout: per-capture kinds match per-capture types,
         // demonstrating that `read_capture_kinded` walks the kind track
         // in lockstep with the bit slots.
-        let layout = arc_immutable_layout(&[
-            ConcreteType::F64,
-            ConcreteType::I32,
-            ConcreteType::Bool,
-        ]);
+        let layout =
+            arc_immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::Bool]);
         // SAFETY: alloc + per-slot writes are paired.
         unsafe {
             let ptr = alloc_typed_closure(0, 0, &layout);
@@ -2047,5 +2048,81 @@ mod owned_closure_block_kinded_tests {
             assert_eq!(k2, NativeKind::Bool);
         }
     }
-}
 
+    #[test]
+    fn read_capture_kinded_narrow_trailing_slot_no_oob() {
+        // R2 regression: a NARROW capture in a trailing 4-byte-aligned (but
+        // not 8-byte-aligned) slot leaves fewer than 8 bytes to the end of
+        // the `alloc_zeroed` block. `captures_size` is only rounded up to
+        // 8-byte alignment for the WHOLE captures area, so a final narrow
+        // slot that lands at a non-8-aligned offset has < 8 bytes to the
+        // allocation end. The pre-fix unconditional 8-byte read at
+        // `heap_capture_offset(last)` overran the allocation (Miri: OOB read
+        // past alloc end under both Stacked and Tree Borrows). The kind-width
+        // read must read exactly the slot width and zero/sign-extend, staying
+        // in-bounds while round-tripping bit-identically with
+        // `write_capture_typed`.
+
+        // Case A — the exact catalog repro: [F64, I32, I32].
+        //   F64 @ capture-offset 0   (heap 16)
+        //   I32 @ capture-offset 8   (heap 24)
+        //   I32 @ capture-offset 12  (heap 28 = alloc+0x1c)  <- trailing
+        // captures_size = round_up(16, 8) = 16, total block = 32. An 8-byte
+        // read of the trailing I32 at heap offset 28 reads bytes 28..36 —
+        // 4 bytes past the 32-byte allocation end (the prompt's
+        // "alloc+0x1c with only 4 bytes left to end").
+        let layout = arc_immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::I32]);
+        // SAFETY: alloc + per-slot writes are paired; single-threaded.
+        unsafe {
+            // Confirm the geometry actually places the last I32 in a slot
+            // whose 8-byte read would overrun (offset + 8 > captures_size).
+            let last = layout.capture_count() - 1;
+            assert!(
+                layout.capture_offset(last) + 8
+                    > layout.total_heap_size()
+                        - crate::v2::closure_layout::HEAP_CLOSURE_HEADER_SIZE,
+                "test must exercise the trailing-narrow overrun shape"
+            );
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, f64::to_bits(3.25));
+            write_capture_typed(ptr, &layout, 1, (-12345i32) as u32 as u64);
+            write_capture_typed(ptr, &layout, 2, (-7i32) as u32 as u64);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (b0, k0) = block.read_capture_kinded(0);
+            assert_eq!(f64::from_bits(b0), 3.25);
+            assert_eq!(k0, NativeKind::Float64);
+            let (b1, k1) = block.read_capture_kinded(1);
+            assert_eq!(b1 as i32, -12345);
+            assert_eq!(k1, NativeKind::Int32);
+            let (b2, k2) = block.read_capture_kinded(2);
+            assert_eq!(b2 as i32, -7);
+            assert_eq!(k2, NativeKind::Int32);
+        }
+
+        // Case B — I8/Bool trailing after an I32 (1-byte read path).
+        //   I32  @ capture-offset 0  (heap 16)
+        //   I8   @ capture-offset 4  (heap 20)         <- 1-byte slot
+        //   Bool @ capture-offset 5  (heap 21)         <- trailing 1-byte
+        // captures_size = round_up(6, 8) = 8, total = 24. An 8-byte read of
+        // the trailing Bool at heap offset 21 reads 21..29 — 5 bytes past
+        // the 24-byte allocation. The kind-width read takes the single byte.
+        let layout_b = arc_immutable_layout(&[ConcreteType::I32, ConcreteType::I8, ConcreteType::Bool]);
+        // SAFETY: alloc + per-slot writes are paired; single-threaded.
+        unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout_b);
+            write_capture_typed(ptr, &layout_b, 0, (-9i32) as u32 as u64);
+            write_capture_typed(ptr, &layout_b, 1, (-5i8) as u8 as u64);
+            write_capture_typed(ptr, &layout_b, 2, 1);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout_b));
+            let (b0, k0) = block.read_capture_kinded(0);
+            assert_eq!(b0 as i32, -9);
+            assert_eq!(k0, NativeKind::Int32);
+            let (b1, k1) = block.read_capture_kinded(1);
+            assert_eq!(b1 as i8, -5);
+            assert_eq!(k1, NativeKind::Int8);
+            let (b2, k2) = block.read_capture_kinded(2);
+            assert_eq!(b2, 1);
+            assert_eq!(k2, NativeKind::Bool);
+        }
+    }
+}

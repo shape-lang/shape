@@ -1,0 +1,54 @@
+version = "1"
+packages = []
+
+[[artifacts]]
+namespace = "external.native.library"
+key = "native-c@0.0.0::stub"
+producer = "shape-runtime/native_resolution@v1"
+inputs_hash = "sha256:90e35ebd310a7b2fd8278a5066389dafd5118cbb912e5ff6ce15154fd1cefc01"
+created_at = "2026-06-16T13:50:16.013984018+00:00"
+payload_json = '{"Object":{"alias":{"String":"stub"},"arch":{"String":"x86_64"},"available":{"Bool":true},"cache_key":"Null","cached":{"Bool":false},"declared_version":"Null","env":"Null","fingerprint":{"String":"sha256:1c2cdfa0752fb53b3caaf58dcf21b3ff17173aa2b54e2c7702be494008c1348c"},"load_target":{"String":"/home/dev/dev/shape-lang/shape-strict-flip-collection-dispatch/docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/./libstub.so"},"os":{"String":"linux"},"package_key":{"String":"native-c@0.0.0"},"package_name":{"String":"native-c"},"package_version":{"String":"0.0.0"},"path_exists":{"Bool":true},"path_like":{"Bool":true},"provider":{"String":"path"},"resolved":{"String":"./libstub.so"},"target":{"String":"linux-x86_64"}}}'
+
+[artifacts.determinism]
+mode = "external"
+
+[artifacts.determinism.fingerprints]
+"native:linux-x86_64:native-c@0.0.0:stub:path" = "sha256:1c2cdfa0752fb53b3caaf58dcf21b3ff17173aa2b54e2c7702be494008c1348c"
+
+[artifacts.inputs]
+alias = "stub"
+arch = "x86_64"
+"external::native:linux-x86_64:native-c@0.0.0:stub:path" = "sha256:1c2cdfa0752fb53b3caaf58dcf21b3ff17173aa2b54e2c7702be494008c1348c"
+os = "linux"
+package_key = "native-c@0.0.0"
+package_name = "native-c"
+package_version = "0.0.0"
+provider = "path"
+resolved = "./libstub.so"
+target = "linux-x86_64"
+
+[[artifacts]]
+namespace = "external.native.library"
+key = "native-c@0.0.0::stub"
+producer = "shape-runtime/native_resolution@v1"
+inputs_hash = "sha256:bee5873a7207c93c331dd20c9a5c8d54a503bd72b731baa2b89ab6ef533f6a6d"
+created_at = "2026-06-22T07:44:43.114717402+00:00"
+payload_json = '{"Object":{"alias":{"String":"stub"},"arch":{"String":"x86_64"},"available":{"Bool":true},"cache_key":"Null","cached":{"Bool":false},"declared_version":"Null","env":"Null","fingerprint":{"String":"sha256:5e08c527e83b5dc092b1a7e2edd018a7c465efc40de97f57ddfd91a1cda92b4b"},"load_target":{"String":"/home/dev/dev/shape-lang/shape-strict-flip-collection-dispatch/docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/./libstub.so"},"os":{"String":"linux"},"package_key":{"String":"native-c@0.0.0"},"package_name":{"String":"native-c"},"package_version":{"String":"0.0.0"},"path_exists":{"Bool":true},"path_like":{"Bool":true},"provider":{"String":"path"},"resolved":{"String":"./libstub.so"},"target":{"String":"linux-x86_64"}}}'
+
+[artifacts.determinism]
+mode = "external"
+
+[artifacts.determinism.fingerprints]
+"native:linux-x86_64:native-c@0.0.0:stub:path" = "sha256:5e08c527e83b5dc092b1a7e2edd018a7c465efc40de97f57ddfd91a1cda92b4b"
+
+[artifacts.inputs]
+alias = "stub"
+arch = "x86_64"
+"external::native:linux-x86_64:native-c@0.0.0:stub:path" = "sha256:5e08c527e83b5dc092b1a7e2edd018a7c465efc40de97f57ddfd91a1cda92b4b"
+os = "linux"
+package_key = "native-c@0.0.0"
+package_name = "native-c"
+package_version = "0.0.0"
+provider = "path"
+resolved = "./libstub.so"
+target = "linux-x86_64"

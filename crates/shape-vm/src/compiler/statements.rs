@@ -22,6 +22,49 @@ struct NativeFieldLayoutSpec {
 }
 
 impl BytecodeCompiler {
+    fn comptime_field_slot_from_literal(
+        struct_name: &str,
+        field_name: &str,
+        field_type: &FieldType,
+        literal: &Literal,
+    ) -> Result<shape_value::KindedSlot> {
+        let slot = match (field_type, literal) {
+            (FieldType::I64, Literal::Int(value)) => shape_value::KindedSlot::from_int(*value),
+            (FieldType::I64, Literal::UInt(value)) if *value <= i64::MAX as u64 => {
+                shape_value::KindedSlot::from_int(*value as i64)
+            }
+            (FieldType::F64, Literal::Number(value)) => {
+                shape_value::KindedSlot::from_number(*value)
+            }
+            (FieldType::F64, Literal::Int(value))
+                if (*value as i128) >= -(1i128 << 53) && (*value as i128) <= (1i128 << 53) =>
+            {
+                shape_value::KindedSlot::from_number(*value as f64)
+            }
+            (FieldType::F64, Literal::UInt(value)) if *value <= (1u64 << 53) => {
+                shape_value::KindedSlot::from_number(*value as f64)
+            }
+            (FieldType::String, Literal::String(value)) => {
+                shape_value::KindedSlot::from_string(value)
+            }
+            (FieldType::Bool, Literal::Bool(value)) => shape_value::KindedSlot::from_bool(*value),
+            (FieldType::Any | FieldType::Option(_), Literal::None) => {
+                shape_value::KindedSlot::none()
+            }
+            _ => {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Comptime field '{}' on type '{}' has default value incompatible with declared type '{}'",
+                        field_name, struct_name, field_type
+                    ),
+                    location: None,
+                });
+            }
+        };
+
+        Ok(slot)
+    }
+
     fn register_builtin_function_decl(
         &mut self,
         def: &shape_ast::ast::BuiltinFunctionDecl,
@@ -58,6 +101,7 @@ impl BytecodeCompiler {
         let call = Expr::QualifiedFunctionCall {
             namespace: "__comptime__".to_string(),
             function: method.to_string(),
+            const_args: Vec::new(),
             args,
             named_args: Vec::new(),
             span,
@@ -82,7 +126,10 @@ impl BytecodeCompiler {
         span: Span,
     ) -> Result<String> {
         serde_json::to_string(value).map_err(|e| ShapeError::RuntimeError {
-            message: format!("Failed to serialize comptime {} directive: {}", directive_label, e),
+            message: format!(
+                "Failed to serialize comptime {} directive: {}",
+                directive_label, e
+            ),
             location: Some(self.span_to_source_location(span)),
         })
     }
@@ -91,11 +138,450 @@ impl BytecodeCompiler {
     fn require_comptime_mode(&self, directive_name: &str, span: Span) -> Result<()> {
         if !self.comptime_mode {
             return Err(ShapeError::SemanticError {
-                message: format!("`{}` is only valid inside `comptime {{}}` context", directive_name),
+                message: format!(
+                    "`{}` is only valid inside `comptime {{}}` context",
+                    directive_name
+                ),
                 location: Some(self.span_to_source_location(span)),
             });
         }
         Ok(())
+    }
+
+    /// strict-flip (map/collect OUTPUT element-type stamp): reject a `let`
+    /// binding whose explicit `Array<T_decl>` annotation does NOT match the
+    /// PROVEN result element type of a computed initializer.
+    ///
+    /// The hole this closes: `let r: Array<number> = [1,2,3].map(|x| x*2)`
+    /// (and the `.iter().map(...).collect()` form). The map's OUTPUT element
+    /// type is the closure RETURN type — `int` here — so the result is
+    /// `Array<int>`. `int` and `number` do NOT unify (CLAUDE.md §Type-System
+    /// Rules): an `Array<int>` result must NOT coerce to `Array<number>`.
+    /// Without this check the binding's slot was stamped `Float64` from the
+    /// annotation while the runtime array carries `Int64` bits — reading them
+    /// as `number` is a bit-reinterpret (the overflow/garbage surface).
+    ///
+    /// Per ADR-006 §2.7.5 stamp-at-compile-time, the proof is the closure's
+    /// RETURN type carried through `specialized_call_return_concrete_type`
+    /// (the substituted callee return annotation). We compare the declared and
+    /// proven `ConcreteType`s structurally; a mismatch is a hard compile error.
+    ///
+    /// Scope is deliberately narrow to avoid regressing lossless literal
+    /// adoption:
+    ///   - An `Expr::Array` literal initializer is SKIPPED — per-element
+    ///     literal adoption (`let a: Array<number> = [1,2,3]`) is handled by
+    ///     the array-emission element path and is lossless/allowed.
+    ///   - We only reject when BOTH the declared annotation AND the
+    ///     initializer resolve to a concrete `Array<T>` whose element types
+    ///     differ. An un-inferable initializer element type yields `None` and
+    ///     the binding falls through to the existing annotation-driven path
+    ///     (a numeric annotation on an unknown-element computed result is the
+    ///     caller's responsibility — this helper never fabricates a match).
+    /// strict-flip S1 (let-annotation Unknown-accept guard, FIX B,
+    /// 2026-06-22): reject `let x: <proven-concrete> = <init>` when the
+    /// initializer's type is genuinely un-inferable (`unknown` / an unresolved
+    /// free type variable). This is the binding-site mirror of
+    /// `reject_unknown_arg_into_typed_param` (function_calls.rs): an
+    /// `unknown`-typed value must NOT launder through a typed binding into a
+    /// concrete slot, where its raw bits would be reinterpreted as that slot's
+    /// `NativeKind` (the catastrophic cross-type reinterpret —
+    /// `let bad: int = apply(ret_num, 3.0)` ⇒ `6.0`'s f64 bits read as an i64
+    /// for `bad % 4`).
+    ///
+    /// NO FALSE POSITIVES after the T1 keystone + the call-site HOF return
+    /// propagation (FIX A): a legitimate dispatch result
+    /// (`let n: int = arr.map(..)[0]`, `let x: int = someTypedCall()`,
+    /// `let r: number = apply(ret_num, 3.0)`) resolves to a CONCRETE type via
+    /// `concrete_type_for_expr` / the post-solve expr-type table, so it never
+    /// reaches the `unknown` reject here. Only a genuinely-unknown result — an
+    /// un-annotated HOF whose param return type cannot be resolved — rejects,
+    /// which is correct: the user must annotate the HOF or type its parameter.
+    ///
+    /// Scope is deliberately narrow: the annotation must be a PROVEN concrete
+    /// PRIMITIVE scalar (`int`/`number`/`bool`/`string`/…). Generic, structural,
+    /// trait-object, and nominal annotations fall through (the existing
+    /// annotation-driven path owns them) so this guard never regresses a
+    /// program whose binding type the tracker legitimately could not prove
+    /// concretely.
+    fn check_let_annotation_scalar_unknown_strict(
+        &mut self,
+        type_ann: &TypeAnnotation,
+        init_expr: &Expr,
+    ) -> Result<()> {
+        // Only a bare proven-concrete primitive scalar annotation triggers the
+        // guard. (`Array<T>` element mismatch is handled by the sibling
+        // element-type check; generic/structural/nominal annotations are not
+        // "proven concrete primitive" and fall through.)
+        let prim_name = match type_ann {
+            TypeAnnotation::Basic(n) => n.as_str(),
+            TypeAnnotation::Reference(p) => p.as_str(),
+            _ => return Ok(()),
+        };
+        if !Self::is_known_concrete_primitive_name(prim_name) {
+            return Ok(());
+        }
+
+        // If the initializer resolves to a CONCRETE type by FIX-A propagation
+        // (the call-site HOF return resolver) or any other proof path, compare
+        // it to the declared annotation directly. An un-annotated HOF whose
+        // return resolves to a concrete primitive (`apply(ret_num, 3.0)` ⇒
+        // `number`) is NOT seen by the type-inference constraint solver (the
+        // callee has no return annotation, so the engine left it `unknown`),
+        // so the solver never raises the mismatch — we must catch it HERE.
+        //   - resolved == declared  → well-typed; never reject.
+        //   - resolved != declared, both proven primitives → hard mismatch
+        //     (`number` resolved into an `int` binding): `int`/`number` do not
+        //     unify (CLAUDE.md §Type-System-Rules). Reject — NO silent widen.
+        //   - resolved is a non-primitive concrete type → fall through (the
+        //     element/nominal paths + solver own it).
+        if let Some(resolved) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, init_expr,
+            )
+        {
+            use shape_value::v2::ConcreteType;
+            let resolved_prim = match &resolved {
+                ConcreteType::I64 => Some("int"),
+                ConcreteType::F64 => Some("number"),
+                ConcreteType::Bool => Some("bool"),
+                ConcreteType::String => Some("string"),
+                _ => None,
+            };
+            let Some(resolved_prim) = resolved_prim else {
+                return Ok(());
+            };
+            // `int`/`uint`-family aliasing: treat the declared name's canonical
+            // primitive against the resolved one. A direct string match covers
+            // the load-bearing `int`/`number`/`bool`/`string` cases.
+            if resolved_prim == prim_name {
+                return Ok(());
+            }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "type mismatch: binding declares '{}' but the initializer \
+                     produces '{}' — `int` and `number` do not unify, so the \
+                     type must match exactly (cast explicitly with `as` if a \
+                     conversion is intended)",
+                    prim_name, resolved_prim
+                ),
+                location: Some(self.span_to_source_location(init_expr.span())),
+            });
+        }
+
+        // strict-flip S1 REVERT (angle-A, 2026-06-22): the prior
+        // `init_rests_on_unprovable_unannotated_fn` guard rejected ANY
+        // `let x: <prim> = f(<concrete args>)` where `f` is an un-return-typed
+        // user fn — over-rejecting a large idiomatic class (`fn f(x){x+1};
+        // let r: int = f(5)` genuinely returns int from its body). A correct
+        // matching annotation must NEVER turn a working program into a compile
+        // error. Removed. The genuinely-`unknown` cases the structural detector
+        // was meant to cover are still caught by the post-solve
+        // `Type::Variable`/`"unknown"` fallback below (which does NOT fire when
+        // inference proves a usable concrete primitive for such a call).
+        //
+        // HOLE-2: a mixed-type arithmetic binary op (`apply(ret_num, 3.0) % 4`
+        // = `number % int`). `concrete_type_for_expr` correctly yields `None`
+        // for the disagreeing operands (no fabrication), but the engine's
+        // `infer_expr_type` reads back the WRONG `int` from the integer literal
+        // operand, masking the `number`-typed result. When an operand of an
+        // arithmetic binop resolves (structurally, annotation-independently) to
+        // a concrete primitive that disagrees with the declared annotation, the
+        // result cannot be the declared type — reject. `int`/`number` do not
+        // unify; no silent widen.
+        if let Some(operand_prim) = self.binop_operand_disagreeing_primitive(init_expr, prim_name) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "type mismatch: binding declares '{}' but an operand of the \
+                     initializer's arithmetic expression produces '{}' — `int` and \
+                     `number` do not unify, so the type must match exactly (cast \
+                     explicitly with `as` if a conversion is intended)",
+                    prim_name, operand_prim
+                ),
+                location: Some(self.span_to_source_location(init_expr.span())),
+            });
+        }
+
+        // Fall back to the post-solve inferred type for the genuinely-unknown
+        // (`Type::Variable` / `"unknown"`) case the structural detector does not
+        // cover (e.g. a bare `let x: int = some_unknown_local`). A concrete
+        // inferred type falls through to the constraint solver.
+        let Ok(init_ty) = self.infer_expr_type(init_expr) else {
+            return Ok(());
+        };
+        if !Self::type_is_unknown(&init_ty) {
+            return Ok(());
+        }
+
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "the initializer has an un-inferable type (`unknown`), but the \
+                 binding declares the proven concrete type '{}' — an \
+                 `unknown`-typed value cannot be accepted into a typed binding \
+                 (this would reinterpret its raw bits as '{}'). Annotate the \
+                 source (e.g. give the higher-order function a return type or \
+                 type its callable parameter) so the type is proven.",
+                prim_name, prim_name
+            ),
+            location: Some(self.span_to_source_location(init_expr.span())),
+        })
+    }
+
+    /// strict-flip S1 (HOLE-2, 2026-06-22): for an arithmetic binary-op init,
+    /// return the proven primitive type NAME of an operand that DISAGREES with
+    /// the declared annotation `decl_prim`. The arithmetic result must be the
+    /// operands' common type; an operand proven to a different primitive means
+    /// the binding can NEVER hold the declared type (`number % int` into an
+    /// `int` binding). Resolves each operand structurally via
+    /// `concrete_type_for_expr` (annotation-independent — the engine's
+    /// `infer_expr_type` is unreliable here, it echoes the integer literal).
+    /// Returns `None` for non-arithmetic ops, fully-agreeing operands, or
+    /// operands the resolver cannot prove (those route through the other
+    /// guards). NO fabrication.
+    fn binop_operand_disagreeing_primitive(&self, expr: &Expr, decl_prim: &str) -> Option<String> {
+        use shape_ast::ast::BinaryOp;
+        use shape_value::v2::ConcreteType;
+        let Expr::BinaryOp {
+            left, op, right, ..
+        } = expr
+        else {
+            return None;
+        };
+        if !matches!(
+            op,
+            BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Mod
+                | BinaryOp::Pow
+        ) {
+            return None;
+        }
+        let prim_name_of = |ct: &ConcreteType| -> Option<&'static str> {
+            match ct {
+                ConcreteType::I64 => Some("int"),
+                ConcreteType::F64 => Some("number"),
+                ConcreteType::Bool => Some("bool"),
+                ConcreteType::String => Some("string"),
+                _ => None,
+            }
+        };
+        for operand in [left.as_ref(), right.as_ref()] {
+            // Numeric literals adopt the surrounding context losslessly (an
+            // `int` literal in a `number` arithmetic is fine) — never the
+            // source of a genuine mismatch here. Skip them so `let r: number =
+            // x % 4` is not falsely flagged by the integer literal `4`.
+            if matches!(operand, Expr::Literal(..)) {
+                continue;
+            }
+            if let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, operand,
+                )
+            {
+                if let Some(op_prim) = prim_name_of(&ct) {
+                    if op_prim != decl_prim {
+                        return Some(op_prim.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn check_let_annotation_element_type_strict(
+        &mut self,
+        type_ann: &TypeAnnotation,
+        init_expr: &Expr,
+    ) -> Result<()> {
+        use shape_value::v2::ConcreteType;
+
+        // Flat array-literal initializers adopt element types per-element
+        // (lossless literal adoption); never reject them here. Nested array
+        // literals still have structural element shape, so `Array<number> =
+        // [[...]]` must reject instead of bypassing this check.
+        if matches!(
+            init_expr,
+            Expr::Array(elements, _)
+                if !elements.iter().any(|e| matches!(e, Expr::Array(..)))
+        ) {
+            return Ok(());
+        }
+
+        // Declared annotation must resolve to a concrete `Array<T_decl>`.
+        let Some(ConcreteType::Array(decl_elem)) =
+            crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, type_ann,
+            )
+        else {
+            return Ok(());
+        };
+
+        // Proven result type of the computed initializer must be a concrete
+        // `Array<T_init>`. Two sources of proof:
+        //   1. The eager `recv.map(|x| ...)` form + receiver-derived builtin
+        //      array methods, resolved by `concrete_type_for_expr` (which
+        //      threads the closure RETURN type through
+        //      `specialized_call_return_concrete_type`).
+        //   2. The lazy `recv.iter().map(|x| ...).collect()` form, whose
+        //      iterator-receiver `.map()` / `.collect()` are NOT monomorphized
+        //      stdlib functions, so source (1) finds nothing. The dedicated
+        //      iterator-chain resolver below stamps the result element = the
+        //      iterator's current element type = the LAST map closure's RETURN
+        //      type (or the source array element when no map adapter is
+        //      present).
+        // Unknown → fall through (the annotation-driven path owns it; this
+        // helper never fabricates a match).
+        let init_elem = if let Some(ConcreteType::Array(e)) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, init_expr,
+            ) {
+            e
+        } else if let Some(e) = self.iterator_collect_result_element_concrete_type(init_expr) {
+            Box::new(e)
+        } else {
+            return Ok(());
+        };
+
+        if *decl_elem != *init_elem {
+            let reason = match (decl_elem.as_ref(), init_elem.as_ref()) {
+                (ConcreteType::I64, ConcreteType::F64) | (ConcreteType::F64, ConcreteType::I64) => {
+                    "`int` and `number` do not unify, so the element type must match exactly \
+                     (cast explicitly with `as` if a conversion is intended)"
+                }
+                _ => {
+                    "the initializer's element structure must match the annotation exactly \
+                     (nested arrays require an array-of-array or matrix-shaped annotation)"
+                }
+            };
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "type mismatch: binding annotated `Array<{}>` but the \
+                     initializer produces `Array<{}>` — {reason}",
+                    decl_elem.mono_key(),
+                    init_elem.mono_key(),
+                ),
+                location: Some(self.span_to_source_location(init_expr.span())),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// strict-flip (map/collect OUTPUT element-type stamp): resolve the PROVEN
+    /// result element `ConcreteType` of a lazy iterator-collect chain
+    /// (`recv.iter().map(f1)…collect()` / `.toArray()`).
+    ///
+    /// The iterator-receiver `.map()` / `.collect()` are NOT monomorphized
+    /// stdlib functions, so the normal
+    /// `specialized_call_return_concrete_type` chain finds no call-site record
+    /// and `concrete_type_for_expr` returns `None`. This walks the chain
+    /// structurally and stamps the result element = the iterator's CURRENT
+    /// element type, per the registered iterator signatures
+    /// (`method_table.rs` §iterator_methods):
+    ///   - `collect` / `toArray` → `Vec<T>` where `T` is the receiver
+    ///     iterator's element.
+    ///   - `iter()` over `Array<T>` → element `T`.
+    ///   - `map(closure)` → element = the closure RETURN type (the OUTPUT
+    ///     element-type stamp — `int` stays `int`, `number` stays `number`).
+    ///   - `filter` / `take` / `skip` → element unchanged.
+    ///
+    /// Per ADR-006 §2.7.5 stamp-at-compile-time, the map output element is the
+    /// closure's RETURN type inferred from its body against the proven input
+    /// element type — no runtime probe, no coercion. Any un-inferable link
+    /// yields `None` (the caller then falls through; the strict check never
+    /// fabricates a match).
+    fn iterator_collect_result_element_concrete_type(
+        &mut self,
+        expr: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let Expr::MethodCall {
+            receiver, method, ..
+        } = expr
+        else {
+            return None;
+        };
+        match method.as_str() {
+            // Eager terminal: the result element = the receiver iterator's
+            // current element type.
+            "collect" | "toArray" => self.iterator_element_concrete_type(receiver),
+            _ => None,
+        }
+    }
+
+    /// Resolve the element `ConcreteType` of an iterator-producing expression
+    /// (the lazy-adapter chain rooted at `.iter()`). See
+    /// [`Self::iterator_collect_result_element_concrete_type`] for the stamping
+    /// rules and the ADR-006 §2.7.5 proof discipline.
+    fn iterator_element_concrete_type(
+        &mut self,
+        expr: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        use shape_value::v2::ConcreteType;
+
+        let Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+
+        match method.as_str() {
+            // `iter()` over an `Array<T>` receiver → element `T`. The receiver
+            // is a concrete array expr (literal, identifier, or an eager
+            // array-returning chain), resolved by the immutable
+            // `concrete_type_for_expr`.
+            "iter" => {
+                match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, receiver,
+                ) {
+                    Some(ConcreteType::Array(elem)) => Some(*elem),
+                    _ => None,
+                }
+            }
+            // `map(closure)` → element = the closure RETURN type, inferred from
+            // its body against the receiver iterator's CURRENT element type.
+            "map" => {
+                let recv_elem = self.iterator_element_concrete_type(receiver)?;
+                let Some(Expr::FunctionExpr {
+                    params: cparams,
+                    body: cbody,
+                    return_type,
+                    ..
+                }) = args.first()
+                else {
+                    return None;
+                };
+                // Seed the closure param's type with the proven input element
+                // type (the §2.7.5 proof of the closure param at this site).
+                let elem_ann =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(
+                        &recv_elem,
+                    );
+                let caller_arg_type_names: Vec<Option<String>> = vec![
+                    elem_ann
+                        .as_ref()
+                        .and_then(Self::tracked_type_name_from_annotation),
+                ];
+                let return_type_name =
+                    crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_caller_context(
+                        self,
+                        cparams,
+                        cbody,
+                        return_type.as_ref(),
+                        &[],
+                        &caller_arg_type_names,
+                    )?;
+                let vec_emission = crate::compiler::v2_map_emission::concrete_type_from_annotation;
+                vec_emission(&shape_ast::ast::TypeAnnotation::Basic(return_type_name))
+            }
+            // Element-preserving lazy adapters.
+            "filter" | "take" | "skip" => self.iterator_element_concrete_type(receiver),
+            _ => None,
+        }
     }
 
     fn emit_comptime_extend_directive(
@@ -405,11 +891,29 @@ impl BytecodeCompiler {
                         impl_name,
                         &impl_block.target_type,
                     )?;
+                    // Async `Drop::drop` is registered under the
+                    // disambiguated symbol name `drop_async` (mirrors the
+                    // `func_def.name` disambiguation in
+                    // `desugar_impl_method`). Registering both the sync and
+                    // async variant under the bare `drop` key would let the
+                    // last-declared impl overwrite the first — making
+                    // drop-variant selection DECLARATION-ORDER dependent
+                    // (a sync `DropCall` would resolve to whichever variant
+                    // happened to be declared last). The runtime
+                    // (`op_drop_call_impl`) looks up `drop_async` for the
+                    // async opcode and `drop` for the sync opcode, so the
+                    // symbol key must carry the same distinction.
+                    let symbol_method_name =
+                        if trait_basename == "Drop" && method.name == "drop" && method.is_async {
+                            "drop_async"
+                        } else {
+                            method.name.as_str()
+                        };
                     self.program.register_trait_method_symbol(
                         &trait_basename,
                         type_name,
                         impl_name,
-                        &method.name,
+                        symbol_method_name,
                         &func_def.name,
                     );
                     self.register_function(&func_def)?;
@@ -486,11 +990,7 @@ impl BytecodeCompiler {
                 // time — see `op_dyn_method_call`. No silent default,
                 // no Bool-default fallback (CLAUDE.md "Renames to refuse
                 // on sight"; phase-2d-hardening item (a)).
-                self.build_and_register_vtable(
-                    &trait_basename,
-                    type_name,
-                    impl_block,
-                )?;
+                self.build_and_register_vtable(&trait_basename, type_name, impl_block)?;
 
                 // BUG-4.6 fix: Register the trait impl in the type inference
                 // environment so that `implements()` can see it at comptime.
@@ -522,7 +1022,8 @@ impl BytecodeCompiler {
                             TypeAnnotation::Generic { name, .. } => name.to_string(),
                             _ => continue,
                         };
-                        let (_canonical_super, super_basename) = self.resolve_trait_name(&super_name);
+                        let (_canonical_super, super_basename) =
+                            self.resolve_trait_name(&super_name);
                         if !self
                             .type_inference
                             .env
@@ -683,12 +1184,27 @@ impl BytecodeCompiler {
 
         // Register function return type for typed opcode emission.
         // When a function has an explicit return type annotation (e.g., `: int`),
-        // record it so that call sites can propagate NumericType through expressions
-        // like `fib(n-1) + fib(n-2)` and emit AddInt instead of generic Add.
+        // record its ConcreteType so call sites can propagate the numeric type
+        // through expressions like `fib(n-1) + fib(n-2)` and emit AddInt instead
+        // of generic Add. U4-5b: registered STRUCTURALLY as a `ConcreteType` — no
+        // `as_simple_name()` display string. A shape with no `ConcreteType`
+        // projection (unresolved annotation) registers nothing (surface-and-stop).
         if let Some(ref return_type) = func_def.return_type {
-            if let Some(type_name) = return_type.as_simple_name() {
+            // Resolve via the SCHEMA-AWARE `declared_annotation_concrete_type`
+            // (not the bare `concrete_type_from_annotation`) so a named
+            // struct/enum return (`fn make() -> Box`) resolves to
+            // `ConcreteType::Struct`/`Enum` — the v2-typed-array element-carrier
+            // detection (`array_elements_all_typed_object`) needs the struct
+            // identity. An unresolvable annotation registers nothing
+            // (surface-and-stop).
+            if let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                    self,
+                    return_type,
+                )
+            {
                 self.type_tracker
-                    .register_function_return_type(&func_def.name, type_name);
+                    .register_function_return_concrete_type(&func_def.name, ct);
             }
         }
 
@@ -718,7 +1234,7 @@ impl BytecodeCompiler {
                             return Err(ShapeError::SemanticError {
                                 message: format!(
                                     "module-level `const` initializer must be comptime-evaluable \
-                                     (literal, or unary `-`/`!` on a literal). \
+                                     (literal, comptime block, or unary `-`/`!` on a literal). \
                                      Function calls and other runtime-dependent expressions are \
                                      rejected per R8 W8 Cluster A (2026-05-24). \
                                      Extending the comptime evaluator is v0.4-concurrency-design-pass \
@@ -734,12 +1250,14 @@ impl BytecodeCompiler {
                 let mut ref_borrow = None;
                 let init_err = if let Some(init_expr) = &var_decl.value {
                     let saved_pending_variable_name = self.pending_variable_name.clone();
+                    let saved_pending_variable_span = self.pending_variable_span;
                     let saved_pending_variable_typed_array_kind =
                         self.pending_variable_typed_array_kind;
                     self.pending_variable_name = var_decl
                         .pattern
                         .as_identifier()
                         .map(|name| name.to_string());
+                    self.pending_variable_span = var_decl.pattern.as_identifier_span();
                     // v2 Phase 3.1 (Agent 3): when the binding has an
                     // explicit `Array<T>` annotation whose element type
                     // maps to a typed-array kind, signal it to
@@ -754,17 +1272,22 @@ impl BytecodeCompiler {
                     self.pending_variable_typed_array_kind = var_decl
                         .type_annotation
                         .as_ref()
-                        .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
-                    match self.compile_expr_for_reference_binding(init_expr) {
+                        .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
+                    match self.compile_expr_for_reference_binding_with_expected_return(
+                        init_expr,
+                        var_decl.type_annotation.as_ref(),
+                    ) {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
                             self.pending_variable_name = saved_pending_variable_name;
+                            self.pending_variable_span = saved_pending_variable_span;
                             self.pending_variable_typed_array_kind =
                                 saved_pending_variable_typed_array_kind;
                             None
                         }
                         Err(e) => {
                             self.pending_variable_name = saved_pending_variable_name;
+                            self.pending_variable_span = saved_pending_variable_span;
                             self.pending_variable_typed_array_kind =
                                 saved_pending_variable_typed_array_kind;
                             // Push null as placeholder so the variable still gets registered
@@ -776,11 +1299,16 @@ impl BytecodeCompiler {
                     self.emit(Instruction::simple(OpCode::PushNull));
                     None
                 };
+                if init_err.is_none() {
+                    self.patch_static_set_ctor_from_annotation(
+                        var_decl.value.as_ref(),
+                        var_decl.type_annotation.as_ref(),
+                    );
+                }
                 // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
                 // empty-array-accumulator placeholder index now, before any
                 // downstream emission can reset it.
-                let captured_empty_array_alloc_idx =
-                    self.pending_empty_array_alloc_idx.take();
+                let captured_empty_array_alloc_idx = self.pending_empty_array_alloc_idx.take();
 
                 if let Some(name) = var_decl.pattern.as_identifier() {
                     // v0.3.3 c6 (Wave 1): re-add narrow B0003 guard for
@@ -799,7 +1327,21 @@ impl BytecodeCompiler {
                     // claim "MIR is the sole authority" only holds inside
                     // function bodies; module-scope top-level statements
                     // need a dedicated guard.
-                    if ref_borrow.is_some() {
+                    //
+                    // ADR-006 §2.7.30 (FlipLive): the guard now flips for the
+                    // EXACT `ModuleBindingStore` floor sink — `let r = &x`
+                    // where `x` is itself a program-lifetime module binding.
+                    // Such a referent outlives every reference to it, so the
+                    // escape→RC promotion is unconditionally sound and the
+                    // binding compiles + reads through the `RefTarget::
+                    // ModuleBinding` carrier. Any OTHER reference escape
+                    // (referent rooted at a local, etc.) is NOT a floor sink
+                    // and still rejects with B0003.
+                    let referent_is_module_floor = var_decl
+                        .value
+                        .as_ref()
+                        .is_some_and(|expr| self.reference_root_is_module_binding(expr));
+                    if ref_borrow.is_some() && !referent_is_module_floor {
                         return Err(ShapeError::SemanticError {
                             message:
                                 "[B0003] cannot return or store a reference that outlives its owner"
@@ -811,6 +1353,11 @@ impl BytecodeCompiler {
                         });
                     }
                     let binding_idx = self.get_or_create_module_binding(name);
+                    if let Some(span) = var_decl.pattern.as_identifier_span()
+                        && !span.is_dummy()
+                    {
+                        self.module_binding_spans.insert(binding_idx, span);
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
@@ -822,7 +1369,8 @@ impl BytecodeCompiler {
                     // the initializer compiled and is still set if the
                     // typed path was taken.
                     if let Some(kind) = self.pending_variable_typed_array_kind {
-                        self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                        self.v2_typed_array_module_bindings
+                            .insert(binding_idx, kind);
                     }
                     // Phase 4b Round 6 WS-1b W16.2-C residual: re-key a bare
                     // empty-array-accumulator placeholder against this module
@@ -856,7 +1404,12 @@ impl BytecodeCompiler {
                         }
                     } else {
                         let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
-                        self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
+                        self.propagate_initializer_type_to_slot(
+                            binding_idx,
+                            false,
+                            is_mutable,
+                            var_decl.value.as_ref(),
+                        );
                     }
 
                     // Track for auto-drop at program exit
@@ -913,7 +1466,7 @@ impl BytecodeCompiler {
                                 return Err(ShapeError::SemanticError {
                                     message: format!(
                                         "`const` initializer must be comptime-evaluable \
-                                         (literal, or unary `-`/`!` on a literal). \
+                                         (literal, comptime block, or unary `-`/`!` on a literal). \
                                          Function calls and other runtime-dependent expressions \
                                          are rejected per R8 W8 Cluster A (2026-05-24). \
                                          Extending the comptime evaluator is v0.4-concurrency-\
@@ -943,25 +1496,38 @@ impl BytecodeCompiler {
                     let mut ref_borrow = None;
                     if let Some(init_expr) = &var_decl.value {
                         let saved_pending_variable_name = self.pending_variable_name.clone();
+                        let saved_pending_variable_span = self.pending_variable_span;
                         let saved_pending_variable_typed_array_kind =
                             self.pending_variable_typed_array_kind;
                         self.pending_variable_name = var_decl
                             .pattern
                             .as_identifier()
                             .map(|name| name.to_string());
+                        self.pending_variable_span = var_decl.pattern.as_identifier_span();
                         // v2 Phase 3.1 (Agent 3): see ModuleBinding case above.
                         // Phase 4b Round 4 W16.2-A (2026-05-18): user-struct
                         // annotation support via `resolve_typed_array_kind_from_annotation`.
                         self.pending_variable_typed_array_kind = var_decl
                             .type_annotation
                             .as_ref()
-                            .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
-                        let compile_result = self.compile_expr_for_reference_binding(init_expr);
+                            .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
+                        let compile_result = self
+                            .compile_expr_for_reference_binding_with_expected_return(
+                                init_expr,
+                                var_decl.type_annotation.as_ref(),
+                            );
                         self.pending_variable_name = saved_pending_variable_name;
+                        self.pending_variable_span = saved_pending_variable_span;
                         self.pending_variable_typed_array_kind =
                             saved_pending_variable_typed_array_kind;
                         ref_borrow = compile_result?;
-                        if ref_borrow.is_some() {
+                        // ADR-006 §2.7.30 (FlipLive): flip EXACTLY the
+                        // `ModuleBindingStore` floor sink — `pub let r = &x`
+                        // where `x` is a program-lifetime module binding.
+                        // Same scoping predicate as the non-export site above.
+                        let referent_is_module_floor =
+                            self.reference_root_is_module_binding(init_expr);
+                        if ref_borrow.is_some() && !referent_is_module_floor {
                             return Err(ShapeError::SemanticError {
                                 message:
                                     "[B0003] cannot return or store a reference that outlives its owner"
@@ -972,8 +1538,17 @@ impl BytecodeCompiler {
                     } else {
                         self.emit(Instruction::simple(OpCode::PushNull));
                     }
+                    self.patch_static_set_ctor_from_annotation(
+                        var_decl.value.as_ref(),
+                        var_decl.type_annotation.as_ref(),
+                    );
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         let binding_idx = self.get_or_create_module_binding(name);
+                        if let Some(span) = var_decl.pattern.as_identifier_span()
+                            && !span.is_dummy()
+                        {
+                            self.module_binding_spans.insert(binding_idx, span);
+                        }
                         self.emit(Instruction::new(
                             OpCode::StoreModuleBinding,
                             Some(Operand::ModuleBinding(binding_idx)),
@@ -1191,10 +1766,8 @@ impl BytecodeCompiler {
                 // W7 (2026-05-17): build the TypeReflectionSnapshot for
                 // `type_info(T)` resolution. Top-level comptime block has
                 // no enclosing generic-type-param scope.
-                let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
-                    self,
-                    &[],
-                );
+                let type_snapshot =
+                    super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
                 // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
                 // rationale on comptime-context items.
                 let comptime_impl_blocks = self.comptime_impl_blocks.clone();
@@ -1435,15 +2008,24 @@ impl BytecodeCompiler {
                     if local_name != canonical_path {
                         let alias_idx = self.get_or_create_module_binding(local_name);
 
-                        // Copy type info from canonical to alias
-                        let module_schema_name = format!("__mod_{}", canonical_path);
-                        if self
-                            .type_tracker
-                            .schema_registry()
-                            .get(&module_schema_name)
-                            .is_some()
+                        // Copy type info from canonical to alias. Shape-source
+                        // modules get their object schema when the dependency
+                        // module is compiled; native modules use the synthetic
+                        // __mod_* schema registered above.
+                        if let Some(type_info) =
+                            self.type_tracker.get_binding_type(canonical_idx).cloned()
                         {
-                            self.set_module_binding_type_info(alias_idx, &module_schema_name);
+                            self.type_tracker.set_binding_type(alias_idx, type_info);
+                        } else {
+                            let module_schema_name = format!("__mod_{}", canonical_path);
+                            if self
+                                .type_tracker
+                                .schema_registry()
+                                .get(&module_schema_name)
+                                .is_some()
+                            {
+                                self.set_module_binding_type_info(alias_idx, &module_schema_name);
+                            }
                         }
 
                         // Emit runtime binding copy: alias = canonical
@@ -1546,16 +2128,15 @@ impl BytecodeCompiler {
                         // constant's kind is stamped from the literal at
                         // compile time when the compiler reaches the
                         // identifier reference.
-                        if matches!(
-                            sym.kind,
-                            shape_ast::module_utils::ModuleExportKind::Value
-                        ) {
+                        if matches!(sym.kind, shape_ast::module_utils::ModuleExportKind::Value) {
                             if let Some(ref dep_ast) = dep_node.ast {
                                 for item in &dep_ast.items {
                                     if let shape_ast::ast::Item::Export(export, _) = item {
                                         if let Some(ref decl) = export.source_decl {
                                             if decl.kind == shape_ast::ast::VarKind::Const {
-                                                if let Some(decl_name) = decl.pattern.as_identifier() {
+                                                if let Some(decl_name) =
+                                                    decl.pattern.as_identifier()
+                                                {
                                                     if decl_name == sym.original_name {
                                                         if let Some(ref init) = decl.value {
                                                             self.imported_consts
@@ -1582,11 +2163,7 @@ impl BytecodeCompiler {
         let Some(registry) = self.extension_registry.as_ref() else {
             return;
         };
-        let Some(module) = registry
-            .iter()
-            .rev()
-            .find(|m| m.name == module_path)
-        else {
+        let Some(module) = registry.iter().rev().find(|m| m.name == module_path) else {
             return;
         };
 
@@ -1627,15 +2204,6 @@ impl BytecodeCompiler {
         }
 
         let schema_name = format!("__mod_{}", module_path);
-        if self
-            .type_tracker
-            .schema_registry()
-            .get(&schema_name)
-            .is_some()
-        {
-            return;
-        }
-
         let mut export_names: Vec<String> = module
             .export_names_available(self.comptime_mode)
             .into_iter()
@@ -1677,7 +2245,7 @@ impl BytecodeCompiler {
         // surfacing as "module 'X' has no export 'Y'" at compile time.
         self.type_tracker
             .schema_registry_mut()
-            .register_type_scoped(schema_name, fields);
+            .upsert_type_scoped_union_fields(schema_name, fields);
     }
 
     /// Register an enum definition in the TypeSchemaRegistry
@@ -1694,15 +2262,12 @@ impl BytecodeCompiler {
                 // is unchanged (`__payload_N` slots at offset 8/16/...);
                 // the kind here only descriptively shapes the print form.
                 match &member.kind {
-                    EnumMemberKind::Unit { .. } => {
-                        EnumVariantInfo::new(&member.name, id as u16, 0)
-                    }
+                    EnumMemberKind::Unit { .. } => EnumVariantInfo::new(&member.name, id as u16, 0),
                     EnumMemberKind::Tuple(types) => {
                         EnumVariantInfo::new(&member.name, id as u16, types.len() as u16)
                     }
                     EnumMemberKind::Struct(fields) => {
-                        let names: Vec<String> =
-                            fields.iter().map(|f| f.name.clone()).collect();
+                        let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
                         EnumVariantInfo::new_struct(&member.name, id as u16, names)
                     }
                 }
@@ -1747,22 +2312,21 @@ impl BytecodeCompiler {
             }
         }
 
-        let schema = shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());
+        let schema =
+            shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());
         self.type_tracker.schema_registry_mut().register(schema);
 
         // Also register under bare name if the qualified name contains "::"
         // so runtime code that uses bare enum names (e.g., "Snapshot") can find the schema.
         if let Some(basename) = enum_def.name.rsplit("::").next() {
             if basename != enum_def.name
-                && self
-                    .type_tracker
-                    .schema_registry()
-                    .get(basename)
-                    .is_none()
+                && self.type_tracker.schema_registry().get(basename).is_none()
             {
                 let alias_schema =
                     shape_runtime::type_schema::TypeSchema::new_enum(basename, variants);
-                self.type_tracker.schema_registry_mut().register(alias_schema);
+                self.type_tracker
+                    .schema_registry_mut()
+                    .register(alias_schema);
             }
         }
         Ok(())
@@ -1814,7 +2378,8 @@ impl BytecodeCompiler {
         method: &shape_ast::ast::types::MethodDef,
         target_type: &shape_ast::ast::TypeName,
     ) -> Result<FunctionDef> {
-        let receiver_type = Some(Self::type_name_to_annotation(target_type));
+        let (implicit_extend_type_params, receiver_type) =
+            Self::synthesize_extend_type_params(target_type);
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
         // Extend methods use qualified "Type.method" names to avoid collisions
@@ -1832,7 +2397,7 @@ impl BytecodeCompiler {
         // Heuristic: a type arg is a type PARAMETER (not a concrete type) if
         // it's a Basic annotation whose name is a single uppercase letter
         // (the standard convention for type variables: T, U, K, V).
-        let extend_type_params: Vec<shape_ast::ast::TypeParam> = match target_type {
+        let explicit_extend_type_params: Vec<shape_ast::ast::TypeParam> = match target_type {
             shape_ast::ast::TypeName::Generic { type_args, .. } => type_args
                 .iter()
                 .filter_map(|ta| match ta {
@@ -1871,7 +2436,13 @@ impl BytecodeCompiler {
         // bindings by name, so positional order matters only for the
         // `mono_key`'s stable ordering — extend-first matches the
         // user-visible declaration order `Vec<T>.map<U>`.
-        let mut merged_type_params: Vec<shape_ast::ast::TypeParam> = extend_type_params;
+        let mut merged_type_params: Vec<shape_ast::ast::TypeParam> = implicit_extend_type_params;
+        for tp in explicit_extend_type_params {
+            let name = tp.name();
+            if !merged_type_params.iter().any(|m| m.name() == name) {
+                merged_type_params.push(tp);
+            }
+        }
         if let Some(method_tps) = method.type_params.as_ref() {
             for tp in method_tps {
                 // Skip duplicates (defensive — if a method redeclares a
@@ -1952,8 +2523,7 @@ impl BytecodeCompiler {
         // All methods in `impl Trait for Array` benefit from this because their
         // body operates on `self` (the generic receiver) — even methods with no
         // explicit parameters like `flatten()`.
-        let (impl_type_params, receiver_type) =
-            Self::synthesize_impl_type_params(target_type);
+        let (impl_type_params, receiver_type) = Self::synthesize_impl_type_params(target_type);
 
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
@@ -1985,36 +2555,32 @@ impl BytecodeCompiler {
         // is preserved per §2.7.7 #9 — no fabricated default.
         let return_type = method.return_type.clone().or_else(|| {
             let (canonical_trait, _) = self.resolve_trait_name(trait_name);
-            self.trait_defs
-                .get(&canonical_trait)
-                .and_then(|trait_def| {
-                    // Match on method name. Both Required and Default trait
-                    // members carry the return type — Required via
-                    // `TraitMemberSignature::Method { return_type, .. }` (always
-                    // present), Default via `MethodDef.return_type:
-                    // Option<TypeAnnotation>` (may itself be None — in which
-                    // case there's nothing to backfill).
-                    for member in &trait_def.members {
-                        match member {
-                            shape_ast::ast::types::TraitMember::Required(
-                                shape_ast::ast::TraitMemberSignature::Method {
-                                    name,
-                                    return_type,
-                                    ..
-                                },
-                            ) if name == &method.name => {
-                                return Some(return_type.clone());
-                            }
-                            shape_ast::ast::types::TraitMember::Default(default_method)
-                                if default_method.name == method.name =>
-                            {
-                                return default_method.return_type.clone();
-                            }
-                            _ => {}
+            self.trait_defs.get(&canonical_trait).and_then(|trait_def| {
+                // Match on method name. Both Required and Default trait
+                // members carry the return type — Required via
+                // `TraitMemberSignature::Method { return_type, .. }` (always
+                // present), Default via `MethodDef.return_type:
+                // Option<TypeAnnotation>` (may itself be None — in which
+                // case there's nothing to backfill).
+                for member in &trait_def.members {
+                    match member {
+                        shape_ast::ast::types::TraitMember::Required(
+                            shape_ast::ast::TraitMemberSignature::Method {
+                                name, return_type, ..
+                            },
+                        ) if name == &method.name => {
+                            return Some(return_type.clone());
                         }
+                        shape_ast::ast::types::TraitMember::Default(default_method)
+                            if default_method.name == method.name =>
+                        {
+                            return default_method.return_type.clone();
+                        }
+                        _ => {}
                     }
-                    None
-                })
+                }
+                None
+            })
         });
 
         // V3-S6a resolver-extension follow-up: merge method-level type
@@ -2046,6 +2612,53 @@ impl BytecodeCompiler {
         })
     }
 
+    /// Synthesize receiver generics for bare collection extend blocks.
+    ///
+    /// `extend Vec { method sum() { self[0] + self[1] } }` is receiver
+    /// parametric even without spelling `Vec<T>`: the element type is proven by
+    /// each call site's receiver (`Vec<int>`, `Vec<number>`, ...). Give the
+    /// desugared UFCS function the same `self: Vec<T>` shape used by explicit
+    /// `extend Vec<T>` blocks so the existing monomorphization pipeline
+    /// specializes the body before bytecode emission. Concrete/generic targets
+    /// such as `extend Vec<number>` keep their source annotation unchanged.
+    fn synthesize_extend_type_params(
+        target_type: &shape_ast::ast::TypeName,
+    ) -> (
+        Vec<shape_ast::ast::TypeParam>,
+        Option<shape_ast::ast::TypeAnnotation>,
+    ) {
+        match target_type {
+            shape_ast::ast::TypeName::Simple(name) if matches!(name.as_str(), "Array" | "Vec") => {
+                let type_params = vec![shape_ast::ast::TypeParam::Type {
+                    name: "T".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                }];
+                let receiver_ann = shape_ast::ast::TypeAnnotation::Generic {
+                    name: shape_ast::ast::type_path::TypePath::simple(name.as_str()),
+                    args: vec![shape_ast::ast::TypeAnnotation::Basic("T".to_string())],
+                };
+                (type_params, Some(receiver_ann))
+            }
+            shape_ast::ast::TypeName::Simple(name)
+                if matches!(name.as_str(), "Number" | "number") =>
+            {
+                let type_params = vec![shape_ast::ast::TypeParam::Type {
+                    name: "N".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                }];
+                let receiver_ann = shape_ast::ast::TypeAnnotation::Basic("N".to_string());
+                (type_params, Some(receiver_ann))
+            }
+            _ => (Vec::new(), Some(Self::type_name_to_annotation(target_type))),
+        }
+    }
+
     /// Synthesize type parameters and a receiver annotation for impl methods
     /// on known generic container types.
     ///
@@ -2057,7 +2670,10 @@ impl BytecodeCompiler {
     /// Returns `(type_params, receiver_annotation)`.
     fn synthesize_impl_type_params(
         target_type: &shape_ast::ast::TypeName,
-    ) -> (Vec<shape_ast::ast::TypeParam>, Option<shape_ast::ast::TypeAnnotation>) {
+    ) -> (
+        Vec<shape_ast::ast::TypeParam>,
+        Option<shape_ast::ast::TypeAnnotation>,
+    ) {
         let type_base = match target_type {
             shape_ast::ast::TypeName::Simple(n) => n.as_str(),
             shape_ast::ast::TypeName::Generic { name, .. } => name.as_str(),
@@ -2402,8 +3018,10 @@ impl BytecodeCompiler {
         let body = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "Ok".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::FunctionCall {
                     name: from_fn_name.to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Identifier("value".to_string(), span)],
                     named_args: Vec::new(),
                     span,
@@ -2477,12 +3095,15 @@ impl BytecodeCompiler {
                 .iter()
                 .flat_map(|p| p.get_identifiers())
                 .collect(),
+            param_defs: ann_def.params.clone(),
             before_handler: None,
             after_handler: None,
             on_define_handler: None,
             metadata_handler: None,
             comptime_pre_handler: None,
             comptime_post_handler: None,
+            before_handler_template: None,
+            after_handler_template: None,
             allowed_targets: Vec::new(),
         };
 
@@ -2520,6 +3141,48 @@ impl BytecodeCompiler {
             };
 
             let func_name = format!("{}___{}", ann_def.name, handler_type_str);
+
+            if matches!(
+                handler.handler_type,
+                AnnotationHandlerType::Before | AnnotationHandlerType::After
+            ) {
+                let placeholder = FunctionDef {
+                    name: func_name.clone(),
+                    name_span: Span::DUMMY,
+                    declaring_module_path: None,
+                    doc_comment: None,
+                    params: Vec::new(),
+                    return_type: handler.return_type.clone(),
+                    body: Vec::new(),
+                    type_params: Some(Vec::new()),
+                    annotations: Vec::new(),
+                    is_async: false,
+                    is_comptime: false,
+                    where_clause: None,
+                };
+                self.register_function(&placeholder)?;
+                let func_id = self.find_function(&func_name).ok_or_else(|| {
+                    ShapeError::RuntimeError {
+                        message: format!(
+                            "Internal error: annotation handler function '{}' was not registered",
+                            func_name
+                        ),
+                        location: None,
+                    }
+                })? as u16;
+                match handler.handler_type {
+                    AnnotationHandlerType::Before => {
+                        compiled.before_handler = Some(func_id);
+                        compiled.before_handler_template = Some(handler.clone());
+                    }
+                    AnnotationHandlerType::After => {
+                        compiled.after_handler = Some(func_id);
+                        compiled.after_handler_template = Some(handler.clone());
+                    }
+                    _ => unreachable!(),
+                }
+                continue;
+            }
 
             // Build function params: self + annotation_params + handler_params
             let mut params = vec![FunctionParameter {
@@ -2724,6 +3387,28 @@ impl BytecodeCompiler {
         use shape_ast::ast::Literal;
         use shape_runtime::type_schema::FieldAnnotation;
 
+        let runtime_field_names: Vec<String> = struct_def
+            .fields
+            .iter()
+            .filter(|f| !f.is_comptime)
+            .map(|f| f.name.clone())
+            .collect();
+        let runtime_field_types = struct_def
+            .fields
+            .iter()
+            .filter(|f| !f.is_comptime)
+            .map(|f| (f.name.clone(), f.type_annotation.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        self.struct_types
+            .entry(struct_def.name.clone())
+            .or_insert_with(|| (runtime_field_names, Span::DUMMY));
+        self.struct_generic_info
+            .entry(struct_def.name.clone())
+            .or_insert_with(|| StructGenericInfo {
+                type_params: struct_def.type_params.clone().unwrap_or_default(),
+                runtime_field_types,
+            });
+
         if self
             .type_tracker
             .schema_registry()
@@ -2882,54 +3567,35 @@ impl BytecodeCompiler {
             builder.register(self.type_tracker.schema_registry_mut());
         }
 
-        // Bake comptime field values into the `comptime_fields` registry
-        // for constant-folded property access.
-        //
-        // **Phase-2c rebuild pending — see ADR-006 §2.4.** The previous
-        // body iterated `struct_def.fields`, materialized each comptime
-        // field's literal default value into a per-FieldType `ValueWord`
-        // (`from_f64`, `from_i64`, `from_string`, `from_bool`, `none`),
-        // and stored the result in a `shape_value::ValueMap`. After the
-        // strict-typing bulldozer:
-        //
-        // - `ValueMap` (typedef alias for `HashMap<String, ValueWord>`)
-        //   and `ValueWord` are deleted from `shape-value` (per CLAUDE.md
-        //   "Renames to refuse on sight").
-        // - The `comptime_fields: HashMap<String, ValueMap>` field on the
-        //   compiler struct itself uses the deleted carrier; its
-        //   rebuild lives in the cluster that owns `compiler/mod.rs`.
-        // - The kinded replacement is per-FieldType `KindedSlot::from_int`
-        //   / `from_number` / `from_string_arc(Arc<String>)` / `from_bool`
-        //   / `none()` per ADR-006 §2.4 / Q6 — preserving the source
-        //   literal's kind by construction without ever round-tripping
-        //   through a tagged dynamic word. The literal-arm validation
-        //   (rejecting non-literal default values with the
-        //   "Comptime field … must have a literal default value" error)
-        //   stays — that's an AST-level invariant unaffected by the
-        //   value-tier rewrite.
-        //
-        // Until Phase 2c lands, this branch is a structural no-op:
-        // comptime field defaults are silently dropped, so subsequent
-        // property-access reads against `Currency.symbol` (cluster-level
-        // out-of-territory consumer at `expressions/property_access.rs:194`)
-        // fall through to the runtime field-access path. Suppressing the
-        // bake is the correct boundary per playbook §7 #4: we do not
-        // synthesize a placeholder ValueMap that would poison the
-        // comptime_fields registry.
+        // Bake comptime field values into the strict `KindedSlot` registry
+        // for constant-folded property access. The field's declared type is
+        // the producer-side kind oracle: `number = 2` adopts the integer
+        // literal into a `Float64` slot, while incompatible defaults surface
+        // here instead of reaching runtime as an inferred/probed value.
         for field in &struct_def.fields {
             if !field.is_comptime {
                 continue;
             }
             if let Some(ref default_expr) = field.default_value {
                 match default_expr {
-                    Expr::Literal(Literal::Number(_), _)
-                    | Expr::Literal(Literal::Int(_), _)
-                    | Expr::Literal(Literal::String(_), _)
-                    | Expr::Literal(Literal::Bool(_), _)
-                    | Expr::Literal(Literal::None, _) => {
-                        // Recognised literal — rebuild surface; drop the
-                        // bake until the kinded comptime_fields registry
-                        // lands.
+                    Expr::Literal(literal @ Literal::Number(_), _)
+                    | Expr::Literal(literal @ Literal::Int(_), _)
+                    | Expr::Literal(literal @ Literal::UInt(_), _)
+                    | Expr::Literal(literal @ Literal::String(_), _)
+                    | Expr::Literal(literal @ Literal::Bool(_), _)
+                    | Expr::Literal(literal @ Literal::None, _) => {
+                        let field_type =
+                            Self::type_annotation_to_field_type(&field.type_annotation);
+                        let slot = Self::comptime_field_slot_from_literal(
+                            &struct_def.name,
+                            &field.name,
+                            &field_type,
+                            literal,
+                        )?;
+                        self.comptime_fields
+                            .entry(struct_def.name.clone())
+                            .or_default()
+                            .insert(field.name.clone(), slot);
                     }
                     _ => {
                         return Err(ShapeError::SemanticError {
@@ -3083,41 +3749,41 @@ impl BytecodeCompiler {
         };
 
         if let Some(name) = ann.as_type_name_str() {
-                if let Some(existing) = self
-                    .program
-                    .native_struct_layouts
-                    .iter()
-                    .find(|layout| layout.name == name)
-                {
-                    return Ok(NativeFieldLayoutSpec {
-                        c_type: name.to_string(),
-                        size: existing.size as u64,
-                        align: existing.align as u64,
-                    });
-                }
-
-                let spec = match name {
-                    "f64" | "number" | "Number" | "float" => ("f64", 8, 8),
-                    "f32" => ("f32", 4, 4),
-                    "i64" | "int" | "integer" | "Int" | "Integer" => ("i64", 8, 8),
-                    "i32" => ("i32", 4, 4),
-                    "i16" => ("i16", 2, 2),
-                    "i8" | "char" => ("i8", 1, 1),
-                    "u64" => ("u64", 8, 8),
-                    "u32" => ("u32", 4, 4),
-                    "u16" => ("u16", 2, 2),
-                    "u8" | "byte" => ("u8", 1, 1),
-                    "bool" | "boolean" => ("bool", 1, 1),
-                    "isize" => ("isize", pointer, pointer),
-                    "usize" | "ptr" | "pointer" => ("ptr", pointer, pointer),
-                    "string" | "str" | "cstring" => ("cstring", pointer, pointer),
-                    _ => return fail(),
-                };
+            if let Some(existing) = self
+                .program
+                .native_struct_layouts
+                .iter()
+                .find(|layout| layout.name == name)
+            {
                 return Ok(NativeFieldLayoutSpec {
-                    c_type: spec.0.to_string(),
-                    size: spec.1,
-                    align: spec.2,
+                    c_type: name.to_string(),
+                    size: existing.size as u64,
+                    align: existing.align as u64,
                 });
+            }
+
+            let spec = match name {
+                "f64" | "number" | "Number" | "float" => ("f64", 8, 8),
+                "f32" => ("f32", 4, 4),
+                "i64" | "int" | "integer" | "Int" | "Integer" => ("i64", 8, 8),
+                "i32" => ("i32", 4, 4),
+                "i16" => ("i16", 2, 2),
+                "i8" | "char" => ("i8", 1, 1),
+                "u64" => ("u64", 8, 8),
+                "u32" => ("u32", 4, 4),
+                "u16" => ("u16", 2, 2),
+                "u8" | "byte" => ("u8", 1, 1),
+                "bool" | "boolean" => ("bool", 1, 1),
+                "isize" => ("isize", pointer, pointer),
+                "usize" | "ptr" | "pointer" => ("ptr", pointer, pointer),
+                "string" | "str" | "cstring" => ("cstring", pointer, pointer),
+                _ => return fail(),
+            };
+            return Ok(NativeFieldLayoutSpec {
+                c_type: spec.0.to_string(),
+                size: spec.1,
+                align: spec.2,
+            });
         }
         match ann {
             TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
@@ -3351,7 +4017,7 @@ impl BytecodeCompiler {
             Self::sanitize_auto_symbol(source_type),
             Self::sanitize_auto_symbol(target_type)
         );
-        if self.function_defs.contains_key(&fn_name) {
+        if self.function_defs.contains_key(&fn_name) && self.find_function(&fn_name).is_some() {
             return Ok(());
         }
 
@@ -3544,22 +4210,21 @@ impl BytecodeCompiler {
 
     /// R8 W8 Cluster A (2026-05-24): predicate for the module-level
     /// `const` reject-runtime-init validation. Returns `true` when the
-    /// initializer expression can be evaluated entirely at compile time
-    /// without invoking the VM:
+    /// initializer expression can be resolved entirely before runtime:
     ///   - literals (any kind)
+    ///   - `comptime { ... }` expressions, which the expression compiler
+    ///     evaluates immediately and lowers to a constant value
     ///   - unary `-` / `!` / `~` applied to a comptime-evaluable operand
     /// Function calls, identifiers, binary ops, etc. return `false` and
     /// surface a clean compile error per the dispatch's reject test.
-    /// ADR-006 §2.7.5 stamp-at-compile-time alignment: the predicate
-    /// matches the loader-side `comptime_eval_const_initializer` shape
-    /// in `crates/shape-runtime/src/module_loader/loading.rs`.
+    /// ADR-006 §2.7.5 stamp-at-compile-time alignment: accepted forms must
+    /// be resolved before runtime bytecode observes the binding.
     fn const_initializer_is_comptime_evaluable(expr: &shape_ast::ast::Expr) -> bool {
         use shape_ast::ast::Expr;
         match expr {
             Expr::Literal(_, _) => true,
-            Expr::UnaryOp { operand, .. } => {
-                Self::const_initializer_is_comptime_evaluable(operand)
-            }
+            Expr::Comptime(_, _) => true,
+            Expr::UnaryOp { operand, .. } => Self::const_initializer_is_comptime_evaluable(operand),
             _ => false,
         }
     }
@@ -3570,7 +4235,7 @@ impl BytecodeCompiler {
         matches!(
             name,
             "int" | "number" | "string" | "bool" | "decimal" | "bigint"
-                | "Array" | "HashMap" | "Option" | "Result" | "DateTime"
+                | "Array" | "HashMap" | "Set" | "Option" | "Result" | "DateTime"
                 | "Content" | "Table" | "DataTable" | "Mat"
                 // W18.5 per-type content builders (supervisor D4,
                 // R8 W3 2026-05-24): `Code::new()` / `KeyValue::new()`
@@ -3612,11 +4277,623 @@ impl BytecodeCompiler {
         }
     }
 
+    fn collect_type_params_from_type_name(
+        type_name: &shape_ast::ast::TypeName,
+    ) -> std::collections::HashSet<String> {
+        let mut params = std::collections::HashSet::new();
+        if let shape_ast::ast::TypeName::Generic { type_args, .. } = type_name {
+            for arg in type_args {
+                let Some(name) = arg.as_type_name_str() else {
+                    continue;
+                };
+                if !name.contains("::")
+                    && name.len() <= 2
+                    && name
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_uppercase())
+                {
+                    params.insert(name.to_string());
+                }
+            }
+        }
+        params
+    }
+
+    fn collect_type_params_from_type_params(
+        type_params: &Option<Vec<shape_ast::ast::TypeParam>>,
+    ) -> std::collections::HashSet<String> {
+        type_params
+            .as_ref()
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|param| param.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn qualify_module_type_annotation(
+        annotation: &shape_ast::ast::TypeAnnotation,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) -> shape_ast::ast::TypeAnnotation {
+        use shape_ast::ast::TypeAnnotation;
+
+        let qualify_name = |name: &str| -> String {
+            if name.contains("::")
+                || Self::is_builtin_type_name(name)
+                || name == "Self"
+                || type_params.contains(name)
+            {
+                name.to_string()
+            } else {
+                Self::qualify_module_symbol(module_path, name)
+            }
+        };
+
+        match annotation {
+            TypeAnnotation::Basic(name) => TypeAnnotation::Basic(qualify_name(name)),
+            TypeAnnotation::Reference(path) => {
+                TypeAnnotation::Reference(qualify_name(path.as_str()).into())
+            }
+            TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
+                name: qualify_name(name.as_str()).into(),
+                args: args
+                    .iter()
+                    .map(|arg| Self::qualify_module_type_annotation(arg, module_path, type_params))
+                    .collect(),
+            },
+            TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(
+                Self::qualify_module_type_annotation(inner, module_path, type_params),
+            )),
+            TypeAnnotation::Tuple(items) => TypeAnnotation::Tuple(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::qualify_module_type_annotation(item, module_path, type_params)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+                params: params
+                    .iter()
+                    .cloned()
+                    .map(|mut param| {
+                        param.type_annotation = Self::qualify_module_type_annotation(
+                            &param.type_annotation,
+                            module_path,
+                            type_params,
+                        );
+                        param
+                    })
+                    .collect(),
+                returns: Box::new(Self::qualify_module_type_annotation(
+                    returns,
+                    module_path,
+                    type_params,
+                )),
+            },
+            TypeAnnotation::Union(items) => TypeAnnotation::Union(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::qualify_module_type_annotation(item, module_path, type_params)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Intersection(items) => TypeAnnotation::Intersection(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::qualify_module_type_annotation(item, module_path, type_params)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Object(fields) => TypeAnnotation::Object(
+                fields
+                    .iter()
+                    .cloned()
+                    .map(|mut field| {
+                        field.type_annotation = Self::qualify_module_type_annotation(
+                            &field.type_annotation,
+                            module_path,
+                            type_params,
+                        );
+                        field
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable: *mutable,
+                inner: Box::new(Self::qualify_module_type_annotation(
+                    inner,
+                    module_path,
+                    type_params,
+                )),
+            },
+            TypeAnnotation::Dyn(traits) => TypeAnnotation::Dyn(
+                traits
+                    .iter()
+                    .map(|trait_path| qualify_name(trait_path.as_str()).into())
+                    .collect(),
+            ),
+            TypeAnnotation::Void
+            | TypeAnnotation::Never
+            | TypeAnnotation::Null
+            | TypeAnnotation::Undefined => annotation.clone(),
+        }
+    }
+
+    fn qualify_module_function_params(
+        params: &mut [FunctionParameter],
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        for param in params {
+            if let Some(annotation) = param.type_annotation.as_mut() {
+                *annotation =
+                    Self::qualify_module_type_annotation(annotation, module_path, type_params);
+            }
+            if let Some(default_value) = param.default_value.as_mut() {
+                Self::qualify_module_expr(default_value, module_path, type_params);
+            }
+        }
+    }
+
+    fn qualify_module_function_signature(
+        func: &mut FunctionDef,
+        module_path: &str,
+    ) -> std::collections::HashSet<String> {
+        let type_params = Self::collect_type_params_from_type_params(&func.type_params);
+        Self::qualify_module_function_params(&mut func.params, module_path, &type_params);
+        if let Some(return_type) = func.return_type.as_mut() {
+            *return_type =
+                Self::qualify_module_type_annotation(return_type, module_path, &type_params);
+        }
+        type_params
+    }
+
+    fn qualify_module_method_signature(
+        method: &mut shape_ast::ast::types::MethodDef,
+        module_path: &str,
+        receiver_type_params: &std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
+        let mut type_params = receiver_type_params.clone();
+        if let Some(method_type_params) = &method.type_params {
+            for param in method_type_params {
+                type_params.insert(param.name().to_string());
+            }
+        }
+        Self::qualify_module_function_params(&mut method.params, module_path, &type_params);
+        if let Some(return_type) = method.return_type.as_mut() {
+            *return_type =
+                Self::qualify_module_type_annotation(return_type, module_path, &type_params);
+        }
+        type_params
+    }
+
+    fn qualify_module_variable_decl(
+        decl: &mut shape_ast::ast::VariableDecl,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        if let Some(annotation) = decl.type_annotation.as_mut() {
+            *annotation =
+                Self::qualify_module_type_annotation(annotation, module_path, type_params);
+        }
+        if let Some(value) = decl.value.as_mut() {
+            Self::qualify_module_expr(value, module_path, type_params);
+        }
+    }
+
+    fn qualify_module_assignment(
+        assignment: &mut shape_ast::ast::Assignment,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        Self::qualify_module_expr(&mut assignment.value, module_path, type_params);
+    }
+
+    fn qualify_module_statements(
+        statements: &mut [Statement],
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        for statement in statements {
+            Self::qualify_module_statement(statement, module_path, type_params);
+        }
+    }
+
+    fn qualify_module_statement(
+        statement: &mut Statement,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        match statement {
+            Statement::Return(Some(expr), _)
+            | Statement::Expression(expr, _)
+            | Statement::SetParamValue {
+                expression: expr, ..
+            }
+            | Statement::SetReturnExpr {
+                expression: expr, ..
+            }
+            | Statement::ReplaceBodyExpr {
+                expression: expr, ..
+            }
+            | Statement::ReplaceModuleExpr {
+                expression: expr, ..
+            } => Self::qualify_module_expr(expr, module_path, type_params),
+            Statement::VariableDecl(decl, _) => {
+                Self::qualify_module_variable_decl(decl, module_path, type_params);
+            }
+            Statement::Assignment(assignment, _) => {
+                Self::qualify_module_assignment(assignment, module_path, type_params);
+            }
+            Statement::For(for_loop, _) => match &mut for_loop.init {
+                shape_ast::ast::ForInit::ForIn { iter, .. } => {
+                    Self::qualify_module_expr(iter, module_path, type_params);
+                    Self::qualify_module_statements(&mut for_loop.body, module_path, type_params);
+                }
+                shape_ast::ast::ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
+                    Self::qualify_module_statement(init, module_path, type_params);
+                    Self::qualify_module_expr(condition, module_path, type_params);
+                    Self::qualify_module_expr(update, module_path, type_params);
+                    Self::qualify_module_statements(&mut for_loop.body, module_path, type_params);
+                }
+            },
+            Statement::While(while_loop, _) => {
+                Self::qualify_module_expr(&mut while_loop.condition, module_path, type_params);
+                Self::qualify_module_statements(&mut while_loop.body, module_path, type_params);
+            }
+            Statement::If(if_stmt, _) => {
+                Self::qualify_module_expr(&mut if_stmt.condition, module_path, type_params);
+                Self::qualify_module_statements(&mut if_stmt.then_body, module_path, type_params);
+                if let Some(else_body) = if_stmt.else_body.as_mut() {
+                    Self::qualify_module_statements(else_body, module_path, type_params);
+                }
+            }
+            Statement::Extend(extend, _) => {
+                let receiver_type_params =
+                    Self::collect_type_params_from_type_name(&extend.type_name);
+                for method in &mut extend.methods {
+                    let method_type_params = Self::qualify_module_method_signature(
+                        method,
+                        module_path,
+                        &receiver_type_params,
+                    );
+                    Self::qualify_module_statements(
+                        &mut method.body,
+                        module_path,
+                        &method_type_params,
+                    );
+                }
+            }
+            Statement::SetParamType {
+                type_annotation, ..
+            }
+            | Statement::SetReturnType {
+                type_annotation, ..
+            } => {
+                *type_annotation =
+                    Self::qualify_module_type_annotation(type_annotation, module_path, type_params);
+            }
+            Statement::ReplaceBody { body, .. } => {
+                Self::qualify_module_statements(body, module_path, type_params);
+            }
+            _ => {}
+        }
+    }
+
+    fn qualify_module_block_items(
+        items: &mut [shape_ast::ast::BlockItem],
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        for item in items {
+            match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                    Self::qualify_module_variable_decl(decl, module_path, type_params);
+                }
+                shape_ast::ast::BlockItem::Assignment(assignment) => {
+                    Self::qualify_module_assignment(assignment, module_path, type_params);
+                }
+                shape_ast::ast::BlockItem::Statement(statement) => {
+                    Self::qualify_module_statement(statement, module_path, type_params);
+                }
+                shape_ast::ast::BlockItem::Expression(expr) => {
+                    Self::qualify_module_expr(expr, module_path, type_params);
+                }
+            }
+        }
+    }
+
+    fn qualify_module_expr(
+        expr: &mut Expr,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        let should_qualify_name = |name: &str| {
+            !name.contains("::")
+                && name != module_path
+                && !Self::is_builtin_type_name(name)
+                && !type_params.contains(name)
+        };
+
+        match expr {
+            Expr::FunctionCall {
+                args, named_args, ..
+            }
+            | Expr::QualifiedFunctionCall {
+                args, named_args, ..
+            } => {
+                for arg in args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+                for (_, arg) in named_args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+            }
+            Expr::EnumConstructor {
+                enum_name, payload, ..
+            } => {
+                if should_qualify_name(enum_name.as_str()) {
+                    *enum_name =
+                        Self::qualify_module_symbol(module_path, enum_name.as_str()).into();
+                }
+                match payload {
+                    shape_ast::ast::EnumConstructorPayload::Unit => {}
+                    shape_ast::ast::EnumConstructorPayload::Tuple(values) => {
+                        for value in values {
+                            Self::qualify_module_expr(value, module_path, type_params);
+                        }
+                    }
+                    shape_ast::ast::EnumConstructorPayload::Struct(fields) => {
+                        for (_, value) in fields {
+                            Self::qualify_module_expr(value, module_path, type_params);
+                        }
+                    }
+                }
+            }
+            Expr::PropertyAccess { object, .. } => {
+                Self::qualify_module_expr(object, module_path, type_params);
+            }
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                Self::qualify_module_expr(object, module_path, type_params);
+                Self::qualify_module_expr(index, module_path, type_params);
+                if let Some(end_index) = end_index.as_mut() {
+                    Self::qualify_module_expr(end_index, module_path, type_params);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                Self::qualify_module_expr(left, module_path, type_params);
+                Self::qualify_module_expr(right, module_path, type_params);
+            }
+            Expr::UnaryOp { operand, .. } => {
+                Self::qualify_module_expr(operand, module_path, type_params);
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::qualify_module_expr(condition, module_path, type_params);
+                Self::qualify_module_expr(then_expr, module_path, type_params);
+                if let Some(else_expr) = else_expr.as_mut() {
+                    Self::qualify_module_expr(else_expr, module_path, type_params);
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        ObjectEntry::Field {
+                            value,
+                            type_annotation,
+                            ..
+                        } => {
+                            if let Some(annotation) = type_annotation.as_mut() {
+                                *annotation = Self::qualify_module_type_annotation(
+                                    annotation,
+                                    module_path,
+                                    type_params,
+                                );
+                            }
+                            Self::qualify_module_expr(value, module_path, type_params);
+                        }
+                        ObjectEntry::Spread(spread) => {
+                            Self::qualify_module_expr(spread, module_path, type_params);
+                        }
+                    }
+                }
+            }
+            Expr::Array(items, _) => {
+                for item in items {
+                    Self::qualify_module_expr(item, module_path, type_params);
+                }
+            }
+            Expr::Block(block, _) => {
+                Self::qualify_module_block_items(&mut block.items, module_path, type_params);
+            }
+            Expr::TypeAssertion {
+                expr,
+                type_annotation,
+                meta_param_overrides,
+                ..
+            } => {
+                Self::qualify_module_expr(expr, module_path, type_params);
+                *type_annotation =
+                    Self::qualify_module_type_annotation(type_annotation, module_path, type_params);
+                if let Some(overrides) = meta_param_overrides.as_mut() {
+                    for value in overrides.values_mut() {
+                        Self::qualify_module_expr(value, module_path, type_params);
+                    }
+                }
+            }
+            Expr::InstanceOf {
+                expr,
+                type_annotation,
+                ..
+            } => {
+                Self::qualify_module_expr(expr, module_path, type_params);
+                *type_annotation =
+                    Self::qualify_module_type_annotation(type_annotation, module_path, type_params);
+            }
+            Expr::FunctionExpr {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
+                Self::qualify_module_function_params(params, module_path, type_params);
+                if let Some(return_type) = return_type.as_mut() {
+                    *return_type =
+                        Self::qualify_module_type_annotation(return_type, module_path, type_params);
+                }
+                Self::qualify_module_statements(body, module_path, type_params);
+            }
+            Expr::Spread(inner, _)
+            | Expr::Await(inner, _)
+            | Expr::AsyncScope(inner, _)
+            | Expr::TryOperator(inner, _)
+            | Expr::UsingImpl { expr: inner, .. }
+            | Expr::Reference { expr: inner, .. }
+            | Expr::TimeframeContext { expr: inner, .. } => {
+                Self::qualify_module_expr(inner, module_path, type_params);
+            }
+            Expr::If(if_expr, _) => {
+                Self::qualify_module_expr(&mut if_expr.condition, module_path, type_params);
+                Self::qualify_module_expr(&mut if_expr.then_branch, module_path, type_params);
+                if let Some(else_branch) = if_expr.else_branch.as_mut() {
+                    Self::qualify_module_expr(else_branch, module_path, type_params);
+                }
+            }
+            Expr::While(while_expr, _) => {
+                Self::qualify_module_expr(&mut while_expr.condition, module_path, type_params);
+                Self::qualify_module_expr(&mut while_expr.body, module_path, type_params);
+            }
+            Expr::For(for_expr, _) => {
+                Self::qualify_module_expr(&mut for_expr.iterable, module_path, type_params);
+                Self::qualify_module_expr(&mut for_expr.body, module_path, type_params);
+            }
+            Expr::Loop(loop_expr, _) => {
+                Self::qualify_module_expr(&mut loop_expr.body, module_path, type_params);
+            }
+            Expr::Let(let_expr, _) => {
+                if let Some(annotation) = let_expr.type_annotation.as_mut() {
+                    *annotation =
+                        Self::qualify_module_type_annotation(annotation, module_path, type_params);
+                }
+                if let Some(value) = let_expr.value.as_mut() {
+                    Self::qualify_module_expr(value, module_path, type_params);
+                }
+                Self::qualify_module_expr(&mut let_expr.body, module_path, type_params);
+            }
+            Expr::Assign(assign_expr, _) => {
+                Self::qualify_module_expr(&mut assign_expr.target, module_path, type_params);
+                Self::qualify_module_expr(&mut assign_expr.value, module_path, type_params);
+            }
+            Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => {
+                Self::qualify_module_expr(inner, module_path, type_params);
+            }
+            Expr::MethodCall {
+                receiver,
+                args,
+                named_args,
+                ..
+            } => {
+                Self::qualify_module_expr(receiver, module_path, type_params);
+                for arg in args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+                for (_, arg) in named_args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+            }
+            Expr::Match(match_expr, _) => {
+                Self::qualify_module_expr(&mut match_expr.scrutinee, module_path, type_params);
+                for arm in &mut match_expr.arms {
+                    if let Some(guard) = arm.guard.as_mut() {
+                        Self::qualify_module_expr(guard, module_path, type_params);
+                    }
+                    Self::qualify_module_expr(&mut arm.body, module_path, type_params);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start.as_mut() {
+                    Self::qualify_module_expr(start, module_path, type_params);
+                }
+                if let Some(end) = end.as_mut() {
+                    Self::qualify_module_expr(end, module_path, type_params);
+                }
+            }
+            Expr::SimulationCall { params, .. } => {
+                for (_, value) in params {
+                    Self::qualify_module_expr(value, module_path, type_params);
+                }
+            }
+            Expr::StructLiteral {
+                type_name, fields, ..
+            } => {
+                if should_qualify_name(type_name.as_str()) {
+                    *type_name =
+                        Self::qualify_module_symbol(module_path, type_name.as_str()).into();
+                }
+                for (_, value) in fields {
+                    Self::qualify_module_expr(value, module_path, type_params);
+                }
+            }
+            Expr::Annotated {
+                annotation, target, ..
+            } => {
+                for arg in &mut annotation.args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+                Self::qualify_module_expr(target, module_path, type_params);
+            }
+            Expr::AsyncLet(async_let, _) => {
+                Self::qualify_module_expr(&mut async_let.expr, module_path, type_params);
+            }
+            Expr::Comptime(statements, _) => {
+                Self::qualify_module_statements(statements, module_path, type_params);
+            }
+            Expr::ComptimeFor(comptime_for, _) => {
+                Self::qualify_module_expr(&mut comptime_for.iterable, module_path, type_params);
+                Self::qualify_module_statements(&mut comptime_for.body, module_path, type_params);
+            }
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    for value in row {
+                        Self::qualify_module_expr(value, module_path, type_params);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(super) fn qualify_module_item(&self, item: &Item, module_path: &str) -> Result<Item> {
         match item {
             Item::Function(func, span) => {
                 let mut qualified = func.clone();
                 qualified.name = Self::qualify_module_symbol(module_path, &func.name);
+                if qualified.declaring_module_path.is_none() {
+                    qualified.declaring_module_path = Some(module_path.to_string());
+                }
+                let type_params =
+                    Self::qualify_module_function_signature(&mut qualified, module_path);
+                Self::qualify_module_statements(&mut qualified.body, module_path, &type_params);
                 Ok(Item::Function(qualified, *span))
             }
             Item::Export(export, span) if export.source_decl.is_none() => {
@@ -3624,6 +4901,12 @@ impl BytecodeCompiler {
                 match &mut qualified.item {
                     ExportItem::Function(func) => {
                         func.name = Self::qualify_module_symbol(module_path, &func.name);
+                        if func.declaring_module_path.is_none() {
+                            func.declaring_module_path = Some(module_path.to_string());
+                        }
+                        let type_params =
+                            Self::qualify_module_function_signature(func, module_path);
+                        Self::qualify_module_statements(&mut func.body, module_path, &type_params);
                     }
                     ExportItem::BuiltinFunction(func) => {
                         func.name = Self::qualify_module_symbol(module_path, &func.name);
@@ -3637,12 +4920,31 @@ impl BytecodeCompiler {
                     }
                     ExportItem::Struct(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
+                        let type_params =
+                            Self::collect_type_params_from_type_params(&def.type_params);
+                        for field in &mut def.fields {
+                            field.type_annotation = Self::qualify_module_type_annotation(
+                                &field.type_annotation,
+                                module_path,
+                                &type_params,
+                            );
+                            if let Some(default_value) = field.default_value.as_mut() {
+                                Self::qualify_module_expr(default_value, module_path, &type_params);
+                            }
+                        }
                     }
                     ExportItem::Enum(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
                     }
                     ExportItem::TypeAlias(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
+                        let type_params =
+                            Self::collect_type_params_from_type_params(&def.type_params);
+                        def.type_annotation = Self::qualify_module_type_annotation(
+                            &def.type_annotation,
+                            module_path,
+                            &type_params,
+                        );
                     }
                     ExportItem::Trait(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
@@ -3751,6 +5053,17 @@ impl BytecodeCompiler {
             Item::StructType(def, span) => {
                 let mut q = def.clone();
                 q.name = Self::qualify_module_symbol(module_path, &def.name);
+                let type_params = Self::collect_type_params_from_type_params(&q.type_params);
+                for field in &mut q.fields {
+                    field.type_annotation = Self::qualify_module_type_annotation(
+                        &field.type_annotation,
+                        module_path,
+                        &type_params,
+                    );
+                    if let Some(default_value) = field.default_value.as_mut() {
+                        Self::qualify_module_expr(default_value, module_path, &type_params);
+                    }
+                }
                 Ok(Item::StructType(q, *span))
             }
             Item::Enum(def, span) => {
@@ -3761,6 +5074,12 @@ impl BytecodeCompiler {
             Item::TypeAlias(def, span) => {
                 let mut q = def.clone();
                 q.name = Self::qualify_module_symbol(module_path, &def.name);
+                let type_params = Self::collect_type_params_from_type_params(&q.type_params);
+                q.type_annotation = Self::qualify_module_type_annotation(
+                    &q.type_annotation,
+                    module_path,
+                    &type_params,
+                );
                 Ok(Item::TypeAlias(q, *span))
             }
             Item::Trait(def, span) => {
@@ -3771,11 +5090,45 @@ impl BytecodeCompiler {
             Item::Extend(extend, span) => {
                 let mut q = extend.clone();
                 q.type_name = Self::qualify_type_name(&extend.type_name, module_path);
+                let receiver_type_params =
+                    Self::collect_type_params_from_type_name(&extend.type_name);
+                for method in &mut q.methods {
+                    if method.declaring_module_path.is_none() {
+                        method.declaring_module_path = Some(module_path.to_string());
+                    }
+                    let method_type_params = Self::qualify_module_method_signature(
+                        method,
+                        module_path,
+                        &receiver_type_params,
+                    );
+                    Self::qualify_module_statements(
+                        &mut method.body,
+                        module_path,
+                        &method_type_params,
+                    );
+                }
                 Ok(Item::Extend(q, *span))
             }
             Item::Impl(impl_block, span) => {
                 let mut q = impl_block.clone();
                 q.target_type = Self::qualify_type_name(&impl_block.target_type, module_path);
+                let receiver_type_params =
+                    Self::collect_type_params_from_type_name(&impl_block.target_type);
+                for method in &mut q.methods {
+                    if method.declaring_module_path.is_none() {
+                        method.declaring_module_path = Some(module_path.to_string());
+                    }
+                    let method_type_params = Self::qualify_module_method_signature(
+                        method,
+                        module_path,
+                        &receiver_type_params,
+                    );
+                    Self::qualify_module_statements(
+                        &mut method.body,
+                        module_path,
+                        &method_type_params,
+                    );
+                }
                 // Do NOT qualify trait_name — traits may be imported from other scopes
                 Ok(Item::Impl(q, *span))
             }
@@ -4128,15 +5481,11 @@ impl BytecodeCompiler {
 
             // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
             // resolution from a module-scoped comptime block.
-            let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
-                self,
-                &[],
-            );
+            let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
             // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
             // rationale on comptime-context items.
             let comptime_impl_blocks = self.comptime_impl_blocks.clone();
-            let comptime_context_trait_defs: Vec<_> =
-                self.trait_defs.values().cloned().collect();
+            let comptime_context_trait_defs: Vec<_> = self.trait_defs.values().cloned().collect();
             let comptime_context_struct_defs: Vec<_> = self
                 .comptime_context_struct_defs
                 .values()
@@ -4225,10 +5574,7 @@ impl BytecodeCompiler {
                     .get(&struct_def.name)
                     .map(|(names, _)| names.is_empty())
                     .unwrap_or(false);
-                let has_real_fields = struct_def
-                    .fields
-                    .iter()
-                    .any(|f| !f.is_comptime);
+                let has_real_fields = struct_def.fields.iter().any(|f| !f.is_comptime);
                 if !self.struct_types.contains_key(&struct_def.name)
                     || (existing_is_empty && has_real_fields)
                 {
@@ -4244,10 +5590,8 @@ impl BytecodeCompiler {
                         .filter(|f| !f.is_comptime)
                         .map(|f| (f.name.clone(), f.type_annotation.clone()))
                         .collect::<std::collections::HashMap<_, _>>();
-                    self.struct_types.insert(
-                        struct_def.name.clone(),
-                        (runtime_field_names, *span),
-                    );
+                    self.struct_types
+                        .insert(struct_def.name.clone(), (runtime_field_names, *span));
                     self.struct_generic_info.insert(
                         struct_def.name.clone(),
                         StructGenericInfo {
@@ -4277,9 +5621,8 @@ impl BytecodeCompiler {
                     };
                     self.type_aliases.insert(
                         type_alias.name.clone(),
-                        base_type_name.unwrap_or_else(|| {
-                            format!("{:?}", type_alias.type_annotation)
-                        }),
+                        base_type_name
+                            .unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
                     );
                     self.type_inference.env.define_type_alias(
                         &type_alias.name,
@@ -4289,9 +5632,7 @@ impl BytecodeCompiler {
                 }
                 Ok(())
             }
-            Item::BuiltinFunctionDecl(def, _) => {
-                self.register_builtin_function_decl(def)
-            }
+            Item::BuiltinFunctionDecl(def, _) => self.register_builtin_function_decl(def),
             Item::ForeignFunction(def, _) => {
                 if !self.function_defs.contains_key(&def.name) {
                     // Register arity + foreign def (same as register_item_functions)
@@ -4340,10 +5681,8 @@ impl BytecodeCompiler {
                             .filter(|f| !f.is_comptime)
                             .map(|f| (f.name.clone(), f.type_annotation.clone()))
                             .collect::<std::collections::HashMap<_, _>>();
-                        self.struct_types.insert(
-                            struct_def.name.clone(),
-                            (runtime_field_names, Span::DUMMY),
-                        );
+                        self.struct_types
+                            .insert(struct_def.name.clone(), (runtime_field_names, Span::DUMMY));
                         self.struct_generic_info.insert(
                             struct_def.name.clone(),
                             StructGenericInfo {
@@ -4369,9 +5708,8 @@ impl BytecodeCompiler {
                         };
                         self.type_aliases.insert(
                             type_alias.name.clone(),
-                            base_type_name.unwrap_or_else(|| {
-                                format!("{:?}", type_alias.type_annotation)
-                            }),
+                            base_type_name
+                                .unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
                         );
                         self.type_inference.env.define_type_alias(
                             &type_alias.name,
@@ -4381,9 +5719,7 @@ impl BytecodeCompiler {
                     }
                     Ok(())
                 }
-                ExportItem::BuiltinFunction(def) => {
-                    self.register_builtin_function_decl(def)
-                }
+                ExportItem::BuiltinFunction(def) => self.register_builtin_function_decl(def),
                 ExportItem::ForeignFunction(def) => {
                     if !self.function_defs.contains_key(&def.name) {
                         let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
@@ -4401,9 +5737,7 @@ impl BytecodeCompiler {
             // Impl and Extend blocks: delegate to register_item_functions
             // which handles the full registration (desugar methods, trait symbols,
             // type inference impls, drop tracking, etc.)
-            Item::Impl(..) | Item::Extend(..) => {
-                self.register_item_functions(item)
-            }
+            Item::Impl(..) | Item::Extend(..) => self.register_item_functions(item),
             Item::Module(module, _) => {
                 let module_path = self.current_module_path_for(module.name.as_str());
                 self.module_scope_stack.push(module_path.clone());
@@ -4450,8 +5784,13 @@ impl BytecodeCompiler {
         }
 
         let mut qualified_items = Vec::with_capacity(module_items.len());
+        let local_functions = Self::module_local_function_names(&module_items);
         for inner in &module_items {
-            qualified_items.push(self.qualify_module_item(inner, &module_path)?);
+            qualified_items.push(self.qualify_module_item_with_local_function_calls(
+                inner,
+                &module_path,
+                &local_functions,
+            )?);
         }
 
         for qualified in &qualified_items {
@@ -4494,7 +5833,9 @@ impl BytecodeCompiler {
             OpCode::StoreModuleBinding,
             Some(Operand::ModuleBinding(binding_idx)),
         ));
-        self.propagate_initializer_type_to_slot(binding_idx, false, false);
+        // U4-4: the module-namespace object is a non-numeric heap value; its
+        // tracker type comes from `last_expr_type_info` (no numeric expr).
+        self.propagate_initializer_type_to_slot(binding_idx, false, false, Some(&module_object));
 
         if self.module_scope_stack.len() == 1 {
             self.module_namespace_bindings
@@ -4560,8 +5901,100 @@ impl BytecodeCompiler {
         slot: u16,
         is_local: bool,
         _is_mutable: bool,
+        // U4-4: the initializer expression — its resolved Type drives the
+        // numeric slot hint (`numeric_type_of`), replacing the deleted
+        // `last_expr_numeric_type` register. `None` where no single init expr
+        // is in hand (falls back to `last_expr_type_info`).
+        init_expr: Option<&shape_ast::ast::Expr>,
     ) {
-        self.propagate_assignment_type_to_slot(slot, is_local, true);
+        self.propagate_assignment_type_to_slot(slot, is_local, true, init_expr);
+    }
+
+    pub(super) fn typed_set_ctor_for_annotation(
+        &self,
+        type_ann: &TypeAnnotation,
+    ) -> Option<crate::bytecode::BuiltinFunction> {
+        let ct =
+            crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, type_ann,
+            )?;
+        self.typed_set_ctor_for_concrete_type(&ct)
+    }
+
+    pub(super) fn typed_set_ctor_for_concrete_type(
+        &self,
+        ct: &shape_value::v2::ConcreteType,
+    ) -> Option<crate::bytecode::BuiltinFunction> {
+        let shape_value::v2::ConcreteType::HashSet(elem) = ct else {
+            return None;
+        };
+        match elem.as_ref() {
+            shape_value::v2::ConcreteType::String => {
+                Some(crate::bytecode::BuiltinFunction::SetCtorString)
+            }
+            shape_value::v2::ConcreteType::I64 => {
+                Some(crate::bytecode::BuiltinFunction::SetCtorI64)
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn typed_set_ctor_for_call_span(
+        &self,
+        span: Span,
+    ) -> Option<crate::bytecode::BuiltinFunction> {
+        if !span.is_dummy()
+            && let Some(ct) = self
+                .resolved_expr_types
+                .get(&span)
+                .or_else(|| self.inference_facts.expression_type(span))
+                .and_then(|ty| {
+                    crate::compiler::monomorphization::type_resolution::concrete_type_from_inference_fact(
+                        self, ty,
+                    )
+                })
+            && let Some(typed_ctor) = self.typed_set_ctor_for_concrete_type(&ct)
+        {
+            return Some(typed_ctor);
+        }
+
+        self.pending_expected_call_return_type
+            .as_ref()
+            .and_then(|ann| self.typed_set_ctor_for_annotation(ann))
+    }
+
+    pub(super) fn patch_static_set_ctor_from_annotation(
+        &mut self,
+        init_expr: Option<&Expr>,
+        type_ann: Option<&TypeAnnotation>,
+    ) {
+        let Some(Expr::FunctionCall {
+            name,
+            args,
+            named_args,
+            ..
+        }) = init_expr
+        else {
+            return;
+        };
+        if name != "Set" || !args.is_empty() || !named_args.is_empty() {
+            return;
+        }
+        let Some(type_ann) = type_ann else {
+            return;
+        };
+        let Some(typed_ctor) = self.typed_set_ctor_for_annotation(type_ann) else {
+            return;
+        };
+        if let Some(last) = self.program.instructions.last_mut()
+            && last.opcode == OpCode::BuiltinCall
+            && matches!(
+                last.operand,
+                Some(Operand::Builtin(crate::bytecode::BuiltinFunction::SetCtor))
+            )
+        {
+            last.operand = Some(Operand::Builtin(typed_ctor));
+        }
     }
 
     /// Compile a statement
@@ -4569,6 +6002,27 @@ impl BytecodeCompiler {
         match stmt {
             Statement::Return(expr_opt, _span) => {
                 if let Some(expr) = expr_opt {
+                    // ADR-006 §2.7.30 (FlipLive): the `return &local` floor
+                    // promotion is admitted ONLY under a `&T` return contract.
+                    // An UNANNOTATED `return &local` (no `-> &T`, and not a
+                    // safe param-reborrow which sets the return-reference
+                    // summary) does NOT build a sound PromotedCell carrier on
+                    // the return path — the raw ref bits would escape without
+                    // an owning carrier (dangling ref / UAF). Keep rejecting it
+                    // with B0003. The annotated `-> &T` form (carrier built)
+                    // and the param-reborrow form (summary set) both fall
+                    // through and compile.
+                    if matches!(expr, shape_ast::ast::Expr::Reference { .. })
+                        && self.current_function_return_reference_summary.is_none()
+                        && !self.current_function_returns_borrow
+                    {
+                        return Err(ShapeError::SemanticError {
+                            message:
+                                "[B0003] cannot return or store a reference that outlives its owner"
+                                    .to_string(),
+                            location: Some(self.span_to_source_location(expr.span())),
+                        });
+                    }
                     self.plan_flexible_binding_escape_from_expr(expr);
                     // Phase F: when the returned expression is a closure
                     // literal, the closure escapes by definition (it is
@@ -4580,20 +6034,67 @@ impl BytecodeCompiler {
                     if matches!(expr, Expr::FunctionExpr { .. }) {
                         self.emit_make_closure_heap_next = true;
                     }
-                    if self.current_function_return_reference_summary.is_some() {
-                        self.compile_expr_preserving_refs(expr)?;
+                    // Numeric-conversion §4 literal adoption (explicit-return
+                    // widening, THE RULE user 2026-06-01): a bare int literal
+                    // `return`ed into a `number` return type IS the number
+                    // literal (`fn g() -> number { return 5 }` ⇒ `5.0`). Re-lower
+                    // it so the return slot is Float64-kinded, not an Int64
+                    // constant bit-reinterpreted as f64 at the call site.
+                    let return_widened =
+                        self.current_function_return_type.as_ref().and_then(|ann| {
+                            crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                                expr, ann,
+                            )
+                        });
+                    let return_expr: &Expr = return_widened.as_ref().unwrap_or(expr);
+                    let saved_pending_callable_hint_name = self.pending_callable_hint_name.clone();
+                    self.pending_callable_hint_name =
+                        self.callable_return_hint_name_for_expr(return_expr);
+                    let return_type_annotation = self.current_function_return_type.clone();
+                    let saved_expected_call_return_type =
+                        self.pending_expected_call_return_type.clone();
+                    self.pending_expected_call_return_type = return_type_annotation.clone();
+                    let compile_result = if self.current_function_return_reference_summary.is_some()
+                    {
+                        self.compile_expr_preserving_refs(return_expr)
                     } else {
-                        self.compile_expr(expr)?;
-                    }
+                        self.compile_expr(return_expr)
+                    };
+                    self.pending_expected_call_return_type = saved_expected_call_return_type;
+                    self.pending_callable_hint_name = saved_pending_callable_hint_name;
+                    compile_result?;
+                    self.patch_static_set_ctor_from_annotation(
+                        Some(return_expr),
+                        return_type_annotation.as_ref(),
+                    );
                 } else {
                     self.emit(Instruction::simple(OpCode::PushNull));
+                }
+                // ADR-006 §2.7.30 (escape-Drop-deferral): when the returned
+                // expression is a bare identifier naming a Drop-bearing
+                // local, that local's value is MOVED to the caller. Its
+                // `Drop` must defer to the caller's lifetime — emitting a
+                // `DropCall` for it here would run the user `Drop::drop` body
+                // a second time (the caller drops it again at its binding's
+                // scope exit) — the bind-then-return double-drop. The
+                // `LoadLocal` clone (above) + the frame-pop `truncate_stack`
+                // slot-release already balance the refcount; only the
+                // spurious `DropCall` needs suppressing. We scope the skip to
+                // exactly this return's drop-emission.
+                if let Some(Expr::Identifier(name, _)) = expr_opt {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        if self.local_drop_kind(local_idx).is_some() {
+                            self.return_escape_drop_skip_local = Some(local_idx);
+                        }
+                    }
                 }
                 // Emit drops for all active drop scopes before returning
                 let total_scopes = self.drop_locals.len();
                 if total_scopes > 0 {
                     self.emit_drops_for_early_exit(total_scopes)?;
                 }
-                self.emit_return_value_with_ownership();
+                self.return_escape_drop_skip_local = None;
+                self.emit_return_value_with_ownership(expr_opt.as_ref())?;
             }
 
             Statement::Break(_) => {
@@ -4655,10 +6156,41 @@ impl BytecodeCompiler {
             }
 
             Statement::VariableDecl(var_decl, _) => {
+                // Numeric-conversion §4 literal adoption (let-annotation widening,
+                // THE RULE user 2026-06-01): when the binding carries an explicit
+                // `number`/`f64` annotation and the initializer is a bare int
+                // literal, the literal IS the number literal (`let n: number = 5`
+                // ⇒ `5.0`). Rewrite the init node to a `Number` literal BEFORE any
+                // sub-path reads `var_decl.value`, so every downstream emission
+                // pushes a `Constant::Number` (Float64-kinded slot) instead of an
+                // Int64 constant laid into a Float64-stamped slot (the
+                // bit-reinterpret hole: `n / 2` int-dividing → `2`). Compile-time
+                // literal re-typing, NOT a runtime coercion opcode (no W4-δ Convert
+                // defection). A non-literal `int` value is NOT rewritten — the
+                // p-var `int`-is-not-`number` rejection stays a compile error.
+                let widened_decl;
+                let var_decl = match (&var_decl.type_annotation, &var_decl.value) {
+                    (Some(ann), Some(value))
+                        if crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                            value, ann,
+                        )
+                        .is_some() =>
+                    {
+                        let mut clone = var_decl.clone();
+                        clone.value =
+                            crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                                value, ann,
+                            );
+                        widened_decl = clone;
+                        &widened_decl
+                    }
+                    _ => var_decl,
+                };
                 // Set pending variable name for hoisting integration.
                 // compile_typed_object_literal uses self to include hoisted fields in the schema.
                 self.pending_variable_name =
                     var_decl.pattern.as_identifier().map(|s| s.to_string());
+                self.pending_variable_span = var_decl.pattern.as_identifier_span();
                 // v2 Phase 3.1 (Agent 3): when the binding has an explicit
                 // `Array<T>` annotation whose element type maps to a
                 // typed-array kind, signal it to `compile_expr_array` so
@@ -4672,21 +6204,10 @@ impl BytecodeCompiler {
                 self.pending_variable_typed_array_kind = var_decl
                     .type_annotation
                     .as_ref()
-                    .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
-                // v2 Phase 3.2: when the binding has an explicit
-                // `HashMap<K, V>` annotation whose key/value pair maps to a
-                // typed-map kind, signal it to `compile_expr_function_call`
-                // (HashMap ctor path) so the constructor lowers to the v2
-                // typed-map opcode.
-                self.pending_variable_typed_map_kind = var_decl
-                    .type_annotation
-                    .as_ref()
-                    .and_then(|ann| {
-                        crate::compiler::v2_map_emission::map_key_value_from_annotation(ann)
-                    })
-                    .and_then(|(k, v)| {
-                        crate::compiler::v2_typed_map_emission::should_use_typed_map(&k, &v)
-                    });
+                    .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
+                // U3 (SB-9 deletion): no typed-map carrier selection. Every
+                // `HashMap<K, V>` binding uses the single honest `HashMapData`
+                // carrier; there is no `pending_variable_typed_map_kind` to set.
 
                 // Compile-time range check: if the type annotation is a width type
                 // (i8, u8, i16, etc.) and the initializer is a constant expression,
@@ -4751,7 +6272,10 @@ impl BytecodeCompiler {
                                 }
                             }
                         } else {
-                            match self.compile_expr_for_reference_binding(init_expr) {
+                            match self.compile_expr_for_reference_binding_with_expected_return(
+                                init_expr,
+                                var_decl.type_annotation.as_ref(),
+                            ) {
                                 Ok(tracked_borrow) => {
                                     ref_borrow = tracked_borrow;
                                     None
@@ -4763,7 +6287,10 @@ impl BytecodeCompiler {
                             }
                         }
                     } else {
-                        match self.compile_expr_for_reference_binding(init_expr) {
+                        match self.compile_expr_for_reference_binding_with_expected_return(
+                            init_expr,
+                            var_decl.type_annotation.as_ref(),
+                        ) {
                             Ok(tracked_borrow) => {
                                 ref_borrow = tracked_borrow;
                                 None
@@ -4778,6 +6305,12 @@ impl BytecodeCompiler {
                     self.emit(Instruction::simple(OpCode::PushNull));
                     None
                 };
+                if init_err.is_none() {
+                    self.patch_static_set_ctor_from_annotation(
+                        var_decl.value.as_ref(),
+                        var_decl.type_annotation.as_ref(),
+                    );
+                }
 
                 // Capture (then clear) pending variable name and v2 typed
                 // array kind after the init expression is compiled. The
@@ -4785,15 +6318,53 @@ impl BytecodeCompiler {
                 // so subsequent typed Get/Set/Push opcode emission can
                 // verify the receiver is actually a v2 typed array.
                 self.pending_variable_name = None;
-                let captured_typed_array_kind = self.pending_variable_typed_array_kind;
+                self.pending_variable_span = None;
+                let mut captured_typed_array_kind = self.pending_variable_typed_array_kind;
                 self.pending_variable_typed_array_kind = None;
-                let captured_typed_map_kind = self.pending_variable_typed_map_kind;
-                self.pending_variable_typed_map_kind = None;
+                // Kind-changing-map carrier reconciliation (2026-06-15):
+                // `pending_variable_typed_array_kind` may have leaked from
+                // compiling a SUB-expression of the initializer (the receiver
+                // array literal of `<arr>.map(closure)`), stamping the INPUT
+                // element kind onto a binding whose RESULT carrier is the
+                // closure-return kind. Re-derive the binding's authoritative
+                // carrier kind from its PROVEN element type. `Some(Some(k))`
+                // overrides with the proven scalar carrier; `Some(None)`
+                // suppresses the stale stamp (heap/uncarriered element → the
+                // carrier-reading GetProp path); `None` leaves the capture
+                // untouched (non-array binding). Per ADR-006 §2.7.5 the
+                // inference engine's element type is the proof — never a
+                // bit-reinterpret of the input carrier.
+                // Numeric-conversion §4 literal adoption (typed-array binding
+                // kind, THE RULE user 2026-06-01): an EXPLICIT `Array<number>`
+                // annotation is AUTHORITATIVE for the element carrier kind. The
+                // `reconcile_binding_typed_array_kind` re-inference walks the
+                // literal `[1, 2, 3]` and the inference engine reports its
+                // natural element type `int` (it does not see the annotation
+                // context), which would override the annotation's `F64` carrier
+                // with `I64` — and then `a[0]` emits `TypedArrayGetI64` against an
+                // array whose elements were stored as f64 (the elements adopted
+                // `number` per the per-element widen at
+                // `collections.rs:1849`), reinterpreting the f64 bits as i64
+                // (`1.0` → `4607182418800017408`). When the annotation already
+                // proved a carrier kind, trust it; only consult the literal
+                // re-inference for the UNANNOTATED binding (`let a = [1, 2, 3]`).
+                let annotation_proved_array_kind = var_decl
+                    .type_annotation
+                    .as_ref()
+                    .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann))
+                    .is_some();
+                if !annotation_proved_array_kind {
+                    if let Some(init_expr) = var_decl.value.as_ref() {
+                        if let Some(reconciled) = self.reconcile_binding_typed_array_kind(init_expr)
+                        {
+                            captured_typed_array_kind = reconciled;
+                        }
+                    }
+                }
                 // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
                 // empty-array-accumulator placeholder index alongside the
                 // other initializer-derived signals.
-                let captured_empty_array_alloc_idx =
-                    self.pending_empty_array_alloc_idx.take();
+                let captured_empty_array_alloc_idx = self.pending_empty_array_alloc_idx.take();
 
                 // ADR-006 §2.7.24 Q25.C: coerce-to-dyn emission. When the
                 // binding's annotation is `TypeAnnotation::Dyn(traits)`,
@@ -4821,11 +6392,9 @@ impl BytecodeCompiler {
                         })
                         .unwrap_or(false);
                 if is_dyn_coerce {
-                    if let Some(trait_name) = var_decl
-                        .type_annotation
-                        .as_ref()
-                        .and_then(crate::compiler::trait_object_emission::trait_name_from_annotation)
-                    {
+                    if let Some(trait_name) = var_decl.type_annotation.as_ref().and_then(
+                        crate::compiler::trait_object_emission::trait_name_from_annotation,
+                    ) {
                         let sid = self.program.add_string(trait_name.to_string());
                         self.emit(Instruction::new(
                             OpCode::BoxTraitObject,
@@ -4864,7 +6433,18 @@ impl BytecodeCompiler {
                         // this on the basis that "MIR is the sole
                         // authority" — but MIR never sees module-scope
                         // statements.
-                        if ref_borrow.is_some() {
+                        //
+                        // ADR-006 §2.7.30 (FlipLive): flip EXACTLY the
+                        // `ModuleBindingStore` floor sink — a top-level
+                        // `let r = &x` where `x` is a program-lifetime module
+                        // binding. Same scoping predicate as the
+                        // `Item::VariableDecl` sites; non-floor escapes
+                        // (referent rooted at a local) still reject.
+                        let referent_is_module_floor = var_decl
+                            .value
+                            .as_ref()
+                            .is_some_and(|expr| self.reference_root_is_module_binding(expr));
+                        if ref_borrow.is_some() && !referent_is_module_floor {
                             return Err(ShapeError::SemanticError {
                                 message:
                                     "[B0003] cannot return or store a reference that outlives its owner"
@@ -4875,6 +6455,17 @@ impl BytecodeCompiler {
                             });
                         }
                         let binding_idx = self.get_or_create_module_binding(name);
+                        if let Some(span) = var_decl.pattern.as_identifier_span()
+                            && !span.is_dummy()
+                        {
+                            self.module_binding_spans.insert(binding_idx, span);
+                        }
+
+                        // U4-6a: the former `record_binding_object_element_fields`
+                        // call is deleted with the side-table; `for {x,y} in
+                        // points` now resolves the element object's field
+                        // annotations via the inference engine span-table
+                        // (`infer_expr_type` in `anonymous_object_element_fields`).
 
                         // Emit StoreModuleBindingTyped for width-typed bindings,
                         // otherwise emit regular StoreModuleBinding.
@@ -4905,7 +6496,8 @@ impl BytecodeCompiler {
 
                         // v2 Phase 3.1 (Agent 3): record v2 typed array kind for this binding
                         if let Some(kind) = captured_typed_array_kind {
-                            self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                            self.v2_typed_array_module_bindings
+                                .insert(binding_idx, kind);
                         }
                         // Phase 4b Round 6 WS-1b W16.2-C residual: re-key a
                         // bare empty-array-accumulator placeholder against
@@ -4921,10 +6513,6 @@ impl BytecodeCompiler {
                                 var_decl.value.as_ref().map(|v| v.span()),
                             );
                         }
-                        // v2 Phase 3.2: record v2 typed map kind for this binding
-                        if let Some(kind) = captured_typed_map_kind {
-                            self.v2_typed_map_module_bindings.insert(binding_idx, kind);
-                        }
                         // ADR-006 §2.7.27 / Item 4 ruling: transfer the
                         // pending container-kind signal to the module
                         // binding for write-back-aware method dispatch.
@@ -4935,17 +6523,29 @@ impl BytecodeCompiler {
                         // binding so subsequent `a.method()` calls emit
                         // `OpCode::DynMethodCall` instead of the standard
                         // `OpCode::CallMethod` path.
-                        if let Some(trait_name) = var_decl
-                            .type_annotation
-                            .as_ref()
-                            .and_then(crate::compiler::trait_object_emission::trait_name_from_annotation)
-                        {
+                        if let Some(trait_name) = var_decl.type_annotation.as_ref().and_then(
+                            crate::compiler::trait_object_emission::trait_name_from_annotation,
+                        ) {
                             self.dyn_module_bindings
                                 .insert(binding_idx, trait_name.to_string());
                         }
 
                         // Track type annotation if present (for type checker)
                         if let Some(ref type_ann) = var_decl.type_annotation {
+                            // strict-flip (map/collect OUTPUT element-type
+                            // stamp): reject `let r: Array<number> =
+                            // [1,2,3].map(|x| x*2)` — the map output element is
+                            // the closure RETURN type (`int`), so the result is
+                            // `Array<int>`, which must NOT coerce to
+                            // `Array<number>`. Runs BEFORE the annotation drives
+                            // the slot stamp below, so a stale `Float64` stamp
+                            // never reaches an `Int64` carrier.
+                            if let Some(init_expr) = var_decl.value.as_ref() {
+                                self.check_let_annotation_element_type_strict(type_ann, init_expr)?;
+                                self.check_let_annotation_scalar_unknown_strict(
+                                    type_ann, init_expr,
+                                )?;
+                            }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)
                             {
@@ -4956,15 +6556,26 @@ impl BytecodeCompiler {
                             // call site `id(n)` can resolve the argument's
                             // type. The type-tracker only retains a lossy
                             // head-name string (e.g. "option" with no inner
-                            // type); this table carries the full ConcreteType.
+                            // type); the explicit binding fact carries the
+                            // full ConcreteType.
                             if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
-                                self.module_binding_concrete_types.insert(binding_idx, ct);
+                                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                    self,
+                                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                                    ct,
+                                    crate::compiler::BindingConcreteFactSource::DeclaredAnnotation,
+                                );
                             }
                             // Handle Table<T> generic annotation
                             self.try_track_datatable_type(type_ann, binding_idx, false)?;
                         } else {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
-                            self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
+                            self.propagate_initializer_type_to_slot(
+                                binding_idx,
+                                false,
+                                is_mutable,
+                                var_decl.value.as_ref(),
+                            );
                             // v0.3 WS-6b GAP A: an *inferred-type* `let p =
                             // <expr>` carries no annotation, so the WS-6
                             // annotated-only recording above never runs. Resolve
@@ -4978,78 +6589,52 @@ impl BytecodeCompiler {
                             // and `id(n)` stays a clean compile error.
                             if let Some(init_expr) = var_decl.value.as_ref() {
                                 if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
-                                    self.module_binding_concrete_types.insert(binding_idx, ct);
+                                    // ROOT-1 (strict-flip, 2026-06-18): a derived-read
+                                    // element type must also reach the type_tracker NAME,
+                                    // not only the `*_concrete_types` side-table. Field
+                                    // access (`p.age`) and `iter_element_type_name`
+                                    // (`for p in ps`) read the tracker NAME, not the
+                                    // ConcreteType table — so an inferred
+                                    // `let ps = [R{..}]` (struct/array-of-struct, no
+                                    // annotation) previously left `ps` named `unknown`
+                                    // and `p.age + 10` failed to infer. Stamp the
+                                    // tracker name from the proven ConcreteType (the
+                                    // ConcreteType IS the proof, ADR-006 §2.7.5 — no
+                                    // fabrication; a shape with no stable tracker name
+                                    // records nothing). Mirror of the annotated path's
+                                    // `set_module_binding_type_info`.
+                                    if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
+                                        // Do not downgrade an already-stamped
+                                        // monomorphized schema (`Box<int>`) to the
+                                        // base name (`Box`) — see
+                                        // `ws6b_name_would_downgrade` (ADR-006 §2.7.5).
+                                        let existing = self
+                                            .type_tracker
+                                            .get_binding_type(binding_idx);
+                                        if !Self::ws6b_name_would_downgrade(existing, &tn) {
+                                            self.set_module_binding_type_info(binding_idx, &tn);
+                                        }
+                                    }
+                                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                        self,
+                                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                                        ct,
+                                        crate::compiler::BindingConcreteFactSource::StructuralInitializer,
+                                    );
                                 }
                             }
                         }
 
-                        // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
-                        // 2026-05-16): Class C method-chain intermediate
-                        // binding coverage at module-binding (top-level)
-                        // path. The canonical Class C fixture
-                        // (`/tmp/cw-B-class-c-method-chain.shape`) is
-                        // top-level (`let doubled = xs.map(...)` at module
-                        // scope), so the side-table to populate is
-                        // `module_binding_array_element_types` (consumed by
-                        // `identifier_concrete_type`'s module-binding
-                        // fallback arm at
-                        // `monomorphization/type_resolution.rs:1462`).
-                        //
-                        // Must run AFTER `propagate_initializer_type_to_slot`
-                        // because that path's fallback writes
-                        // `VariableTypeInfo::unknown()` when no type info is
-                        // available from the expression's compile-time
-                        // metadata (`last_expr_type_info` /
-                        // `last_expr_numeric_type` / `last_expr_schema`),
-                        // which would wipe a prior type_tracker entry. The
-                        // method call's `last_expr_type_info` is cleared at
-                        // `compile_expr_method_call` line 2197/2287/2438 per
-                        // the method-result clearing pattern, so the
-                        // initializer-propagate fallback unconditionally
-                        // hits the unknown-write arm for method-call RHS.
-                        //
-                        // Per ADR-006 §2.7.5 stamp-at-compile-time: the
-                        // specialized callee's substituted return-type
-                        // annotation IS the proof — no runtime decode, no
-                        // inference fabrication, no Bool-default. The
-                        // monomorphization site-table was populated by
-                        // `try_monomorphize_method_call` /
-                        // `_with_closures` per the V3-S6b conduit; this
-                        // walks the same side-tables used by the link-time
-                        // MIR resolver, but at bytecode-emission time so
-                        // subsequent statements see the type before the
-                        // resolver runs. Per §2.7.7 #9: when any chain link
-                        // is absent the helper returns None and the slot
-                        // stays unstamped (surface-and-stop preserved).
-                        //
-                        // The mirror set_module_binding_type_info call is
-                        // required because `resolve_receiver_extend_type`
-                        // at `helpers.rs:3826` consults the type_tracker
-                        // (not the side-table) to gate the UFCS extend-
-                        // function lookup for `Vec.map` at
-                        // `compile_expr_method_call:2116`. Without the
-                        // type_tracker mirror, the second `.map(...)` falls
-                        // through to the generic `CallMethod` path without
-                        // specializing, and the bytecode runtime hits the
-                        // ckpt-2 surface in `array_transform.rs::map`.
+                        // U4-6 post-monomorphization call-site return fact:
+                        // after initializer propagation, stamp a module binding
+                        // from the specialized method-call return recorded at
+                        // `(init_span, current_function)`.
                         if let Some(init_expr) = var_decl.value.as_ref() {
-                            if let Some(shape_value::v2::ConcreteType::Array(elem)) =
-                                crate::compiler::monomorphization::type_resolution::specialized_call_return_concrete_type(
-                                    self, init_expr,
-                                )
-                            {
-                                self.module_binding_array_element_types
-                                    .insert(binding_idx, (*elem).clone());
-                                if let Some(elem_ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem) {
-                                    let vec_ann = shape_ast::ast::TypeAnnotation::Generic {
-                                        name: shape_ast::ast::TypePath::simple("Vec"),
-                                        args: vec![elem_ann],
-                                    };
-                                    if let Some(type_name) = Self::tracked_type_name_from_annotation(&vec_ann) {
-                                        self.set_module_binding_type_info(binding_idx, &type_name);
-                                    }
-                                }
-                            }
+                            crate::compiler::monomorphization::type_resolution::stamp_binding_initializer_monomorphized_call_return(
+                                self,
+                                crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                                init_expr,
+                            );
                         }
 
                         // Track for auto-drop at program exit
@@ -5168,12 +6753,11 @@ impl BytecodeCompiler {
                     // emitting one extra opcode per binding across an entire pipeline
                     // is measurable, and the hint is free to consult.
                     if let Some(name) = var_decl.pattern.as_identifier() {
-                        let is_owned_binding = var_decl.kind == VarKind::Let
-                            || var_decl.kind == VarKind::Const;
+                        let is_owned_binding =
+                            var_decl.kind == VarKind::Let || var_decl.kind == VarKind::Const;
                         if is_owned_binding {
                             if let Some(local_idx) = self.resolve_local(name) {
-                                let box_by_default =
-                                    super::helpers::box_by_default_enabled();
+                                let box_by_default = super::helpers::box_by_default_enabled();
                                 let should_promote = self
                                     .mir_storage_class_for_slot(local_idx)
                                     .map_or(false, |sc| {
@@ -5214,6 +6798,42 @@ impl BytecodeCompiler {
                                             self.emit(Instruction::simple(OpCode::PromoteToOwned));
                                             self.emit(last);
                                         }
+                                    }
+                                }
+
+                                // ADR-006 §2.7.30 (R3): def-site cell allocation
+                                // for a referent promoted by R2 because a
+                                // reference escapes it via a flipped FLOOR sink
+                                // (`return &x` / module-binding `let r = &x`).
+                                // The borrow planner assigned `SharedCow` AND
+                                // flagged the slot in the sink-discriminated
+                                // promotion set; promote the just-stored value
+                                // into an RC'd `SharedCell` here so `op_make_ref`
+                                // builds an OWNING `PromotedCell` carrier that
+                                // outlives this frame. Reuses the closures.rs
+                                // `LoadLocal + AllocSharedLocal` sequence. The
+                                // `shared_locals` membership makes subsequent
+                                // reads of this binding route through the cell;
+                                // the `shared_drop_locals` registration releases
+                                // the def-site share at scope exit (R3 keep-alive
+                                // is the ref's owning share, NOT this one).
+                                if matches!(
+                                    self.mir_storage_class_for_slot(local_idx),
+                                    Some(crate::type_tracking::BindingStorageClass::SharedCow)
+                                ) && self.slot_is_reference_escape_promotion(local_idx)
+                                    && !self.shared_locals.contains(name)
+                                {
+                                    self.emit(Instruction::new(
+                                        OpCode::LoadLocal,
+                                        Some(Operand::Local(local_idx)),
+                                    ));
+                                    self.emit(Instruction::new(
+                                        OpCode::AllocSharedLocal,
+                                        Some(Operand::Local(local_idx)),
+                                    ));
+                                    self.shared_locals.insert(name.to_string());
+                                    if let Some(scope) = self.shared_drop_locals.last_mut() {
+                                        scope.push(local_idx);
                                     }
                                 }
                             }
@@ -5265,6 +6885,20 @@ impl BytecodeCompiler {
                     // Track type annotation first (so drop tracking can resolve the type)
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         if let Some(ref type_ann) = var_decl.type_annotation {
+                            // strict-flip (map/collect OUTPUT element-type
+                            // stamp): mirror of the module-binding path — reject
+                            // `let r: Array<number> = [1,2,3].map(|x| x*2)`
+                            // (and the `.iter().map(...).collect()` form). The
+                            // map output element is the closure RETURN type, so
+                            // an `Array<int>` result must NOT coerce to
+                            // `Array<number>`. Runs before the annotation stamps
+                            // the local slot kind.
+                            if let Some(init_expr) = var_decl.value.as_ref() {
+                                self.check_let_annotation_element_type_strict(type_ann, init_expr)?;
+                                self.check_let_annotation_scalar_unknown_strict(
+                                    type_ann, init_expr,
+                                )?;
+                            }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)
                             {
@@ -5279,7 +6913,12 @@ impl BytecodeCompiler {
                             // See the mirror module-binding path above.
                             if let Some(local_idx) = self.resolve_local(name) {
                                 if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
-                                    self.current_function_local_concrete_types.insert(local_idx, ct);
+                                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                        self,
+                                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                        ct,
+                                        crate::compiler::BindingConcreteFactSource::DeclaredAnnotation,
+                                    );
                                 }
                             }
                             // Handle Table<T> generic annotation
@@ -5290,21 +6929,27 @@ impl BytecodeCompiler {
                             // local so subsequent `a.method()` calls
                             // route through `OpCode::DynMethodCall`.
                             if let Some(trait_name) =
-                                crate::compiler::trait_object_emission::trait_name_from_annotation(type_ann)
+                                crate::compiler::trait_object_emission::trait_name_from_annotation(
+                                    type_ann,
+                                )
                             {
                                 if let Some(local_idx) = self.resolve_local(name) {
-                                    self.dyn_locals
-                                        .insert(local_idx, trait_name.to_string());
+                                    self.dyn_locals.insert(local_idx, trait_name.to_string());
                                 }
                             }
                         } else if let Some(local_idx) = self.resolve_local(name) {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
-                            self.propagate_initializer_type_to_slot(local_idx, true, is_mutable);
+                            self.propagate_initializer_type_to_slot(
+                                local_idx,
+                                true,
+                                is_mutable,
+                                var_decl.value.as_ref(),
+                            );
                             // v0.3 WS-6b GAP A: mirror of the inferred-type
                             // module-binding path above. An inferred `let p =
                             // <expr>` local carries no annotation, so the WS-6
-                            // annotated-only `current_function_local_concrete_types`
-                            // recording never fires. Resolve the local's
+                            // annotated-only binding fact recording never
+                            // fires. Resolve the local's
                             // ConcreteType structurally from the initializer so a
                             // later generic call site `id(p)` (inside the same
                             // function) can bind its type argument. `None` for a
@@ -5312,7 +6957,30 @@ impl BytecodeCompiler {
                             // clean-compile-error contract is preserved.
                             if let Some(init_expr) = var_decl.value.as_ref() {
                                 if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
-                                    self.current_function_local_concrete_types.insert(local_idx, ct);
+                                    // ROOT-1 (strict-flip, 2026-06-18): mirror of the
+                                    // module-binding path above — stamp the type_tracker
+                                    // NAME from the proven ConcreteType so a derived-read
+                                    // struct/array-of-struct local (`let p = ps[0]`,
+                                    // `let ps = [R{..}]`) is field-accessible and
+                                    // for-iterable. The tracker NAME (not the ConcreteType
+                                    // side-table) is what `p.age` / `iter_element_type_name`
+                                    // consult. ConcreteType IS the proof (ADR-006 §2.7.5).
+                                    if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
+                                        // Do not downgrade an already-stamped
+                                        // monomorphized schema (`Box<int>`) to the
+                                        // base name (`Box`) — see
+                                        // `ws6b_name_would_downgrade` (ADR-006 §2.7.5).
+                                        let existing = self.type_tracker.get_local_type(local_idx);
+                                        if !Self::ws6b_name_would_downgrade(existing, &tn) {
+                                            self.set_local_type_info(local_idx, &tn);
+                                        }
+                                    }
+                                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                        self,
+                                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                        ct,
+                                        crate::compiler::BindingConcreteFactSource::StructuralInitializer,
+                                    );
                                 }
                             }
                         }
@@ -5340,85 +7008,23 @@ impl BytecodeCompiler {
                                 var_decl.value.as_ref().map(|v| v.span()),
                             );
                         }
+                        // U4-6a: the former `record_binding_object_element_fields`
+                        // call (local `let pts = [{x:1,y:2}]`) is deleted with
+                        // the side-table; `for {x,y} in pts` resolves the element
+                        // object's field annotations via the inference engine
+                        // span-table (`infer_expr_type`).
                     }
-                    // v0.3 WS-6b GAP B: record v2 typed-map kind for the
-                    // local. The module-binding path above stamps
-                    // `v2_typed_map_module_bindings`, but the function-local
-                    // path had no mirror — so a function-scoped
-                    // `let m: HashMap<K,V> = HashMap()` produced a
-                    // `NewTypedMap*` carrier whose slot was never registered
-                    // as a typed map. `is_typed_map_receiver` /
-                    // `try_compile_typed_slot_method` then both missed it,
-                    // method dispatch fell through to the generic
-                    // `CallMethod` path, and the runtime surfaced
-                    // `no method 'set'/'get' on receiver kind UInt64`.
-                    // Mirrors the `v2_typed_array_locals` arm directly above.
-                    if let Some(kind) = captured_typed_map_kind {
+                    // U4-6 post-monomorphization call-site return fact: mirror
+                    // the module-binding path for local let-bound method-chain
+                    // intermediates.
+                    if let Some(init_expr) = var_decl.value.as_ref() {
                         if let Some(name) = var_decl.pattern.as_identifier() {
                             if let Some(local_idx) = self.resolve_local(name) {
-                                self.v2_typed_map_locals.insert(local_idx, kind);
-                            }
-                        }
-                    }
-
-                    // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
-                    // 2026-05-16): Class C method-chain intermediate slot
-                    // coverage. When the RHS is a method call that just
-                    // monomorphized to a specialization whose return type
-                    // is `Array<C>`, populate `local_array_element_types`
-                    // so the next statement's
-                    // `concrete_type_for_expr(receiver_identifier)` chain
-                    // can reach the `Array<C>` annotation through
-                    // `identifier_concrete_type`'s side-table arm
-                    // (`monomorphization/type_resolution.rs:1443`). This
-                    // closes the canonical chain
-                    // `let doubled = xs.map(|x|x*2); let trebled =
-                    // doubled.map(|y|y+1); print(trebled.sum())` whose
-                    // pre-fix failure was that the SECOND `.map(...)`
-                    // could not specialize because `doubled`'s slot had
-                    // no entry in any concrete-type side-table.
-                    //
-                    // Per ADR-006 §2.7.5 stamp-at-compile-time: the
-                    // specialized callee's substituted return-type
-                    // annotation IS the proof — no runtime decode, no
-                    // inference fabrication, no Bool-default. The
-                    // monomorphization site-table was populated by
-                    // `try_monomorphize_method_call` /
-                    // `_with_closures` per the V3-S6b conduit; this
-                    // walks the same side-tables used by the link-time
-                    // MIR resolver, but at bytecode-emission time so
-                    // subsequent statements see the type before the
-                    // resolver runs. Per §2.7.7 #9: when any chain link
-                    // is absent the helper returns None and the slot
-                    // stays unstamped (surface-and-stop preserved).
-                    if let Some(init_expr) = var_decl.value.as_ref() {
-                        if let Some(shape_value::v2::ConcreteType::Array(elem)) =
-                            crate::compiler::monomorphization::type_resolution::specialized_call_return_concrete_type(
-                                self, init_expr,
-                            )
-                        {
-                            if let Some(name) = var_decl.pattern.as_identifier() {
-                                if let Some(local_idx) = self.resolve_local(name) {
-                                    self.local_array_element_types
-                                        .insert(local_idx, (*elem).clone());
-                                    // Mirror `set_local_type_info` for the
-                                    // corresponding `Vec<elem>` type name
-                                    // — see the module-binding site above
-                                    // for the full rationale on why both
-                                    // the side-table and the type_tracker
-                                    // entry are required to close the
-                                    // `let intermediate = recv.map(...)`
-                                    // → `intermediate.map(...)` chain.
-                                    if let Some(elem_ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem) {
-                                        let vec_ann = shape_ast::ast::TypeAnnotation::Generic {
-                                            name: shape_ast::ast::TypePath::simple("Vec"),
-                                            args: vec![elem_ann],
-                                        };
-                                        if let Some(type_name) = Self::tracked_type_name_from_annotation(&vec_ann) {
-                                            self.set_local_type_info(local_idx, &type_name);
-                                        }
-                                    }
-                                }
+                                crate::compiler::monomorphization::type_resolution::stamp_binding_initializer_monomorphized_call_return(
+                                    self,
+                                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                    init_expr,
+                                );
                             }
                         }
                     }
@@ -5620,9 +7226,57 @@ impl BytecodeCompiler {
                         if method == "push" && args.len() == 1 {
                             if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                                 if recv_name == name {
+                                    // R1 empty-array-push let-gen (2026-06-14):
+                                    // `a = a.push(x)` where `a` is a bare empty-
+                                    // array accumulator (`let mut a = []`, no
+                                    // annotation, placeholder `NewArray(0)`
+                                    // allocator). The v1 `ArrayPushLocal` path
+                                    // below assumes a materialized array carrier
+                                    // in the slot; the placeholder accumulator is
+                                    // not yet a typed array, so pushing into it
+                                    // (especially at MODULE scope, where the slot
+                                    // read None) SIGSEGV'd. Route the first such
+                                    // self-push through the accumulator finalizer:
+                                    // it resolves the element kind from `x`'s
+                                    // producer-side proof, PATCHES the placeholder
+                                    // allocator to the typed `NewTypedArray*`
+                                    // opcode (so the slot holds a real typed
+                                    // array), emits the typed push, and leaves the
+                                    // array on the stack — which the assignment
+                                    // then stores back into the same slot. The
+                                    // allocator patch fires AFTER the element type
+                                    // resolves, so the module-binding slot is
+                                    // constructed with the right kind (no None
+                                    // read, no heap corruption).
+                                    let source_loc =
+                                        self.span_to_source_location(receiver.as_ref().span());
+                                    if self.compile_first_push_to_empty_accumulator(
+                                        recv_name,
+                                        &args[0],
+                                        Some(source_loc),
+                                    )? {
+                                        // The typed push left the (now-typed)
+                                        // array on the stack; store it back into
+                                        // the binding slot.
+                                        if let Some(local_idx) = self.resolve_local(name) {
+                                            self.emit(Instruction::new(
+                                                OpCode::StoreLocal,
+                                                Some(Operand::Local(local_idx)),
+                                            ));
+                                        } else {
+                                            let binding_idx =
+                                                self.get_or_create_module_binding(name);
+                                            self.emit(Instruction::new(
+                                                OpCode::StoreModuleBinding,
+                                                Some(Operand::ModuleBinding(binding_idx)),
+                                            ));
+                                        }
+                                        break 'assign;
+                                    }
                                     if let Some(local_idx) = self.resolve_local(name) {
                                         self.compile_expr(&args[0])?;
-                                        let pushed_numeric = self.last_expr_numeric_type;
+                                        // U4-4: pushed element kind from the one resolved Type.
+                                        let pushed_numeric = self.numeric_type_of(&args[0]);
                                         self.emit(Instruction::new(
                                             OpCode::ArrayPushLocal,
                                             Some(Operand::Local(local_idx)),
@@ -5634,6 +7288,8 @@ impl BytecodeCompiler {
                                                 numeric_type,
                                             );
                                         }
+                                        // T1 sub-case (a): see the first-push arm.
+                                        self.record_pushed_element_concrete_type(name, &args[0]);
                                         self.plan_flexible_binding_storage_from_expr(
                                             local_idx,
                                             true,
@@ -5643,7 +7299,8 @@ impl BytecodeCompiler {
                                     } else {
                                         let binding_idx = self.get_or_create_module_binding(name);
                                         self.compile_expr(&args[0])?;
-                                        let pushed_numeric = self.last_expr_numeric_type;
+                                        // U4-4: pushed element kind from the one resolved Type.
+                                        let pushed_numeric = self.numeric_type_of(&args[0]);
                                         self.emit(Instruction::new(
                                             OpCode::ArrayPushLocal,
                                             Some(Operand::ModuleBinding(binding_idx)),
@@ -5655,6 +7312,8 @@ impl BytecodeCompiler {
                                                 numeric_type,
                                             );
                                         }
+                                        // T1 sub-case (a): see the first-push arm.
+                                        self.record_pushed_element_concrete_type(name, &args[0]);
                                         self.plan_flexible_binding_storage_from_expr(
                                             binding_idx,
                                             false,
@@ -5670,10 +7329,45 @@ impl BytecodeCompiler {
 
                 // Compile value
                 let saved_pending_variable_name = self.pending_variable_name.clone();
+                let saved_pending_variable_span = self.pending_variable_span;
                 self.pending_variable_name =
                     assign.pattern.as_identifier().map(|name| name.to_string());
+                self.pending_variable_span = assign.pattern.as_identifier_span();
+                // V3-S5 empty-array reassign (STAGE T4, 2026-06-20): an empty
+                // array literal RHS (`a = []`) carries no element type of its
+                // own — the var-decl path proves it from the `Array<T>`
+                // annotation and hands it to `compile_expr_array` via
+                // `pending_variable_typed_array_kind` (statements.rs:967),
+                // which makes the empty literal lower to the typed
+                // `NewTypedArray*` allocator (count 0). A reassignment has no
+                // annotation, so without the symmetric hand-off the empty
+                // literal fell through to the generic `NewArray(0)` and
+                // SURFACEd `op_new_array(0)` at runtime mid-program. Recover
+                // the LHS binding's PROVEN element type from the type tracker
+                // (the binding's declared `Array<T>` — ADR-006 §2.7.5
+                // producer-side proof, no runtime inspection) and re-key it
+                // through the same `pending_variable_typed_array_kind`
+                // hand-off. NO TypedArrayData: the typed allocator the kind
+                // selects is the existing per-T v2-raw `TypedArray<T>`
+                // monomorphization which already handles the count-0 case.
+                let saved_pending_typed_array_kind = self.pending_variable_typed_array_kind;
+                if matches!(&assign.value, Expr::Array(elements, _) if elements.is_empty()) {
+                    if let Some(name) = assign.pattern.as_identifier() {
+                        if let Some(shape_value::v2::ConcreteType::Array(elem)) =
+                            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                                self,
+                                &Expr::Identifier(name.to_string(), Span::DUMMY),
+                            )
+                        {
+                            self.pending_variable_typed_array_kind =
+                                crate::compiler::v2_typed_emission::should_use_typed_array(&elem);
+                        }
+                    }
+                }
                 let compile_result = self.compile_expr_for_reference_binding(&assign.value);
+                self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
                 self.pending_variable_name = saved_pending_variable_name;
+                self.pending_variable_span = saved_pending_variable_span;
                 let ref_borrow = compile_result?;
                 let assigned_ident = assign.pattern.as_identifier().map(str::to_string);
 
@@ -5718,7 +7412,7 @@ impl BytecodeCompiler {
                             );
                         }
                     }
-                    self.propagate_assignment_type_to_identifier(name);
+                    self.propagate_assignment_type_to_identifier(name, Some(&assign.value));
                 }
             }
 
@@ -5756,9 +7450,7 @@ impl BytecodeCompiler {
                             self.module_bindings
                                 .get(&scoped)
                                 .copied()
-                                .and_then(|idx| {
-                                    self.mut_self_container_bindings.get(&idx).copied()
-                                })
+                                .and_then(|idx| self.mut_self_container_bindings.get(&idx).copied())
                         } else {
                             None
                         };
@@ -5802,8 +7494,8 @@ impl BytecodeCompiler {
                             // v2-raw `TypedArray<T>` receiver is a
                             // kind-mismatch (the V3-S5 `op_array_push`
                             // strict-kind check).
-                            let typed_kind = self
-                                .resolve_receiver_typed_array_kind(receiver.as_ref());
+                            let typed_kind =
+                                self.resolve_receiver_typed_array_kind(receiver.as_ref());
                             if let Some(local_idx) = self.resolve_local(recv_name) {
                                 if !self.ref_locals.contains(&local_idx) {
                                     self.check_named_binding_write_allowed(
@@ -5823,7 +7515,8 @@ impl BytecodeCompiler {
                                     return Ok(());
                                 }
                                 self.compile_expr(&args[0])?;
-                                let pushed_numeric = self.last_expr_numeric_type;
+                                // U4-4: pushed element kind from the one resolved Type.
+                                let pushed_numeric = self.numeric_type_of(&args[0]);
                                 self.emit(Instruction::new(
                                     OpCode::ArrayPushLocal,
                                     Some(Operand::Local(local_idx)),
@@ -5930,8 +7623,7 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use crate::compiler::BytecodeCompiler;
-    use crate::executor::{VMConfig, VirtualMachine};
-    use shape_ast::ast::{Item, Span, Statement};
+    use shape_ast::ast::{Item, Span, Statement, TypeAnnotation};
     use shape_ast::parser::parse_program;
 
     // The four `test_module_*` / `test_module_inline_comptime_*` tests
@@ -5946,6 +7638,38 @@ mod tests {
     // `vm.execute_raw -> (bits, kind)` boundary lands and the tests can
     // read `f64::from_bits(bits)` directly. Phase-2c rebuild surface —
     // see ADR-006 §2.4.
+    #[test]
+    fn module_qualification_preserves_builtin_set_generic() {
+        let mut type_params = std::collections::HashSet::new();
+        type_params.insert("T".to_string());
+
+        let set_ann = TypeAnnotation::Generic {
+            name: "Set".into(),
+            args: vec![TypeAnnotation::Basic("T".to_string())],
+        };
+        let qualified = BytecodeCompiler::qualify_module_type_annotation(
+            &set_ann,
+            "std::core::set",
+            &type_params,
+        );
+
+        assert_eq!(qualified, set_ann);
+
+        let local_ann = TypeAnnotation::Generic {
+            name: "LocalBox".into(),
+            args: vec![TypeAnnotation::Basic("T".to_string())],
+        };
+        let qualified_local = BytecodeCompiler::qualify_module_type_annotation(
+            &local_ann,
+            "std::core::set",
+            &type_params,
+        );
+        assert!(matches!(
+            qualified_local,
+            TypeAnnotation::Generic { ref name, .. } if name.as_str() == "std::core::set::LocalBox"
+        ));
+    }
+
     #[cfg(any())]
     #[test]
     fn test_module_decl_function_resolves_module_const() {
@@ -7273,5 +8997,300 @@ mod tests {
         // emit a synthesized FunctionDef when the impl block is empty;
         // that's fine — the test asserts the negative space (no
         // fabricated annotation).
+    }
+
+    #[test]
+    fn u4_6_post_mono_module_binding_method_chain_intermediate_compiles() {
+        use crate::test_utils::compile_with_prelude;
+
+        let res = compile_with_prelude(
+            "let xs = [1, 2, 3]\n\
+             let doubled = xs.map(|x| x * 2)\n\
+             let trebled = doubled.map(|y| y + 1)\n\
+             print(trebled.len())",
+        );
+        assert!(
+            res.is_ok(),
+            "module binding method-chain intermediate should compile; got: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn u4_6_post_mono_local_binding_method_chain_intermediate_compiles() {
+        use crate::test_utils::compile_with_prelude;
+
+        let res = compile_with_prelude(
+            "fn run() {\n\
+             let xs = [1, 2, 3]\n\
+             let doubled = xs.map(|x| x * 2)\n\
+             let trebled = doubled.map(|y| y + 1)\n\
+             print(trebled.len())\n\
+             }\n\
+             run()",
+        );
+        assert!(
+            res.is_ok(),
+            "local binding method-chain intermediate should compile; got: {:?}",
+            res.err()
+        );
+    }
+
+    // ── strict-flip S1: let-annotation Unknown-accept guard (STRUCTURAL) ──
+    //
+    // The laundering holes that previously ran rc=0 WRONG (VM==JIT) now reject
+    // CLEANLY at compile time, plus the no-FP cases that must keep compiling.
+    //   (A) angle-A REVERTED (2026-06-22): the prior
+    //       `init_rests_on_unprovable_unannotated_fn` reject over-rejected the
+    //       idiomatic `let x: int = f(5)` class (un-return-typed fn genuinely
+    //       returning int) and is removed. Replaced (S1 body-return inference,
+    //       2026-06-22) by a REAL return-type proof: `hof_unannotated_call_
+    //       return_concrete_type` resolves an un-annotated fn's return from its
+    //       body tail (params seeded to call-site arg types, callable-valued
+    //       params resolved through their own bodies — `apply2(id, ret_num,
+    //       3.0)` ⇒ `number`). HOLE-3 now REJECTS cleanly into an `int` binding
+    //       (number != int) and BINDS cleanly into a `number` binding — no
+    //       over-reject, no bit-leak. `binop_operand_disagreeing_primitive`
+    //       (HOLE-2) is KEPT — it only fires on a structurally-PROVEN
+    //       disagreeing operand (no over-reject).
+    //   (B) array-destructure binding facts from runtime inference, now
+    //       RECURSING into nested `[[a,b],[c,d]]` patterns (peels one
+    //       `Array<…>` layer per level).
+
+    fn compile_fails(source: &str) -> bool {
+        let Ok(program) = parse_program(source) else {
+            return true;
+        };
+        BytecodeCompiler::new().compile(&program).is_err()
+    }
+
+    #[test]
+    fn strict_flip_s1_hole1_array_destructure_then_int_annotation_rejected() {
+        // HOLE-1: `let [a, b] = pair` over `Array<number>` binds a,b to number
+        // (angle B); `let bad: int = a` then mismatches (number != int).
+        assert!(
+            compile_fails("let pair = [3.0, 4.0]\nlet [a, b] = pair\nlet bad: int = a\nbad"),
+            "HOLE-1: number array element accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hole2_inline_hof_arith_into_int_rejected() {
+        // HOLE-2: `apply(ret_num, 3.0) % 4` = `number % int`; the number-typed
+        // left operand disagrees with the `int` annotation.
+        assert!(
+            compile_fails(
+                "fn apply(f, x) { f(x) }\nfn ret_num(x) { x * 2.0 }\n\
+                 let bad: int = apply(ret_num, 3.0) % 4\nbad"
+            ),
+            "HOLE-2: number-operand arithmetic accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_unannotated_fn_returning_int_into_int_compiles() {
+        // angle-A REVERT no-over-reject: `let r: int = f(5)` where `f` is an
+        // un-return-typed user fn that GENUINELY returns int from its body must
+        // COMPILE and run (a matching annotation must never reject a working
+        // program). This was the over-rejected idiomatic class.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(eval_typed_i64("fn f(x) { x + 1 }\nlet r: int = f(5)\nr"), 6,);
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_unannotated_fn_returning_number_into_number_compiles() {
+        // angle-A REVERT no-over-reject (number twin).
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64("fn g(x) { x * 2.0 }\nlet r: number = g(3.0)\nr"),
+            6.0,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_unannotated_fn_chain_into_int_compiles() {
+        // angle-A REVERT no-over-reject: a chain of un-annotated-fn bindings.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn a(x) { x + 1 }\nfn b(x) { x * 2 }\n\
+                 let p: int = a(5)\nlet q: int = b(p)\nlet r: int = a(q)\nr"
+            ),
+            13,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nested_destructure_int_arith_compiles() {
+        // angle-B nested extension no-over-reject: `let [[a,b],[c,d]] =
+        // [[3,4],[5,6]]` stamps a,b,c,d to int; `let s: int = a + b` => 7
+        // (AddInt — no "no method add on Int64" runtime crash).
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64("let [[a, b], [c, d]] = [[3, 4], [5, 6]]\nlet s: int = a + b\ns"),
+            7,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nested_destructure_number_into_int_rejected() {
+        // angle-B nested extension HOLE close: `let [[a,b],[c,d]] =
+        // [[3.0,4.0],[5.0,6.0]]` stamps a,b,c,d to number; `let bad: int = a`
+        // then mismatches (number != int).
+        assert!(
+            compile_fails("let [[a, b], [c, d]] = [[3.0, 4.0], [5.0, 6.0]]\nlet bad: int = a\nbad"),
+            "nested-destructure: number element accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nested_destructure_int_into_number_rejected() {
+        // angle-B nested extension HOLE close (other direction): int element
+        // into a number binding mismatches.
+        assert!(
+            compile_fails("let [[a, b], [c, d]] = [[3, 4], [5, 6]]\nlet bad: number = a\nbad"),
+            "nested-destructure: int element accepted into number binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_valid_int_array_destructure_compiles() {
+        // No-FP (angle B): a homogeneous int array destructure binds a,b to
+        // `int`, so `let s: int = a + b` type-checks and runs to 7.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64("let [a, b] = [3, 4]\nlet s: int = a + b\ns"),
+            7,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_closure_hof_result_binds_int() {
+        // No-FP (angle A): a closure-literal HOF arg genuinely proves `int`
+        // (NOT an annotation echo) — must keep compiling and run to 42.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn apply2(f, x, y) { f(x, y) }\nlet r: int = apply2(|a, b| a * b, 6, 7)\nr"
+            ),
+            42,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_hof_number_return_binds_number() {
+        // No-FP (angle A): a resolvable-HOF result (`apply(ret_num, 3.0)` ->
+        // number via the HOF resolver) binds cleanly into a `number`.
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64(
+                "fn apply(f, x) { f(x) }\nfn ret_num(x) { x * 2.0 }\n\
+                 let r: number = apply(ret_num, 3.0)\nr"
+            ),
+            6.0,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_number_var_mod_int_literal_compiles() {
+        // No-FP (angle A): `number % <int literal>` into a `number` binding —
+        // the int literal adopts the number context losslessly; must compile.
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64("let x: number = 3.0\nlet r: number = x % 4\nr"),
+            3.0,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_dispatch_result_into_int_compiles() {
+        // No-FP (angle A): a concrete method-dispatch result (`[1,2,3].sum()`
+        // -> int via the method registry) is NOT an un-provable HOF and must
+        // bind cleanly into `int` — the guard must not over-fire on it.
+        use crate::test_utils::compile_with_prelude;
+        assert!(
+            compile_with_prelude("let s: int = [1, 2, 3].sum()\ns").is_ok(),
+            "no-FP: concrete dispatch result `.sum()` rejected into int binding"
+        );
+    }
+
+    // ── strict-flip S1 body-return inference (2026-06-22) ──
+    // The un-annotated fn's return type is RESOLVED from its body tail (the HM
+    // let-gen the user ruled), including the nested HOF `apply2(g, f, x){g(f(x))}`
+    // shape. Three properties: resolved-accept, resolved-mismatch-reject, and
+    // HOF-indirection-no-leak (the mismatch is a CLEAN compile error, NEVER a
+    // raw-bits reinterpret of `6.0`'s f64 into an i64).
+
+    #[test]
+    fn strict_flip_s1_hof_nested_number_resolved_accepts_into_number() {
+        // Resolved-accept: `apply2(id, ret_num, 3.0)` resolves to `number`
+        // (g=id passthrough, f=ret_num : number->number, x=3.0). A matching
+        // `number` annotation binds cleanly and runs to 6.0.
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64(
+                "fn id(x) { x }\nfn ret_num(x) { x * 2.0 }\n\
+                 fn apply2(g, f, x) { g(f(x)) }\n\
+                 let r: number = apply2(id, ret_num, 3.0)\nr"
+            ),
+            6.0,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_nested_int_resolved_accepts_into_int() {
+        // Resolved-accept (int twin): `apply2(id, ret_int, 5)` resolves to
+        // `int` (f=ret_int : int->int). A matching `int` annotation binds
+        // cleanly and runs to 6.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn id(x) { x }\nfn ret_int(x) { x + 1 }\n\
+                 fn apply2(g, f, x) { g(f(x)) }\n\
+                 let r: int = apply2(id, ret_int, 5)\nr"
+            ),
+            6,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_nested_number_into_int_rejected_no_leak() {
+        // Resolved-mismatch-reject + HOF-indirection-no-leak: the SAME
+        // `apply2(id, ret_num, 3.0)` resolved to `number` must REJECT cleanly
+        // into an `int` binding (number != int) — NEVER reinterpret `6.0`'s
+        // f64 bits as the i64 `4618441417868443649`.
+        assert!(
+            compile_fails(
+                "fn id(x) { x }\nfn ret_num(x) { x * 2.0 }\n\
+                 fn apply2(g, f, x) { g(f(x)) }\n\
+                 let bad: int = apply2(id, ret_num, 3.0)\nbad"
+            ),
+            "HOF-indirection: number-returning nested HOF accepted into int binding (bit-leak)"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_onelevel_number_into_int_rejected() {
+        // Resolved-mismatch-reject (1-level): `apply(ret_num, 3.0)` resolves to
+        // `number`; an `int` binding rejects cleanly.
+        assert!(
+            compile_fails(
+                "fn apply(f, x) { f(x) }\nfn ret_num(x) { x * 2.0 }\n\
+                 let bad: int = apply(ret_num, 3.0)\nbad"
+            ),
+            "1-level HOF: number-returning HOF accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_closure_callable_unresolvable_rejects() {
+        // Genuinely-unresolvable (closure-literal callable): `apply(|y| y*2.0,
+        // 3.0)` into `int` cannot be statically resolved through a named
+        // callable; it must still REJECT (via the constraint solver / FIX B),
+        // NEVER leak. The point is no acceptance of an unproven HOF into int.
+        assert!(
+            compile_fails("fn apply(f, x) { f(x) }\nlet bad: int = apply(|y| y * 2.0, 3.0)\nbad"),
+            "closure-callable HOF: unresolved number result accepted into int binding"
+        );
     }
 }

@@ -45,10 +45,11 @@
 //!   (iv) ruling. Fail-safe REFUSE LOAD with structured error sits at
 //!   the extension load gate (`shape-runtime/src/plugins/loader.rs`).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use rmpv::Value as Rmp;
 use shape_runtime::type_schema::{FieldType, TypeSchema, TypeSchemaRegistry};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr};
-use shape_value::{KindedSlot, NativeKind, TypedObjectStorage, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot};
 use std::sync::Arc;
 
 // ============================================================================
@@ -62,10 +63,7 @@ use std::sync::Arc;
 /// `kinded_slot_to_msgpack`. Heap-kinded arms dispatch via
 /// `slot.slot().as_heap_value()` (ADR-005 §1 single-discriminator) +
 /// `HeapValue::*` match.
-pub fn marshal_args(
-    args: &[KindedSlot],
-    schemas: &TypeSchemaRegistry,
-) -> Result<Vec<u8>, VMError> {
+pub fn marshal_args(args: &[KindedSlot], schemas: &TypeSchemaRegistry) -> Result<Vec<u8>, VMError> {
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
         values.push(kinded_slot_to_msgpack(arg, schemas)?);
@@ -85,10 +83,7 @@ pub fn marshal_args(
 /// (ADR-005 §1). The String / StringV2 / DecimalV2 arms read the
 /// inline carrier directly — `NativeKind` is the discriminator, the
 /// deleted `tag_bits` dispatch has no role here.
-fn kinded_slot_to_msgpack(
-    slot: &KindedSlot,
-    schemas: &TypeSchemaRegistry,
-) -> Result<Rmp, VMError> {
+fn kinded_slot_to_msgpack(slot: &KindedSlot, schemas: &TypeSchemaRegistry) -> Result<Rmp, VMError> {
     let bits = slot.raw();
     match slot.kind() {
         // ── Scalar kinds (post-proof per §2.7.5) ───────────────────────
@@ -212,8 +207,7 @@ fn heap_slot_to_msgpack(
             Ok(Rmp::Integer(v.into()))
         },
         HeapKind::Decimal => unsafe {
-            let arc =
-                Arc::<rust_decimal::Decimal>::from_raw(bits as *const rust_decimal::Decimal);
+            let arc = Arc::<rust_decimal::Decimal>::from_raw(bits as *const rust_decimal::Decimal);
             let v = *arc;
             let _ = Arc::into_raw(arc);
             Ok(Rmp::String(v.to_string().into()))
@@ -249,11 +243,42 @@ fn heap_slot_to_msgpack(
         // common shapes (String, Decimal, TypedObject, scalar) ship
         // here; rarer heap kinds (HashMap, HashSet, Deque, Range,
         // Channel, …) surface for the next round per FFI demand.
-        other => Err(VMError::NotImplemented(format!(
+        unsupported @ (HeapKind::TypedArray
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice
+        | HeapKind::Closure) => Err(VMError::NotImplemented(format!(
             "foreign_marshal: HeapKind::{other:?} has no FFI wire \
              projection yet (W17-foreign-ffi follow-up). The audit \
              §2.3 bounds the W17 round to typed-Arc payloads; rarer \
-             heap kinds (HashMap, HashSet, …) land per FFI demand."
+             heap kinds (HashMap, HashSet, …) land per FFI demand.",
+            other = unsupported
         ))),
     }
 }
@@ -281,7 +306,7 @@ fn typed_object_storage_to_msgpack(
     let mut entries = Vec::with_capacity(schema.fields.len());
     let use_field_kinds = !storage.field_kinds.is_empty();
     for (i, field) in schema.fields.iter().enumerate() {
-        let slot_bits = storage.slots[i].raw();
+        let slot_bits = storage.slots()[i].raw();
         let kind: NativeKind = if use_field_kinds && i < storage.field_kinds.len() {
             storage.field_kinds[i]
         } else {
@@ -391,9 +416,9 @@ fn msgpack_to_kinded_slot(
         },
         "string" | "String" => match val {
             Rmp::String(s) => {
-                let s = s.as_str().ok_or_else(|| {
-                    marshal_error("string contains invalid UTF-8")
-                })?;
+                let s = s
+                    .as_str()
+                    .ok_or_else(|| marshal_error("string contains invalid UTF-8"))?;
                 Ok(KindedSlot::from_string(s))
             }
             _ => Err(marshal_error(format!(
@@ -537,10 +562,7 @@ fn marshal_typed_object_from_msgpack(
 fn is_heap_kind(kind: NativeKind) -> bool {
     matches!(
         kind,
-        NativeKind::String
-            | NativeKind::StringV2
-            | NativeKind::DecimalV2
-            | NativeKind::Ptr(_)
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 | NativeKind::Ptr(_)
     )
 }
 
@@ -603,13 +625,15 @@ fn build_field_slot(
                     _ => None,
                 })
                 .unwrap_or_default();
-            Ok((
-                ValueSlot::from_string_arc(Arc::new(s)),
-                NativeKind::String,
-            ))
+            Ok((ValueSlot::from_string_arc(Arc::new(s)), NativeKind::String))
         }
-        FieldType::I8 | FieldType::U8 | FieldType::I16 | FieldType::U16
-        | FieldType::I32 | FieldType::U32 | FieldType::U64
+        FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::U64
         | FieldType::Timestamp => {
             let n = val
                 .and_then(|v| match v {
@@ -710,7 +734,7 @@ fn _unused_imports_keepalive(_hv: &HeapValue, _tp: &TypedObjectPtr) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_runtime::type_schema::{FieldType, TypeSchemaRegistry};
+    use shape_runtime::type_schema::TypeSchemaRegistry;
 
     #[test]
     fn marshal_scalar_args_roundtrips_through_msgpack() {

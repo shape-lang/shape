@@ -42,28 +42,14 @@ impl BytecodeCompiler {
                     is_strict_unary_bitwise(op),
                     "unary `~` arm must classify as is_strict_unary_bitwise (gate site)"
                 );
-                let mut numeric = self.last_expr_numeric_type;
-                if let Expr::Identifier(name, _) = operand {
-                    if let Some(local_idx) = self.resolve_local(name) {
-                        if self.param_locals.contains(&local_idx) {
-                            numeric = None;
-                        }
-                    }
-                }
-                if numeric.is_none() {
-                    numeric = self
-                        .infer_expr_type(operand)
-                        .ok()
-                        .and_then(|t| inferred_type_to_numeric(&t));
-                }
+                // U4-4: operand NumericType derived from the one resolved Type.
+                let numeric = self.numeric_type_of(operand);
                 let is_int = matches!(numeric, Some(NumericType::Int));
                 if !is_int {
                     let operand_desc = self
                         .infer_expr_type(operand)
                         .ok()
-                        .map(|t| {
-                            super::numeric_ops::type_display_name(&t)
-                        })
+                        .map(|t| super::numeric_ops::type_display_name(&t))
                         .unwrap_or_else(|| "unknown".to_string());
                     return Err(shape_ast::error::ShapeError::SemanticError {
                         message: format!(
@@ -78,12 +64,16 @@ impl BytecodeCompiler {
                 self.emit(Instruction::simple(OpCode::BitNotInt));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = Some(NumericType::Int);
                 return Ok(());
             }
             UnaryOp::Neg => {
-                // Emit typed negation when the operand type is known
-                let opcode = match self.last_expr_numeric_type {
+                // Emit typed negation when the operand type is known.
+                // U4-4: operand NumericType derived from the one resolved Type
+                // (`numeric_type_of` → `infer_expr_type`), not the deleted
+                // `last_expr_numeric_type` register. A `None` falls through to
+                // the second-chance inference block below (number-default for
+                // unresolved TypeVar / closure-param operands).
+                let opcode = match self.numeric_type_of(operand) {
                     Some(NumericType::Int) | Some(NumericType::IntWidth(_)) => Some(OpCode::NegInt),
                     Some(NumericType::Number) => Some(OpCode::NegNumber),
                     Some(NumericType::Decimal) => Some(OpCode::NegDecimal),
@@ -114,7 +104,8 @@ impl BytecodeCompiler {
                             method_id: method_id.0,
                             arg_count: 0,
                             string_id,
-                         receiver_type_tag: 0xFF, }),
+                            receiver_type_tag: 0xFF,
+                        }),
                     ));
                     // ADR-006 §2.7.5 W10 conduit: persist the bytecode-time
                     // unary-trait-dispatch decision so the JIT MIR consumer
@@ -126,7 +117,6 @@ impl BytecodeCompiler {
                         .insert(op_span, ("neg".to_string(), 0));
                     self.last_expr_schema = None;
                     self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = None;
                     return Ok(());
                 }
 
@@ -159,19 +149,15 @@ impl BytecodeCompiler {
                                 NumericType::Decimal => OpCode::NegDecimal,
                             };
                             self.emit(Instruction::simple(opcode));
-                            self.last_expr_numeric_type = Some(nt);
                             return Ok(());
                         }
                         // Unresolved TypeVar / Constrained / Function (not
                         // a concrete type) — default to `number`.
                         if matches!(
                             inferred,
-                            Type::Variable(_)
-                                | Type::Constrained { .. }
-                                | Type::Function { .. }
+                            Type::Variable(_) | Type::Constrained { .. } | Type::Function { .. }
                         ) {
                             self.emit(Instruction::simple(OpCode::NegNumber));
-                            self.last_expr_numeric_type = Some(NumericType::Number);
                             return Ok(());
                         }
                         // Concrete non-numeric type with no Neg impl: fall
@@ -184,13 +170,13 @@ impl BytecodeCompiler {
                         // Default to `number` — the only principled
                         // numeric choice for unary `-`.
                         self.emit(Instruction::simple(OpCode::NegNumber));
-                        self.last_expr_numeric_type = Some(NumericType::Number);
                         return Ok(());
                     }
                 }
 
                 return Err(shape_ast::error::ShapeError::SemanticError {
-                    message: "Cannot infer operand type for unary `-` — add type annotations".to_string(),
+                    message: "Cannot infer operand type for unary `-` — add type annotations"
+                        .to_string(),
                     location: None,
                 });
             }
@@ -232,7 +218,6 @@ impl BytecodeCompiler {
                         .insert(op_span, ("not".to_string(), 0));
                     self.last_expr_schema = None;
                     self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = None;
                     return Ok(());
                 }
 

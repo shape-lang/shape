@@ -120,11 +120,7 @@ impl FromSlot for Option<f64> {
     #[inline]
     fn from_slot(bits: u64) -> Self {
         let v = f64::from_bits(bits);
-        if v.is_nan() {
-            None
-        } else {
-            Some(v)
-        }
+        if v.is_nan() { None } else { Some(v) }
     }
 }
 
@@ -155,6 +151,26 @@ impl FromSlot for Arc<String> {
             Arc::increment_strong_count(ptr);
             Arc::from_raw(ptr)
         }
+    }
+}
+
+/// Read a `TypedObjectPtr` from a `Ptr(HeapKind::TypedObject)` slot.
+///
+/// TypedObject slots are v2-raw carriers: bits are the raw
+/// `*const TypedObjectStorage`, and lifetime is governed by the embedded
+/// `HeapHeader`, not by `Arc<TypedObjectStorage>`. The caller-owned slot
+/// keeps its share; the body receives an independent retained wrapper.
+impl FromSlot for shape_value::heap_value::TypedObjectPtr {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedObject);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
+        if !ptr.is_null() {
+            // SAFETY: the registered native kind pins this slot to a live
+            // v2-raw TypedObjectStorage carrier with a HeapHeader at offset 0.
+            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header) };
+        }
+        shape_value::heap_value::TypedObjectPtr::new(ptr)
     }
 }
 
@@ -210,8 +226,7 @@ impl FromSlot for Arc<shape_value::DataTable>
 where
     Self: Sized,
 {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::DataTable);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::DataTable);
     #[inline]
     fn from_slot(bits: u64) -> Self {
         let ptr = bits as *const shape_value::HeapValue;
@@ -236,8 +251,7 @@ where
 /// Write an `Arc<DataTable>` into a heap slot by wrapping in
 /// `HeapValue::DataTable` and producing the raw `Arc<HeapValue>` pointer.
 impl ToSlot for Arc<shape_value::DataTable> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::DataTable);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::DataTable);
     #[inline]
     fn to_slot(self) -> u64 {
         let hv = Arc::new(shape_value::HeapValue::DataTable(self));
@@ -248,58 +262,39 @@ impl ToSlot for Arc<shape_value::DataTable> {
 // ────────────────────── IoHandle FromSlot/ToSlot (option γ) ───────────────
 //
 // Cluster #2 (docs/defections.md 2026-05-06): IoHandle marshal extension
-// via Arc<IoHandleData>. Mirrors the Arc<DataTable> shape exactly.
+// via Arc<IoHandleData>.
 //
-// `HeapValue::IoHandle` payload was changed from Box<IoHandleData> to
-// Arc<IoHandleData> in the prior commit specifically so the FromSlot
-// projection here is one atomic op (Arc::clone of the inner Arc) rather
-// than a Box clone (alloc + memcpy). Bodies declare
-// `handle: Arc<IoHandleData>` and call methods on it via Arc::deref —
-// `handle.is_open()`, `handle.close()`, `handle.resource.lock()`.
-//
-// Same consistency-check residual as Arc<DataTable> at marshal.rs:193 —
-// the body's `Arc<IoHandleData>` parameter type pins the expected
-// `HeapValue::IoHandle` variant; the panic-on-mismatch arm is
-// unreachable in a well-typed system per
-// `docs/runtime-v2-spec.md` ("consistency check, not probe").
+// Strict IoHandle slots use the direct `Arc::into_raw(Arc<IoHandleData>)`
+// carrier that `KindedSlot::from_io_handle` and the HeapKind::IoHandle
+// clone/drop arms retain and release. Bodies declare
+// `handle: Arc<IoHandleData>` and call methods on it via Arc::deref.
 
-/// Read the inner `Arc<IoHandleData>` from a `NativeKind::Ptr(HeapKind::IoHandle)` slot.
+/// Read the direct `Arc<IoHandleData>` from a `NativeKind::Ptr(HeapKind::IoHandle)` slot.
 impl FromSlot for Arc<shape_value::heap_value::IoHandleData>
 where
     Self: Sized,
 {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::IoHandle);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::IoHandle);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: NATIVE_KIND::Ptr(HeapKind::IoHandle) pins the bits to
-        // an Arc<HeapValue> with the IoHandle variant. We clone the
-        // inner Arc<IoHandleData> without consuming the slot's strong ref.
+        let ptr = bits as *const shape_value::heap_value::IoHandleData;
+        // SAFETY: KindedSlot::from_io_handle and the HeapKind::IoHandle
+        // clone/drop tables store a direct Arc<IoHandleData> carrier.
+        // Increment then rebuild an Arc from that retained share, leaving
+        // the caller-owned slot share untouched.
         unsafe {
             Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::IoHandle(arc_io) => Arc::clone(arc_io),
-                other => panic!(
-                    "FromSlot<Arc<IoHandleData>>: slot bits decoded to HeapValue::{:?}, \
-                     not IoHandle. Marshal kind contract violated by caller.",
-                    other.kind()
-                ),
-            }
+            Arc::from_raw(ptr)
         }
     }
 }
 
-/// Write an `Arc<IoHandleData>` into a heap slot by wrapping in
-/// `HeapValue::IoHandle` and producing the raw `Arc<HeapValue>` pointer.
+/// Write an `Arc<IoHandleData>` using the strict direct-Arc IoHandle carrier.
 impl ToSlot for Arc<shape_value::heap_value::IoHandleData> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::IoHandle);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::IoHandle);
     #[inline]
     fn to_slot(self) -> u64 {
-        let hv = Arc::new(shape_value::HeapValue::IoHandle(self));
-        Arc::into_raw(hv) as u64
+        Arc::into_raw(self) as u64
     }
 }
 
@@ -360,8 +355,7 @@ impl ToSlot for Arc<shape_value::heap_value::IoHandleData> {
 /// is copied into a fresh `Vec<u8>` (owns-clone semantics — body receives
 /// an owned vector independent of the slot's refcount share).
 impl FromSlot for Vec<u8> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
         // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) + body-declared
@@ -374,9 +368,7 @@ impl FromSlot for Vec<u8> {
         if arr.is_null() {
             return Vec::new();
         }
-        unsafe {
-            shape_value::v2::typed_array::TypedArray::<u8>::as_slice(arr).to_vec()
-        }
+        unsafe { shape_value::v2::typed_array::TypedArray::<u8>::as_slice(arr).to_vec() }
     }
 }
 
@@ -385,8 +377,7 @@ impl FromSlot for Vec<u8> {
 /// (2026-05-15): rewritten for the v2-raw flat-struct carrier. Owns-clone
 /// semantics.
 impl FromSlot for Vec<i64> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
         // SAFETY: see Vec<u8>::from_slot above.
@@ -394,9 +385,7 @@ impl FromSlot for Vec<i64> {
         if arr.is_null() {
             return Vec::new();
         }
-        unsafe {
-            shape_value::v2::typed_array::TypedArray::<i64>::as_slice(arr).to_vec()
-        }
+        unsafe { shape_value::v2::typed_array::TypedArray::<i64>::as_slice(arr).to_vec() }
     }
 }
 
@@ -409,8 +398,7 @@ impl FromSlot for Vec<i64> {
 /// `Arc<String>` (owns-clone semantics — body receives an owned vector
 /// of independent Arcs).
 impl FromSlot for Vec<Arc<String>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
         // SAFETY: see Vec<u8>::from_slot above. The body-declared element
@@ -428,11 +416,7 @@ impl FromSlot for Vec<Arc<String>> {
             >::as_slice(arr);
             slice
                 .iter()
-                .map(|&p| {
-                    Arc::new(
-                        shape_value::v2::string_obj::StringObj::as_str(p).to_owned(),
-                    )
-                })
+                .map(|&p| Arc::new(shape_value::v2::string_obj::StringObj::as_str(p).to_owned()))
                 .collect()
         }
     }
@@ -441,39 +425,200 @@ impl FromSlot for Vec<Arc<String>> {
 /// Read a `Vec<Arc<HeapValue>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
 /// slot.
 ///
-/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: the
-/// `materialize_heap_arcs` helper (deleted alongside this comment block)
-/// re-wrapped each strict-typed element into a `HeapValue::*` Arc by
-/// pattern-matching the deleted `TypedArrayData` enum. The new
-/// `*mut TypedArray<T>` flat-struct carrier needs a per-`T` dispatcher
-/// (one impl per element width: `*const StringObj`, `*const DecimalObj`,
-/// `TypedObjectPtr`, char, etc.) plus a parallel element-kind discriminator
-/// in the marshal layer to know which `T` the slot was constructed for.
-/// The element discriminator already exists at the VM level
-/// (`stamp_elem_type` at `crates/shape-vm/src/executor/v2_handlers/array.rs`)
-/// but isn't yet exposed at the marshal-`FromSlot` boundary.
+/// STAGE K2 (2026-06-02) — per-element-T marshal dispatcher over the v2-raw
+/// `*mut TypedArray<T>` flat-struct carrier. The element type `T` was
+/// monomorphized at compile time by the `NewTypedArray*` allocation opcodes
+/// and is recorded at runtime by `stamp_elem_type` in the `_pad` byte
+/// (offset 7) of the array's `HeapHeader` (`crates/shape-vm/src/executor/
+/// v2_handlers/v2_array_detect.rs::stamp_elem_type`, canonical discriminants
+/// at `crates/shape-value/src/v2/typed_array.rs`). This reader threads that
+/// existing discriminator to the marshal boundary via the public
+/// `TypedArray::read_elem_type` accessor — no new side-channel, no kind
+/// fabrication, no `is_heap()` probe.
 ///
-/// Adding this dispatcher is the Round 2 `Vec<Arc<HeapValue>>` rewire
-/// follow-up; pairs with the `from_typed_array_<T>` constructor wave at
-/// `crates/shape-value/src/slot.rs:142` and the matching ckpt-6 JIT FFI
-/// String/Decimal build work. Until that lands, the marshal-FromSlot panics
-/// with a structured error pointing at the follow-up — any stdlib body
-/// declaring `Vec<Arc<HeapValue>>` and reaching this from_slot is currently
-/// dead at the marshal boundary (consistent with V3-S5 ckpt-5's wholesale
-/// `HeapValue::TypedArray` outer-arm deletion).
+/// Each element projects into the canonical `Arc<HeapValue>` arm (ADR-005
+/// §1 single-discriminator):
+///
+///   `ELEM_TYPE_CHAR`         → `HeapValue::Char(c)`
+///   `ELEM_TYPE_STRING`       → `HeapValue::String(Arc::new(s.to_owned()))`
+///   `ELEM_TYPE_DECIMAL`      → `HeapValue::Decimal(Arc::new(d))`
+///   `ELEM_TYPE_TYPED_OBJECT` → `HeapValue::TypedObject(TypedObjectPtr::new(p))`
+///                              (per-element `v2_retain` — owns-clone share)
+///
+/// Owns-clone semantics: the returned `Vec<Arc<HeapValue>>` is independent of
+/// the source array. String/Decimal elements are deep-copied into fresh
+/// `Arc<String>` / `Arc<Decimal>` payloads; each TypedObject element bumps the
+/// pointed-to v2-raw HeapHeader refcount so the wrapper owns a real share.
+///
+/// Scalar element kinds (`F64`/`I64`/`I32`/`Bool`/sized-ints/`F32`) have **no
+/// canonical `Arc<HeapValue>` arm** — `number`/`int`/`bool`/etc. are
+/// inline-scalar NativeKinds, not heap values (same contract as the
+/// `Vec<(Arc<String>, Arc<HeapValue>)>` HashMap reader above). Those arrays
+/// marshal via the dedicated `Arc<Vec<T>>` impls; reaching this reader with a
+/// scalar-stamped array is a marshal kind-contract violation by the caller and
+/// SURFACEs (panic with a precise message — the established surface mechanism
+/// for a `from_slot` that cannot return `Result`). Nested-array elements
+/// (`Array<Array<...>>`) are slot-level carriers (`ELEM_TYPE_TYPED_ARRAY`),
+/// not `HeapValue` arms; exact nested consumers use a concrete body type such
+/// as `Vec<Vec<Arc<String>>>`.
 impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
-    fn from_slot(_bits: u64) -> Self {
-        panic!(
-            "FromSlot<Vec<Arc<HeapValue>>>: V3-S5 ckpt-5-prime²c SURFACE — \
-             the polymorphic Vec<Arc<HeapValue>> marshal path needs a \
-             per-element-T dispatcher over the v2-raw *mut TypedArray<T> \
-             carrier. Round 2 `Vec<Arc<HeapValue>>` rewire follow-up \
-             (pairs with from_typed_array_<T> constructor wave). \
-             ADR-006 §2.7.24 Q25.A SUPERSEDED."
-        )
+    fn from_slot(bits: u64) -> Self {
+        use shape_value::heap_value::{HeapValue, TypedObjectPtr, TypedObjectStorage};
+        use shape_value::v2::decimal_obj::DecimalObj;
+        use shape_value::v2::refcount::v2_retain;
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY,
+            ELEM_TYPE_TYPED_OBJECT, TypedArray, read_elem_type,
+        };
+
+        let base = bits as usize as *const u8;
+        if base.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) pins the slot bits to
+        // a live `*mut TypedArray<T>` (HeapHeader at offset 0, element-type
+        // byte stamped at offset 7 by the producer).
+        let elem_type = unsafe { read_elem_type(base) };
+        unsafe {
+            match elem_type {
+                ELEM_TYPE_CHAR => {
+                    let arr = base as *const TypedArray<char>;
+                    let slice = TypedArray::<char>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&c| Arc::new(HeapValue::Char(c)))
+                        .collect()
+                }
+                ELEM_TYPE_STRING => {
+                    let arr = base as *const TypedArray<*const StringObj>;
+                    let slice = TypedArray::<*const StringObj>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&p| {
+                            Arc::new(HeapValue::String(Arc::new(StringObj::as_str(p).to_owned())))
+                        })
+                        .collect()
+                }
+                ELEM_TYPE_DECIMAL => {
+                    let arr = base as *const TypedArray<*const DecimalObj>;
+                    let slice = TypedArray::<*const DecimalObj>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&p| Arc::new(HeapValue::Decimal(Arc::new(DecimalObj::value(p)))))
+                        .collect()
+                }
+                ELEM_TYPE_TYPED_OBJECT => {
+                    let arr = base as *const TypedArray<*const TypedObjectStorage>;
+                    let slice = TypedArray::<*const TypedObjectStorage>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&p| {
+                            // The array owns one share per stored pointer; the
+                            // returned wrapper gets a fresh share retired by
+                            // TypedObjectPtr::drop.
+                            v2_retain(&(*p).header);
+                            Arc::new(HeapValue::TypedObject(TypedObjectPtr::new(p)))
+                        })
+                        .collect()
+                }
+                ELEM_TYPE_TYPED_ARRAY => panic!(
+                    "FromSlot<Vec<Arc<HeapValue>>>: TypedArray element-type \
+                     ELEM_TYPE_TYPED_ARRAY is a slot-level nested-array \
+                     carrier, not a canonical HeapValue arm. Use an exact \
+                     body type such as Vec<Vec<Arc<String>>> for \
+                     Array<Array<string>> so the inner element contract \
+                     stays producer-stamped and monomorphic (STAGE K2)."
+                ),
+                other => panic!(
+                    "FromSlot<Vec<Arc<HeapValue>>>: TypedArray element-type \
+                     discriminant {} has no canonical Arc<HeapValue> arm. \
+                     Scalar element kinds (number/int/bool/sized-ints/f32) are \
+                     inline-scalar NativeKinds with no HeapValue projection and \
+                     marshal via Arc<Vec<T>>; an unstamped (0) array means the \
+                     producer-side stamp_elem_type contract was violated. \
+                     Marshal kind contract violated by caller (STAGE K2).",
+                    other
+                ),
+            }
+        }
+    }
+}
+
+/// Read an `Array<Array<string>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot.
+///
+/// The outer slot must be a v2-raw
+/// `TypedArray<*const TypedArrayElem>` stamped `ELEM_TYPE_TYPED_ARRAY`.
+/// Every inner row must be a v2-raw `TypedArray<*const StringObj>` stamped
+/// `ELEM_TYPE_STRING`. The stamps are producer-side element contracts; this
+/// reader does not infer element kinds from payload bits.
+impl FromSlot for Vec<Vec<Arc<String>>> {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY, TypedArray, TypedArrayElem, read_elem_type,
+        };
+
+        let base = bits as usize as *const u8;
+        if base.is_null() {
+            return Vec::new();
+        }
+
+        unsafe {
+            let outer_elem_type = read_elem_type(base);
+            if outer_elem_type != ELEM_TYPE_TYPED_ARRAY {
+                panic!(
+                    "FromSlot<Vec<Vec<Arc<String>>>>: expected outer \
+                     Array<Array<string>> carrier stamped \
+                     ELEM_TYPE_TYPED_ARRAY ({}), got element-type \
+                     discriminant {}.",
+                    ELEM_TYPE_TYPED_ARRAY, outer_elem_type
+                );
+            }
+
+            let outer = base as *const TypedArray<*const TypedArrayElem>;
+            let outer_slice = TypedArray::<*const TypedArrayElem>::as_slice(outer);
+            let mut rows = Vec::with_capacity(outer_slice.len());
+
+            for (row_index, &row_ptr) in outer_slice.iter().enumerate() {
+                if row_ptr.is_null() {
+                    panic!(
+                        "FromSlot<Vec<Vec<Arc<String>>>>: row {} is a null \
+                         inner typed-array pointer; Array<Array<string>> rows \
+                         must be stamped Array<string> carriers.",
+                        row_index
+                    );
+                }
+
+                let row_base = row_ptr as *const u8;
+                let inner_elem_type = read_elem_type(row_base);
+                if inner_elem_type != ELEM_TYPE_STRING {
+                    panic!(
+                        "FromSlot<Vec<Vec<Arc<String>>>>: row {} expected \
+                         inner Array<string> carrier stamped \
+                         ELEM_TYPE_STRING ({}), got element-type \
+                         discriminant {}.",
+                        row_index, ELEM_TYPE_STRING, inner_elem_type
+                    );
+                }
+
+                let row_arr = row_ptr as *const TypedArray<*const StringObj>;
+                let row_slice = TypedArray::<*const StringObj>::as_slice(row_arr);
+                let row = row_slice
+                    .iter()
+                    .map(|&p| Arc::new(StringObj::as_str(p).to_owned()))
+                    .collect();
+                rows.push(row);
+            }
+
+            rows
+        }
     }
 }
 
@@ -486,8 +631,7 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
 /// resulting raw pointer (refcount discipline goes through `v2_retain` /
 /// `v2_release` per `HeapHeader`).
 impl ToSlot for Vec<Arc<String>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
         let elems: Vec<*const shape_value::v2::string_obj::StringObj> = self
@@ -500,34 +644,194 @@ impl ToSlot for Vec<Arc<String>> {
         let arr = shape_value::v2::typed_array::TypedArray::<
             *const shape_value::v2::string_obj::StringObj,
         >::from_slice(&elems);
+        unsafe {
+            shape_value::v2::typed_array::stamp_elem_type(
+                arr as *mut u8,
+                shape_value::v2::typed_array::ELEM_TYPE_STRING,
+            );
+        }
         arr as usize as u64
+    }
+}
+
+/// Project an `Array<Array<string>>` into the v2-raw nested typed-array
+/// carrier.
+///
+/// The outer allocation is `TypedArray<*const TypedArrayElem>` stamped
+/// `ELEM_TYPE_TYPED_ARRAY`. Each row is a freshly allocated
+/// `TypedArray<*const StringObj>` stamped `ELEM_TYPE_STRING`; the row's
+/// initial refcount share transfers into the outer array, whose drop path
+/// releases inner rows via `TypedArrayElem::release_elem`.
+impl ToSlot for Vec<Vec<Arc<String>>> {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+
+    #[inline]
+    fn to_slot(self) -> u64 {
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY, TypedArray, TypedArrayElem, stamp_elem_type,
+        };
+
+        let outer = TypedArray::<*const TypedArrayElem>::with_capacity(self.len() as u32);
+        unsafe {
+            stamp_elem_type(outer as *mut u8, ELEM_TYPE_TYPED_ARRAY);
+
+            for row in self {
+                let row_arr = TypedArray::<*const StringObj>::with_capacity(row.len() as u32);
+                stamp_elem_type(row_arr as *mut u8, ELEM_TYPE_STRING);
+
+                for cell in row {
+                    let p = StringObj::new(cell.as_str()) as *const StringObj;
+                    TypedArray::<*const StringObj>::push(row_arr, p);
+                }
+
+                TypedArray::<*const TypedArrayElem>::push(outer, row_arr as *const TypedArrayElem);
+            }
+        }
+
+        outer as usize as u64
     }
 }
 
 /// Project a `Vec<Arc<HeapValue>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
 /// slot.
 ///
-/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: same per-element-T
-/// dispatcher gap as the `FromSlot<Vec<Arc<HeapValue>>>` reader above.
-/// The pre-deletion `build_specialized_from_heap_arcs` helper dispatched
-/// each `HeapValue` arm into the matching `TypedArrayData::*` variant; the
-/// new flat-struct carrier needs to pick the matching
-/// `TypedArray<T>::from_slice` instantiation per element kind and
-/// stamp the element discriminator before push. Pairs with the
-/// Round 2 follow-up cited in the FromSlot impl.
+/// STAGE K2 (2026-06-02) — mirror of the `FromSlot<Vec<Arc<HeapValue>>>`
+/// reader above. The element kind is chosen by inspecting the first element's
+/// `HeapValue` variant (ADR-005 §1: `HeapValue` IS the discriminator); the
+/// matching `TypedArray<T>` monomorphization is allocated, stamped with the
+/// element discriminator via `stamp_elem_type`, and each element is pushed
+/// after building its v2-raw carrier:
+///
+///   `HeapValue::Char(c)`      → `TypedArray<char>`               (`ELEM_TYPE_CHAR`)
+///   `HeapValue::String(s)`    → `TypedArray<*const StringObj>`   (`ELEM_TYPE_STRING`)
+///   `HeapValue::Decimal(d)`   → `TypedArray<*const DecimalObj>`  (`ELEM_TYPE_DECIMAL`)
+///   `HeapValue::TypedObject`  → `TypedArray<*const TypedObjectStorage>`
+///                               (`ELEM_TYPE_TYPED_OBJECT`)
+///
+/// Owns-clone / refcount discipline: String and Decimal elements allocate
+/// fresh `StringObj` / `DecimalObj` (refcount = 1) — the new array owns those
+/// allocations outright. TypedObject elements `v2_retain` the pointed-to
+/// HeapHeader before pushing the raw pointer, so the array's one share per
+/// element is independent of the input `Vec`'s share (which Drop retires when
+/// the `Vec<Arc<HeapValue>>` is dropped by the caller).
+///
+/// The array must be homogeneous (a single `HeapValue` variant) — a mixed
+/// `Vec` cannot map to one monomorphized `TypedArray<T>` and SURFACEs.
+/// Variants with no v2-raw element carrier (scalar `HeapValue`s, `HashMap`,
+/// nested arrays, etc.) SURFACE rather than shim. An empty `Vec` returns a
+/// null pointer (bits = 0); the reader maps null → `Vec::new()`, preserving
+/// round-trip identity for the empty case.
 impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        panic!(
-            "ToSlot<Vec<Arc<HeapValue>>>: V3-S5 ckpt-5-prime²c SURFACE — \
-             polymorphic Vec<Arc<HeapValue>> projection needs a per-element-T \
-             dispatcher over the v2-raw *mut TypedArray<T> carrier (mirror \
-             of the deleted build_specialized_from_heap_arcs). Round 2 \
-             `Vec<Arc<HeapValue>>` rewire follow-up. ADR-006 §2.7.24 Q25.A \
-             SUPERSEDED."
-        )
+        use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+        use shape_value::v2::decimal_obj::DecimalObj;
+        use shape_value::v2::refcount::v2_retain;
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
+            TypedArray, stamp_elem_type,
+        };
+
+        let first = match self.first() {
+            // Empty array: null carrier; the reader maps null → Vec::new().
+            None => return 0,
+            Some(arc) => arc,
+        };
+
+        // Per-variant homogeneity guard: every element must share the first
+        // element's variant. A heterogeneous Vec cannot project to a single
+        // monomorphized TypedArray<T>.
+        macro_rules! assert_homogeneous {
+            ($variant:literal, $pat:pat) => {
+                for (i, arc) in self.iter().enumerate() {
+                    if !matches!(&**arc, $pat) {
+                        panic!(
+                            "ToSlot<Vec<Arc<HeapValue>>>: heterogeneous array — \
+                             element 0 is {} but element {} is HeapValue::{:?}. \
+                             A v2-raw TypedArray<T> is monomorphic; mixed-variant \
+                             arrays have no single-T carrier (STAGE K2).",
+                            $variant,
+                            i,
+                            arc.kind()
+                        );
+                    }
+                }
+            };
+        }
+
+        match &**first {
+            HeapValue::Char(_) => {
+                assert_homogeneous!("Char", HeapValue::Char(_));
+                let out = TypedArray::<char>::with_capacity(self.len() as u32);
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_CHAR);
+                    for arc in &self {
+                        if let HeapValue::Char(c) = &**arc {
+                            TypedArray::<char>::push(out, *c);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            HeapValue::String(_) => {
+                assert_homogeneous!("String", HeapValue::String(_));
+                let out = TypedArray::<*const StringObj>::with_capacity(self.len() as u32);
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_STRING);
+                    for arc in &self {
+                        if let HeapValue::String(s) = &**arc {
+                            // Fresh StringObj (refcount = 1); the array owns it.
+                            let p = StringObj::new(s.as_str()) as *const StringObj;
+                            TypedArray::<*const StringObj>::push(out, p);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            HeapValue::Decimal(_) => {
+                assert_homogeneous!("Decimal", HeapValue::Decimal(_));
+                let out = TypedArray::<*const DecimalObj>::with_capacity(self.len() as u32);
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_DECIMAL);
+                    for arc in &self {
+                        if let HeapValue::Decimal(d) = &**arc {
+                            // Fresh DecimalObj (refcount = 1); the array owns it.
+                            let p = DecimalObj::new(**d) as *const DecimalObj;
+                            TypedArray::<*const DecimalObj>::push(out, p);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            HeapValue::TypedObject(_) => {
+                assert_homogeneous!("TypedObject", HeapValue::TypedObject(_));
+                let out = TypedArray::<*const TypedObjectStorage>::with_capacity(self.len() as u32);
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+                    for arc in &self {
+                        if let HeapValue::TypedObject(tp) = &**arc {
+                            let p = tp.as_ptr();
+                            // Array takes its own share; input Vec keeps its
+                            // share (released on the caller's Vec Drop).
+                            v2_retain(&(*p).header);
+                            TypedArray::<*const TypedObjectStorage>::push(out, p);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            other => panic!(
+                "ToSlot<Vec<Arc<HeapValue>>>: HeapValue::{:?} has no v2-raw \
+                 TypedArray<T> element carrier. Only Char / String / Decimal / \
+                 TypedObject elements have a stamped ELEM_TYPE_* monomorphization; \
+                 scalar / HashMap / nested-array variants SURFACE rather than \
+                 shim (STAGE K2).",
+                other.kind()
+            ),
+        }
     }
 }
 
@@ -573,63 +877,49 @@ impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
 /// expected to be `HeapValue::String(_)`; mismatch panics as the
 /// spec-permitted consistency check (`docs/runtime-v2-spec.md`).
 impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::HashMap);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::HashMap);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: see Vec<u8>::from_slot above — slot bits were proven by
-        // the dispatcher to point to a valid `Arc<HeapValue>`.
+        use shape_value::heap_value::HashMapKindedRef;
+
+        // SAFETY: `ValueSlot::from_hashmap` / `KindedSlot::from_hashmap`
+        // store `Arc::into_raw(Arc<HashMapKindedRef>)` directly and stamp
+        // `Ptr(HeapKind::HashMap)`. The marshal wrapper proved the slot kind;
+        // borrow the caller-owned Arc allocation without changing ownership.
+        let kref: &HashMapKindedRef = unsafe { &*(bits as *const HashMapKindedRef) };
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::HashMap(kref) => {
-                    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V
-                    // walk for HashMap<string, string> (V=String). Other V
-                    // variants panic — the marshal contract says caller
-                    // declared a string-valued map; non-string V is a
-                    // construction-side type error.
-                    use shape_value::heap_value::HashMapKindedRef;
-                    match kref {
-                        HashMapKindedRef::String(arc) => {
-                            let n = arc.len();
-                            let mut out: Vec<(Arc<String>, Arc<String>)> =
-                                Vec::with_capacity(n);
-                            for i in 0..n {
-                                let key = unsafe {
-                                    let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
-                                        arc.keys, i as u32,
-                                    );
-                                    Arc::new(
-                                        shape_value::v2::string_obj::StringObj::as_str(ptr)
-                                            .to_owned(),
-                                    )
-                                };
-                                let val = unsafe {
-                                    let v_ptr: *const shape_value::v2::string_obj::StringObj =
-                                        *(*arc.values).data.add(i);
-                                    Arc::new(
-                                        shape_value::v2::string_obj::StringObj::as_str(v_ptr)
-                                            .to_owned(),
-                                    )
-                                };
-                                out.push((key, val));
-                            }
-                            out
-                        }
-                        other => panic!(
-                            "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap V \
-                             variant {:?} not supported — marshal contract requires \
-                             V=String. ADR-006 §2.7.24 Q25.B SUPERSEDED.",
-                            other.values_kind()
-                        ),
+            // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V
+            // walk for HashMap<string, string> (V=String). Other V
+            // variants panic — the marshal contract says caller
+            // declared a string-valued map; non-string V is a
+            // construction-side type error.
+            match kref {
+                HashMapKindedRef::String(arc) => {
+                    let n = arc.len();
+                    let mut out: Vec<(Arc<String>, Arc<String>)> = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let key = {
+                            let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                arc.keys, i as u32,
+                            );
+                            Arc::new(shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned())
+                        };
+                        let val = {
+                            let v_ptr: *const shape_value::v2::string_obj::StringObj =
+                                *(*arc.values).data.add(i);
+                            Arc::new(
+                                shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned(),
+                            )
+                        };
+                        out.push((key, val));
                     }
+                    out
                 }
                 other => panic!(
-                    "FromSlot<Vec<(Arc<String>, Arc<String>)>>: slot bits decoded to \
-                     HeapValue::{:?}, not HashMap. Marshal kind contract violated by caller.",
-                    other.kind()
+                    "FromSlot<Vec<(Arc<String>, Arc<String>)>>: HashMap V \
+                     variant {:?} not supported — marshal contract requires \
+                     V=String. ADR-006 §2.7.24 Q25.B SUPERSEDED.",
+                    other.values_kind()
                 ),
             }
         }
@@ -646,124 +936,113 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
 /// pattern-matching the inner kind per the option ε contract. No
 /// element-kind constraint at the marshal boundary.
 impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::HashMap);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::HashMap);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: see Vec<u8>::from_slot above.
+        use shape_value::heap_value::{HashMapKindedRef, HeapValue};
+
+        // SAFETY: `ValueSlot::from_hashmap` / `KindedSlot::from_hashmap`
+        // store `Arc::into_raw(Arc<HashMapKindedRef>)` directly and stamp
+        // `Ptr(HeapKind::HashMap)`. The marshal wrapper proved the slot kind;
+        // borrow the caller-owned Arc allocation without changing ownership.
+        let kref: &HashMapKindedRef = unsafe { &*(bits as *const HashMapKindedRef) };
         unsafe {
-            Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::HashMap(kref) => {
-                    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V
-                    // walk → `Vec<(Arc<String>, Arc<HeapValue>)>` for the
-                    // polymorphic-valued marshal path. Each per-V slot
-                    // projects into the canonical `Arc<HeapValue>` arm.
-                    use shape_value::heap_value::{HashMapKindedRef, HeapValue};
-                    let n = kref.len();
-                    let mut out: Vec<(Arc<String>, Arc<HeapValue>)> = Vec::with_capacity(n);
-                    let keys_ptr = match kref {
-                        HashMapKindedRef::I64(arc) => arc.keys,
-                        HashMapKindedRef::F64(arc) => arc.keys,
-                        HashMapKindedRef::Bool(arc) => arc.keys,
-                        HashMapKindedRef::Char(arc) => arc.keys,
-                        HashMapKindedRef::String(arc) => arc.keys,
-                        HashMapKindedRef::Decimal(arc) => arc.keys,
-                        HashMapKindedRef::TypedObject(arc) => arc.keys,
-                        HashMapKindedRef::TraitObject(arc) => arc.keys,
-                        HashMapKindedRef::HashMap(arc) => arc.keys,
-                    };
-                    for i in 0..n {
-                        let key = unsafe {
-                            let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
-                                keys_ptr, i as u32,
-                            );
-                            Arc::new(
-                                shape_value::v2::string_obj::StringObj::as_str(ptr)
-                                    .to_owned(),
-                            )
-                        };
-                        let value: Arc<HeapValue> = match kref {
-                            HashMapKindedRef::I64(arc) => {
-                                let v: i64 = unsafe { *(*arc.values).data.add(i) };
-                                Arc::new(HeapValue::BigInt(Arc::new(v)))
-                            }
-                            HashMapKindedRef::F64(_) => {
-                                panic!(
-                                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
-                                     HashMap<string, number> has no canonical \
-                                     HeapValue arm (number is inline-scalar). \
-                                     Marshal contract violation."
-                                );
-                            }
-                            HashMapKindedRef::Bool(_) => {
-                                panic!(
-                                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
-                                     HashMap<string, bool> has no canonical \
-                                     HeapValue arm (bool is inline-scalar). \
-                                     Marshal contract violation."
-                                );
-                            }
-                            HashMapKindedRef::Char(arc) => {
-                                let v: char = unsafe { *(*arc.values).data.add(i) };
-                                Arc::new(HeapValue::Char(v))
-                            }
-                            HashMapKindedRef::String(arc) => {
-                                let ptr: *const shape_value::v2::string_obj::StringObj =
-                                    unsafe { *(*arc.values).data.add(i) };
-                                let s = unsafe {
-                                    shape_value::v2::string_obj::StringObj::as_str(ptr)
-                                        .to_owned()
-                                };
-                                Arc::new(HeapValue::String(Arc::new(s)))
-                            }
-                            HashMapKindedRef::Decimal(arc) => {
-                                let ptr: *const shape_value::v2::decimal_obj::DecimalObj =
-                                    unsafe { *(*arc.values).data.add(i) };
-                                let d = unsafe { (*ptr).value };
-                                Arc::new(HeapValue::Decimal(Arc::new(d)))
-                            }
-                            HashMapKindedRef::TypedObject(arc) => {
-                                let elem: &shape_value::heap_value::TypedObjectPtr =
-                                    unsafe { &*(*arc.values).data.add(i) };
-                                Arc::new(HeapValue::TypedObject(elem.clone()))
-                            }
-                            HashMapKindedRef::TraitObject(_) => {
-                                panic!(
-                                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
-                                     HashMap<string, TraitObject> marshal not yet \
-                                     wired (HeapValue::TraitObject arm exists but \
-                                     payload kind dispatch is its own cluster)."
-                                );
-                            }
-                            HashMapKindedRef::HashMap(arc) => {
-                                // Recursive carrier (Wave N hashmap-value-v-arm
-                                // follow-up, cluster-2 closure-wave-C,
-                                // 2026-05-16). Each inner element is itself a
-                                // HashMapKindedRef; wrap as a fresh
-                                // HeapValue::HashMap. The inner Arc is
-                                // share-cloned (Arc::clone on
-                                // HashMapKindedRef::clone — single refcount
-                                // bump on the inner Arc<HashMapData<V_inner>>).
-                                // Per outer `unsafe` block at line 655; no
-                                // inner unsafe wrapper needed.
-                                let inner_ref: &HashMapKindedRef =
-                                    &*(*arc.values).data.add(i);
-                                Arc::new(HeapValue::HashMap(inner_ref.clone()))
-                            }
-                        };
-                        out.push((key, value));
+            // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V
+            // walk → `Vec<(Arc<String>, Arc<HeapValue>)>` for the
+            // polymorphic-valued marshal path. Each per-V slot
+            // projects into the canonical `Arc<HeapValue>` arm.
+            let n = kref.len();
+            let mut out: Vec<(Arc<String>, Arc<HeapValue>)> = Vec::with_capacity(n);
+            let keys_ptr = match kref {
+                HashMapKindedRef::I64(arc) => arc.keys,
+                HashMapKindedRef::F64(arc) => arc.keys,
+                HashMapKindedRef::Bool(arc) => arc.keys,
+                HashMapKindedRef::Char(arc) => arc.keys,
+                HashMapKindedRef::String(arc) => arc.keys,
+                HashMapKindedRef::Decimal(arc) => arc.keys,
+                HashMapKindedRef::TypedObject(arc) => arc.keys,
+                HashMapKindedRef::TraitObject(arc) => arc.keys,
+                HashMapKindedRef::Callable(arc) => arc.keys,
+                HashMapKindedRef::HashMap(arc) => arc.keys,
+            };
+            for i in 0..n {
+                let key = {
+                    let ptr =
+                        shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+                    Arc::new(shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned())
+                };
+                let value: Arc<HeapValue> = match kref {
+                    HashMapKindedRef::I64(arc) => {
+                        let v: i64 = *(*arc.values).data.add(i);
+                        Arc::new(HeapValue::BigInt(Arc::new(v)))
                     }
-                    out
-                }
-                other => panic!(
-                    "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: slot bits decoded to \
-                     HeapValue::{:?}, not HashMap. Marshal kind contract violated by caller.",
-                    other.kind()
-                ),
+                    HashMapKindedRef::F64(_) => {
+                        panic!(
+                            "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
+                             HashMap<string, number> has no canonical \
+                             HeapValue arm (number is inline-scalar). \
+                             Marshal contract violation."
+                        );
+                    }
+                    HashMapKindedRef::Bool(_) => {
+                        panic!(
+                            "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
+                             HashMap<string, bool> has no canonical \
+                             HeapValue arm (bool is inline-scalar). \
+                             Marshal contract violation."
+                        );
+                    }
+                    HashMapKindedRef::Char(arc) => {
+                        let v: char = *(*arc.values).data.add(i);
+                        Arc::new(HeapValue::Char(v))
+                    }
+                    HashMapKindedRef::String(arc) => {
+                        let ptr: *const shape_value::v2::string_obj::StringObj =
+                            *(*arc.values).data.add(i);
+                        let s = shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned();
+                        Arc::new(HeapValue::String(Arc::new(s)))
+                    }
+                    HashMapKindedRef::Decimal(arc) => {
+                        let ptr: *const shape_value::v2::decimal_obj::DecimalObj =
+                            *(*arc.values).data.add(i);
+                        let d = (*ptr).value;
+                        Arc::new(HeapValue::Decimal(Arc::new(d)))
+                    }
+                    HashMapKindedRef::TypedObject(arc) => {
+                        let elem: &shape_value::heap_value::TypedObjectPtr =
+                            &*(*arc.values).data.add(i);
+                        Arc::new(HeapValue::TypedObject(elem.clone()))
+                    }
+                    HashMapKindedRef::TraitObject(_) => {
+                        panic!(
+                            "FromSlot<Vec<(Arc<String>, Arc<HeapValue>)>>: \
+                             HashMap<string, TraitObject> marshal not yet \
+                             wired (HeapValue::TraitObject arm exists but \
+                             payload kind dispatch is its own cluster)."
+                        );
+                    }
+                    HashMapKindedRef::Callable(arc) => {
+                        let elem: &shape_value::heap_value::CallablePtr =
+                            &*(*arc.values).data.add(i);
+                        Arc::increment_strong_count(elem.as_ptr());
+                        Arc::from_raw(elem.as_ptr())
+                    }
+                    HashMapKindedRef::HashMap(arc) => {
+                        // Recursive carrier (Wave N hashmap-value-v-arm
+                        // follow-up, cluster-2 closure-wave-C,
+                        // 2026-05-16). Each inner element is itself a
+                        // HashMapKindedRef; wrap as a fresh
+                        // HeapValue::HashMap. The inner Arc is
+                        // share-cloned (Arc::clone on
+                        // HashMapKindedRef::clone — single refcount
+                        // bump on the inner Arc<HashMapData<V_inner>>).
+                        let inner_ref: &HashMapKindedRef = &*(*arc.values).data.add(i);
+                        Arc::new(HeapValue::HashMap(inner_ref.clone()))
+                    }
+                };
+                out.push((key, value));
             }
+            out
         }
     }
 }
@@ -802,8 +1081,7 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
 /// Migration shape (a) — replaces the pre-migration
 /// `FromSlot for Arc<AlignedTypedBuffer>` entry.
 impl FromSlot for Arc<Vec<f64>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
         // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) + body-declared
@@ -813,11 +1091,7 @@ impl FromSlot for Arc<Vec<f64>> {
         if arr.is_null() {
             return Arc::new(Vec::new());
         }
-        unsafe {
-            Arc::new(
-                shape_value::v2::typed_array::TypedArray::<f64>::as_slice(arr).to_vec(),
-            )
-        }
+        unsafe { Arc::new(shape_value::v2::typed_array::TypedArray::<f64>::as_slice(arr).to_vec()) }
     }
 }
 
@@ -826,8 +1100,7 @@ impl FromSlot for Arc<Vec<f64>> {
 /// Migration shape (a) — replaces the pre-migration
 /// `ToSlot for Arc<AlignedTypedBuffer>` entry.
 impl ToSlot for Arc<Vec<f64>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
         let arr = shape_value::v2::typed_array::TypedArray::<f64>::from_slice(self.as_slice());
@@ -840,8 +1113,7 @@ impl ToSlot for Arc<Vec<f64>> {
 /// Migration shape (a) — replaces the pre-migration
 /// `FromSlot for Arc<TypedBuffer<i64>>` entry.
 impl FromSlot for Arc<Vec<i64>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
         // SAFETY: see Arc<Vec<f64>>::from_slot above.
@@ -849,11 +1121,7 @@ impl FromSlot for Arc<Vec<i64>> {
         if arr.is_null() {
             return Arc::new(Vec::new());
         }
-        unsafe {
-            Arc::new(
-                shape_value::v2::typed_array::TypedArray::<i64>::as_slice(arr).to_vec(),
-            )
-        }
+        unsafe { Arc::new(shape_value::v2::typed_array::TypedArray::<i64>::as_slice(arr).to_vec()) }
     }
 }
 
@@ -861,8 +1129,7 @@ impl FromSlot for Arc<Vec<i64>> {
 /// slot whose payload is `*mut TypedArray<i64>`. V3-S5 ckpt-5-prime²c
 /// Migration shape (a).
 impl ToSlot for Arc<Vec<i64>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
         let arr = shape_value::v2::typed_array::TypedArray::<i64>::from_slice(self.as_slice());
@@ -883,8 +1150,7 @@ impl ToSlot for Arc<Vec<i64>> {
 /// distinguish "Array<u8>" from "Array<bool>" at this boundary. Resolution
 /// when a Bool consumer surfaces.
 impl FromSlot for Arc<Vec<u8>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn from_slot(bits: u64) -> Self {
         // SAFETY: see Arc<Vec<f64>>::from_slot above.
@@ -892,11 +1158,7 @@ impl FromSlot for Arc<Vec<u8>> {
         if arr.is_null() {
             return Arc::new(Vec::new());
         }
-        unsafe {
-            Arc::new(
-                shape_value::v2::typed_array::TypedArray::<u8>::as_slice(arr).to_vec(),
-            )
-        }
+        unsafe { Arc::new(shape_value::v2::typed_array::TypedArray::<u8>::as_slice(arr).to_vec()) }
     }
 }
 
@@ -904,8 +1166,7 @@ impl FromSlot for Arc<Vec<u8>> {
 /// slot whose payload is `*mut TypedArray<u8>`. V3-S5 ckpt-5-prime²c
 /// Migration shape (a).
 impl ToSlot for Arc<Vec<u8>> {
-    const NATIVE_KIND: NativeKind =
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
         let arr = shape_value::v2::typed_array::TypedArray::<u8>::from_slice(self.as_slice());
@@ -920,9 +1181,7 @@ impl ToSlot for Arc<Vec<u8>> {
 /// `register_typed_fn_N` helpers, which type-check the body's actual
 /// Rust signature against `FromSlot` for each arg.
 type TypedInvoke = Arc<
-    dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-        + Send
-        + Sync,
+    dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String> + Send + Sync,
 >;
 
 /// Register a 0-arg native function whose body takes only the
@@ -934,10 +1193,7 @@ pub fn register_typed_fn_0<F>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: for<'ctx> Fn(&ModuleContext<'ctx>) -> Result<TypedReturn, String>
-        + Send
-        + Sync
-        + 'static,
+    F: for<'ctx> Fn(&ModuleContext<'ctx>) -> Result<TypedReturn, String> + Send + Sync + 'static,
 {
     let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
         if !slots.is_empty() {
@@ -949,7 +1205,15 @@ pub fn register_typed_fn_0<F>(
         }
         body(ctx)
     });
-    install(module, name, description, vec![], return_type, vec![], invoke);
+    install(
+        module,
+        name,
+        description,
+        vec![],
+        return_type,
+        vec![],
+        invoke,
+    );
 }
 
 /// Register a 1-arg native function. The body's `P0` parameter type
@@ -1644,9 +1908,9 @@ fn install(
 type TypedAsyncInvoke = Arc<
     dyn Fn(
             Vec<u64>,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TypedReturn, String>> + Send>>
-        + Send
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<TypedReturn, String>> + Send>,
+        > + Send
         + Sync,
 >;
 
@@ -1684,7 +1948,15 @@ pub fn register_typed_async_fn_1<F, Fut, P0>(
         required: true,
         ..Default::default()
     }];
-    install_async(module, name, description, params, return_type, arg_kinds, invoke);
+    install_async(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds,
+        invoke,
+    );
 }
 
 /// Register a 2-arg async native function.
@@ -1724,7 +1996,15 @@ pub fn register_typed_async_fn_2<F, Fut, P0, P1>(
             ..Default::default()
         })
         .collect();
-    install_async(module, name, description, params, return_type, arg_kinds, invoke);
+    install_async(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds,
+        invoke,
+    );
 }
 
 /// Register a 3-arg async native function.
@@ -1766,7 +2046,15 @@ pub fn register_typed_async_fn_3<F, Fut, P0, P1, P2>(
             ..Default::default()
         })
         .collect();
-    install_async(module, name, description, params, return_type, arg_kinds, invoke);
+    install_async(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds,
+        invoke,
+    );
 }
 
 // ──────────── async per-arity `_full` register helpers (optional-arg) ────────
@@ -1956,10 +2244,7 @@ use shape_value::KindedSlot;
 /// with optional / overload-shaped arguments (json.stringify's optional
 /// `pretty`, time.benchmark's optional `iterations`, etc.). For
 /// fixed-arity functions, prefer [`register_typed_fn_N`].
-pub type VariadicTypedBody = dyn for<'ctx> Fn(
-        &[KindedSlot],
-        &ModuleContext<'ctx>,
-    ) -> Result<TypedReturn, String>
+pub type VariadicTypedBody = dyn for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
     + Send
     + Sync;
 
@@ -2009,12 +2294,7 @@ pub fn register_typed_function<F>(
         // threading from the registered schema.
         let kinded: Vec<KindedSlot> = slots
             .iter()
-            .map(|&bits| {
-                KindedSlot::new(
-                    shape_value::ValueSlot::from_raw(bits),
-                    NativeKind::Bool,
-                )
-            })
+            .map(|&bits| KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Bool))
             .collect();
         body(&kinded, ctx)
     });
@@ -2043,8 +2323,7 @@ pub fn register_typed_function<F>(
 /// Variadic — same shape as [`VariadicTypedBody`] but returning a
 /// `Future`. No `&ModuleContext` (the borrow cannot cross await
 /// points); permission gating must happen synchronously upstream.
-pub type VariadicTypedAsyncBody<Fut> =
-    dyn Fn(Vec<KindedSlot>) -> Fut + Send + Sync;
+pub type VariadicTypedAsyncBody<Fut> = dyn Fn(Vec<KindedSlot>) -> Fut + Send + Sync;
 
 /// Register an async native function whose body inspects a variadic
 /// [`KindedSlot`] vector.
@@ -2070,12 +2349,7 @@ pub fn register_typed_async_function<F, Fut>(
     let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
         let kinded: Vec<KindedSlot> = slots
             .into_iter()
-            .map(|bits| {
-                KindedSlot::new(
-                    shape_value::ValueSlot::from_raw(bits),
-                    NativeKind::Bool,
-                )
-            })
+            .map(|bits| KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Bool))
             .collect();
         let body = body.clone();
         Box::pin(async move { body(kinded).await })
@@ -2098,4 +2372,265 @@ pub fn register_typed_async_function<F, Fut>(
             arg_kinds,
         },
     );
+}
+
+// ───────── STAGE K2 — Vec<Arc<HeapValue>> round-trip identity tests ─────────
+#[cfg(test)]
+mod heap_value_vec_marshal_tests {
+    use super::{FromSlot, ToSlot};
+    use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+    use shape_value::v2::typed_array::release_v2_typed_array;
+    use std::sync::Arc;
+
+    type HeapVec = Vec<Arc<HeapValue>>;
+
+    /// Build a heap-kinded-field-free `HeapValue::TypedObject` for the given
+    /// schema id (no slots → `heap_mask = 0`, so Drop touches no element
+    /// shares). Identity for round-trip is the `schema_id`.
+    fn make_typed_object(schema_id: u64) -> Arc<HeapValue> {
+        let ptr = TypedObjectStorage::_new(
+            schema_id,
+            Box::new([]),
+            0,
+            Arc::from(Vec::<shape_value::NativeKind>::new()),
+        );
+        Arc::new(HeapValue::TypedObject(
+            shape_value::heap_value::TypedObjectPtr::new(ptr),
+        ))
+    }
+
+    #[test]
+    fn array_string_round_trips_fromslot_toslot_identity() {
+        let original: HeapVec = vec![
+            Arc::new(HeapValue::String(Arc::new("alpha".to_string()))),
+            Arc::new(HeapValue::String(Arc::new(String::new()))),
+            Arc::new(HeapValue::String(Arc::new("βγδ unicode".to_string()))),
+        ];
+
+        // ToSlot: project into the v2-raw *mut TypedArray<*const StringObj>.
+        let bits = original.clone().to_slot();
+        assert_ne!(bits, 0, "non-empty Array<string> must carry a real pointer");
+
+        // FromSlot: read back into a fresh Vec<Arc<HeapValue>>.
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+
+        assert_eq!(round.len(), original.len());
+        for (a, b) in original.iter().zip(round.iter()) {
+            match (&**a, &**b) {
+                (HeapValue::String(sa), HeapValue::String(sb)) => {
+                    assert_eq!(sa.as_str(), sb.as_str(), "string element identity");
+                }
+                (x, _) => panic!("expected String/String, got {:?}", x.kind()),
+            }
+        }
+
+        // Release the carrier (drops the per-element StringObj allocations).
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+    }
+
+    #[test]
+    fn array_typed_object_round_trips_fromslot_toslot_identity() {
+        let original: HeapVec = vec![
+            make_typed_object(7),
+            make_typed_object(42),
+            make_typed_object(7),
+        ];
+
+        let bits = original.clone().to_slot();
+        assert_ne!(bits, 0, "non-empty Array<TypedObject> must carry a pointer");
+
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+
+        assert_eq!(round.len(), original.len());
+        for (a, b) in original.iter().zip(round.iter()) {
+            match (&**a, &**b) {
+                (HeapValue::TypedObject(ta), HeapValue::TypedObject(tb)) => {
+                    assert_eq!(
+                        ta.schema_id, tb.schema_id,
+                        "typed-object schema-id identity"
+                    );
+                }
+                (x, _) => panic!("expected TypedObject/TypedObject, got {:?}", x.kind()),
+            }
+        }
+
+        // Release the read-back wrappers (each owns one v2_retain'd share),
+        // then the carrier array (owns one share per stored pointer), then the
+        // original Vec (Drop of each Arc<HeapValue::TypedObject> releases its
+        // own share). The underlying TypedObjectStorage allocations are freed
+        // when the last of those three shares is retired.
+        drop(round);
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+        drop(original);
+    }
+
+    #[test]
+    fn empty_array_round_trips_via_null_carrier() {
+        let original: HeapVec = Vec::new();
+        let bits = original.to_slot();
+        assert_eq!(bits, 0, "empty array projects to the null carrier");
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+        assert!(round.is_empty(), "null carrier reads back as empty");
+    }
+
+    #[test]
+    fn array_char_round_trips_fromslot_toslot_identity() {
+        let original: HeapVec = vec![
+            Arc::new(HeapValue::Char('a')),
+            Arc::new(HeapValue::Char('Z')),
+            Arc::new(HeapValue::Char('λ')),
+        ];
+        let bits = original.clone().to_slot();
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+        assert_eq!(round.len(), original.len());
+        for (a, b) in original.iter().zip(round.iter()) {
+            match (&**a, &**b) {
+                (HeapValue::Char(ca), HeapValue::Char(cb)) => assert_eq!(ca, cb),
+                (x, _) => panic!("expected Char/Char, got {:?}", x.kind()),
+            }
+        }
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+    }
+
+    #[test]
+    fn nested_array_string_round_trips_fromslot_toslot_identity() {
+        type NestedRows = Vec<Vec<Arc<String>>>;
+
+        let original: NestedRows = vec![
+            vec![Arc::new("x".to_string()), Arc::new("y".to_string())],
+            vec![Arc::new("1".to_string()), Arc::new("2".to_string())],
+            vec![Arc::new(String::new())],
+        ];
+
+        let bits = original.clone().to_slot();
+        assert_ne!(
+            bits, 0,
+            "Array<Array<string>> must carry a stamped outer typed array"
+        );
+
+        let round: NestedRows = <NestedRows as FromSlot>::from_slot(bits);
+
+        assert_eq!(round.len(), original.len());
+        for (row_a, row_b) in original.iter().zip(round.iter()) {
+            assert_eq!(row_a.len(), row_b.len());
+            for (a, b) in row_a.iter().zip(row_b.iter()) {
+                assert_eq!(a.as_str(), b.as_str());
+            }
+        }
+
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+    }
+
+    #[test]
+    #[should_panic(expected = "heterogeneous array")]
+    fn heterogeneous_array_surfaces_on_toslot() {
+        let mixed: HeapVec = vec![
+            Arc::new(HeapValue::String(Arc::new("x".to_string()))),
+            Arc::new(HeapValue::Char('y')),
+        ];
+        let _ = mixed.to_slot();
+    }
+}
+
+// ───────── HashMap direct-carrier marshal tests ─────────
+#[cfg(test)]
+mod hashmap_marshal_tests {
+    use super::FromSlot;
+    use shape_value::KindedSlot;
+    use shape_value::heap_value::{HashMapData, HashMapKindedRef, HeapValue};
+    use shape_value::v2::string_obj::StringObj;
+    use std::sync::Arc;
+
+    fn string_hashmap_ref(pairs: &[(&str, &str)]) -> Arc<HashMapKindedRef> {
+        let mut data = HashMapData::<*const StringObj>::new();
+        for (key, value) in pairs {
+            let value_obj = StringObj::new(value);
+            unsafe {
+                data.insert(key, value_obj as *const StringObj);
+            }
+        }
+        Arc::new(HashMapKindedRef::String(Arc::new(data)))
+    }
+
+    fn i64_hashmap_ref(pairs: &[(&str, i64)]) -> Arc<HashMapKindedRef> {
+        let mut data = HashMapData::<i64>::new();
+        for (key, value) in pairs {
+            unsafe {
+                data.insert(key, *value);
+            }
+        }
+        Arc::new(HashMapKindedRef::I64(Arc::new(data)))
+    }
+
+    #[test]
+    fn hashmap_string_string_fromslot_reads_direct_kinded_ref_carrier() {
+        let carrier = string_hashmap_ref(&[("accept", "application/json"), ("trace", "on")]);
+        let slot = KindedSlot::from_hashmap(Arc::clone(&carrier));
+        let bits = slot.slot.raw();
+
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let out: Vec<(Arc<String>, Arc<String>)> =
+            <Vec<(Arc<String>, Arc<String>)> as FromSlot>::from_slot(bits);
+
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0.as_str(), "accept");
+        assert_eq!(out[0].1.as_str(), "application/json");
+        assert_eq!(out[1].0.as_str(), "trace");
+        assert_eq!(out[1].1.as_str(), "on");
+
+        drop(slot);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn hashmap_heapvalue_fromslot_reads_direct_kinded_ref_carrier() {
+        let carrier = string_hashmap_ref(&[("method", "GET"), ("content-type", "text/plain")]);
+        let slot = KindedSlot::from_hashmap(Arc::clone(&carrier));
+        let bits = slot.slot.raw();
+
+        let out: Vec<(Arc<String>, Arc<HeapValue>)> =
+            <Vec<(Arc<String>, Arc<HeapValue>)> as FromSlot>::from_slot(bits);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0.as_str(), "method");
+        match &*out[0].1 {
+            HeapValue::String(value) => assert_eq!(value.as_str(), "GET"),
+            other => panic!("expected string HeapValue, got {:?}", other.kind()),
+        }
+        assert_eq!(out[1].0.as_str(), "content-type");
+        match &*out[1].1 {
+            HeapValue::String(value) => assert_eq!(value.as_str(), "text/plain"),
+            other => panic!("expected string HeapValue, got {:?}", other.kind()),
+        }
+
+        drop(slot);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn hashmap_heapvalue_fromslot_projects_i64_values_deterministically() {
+        let carrier = i64_hashmap_ref(&[("limit", 10), ("offset", -2)]);
+        let slot = KindedSlot::from_hashmap(Arc::clone(&carrier));
+        let bits = slot.slot.raw();
+
+        let out: Vec<(Arc<String>, Arc<HeapValue>)> =
+            <Vec<(Arc<String>, Arc<HeapValue>)> as FromSlot>::from_slot(bits);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0.as_str(), "limit");
+        match &*out[0].1 {
+            HeapValue::BigInt(value) => assert_eq!(**value, 10),
+            other => panic!("expected BigInt HeapValue, got {:?}", other.kind()),
+        }
+        assert_eq!(out[1].0.as_str(), "offset");
+        match &*out[1].1 {
+            HeapValue::BigInt(value) => assert_eq!(**value, -2),
+            other => panic!("expected BigInt HeapValue, got {:?}", other.kind()),
+        }
+
+        drop(slot);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
 }

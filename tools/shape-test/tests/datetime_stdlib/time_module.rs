@@ -40,7 +40,10 @@ fn time_module_exports_all_functions() {
 #[test]
 fn time_now_returns_instant() {
     let module = create_time_module();
-    let result = module.invoke_export("now", &[], &test_ctx()).unwrap().unwrap();
+    let result = module
+        .invoke_export("now", &[], &test_ctx())
+        .unwrap()
+        .unwrap();
     assert_eq!(result.type_name(), "instant");
     assert!(result.as_instant().is_some());
 }
@@ -48,7 +51,10 @@ fn time_now_returns_instant() {
 #[test]
 fn time_stopwatch_returns_instant() {
     let module = create_time_module();
-    let result = module.invoke_export("stopwatch", &[], &test_ctx()).unwrap().unwrap();
+    let result = module
+        .invoke_export("stopwatch", &[], &test_ctx())
+        .unwrap()
+        .unwrap();
     assert_eq!(result.type_name(), "instant");
     assert!(result.as_instant().is_some());
 }
@@ -56,7 +62,10 @@ fn time_stopwatch_returns_instant() {
 #[test]
 fn time_instant_elapsed_increases() {
     let module = create_time_module();
-    let instant = module.invoke_export("now", &[], &test_ctx()).unwrap().unwrap();
+    let instant = module
+        .invoke_export("now", &[], &test_ctx())
+        .unwrap()
+        .unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(5));
 
@@ -89,7 +98,10 @@ fn time_instant_duration_since() {
 #[test]
 fn time_millis_returns_epoch() {
     let module = create_time_module();
-    let result = module.invoke_export("millis", &[], &test_ctx()).unwrap().unwrap();
+    let result = module
+        .invoke_export("millis", &[], &test_ctx())
+        .unwrap()
+        .unwrap();
     let ms = result.as_f64().unwrap();
     // Should be after 2020-01-01 in milliseconds
     assert!(
@@ -101,20 +113,26 @@ fn time_millis_returns_epoch() {
 #[test]
 fn time_sleep_sync_zero_succeeds() {
     let module = create_time_module();
-    let result = module.invoke_export("sleep_sync", &[ValueWord::from_f64(0.0)], &test_ctx()).unwrap();
+    let result = module
+        .invoke_export("sleep_sync", &[ValueWord::from_f64(0.0)], &test_ctx())
+        .unwrap();
     assert!(result.is_ok(), "sleep_sync(0) should succeed");
 }
 
 #[test]
 fn time_sleep_sync_negative_errors() {
     let module = create_time_module();
-    let result = module.invoke_export("sleep_sync", &[ValueWord::from_f64(-1.0)], &test_ctx()).unwrap();
+    let result = module
+        .invoke_export("sleep_sync", &[ValueWord::from_f64(-1.0)], &test_ctx())
+        .unwrap();
     assert!(result.is_err(), "sleep_sync(-1) should error");
 }
 
 #[test]
 fn time_sleep_sync_no_args_errors() {
     let module = create_time_module();
-    let result = module.invoke_export("sleep_sync", &[], &test_ctx()).unwrap();
+    let result = module
+        .invoke_export("sleep_sync", &[], &test_ctx())
+        .unwrap();
     assert!(result.is_err(), "sleep_sync() with no args should error");
 }

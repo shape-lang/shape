@@ -8,12 +8,12 @@
 ///
 /// Routes through the PHF method dispatch — single discriminator per
 /// ADR-005 §1 (W12-stdlib-intrinsic-collapse, Wave-2-Agent-G, 2026-05-14).
-pub fn sum(series) {
+pub fn sum(series: Array<number>) -> number {
     series.sum()
 }
 
 /// Compute the arithmetic mean of `series`.
-pub fn mean(series) {
+pub fn mean(series: Array<number>) -> number {
     __intrinsic_mean(series)
 }
 
@@ -23,34 +23,34 @@ pub fn mean(series) {
 // The builtin intrinsics are used internally via __intrinsic_min/__intrinsic_max
 
 /// Compute the standard deviation of `series`.
-pub fn std(series) {
+pub fn std(series: Array<number>) -> number {
     __intrinsic_std(series)
 }
 
 /// Compute the variance of `series`.
-pub fn variance(series) {
+pub fn variance(series: Array<number>) -> number {
     __intrinsic_variance(series)
 }
 
 // ===== Advanced Statistics =====
 
 /// Compute the Pearson correlation between two series.
-pub fn correlation(series_a, series_b) {
+pub fn correlation(series_a: Array<number>, series_b: Array<number>) -> number {
     __intrinsic_correlation(series_a, series_b)
 }
 
 /// Compute the covariance between two series.
-pub fn covariance(series_a, series_b) {
+pub fn covariance(series_a: Array<number>, series_b: Array<number>) -> number {
     __intrinsic_covariance(series_a, series_b)
 }
 
 /// Return the `p` percentile of `series`.
-pub fn percentile(series, p) {
+pub fn percentile(series: Array<number>, p: number) -> number {
     __intrinsic_percentile(series, p)
 }
 
 /// Return the median of `series`.
-pub fn median(series) {
+pub fn median(series: Array<number>) -> number {
     __intrinsic_median(series)
 }
 
@@ -61,7 +61,7 @@ pub fn median(series) {
 /// @returns `std(series) / mean(series)` when the mean is non-zero, otherwise `None`.
 /// @see std::core::math::std
 /// @see std::core::math::mean
-pub fn coefficient_of_variation(series) {
+pub fn coefficient_of_variation(series: Array<number>) -> Option<number> {
     let std_val = __intrinsic_std(series);
     let mean_val = __intrinsic_mean(series);
 
@@ -73,7 +73,7 @@ pub fn coefficient_of_variation(series) {
 }
 
 /// Return the difference between the maximum and minimum values in `series`.
-pub fn spread(series) {
+pub fn spread(series: Array<number>) -> number {
     __intrinsic_max(series) - __intrinsic_min(series)
 }
 
@@ -81,10 +81,14 @@ pub fn spread(series) {
 ///
 /// @see std::core::math::mean
 /// @see std::core::math::std
-pub fn zscore(series) {
-    let mean_val = __intrinsic_mean(series);
-    let std_val = __intrinsic_std(series);
-    (series - mean_val) / std_val
+pub fn zscore(series: Array<number>) -> Array<number> {
+    let mean_val: number = __intrinsic_mean(series);
+    let std_val: number = __intrinsic_std(series);
+    let mut scores: Array<number> = [];
+    for x in series {
+        scores.push((x - mean_val) / std_val);
+    }
+    scores
 }
 
 // ===== Vec Operations =====
@@ -96,7 +100,7 @@ pub fn zscore(series) {
 ///
 /// Uses the sequential `.map()` method.  A parallel intrinsic path is planned
 /// but not yet wired up, so all sizes take the same code path for now.
-pub fn parallel_map(array, fn) {
+pub fn parallel_map<T, U>(array: Array<T>, fn: (T) => U) -> Array<U> {
     array.map(fn)
 }
 
@@ -104,76 +108,89 @@ pub fn parallel_map(array, fn) {
 ///
 /// Uses the sequential `.filter()` method.  A parallel intrinsic path is planned
 /// but not yet wired up, so all sizes take the same code path for now.
-pub fn parallel_filter(array, predicate) {
+pub fn parallel_filter<T>(array: Array<T>, predicate: (T) => bool) -> Array<T> {
     array.filter(predicate)
 }
 
 // ===== Constants =====
 
 /// The mathematical constant pi (3.14159...).
-pub fn PI() {
+pub fn PI() -> number {
     3.141592653589793
 }
 
 /// Euler's number e (2.71828...).
-pub fn E() {
+pub fn E() -> number {
     2.718281828459045
 }
 
 /// Tau = 2 * pi (6.28318...).
-pub fn TAU() {
+pub fn TAU() -> number {
     6.283185307179586
 }
 
 // ===== Trigonometry =====
 
+// STRICT-FLIP (v0.3.3, STAGE-F3 finding-8): these wrappers had NO return
+// annotation, so `build_imported_analysis_items`
+// (compiler_impl_reference_model.rs:1833) SKIPPED them from the inference env
+// (the OP0 soundness rule: an unannotated imported fn must not be modeled as an
+// unconstrained `any`-return). The skip erased the inline return type of every
+// expression-position call — `sin(x) + 1.0` failed the checker ("no method add
+// on the erased operand") and `1.0 * sin(x)` reached the VM with an untyped
+// receiver ("no method mul on Float64"). The concrete `(number) -> number`
+// signatures are verbatim the book spec (stdlib/native/math.mdx:75-84). Each is
+// backed by an `__intrinsic_*` that returns f64. int LITERAL args adopt the
+// `number` context losslessly (§4); an int VARIABLE arg needs an explicit `as`
+// cast (int != number never unify) — strict-correct.
+
 /// Return the sine of `x` in radians.
-pub fn sin(x) {
+pub fn sin(x: number) -> number {
     __intrinsic_sin(x)
 }
 
 /// Return the cosine of `x` in radians.
-pub fn cos(x) {
+pub fn cos(x: number) -> number {
     __intrinsic_cos(x)
 }
 
 /// Return the tangent of `x` in radians.
-pub fn tan(x) {
+pub fn tan(x: number) -> number {
     __intrinsic_tan(x)
 }
 
 /// Return the inverse sine of `x` in radians.
-pub fn asin(x) {
+pub fn asin(x: number) -> number {
     __intrinsic_asin(x)
 }
 
 /// Return the inverse cosine of `x` in radians.
-pub fn acos(x) {
+pub fn acos(x: number) -> number {
     __intrinsic_acos(x)
 }
 
 /// Return the inverse tangent of `x` in radians.
-pub fn atan(x) {
+pub fn atan(x: number) -> number {
     __intrinsic_atan(x)
 }
 
 /// Return the quadrant-aware inverse tangent of `y / x` in radians.
-pub fn atan2(y, x) {
+pub fn atan2(y: number, x: number) -> number {
     __intrinsic_atan2(y, x)
 }
 
 /// Return the hyperbolic sine of `x`.
-pub fn sinh(x) {
+pub fn sinh(x: number) -> number {
     __intrinsic_sinh(x)
 }
 
 /// Return the hyperbolic cosine of `x`.
-pub fn cosh(x) {
+pub fn cosh(x: number) -> number {
     __intrinsic_cosh(x)
 }
 
 /// Return the hyperbolic tangent of `x`.
-pub fn tanh(x) {
+pub fn tanh(x: number) -> number {
     __intrinsic_tanh(x)
 }
 
@@ -199,12 +216,12 @@ pub fn sign(x: int) -> int {
 }
 
 /// Convert radians to degrees.
-pub fn degrees(rad) {
+pub fn degrees(rad: number) -> number {
     rad * 180.0 / 3.141592653589793
 }
 
 /// Convert degrees to radians.
-pub fn radians(deg) {
+pub fn radians(deg: number) -> number {
     deg * 3.141592653589793 / 180.0
 }
 

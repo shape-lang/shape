@@ -145,9 +145,7 @@ pub fn eval_with_prelude(source: &str) -> KindedSlot {
 
 /// Compile Shape source code with prelude, returning a Result.
 /// Useful for testing expected compile/runtime errors with stdlib.
-pub fn compile_with_prelude(
-    source: &str,
-) -> Result<crate::bytecode::BytecodeProgram, VMError> {
+pub fn compile_with_prelude(source: &str) -> Result<crate::bytecode::BytecodeProgram, VMError> {
     let program = shape_ast::parser::parse_program(source)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
@@ -247,23 +245,17 @@ mod kind_hint_api_tests {
         // top-level emission produces raw native bits.
         let raw = 100i64 as u64;
         assert_eq!(
-            KindedSlot::new(
-                shape_value::ValueSlot::from_raw(raw),
-                NativeKind::Int64
-            )
-            .as_i64()
-            .unwrap(),
+            KindedSlot::new(shape_value::ValueSlot::from_raw(raw), NativeKind::Int64)
+                .as_i64()
+                .unwrap(),
             100
         );
 
         let raw = 2.5f64.to_bits();
         assert_eq!(
-            KindedSlot::new(
-                shape_value::ValueSlot::from_raw(raw),
-                NativeKind::Float64
-            )
-            .as_f64()
-            .unwrap(),
+            KindedSlot::new(shape_value::ValueSlot::from_raw(raw), NativeKind::Float64)
+                .as_f64()
+                .unwrap(),
             2.5
         );
 

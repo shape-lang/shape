@@ -83,9 +83,7 @@ impl VirtualMachine {
     #[inline]
     fn read_capture_raw_pointer_bits(&self, upvalue_idx: u16) -> Result<u64, VMError> {
         let frame = self.call_stack.last().ok_or_else(|| {
-            VMError::RuntimeError(
-                "mutable/shared capture access outside a call frame".to_string(),
-            )
+            VMError::RuntimeError("mutable/shared capture access outside a call frame".to_string())
         })?;
         let upvalues = frame.upvalues.as_ref().ok_or_else(|| {
             VMError::RuntimeError(
@@ -112,6 +110,8 @@ impl VirtualMachine {
             LoadLocalTrusted => self.op_load_local_trusted(instruction)?,
             LoadLocalMove => self.op_load_local_move(instruction)?,
             LoadLocalClone => self.op_load_local_clone(instruction)?,
+            LoadLocalDeepClone => self.op_load_local_deep_clone(instruction)?,
+            DeepCloneTop => self.op_deep_clone_top(instruction)?,
             StoreLocal => self.op_store_local(instruction)?,
             StoreLocalTyped => self.op_store_local_typed(instruction)?,
             StoreLocalDrop => self.op_store_local_drop(instruction)?,
@@ -193,7 +193,9 @@ impl VirtualMachine {
             StoreOwnedMutableCaptureU16 => self.op_store_owned_mutable_capture_u16(instruction)?,
             StoreOwnedMutableCaptureI8 => self.op_store_owned_mutable_capture_i8(instruction)?,
             StoreOwnedMutableCaptureU8 => self.op_store_owned_mutable_capture_u8(instruction)?,
-            StoreOwnedMutableCaptureBool => self.op_store_owned_mutable_capture_bool(instruction)?,
+            StoreOwnedMutableCaptureBool => {
+                self.op_store_owned_mutable_capture_bool(instruction)?
+            }
             StoreOwnedMutableCapturePtr => self.op_store_owned_mutable_capture_ptr(instruction)?,
             LoadSharedCapture => self.op_load_shared_capture(instruction)?,
             StoreSharedCapture => self.op_store_shared_capture(instruction)?,
@@ -365,10 +367,7 @@ impl VirtualMachine {
     /// for every capture site. This polymorphic shell stays as a SURFACE
     /// marker until it is removed from the bytecode entirely (out of
     /// B6 territory — bytecode-level cleanup).
-    fn op_load_owned_mutable_capture(
-        &mut self,
-        _instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_owned_mutable_capture(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
         Err(VMError::NotImplemented(
             "LoadOwnedMutableCapture (polymorphic): the deleted ValueWord/vw_clone \
              dispatch path is replaced by per-FieldKind LoadOwnedMutableCapture<Kind> \
@@ -974,10 +973,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_load_shared_capture_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -993,10 +989,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::Int64)
     }
 
-    fn op_load_shared_capture_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1012,10 +1005,7 @@ impl VirtualMachine {
         self.push_kinded(value, NativeKind::UInt64)
     }
 
-    fn op_load_shared_capture_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1031,10 +1021,7 @@ impl VirtualMachine {
         self.push_kinded(value.to_bits(), NativeKind::Float64)
     }
 
-    fn op_load_shared_capture_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1050,10 +1037,7 @@ impl VirtualMachine {
         self.push_kinded(value as i64 as u64, NativeKind::Int32)
     }
 
-    fn op_load_shared_capture_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1069,10 +1053,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::UInt32)
     }
 
-    fn op_load_shared_capture_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1088,10 +1069,7 @@ impl VirtualMachine {
         self.push_kinded(value as i64 as u64, NativeKind::Int16)
     }
 
-    fn op_load_shared_capture_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1107,10 +1085,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::UInt16)
     }
 
-    fn op_load_shared_capture_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1126,10 +1101,7 @@ impl VirtualMachine {
         self.push_kinded(value as i64 as u64, NativeKind::Int8)
     }
 
-    fn op_load_shared_capture_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1145,10 +1117,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::UInt8)
     }
 
-    fn op_load_shared_capture_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1166,10 +1135,7 @@ impl VirtualMachine {
 
     /// `LoadSharedCapturePtr { idx }` — typed Ptr load via
     /// `SharedCell::kind()` (Wave-β B6 round-1, commit `c785174`).
-    fn op_load_shared_capture_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1192,10 +1158,7 @@ impl VirtualMachine {
         self.push_kinded(payload_bits, kind)
     }
 
-    fn op_store_shared_capture_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1214,10 +1177,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1235,10 +1195,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1257,10 +1214,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1279,10 +1233,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1301,10 +1252,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1323,10 +1271,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1345,10 +1290,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1367,10 +1309,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1389,10 +1328,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1413,10 +1349,7 @@ impl VirtualMachine {
 
     /// `StoreSharedCapturePtr { idx }` — typed Ptr store via
     /// `SharedCell::kind()` (Wave-β B6 round-1, commit `c785174`).
-    fn op_store_shared_capture_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1501,6 +1434,23 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         let (value_bits, value_kind) = self.pop_kinded()?;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        // CaptureCarrier F1 idempotency (ADR-006 §2.7.8 / Q10, 2026-06-18):
+        // mirror of `op_alloc_shared_module_binding`. When the closure
+        // literal that promotes this local sits inside a loop body, the
+        // `LoadLocal; AllocSharedLocal; LoadLocal` promotion sequence
+        // re-runs every iteration. On the second+ iteration the slot
+        // already holds a `*const SharedCell` (kind `Ptr(SharedCell)`),
+        // pushed-and-cloned by the preceding `LoadLocal`. Re-wrapping it
+        // double-promotes (a new cell whose payload is the OLD cell
+        // pointer), so the closure body reads the cell pointer as the value
+        // (`got bool` / corruption). Keep the existing cell: release the
+        // redundant cloned share and leave the slot untouched.
+        if matches!(value_kind, NativeKind::Ptr(HeapKind::SharedCell)) {
+            crate::executor::vm_impl::stack::drop_with_kind(value_bits, value_kind);
+            return Ok(());
+        }
         // SAFETY: `SharedCell::new(bits, kind)` records the kind
         // companion in lockstep with the value bits per §2.7.8 / Q10.
         // `pop_kinded` transferred the share ownership out of the
@@ -1510,8 +1460,6 @@ impl VirtualMachine {
         // when the last `Arc<SharedCell>` share retires.
         let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
         let cell_bits = StdArc::into_raw(cell) as u64;
-        let bp = self.current_locals_base();
-        let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             // Reclaim the share we were about to install. Use the same
             // `Arc::from_raw` shape `op_drop_shared_local` uses.
@@ -1527,11 +1475,7 @@ impl VirtualMachine {
         // The frame-init sentinel at `slot` is `(NONE_BITS, Bool)`;
         // `stack_write_kinded` releases that no-op then installs the
         // new (cell_bits, SharedCell) pair in lockstep.
-        self.stack_write_kinded(
-            slot,
-            cell_bits,
-            NativeKind::Ptr(HeapKind::SharedCell),
-        );
+        self.stack_write_kinded(slot, cell_bits, NativeKind::Ptr(HeapKind::SharedCell));
         Ok(())
     }
 
@@ -1658,10 +1602,7 @@ impl VirtualMachine {
     // Shared module-binding opcodes
     // ─────────────────────────────────────────────────────────────────────
 
-    fn op_alloc_shared_module_binding(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_alloc_shared_module_binding(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         // Wave 8 W8-T25 close (ADR-006 §2.7.12 / Q13 amendment,
         // 2026-05-10): paired with `op_alloc_shared_local` above. The
         // Wave-γ G-module-bindings-kind `module_binding_write_kinded`
@@ -1692,23 +1633,48 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         let (value_bits, value_kind) = self.pop_kinded()?;
+        let index = idx as usize;
+        // CaptureCarrier F1 idempotency (ADR-006 §2.7.8 / Q10, 2026-06-18):
+        // the promotion sequence `LoadModuleBinding; AllocSharedModuleBinding;
+        // LoadModuleBinding` is emitted at the closure literal's lowering
+        // site (`compiler/expressions/closures.rs`). When that closure
+        // literal sits inside a loop body, the sequence RE-RUNS every
+        // iteration. On the second+ iteration the module-binding slot
+        // already holds a `*const SharedCell` (kind `Ptr(SharedCell)`), and
+        // `LoadModuleBinding` pushes that cell pointer (cloned via
+        // `clone_with_kind`). Re-wrapping it in a fresh `SharedCell::new`
+        // would double-promote: a new cell whose payload is the OLD cell
+        // pointer with kind `Ptr(SharedCell)`, so the closure body reads the
+        // inner cell pointer as the value (`got shared_cell` / non-TypedArray
+        // / corruption). Detect the already-promoted case and keep the
+        // existing cell: drop the redundant cloned cell share that
+        // `LoadModuleBinding` produced (balancing its retain) and leave the
+        // slot untouched. `shared_module_bindings` already contains `index`.
+        if matches!(value_kind, NativeKind::Ptr(HeapKind::SharedCell)) {
+            debug_assert!(
+                self.shared_module_bindings.contains(&index),
+                "AllocSharedModuleBinding: slot {} carries Ptr(SharedCell) but is not \
+                 registered as a shared module binding",
+                index
+            );
+            // The popped bits are the existing cell pointer, retained by the
+            // preceding `LoadModuleBinding`. Release that extra share; the
+            // module-binding slot keeps its own share unchanged.
+            crate::executor::vm_impl::stack::drop_with_kind(value_bits, value_kind);
+            return Ok(());
+        }
         // SAFETY: same construction-side contract as
         // `op_alloc_shared_local`. The popped slot's share transfers
         // into the cell's `value` field; `SharedCell::Drop` retires it
         // via `drop_with_kind` at refcount=0.
         let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
         let cell_bits = StdArc::into_raw(cell) as u64;
-        let index = idx as usize;
         // `module_binding_write_kinded` grows the parallel tracks if
         // `index` is past the current end (via `module_binding_pad_to_kinded`),
         // releases the previous occupant via `drop_with_kind`, and
         // installs `(cell_bits, NativeKind::Ptr(HeapKind::SharedCell))`
         // in lockstep.
-        self.module_binding_write_kinded(
-            index,
-            cell_bits,
-            NativeKind::Ptr(HeapKind::SharedCell),
-        );
+        self.module_binding_write_kinded(index, cell_bits, NativeKind::Ptr(HeapKind::SharedCell));
         // Register the slot so VM-Drop reclaims the Arc<SharedCell>
         // share via `Arc::from_raw`. The kind-aware second loop in
         // `Drop for VirtualMachine` zeroes both bits and kind first,
@@ -1719,10 +1685,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_load_shared_module_binding(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_module_binding(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
 
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
@@ -1754,10 +1717,7 @@ impl VirtualMachine {
         self.push_kinded(payload_bits, kind)
     }
 
-    fn op_store_shared_module_binding(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_module_binding(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
 
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
@@ -1903,6 +1863,105 @@ impl VirtualMachine {
         let (bits, kind) = self.stack_read_kinded_raw(slot);
         crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
         self.push_kinded(bits, kind)
+    }
+
+    /// `LoadLocalDeepClone { idx }` — DEEP-clone semantics for the
+    /// `var copy = data` auto-clone of a still-live PROVEN-heap source
+    /// (ADR-006 SharedCow independence-on-mutation, S1b 2026-06-21).
+    ///
+    /// A shallow refcount share (`LoadLocalClone`) ALIASES the backing
+    /// buffer: `copy.push(99)` / `copy[0] = ...` mutate the source's
+    /// TypedArray / TypedObject in place (those mutating ops write through
+    /// the raw `view.ptr` with no copy-on-write barrier). To make the
+    /// copy independent we produce a fresh deep copy here, routed through
+    /// the same per-kind primitives as an explicit `.clone()` so the new
+    /// value owns a refcount=1 backing.
+    ///
+    /// Mutable-in-place carriers (`TypedArray`, `TypedObject`) get a real
+    /// deep clone. Immutable / already-copy-on-write carriers (String /
+    /// Decimal — immutable; HashMap / Set / Deque — `Arc::make_mut` CoW on
+    /// every mutation) are observably independent under a balanced shallow
+    /// share, so they take the `clone_with_kind` retain. Scalars copy their
+    /// bits verbatim (no share owed). No Bool-default, refcount-balanced.
+    fn op_load_local_deep_clone(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalDeepClone slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        let (new_bits, new_kind) = Self::deep_clone_kinded(bits, kind)?;
+        self.push_kinded(new_bits, new_kind)
+    }
+
+    /// `DeepCloneTop` — replace the top-of-stack value with an INDEPENDENT
+    /// deep copy and release the original's share. Stack-based sibling of
+    /// `LoadLocalDeepClone` used after a `LoadModuleBinding` for a
+    /// top-level `var copy = data` auto-clone (module bindings are not read
+    /// through the local-slot ownership path). The popped source owns one
+    /// share; `deep_clone_kinded` produces the independent copy, then we
+    /// release the popped source so refcounts stay balanced.
+    fn op_deep_clone_top(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
+        let (bits, kind) = self.pop_kinded()?;
+        let (new_bits, new_kind) = Self::deep_clone_kinded(bits, kind)?;
+        // Release the popped source's share now that the independent copy
+        // owns its own backing. For scalar kinds this is a no-op.
+        crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+        self.push_kinded(new_bits, new_kind)
+    }
+
+    /// Produce an INDEPENDENT deep copy of a kinded value for the
+    /// `var`-still-live auto-clone (`LoadLocalDeepClone`). Returns the
+    /// new bits + kind. The caller pushes the result; ownership of the
+    /// returned share belongs to the new binding.
+    ///
+    /// - `Ptr(TypedArray)` → `clone_array` (fresh buffer, heap elements
+    ///   retained, scalars memcpy'd).
+    /// - `Ptr(TypedObject)` → `deep_clone_typed_object` (fresh storage,
+    ///   nested struct/array recursively deep-cloned).
+    /// - all other heap `Ptr(_)` kinds → balanced shallow share
+    ///   (`clone_with_kind`): immutable (String / Decimal) or already
+    ///   copy-on-write (HashMap / Set / Deque via `Arc::make_mut`), hence
+    ///   observably independent without a structural copy.
+    /// - scalar kinds → bits copied verbatim, no share owed.
+    fn deep_clone_kinded(bits: u64, kind: NativeKind) -> Result<(u64, NativeKind), VMError> {
+        use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, clone_array};
+        match kind {
+            NativeKind::Ptr(HeapKind::TypedArray) if bits != 0 => {
+                let view = as_v2_typed_array(bits, kind).ok_or_else(|| {
+                    VMError::RuntimeError(
+                        "LoadLocalDeepClone: Ptr(TypedArray) slot did not yield a v2 array view"
+                            .into(),
+                    )
+                })?;
+                let new_ptr = clone_array(&view);
+                Ok((new_ptr as u64, kind))
+            }
+            NativeKind::Ptr(HeapKind::TypedObject) if bits != 0 => {
+                // SAFETY: kind == Ptr(TypedObject) and bits != 0 ⇒ bits is a
+                // live `*const TypedObjectStorage` (v2-raw carrier); the slot
+                // holds a share so it is read-only-borrowable for the clone.
+                let src: &shape_value::TypedObjectStorage =
+                    unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
+                let cloned_ptr =
+                    crate::executor::objects::object_operations::deep_clone_typed_object(src)?;
+                Ok((cloned_ptr as u64, kind))
+            }
+            // Immutable or copy-on-write heap carriers + scalar kinds:
+            // a balanced share / verbatim bit-copy is observably
+            // independent. `clone_with_kind` is a no-op for scalar kinds
+            // (it only bumps refcounts on heap `Ptr(_)` kinds).
+            _ => {
+                crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+                Ok((bits, kind))
+            }
+        }
     }
 
     /// `StoreLocalDrop { idx }` — pop a kinded source, install into
@@ -2537,21 +2596,39 @@ impl VirtualMachine {
                 // construction time. The producing typed-Store / typed-
                 // initial-write emitted this kind; refs capture it
                 // verbatim, no fabrication.
-                let (_bits, kind) = self.stack_read_kinded_raw(slot);
-                shape_value::RefTarget::Local {
-                    frame_index,
-                    slot_index: local_idx as u32,
-                    kind,
+                let (bits, kind) = self.stack_read_kinded_raw(slot);
+                // ADR-006 §2.7.30 (R3): if the referent slot was promoted
+                // to a `SharedCell` (R2's `SharedCow` storage class for a
+                // flipped-floor reference escape), this `&x` must produce an
+                // OWNING `PromotedCell` carrier — not a non-owning `Local`
+                // coordinate (the proven round-1 UAF). Clone one strong-count
+                // `Arc<SharedCell>` share out of the slot bits; the def-site
+                // slot retains its own share. The projected kind is the
+                // cell's interior value kind (§2.7.8 lockstep companion).
+                if kind == NativeKind::Ptr(HeapKind::SharedCell) {
+                    self.make_promoted_cell_ref(bits)
+                } else {
+                    shape_value::RefTarget::Local {
+                        frame_index,
+                        slot_index: local_idx as u32,
+                        kind,
+                    }
                 }
             }
             Some(Operand::ModuleBinding(binding_idx)) => {
                 // Kind sourced from the §2.7.8 module-binding parallel-
                 // kind track at construction time.
-                let (_bits, kind) =
-                    self.module_binding_read_kinded_raw(binding_idx as usize);
-                shape_value::RefTarget::ModuleBinding {
-                    binding_idx: binding_idx as u32,
-                    kind,
+                let (bits, kind) = self.module_binding_read_kinded_raw(binding_idx as usize);
+                // ADR-006 §2.7.30 (R3): same promotion discrimination as the
+                // local path — a promoted module-binding referent yields an
+                // owning `PromotedCell`, never a `ModuleBinding` coordinate.
+                if kind == NativeKind::Ptr(HeapKind::SharedCell) {
+                    self.make_promoted_cell_ref(bits)
+                } else {
+                    shape_value::RefTarget::ModuleBinding {
+                        binding_idx: binding_idx as u32,
+                        kind,
+                    }
                 }
             }
             _ => return Err(VMError::InvalidOperand),
@@ -2563,6 +2640,33 @@ impl VirtualMachine {
         let arc = std::sync::Arc::new(rt);
         let bits = std::sync::Arc::into_raw(arc) as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
+    }
+
+    /// ADR-006 §2.7.30 (R3): build an owning `RefTarget::PromotedCell` from
+    /// a referent slot whose bits are `Arc::into_raw(Arc<SharedCell>)` (the
+    /// R2 `SharedCow` promotion of a flipped-floor reference escape).
+    ///
+    /// Clones ONE strong-count share out of the slot bits via
+    /// `Arc::increment_strong_count` + `Arc::from_raw` (the def-site slot
+    /// keeps its own share). The owning share is what keeps the referent
+    /// alive past lexical frame-pop. Projected kind is the cell's interior
+    /// value kind (`cell.kind()` — §2.7.8 lockstep companion), NOT the
+    /// `SharedCell` pointer kind.
+    fn make_promoted_cell_ref(&self, cell_bits: u64) -> shape_value::RefTarget {
+        use shape_value::v2::closure_layout::SharedCell;
+        let raw = cell_bits as *const SharedCell;
+        // SAFETY: kind == Ptr(HeapKind::SharedCell) guarantees `cell_bits`
+        // is a live `Arc::into_raw(Arc<SharedCell>)` pointer. Bump the
+        // strong count, then reconstruct an owning `Arc<SharedCell>` — the
+        // increment balances the `from_raw` so the def-site slot retains its
+        // original share. This is the cluster-1.5 share-accounting pattern:
+        // explicit retain before claim (§2.7.30.2).
+        let cell = unsafe {
+            std::sync::Arc::increment_strong_count(raw);
+            std::sync::Arc::from_raw(raw)
+        };
+        let kind = cell.kind();
+        shape_value::RefTarget::PromotedCell { cell, kind }
     }
 
     /// `MakeFieldRef { Operand::TypedField{type_id, field_idx,
@@ -2590,18 +2694,28 @@ impl VirtualMachine {
         // field_type_tag — playbook §2 kind-sourcing rules. Surface (no
         // fabrication, no Bool-default fallback per §2.7.7 #9) when the
         // tag is FIELD_TAG_ANY / FIELD_TAG_UNKNOWN.
-        let projected_kind = crate::executor::typed_object_ops::field_tag_to_native_kind(
-            field_type_tag,
-        )
-        .ok_or_else(|| {
-            VMError::NotImplemented(format!(
-                "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
+        //
+        // R3 carrier-authoritative ref kind (strict-flip): the tag only
+        // identifies the FieldType (`String`), not the runtime carrier. A
+        // `String`-typed field may store a `StringV2` (`*const StringObj`)
+        // carrier; capturing the tag-derived `NativeKind::String` into the
+        // `RefTarget::TypedField.kind` makes `read_ref_target` later hand a
+        // `StringObj` pointer to `clone_with_kind` as if it were an
+        // `Arc<String>` — `Arc::increment_strong_count::<String>` then reads
+        // the (non-existent) ArcInner header 16 bytes before the `StringObj`
+        // block, corrupting the heap. Below (after the receiver is resolved)
+        // we override the heap-field kind with the receiver's authoritative
+        // `field_kinds[field_idx]` (ADR-006 §2.7.7).
+        let tag_kind = crate::executor::typed_object_ops::field_tag_to_native_kind(field_type_tag)
+            .ok_or_else(|| {
+                VMError::NotImplemented(format!(
+                    "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
                  FIELD_TAG_UNKNOWN) has no statically-sourceable NativeKind \
                  — ADR-006 §2.7.13 / Q14 forbids fabrication. Producing emitter \
                  must stamp a concrete tag.",
-                field_type_tag
-            ))
-        })?;
+                    field_type_tag
+                ))
+            })?;
         // Pop the base-ref carrier. The stack transfers one
         // `Arc<RefTarget>` strong-count share to us via `pop_kinded`.
         let (base_bits, base_kind) = self.pop_kinded()?;
@@ -2642,13 +2756,26 @@ impl VirtualMachine {
         // decrements it).
         drop(base_arc);
         // Bounds check against the receiver's slot count.
-        if (field_idx as usize) >= receiver.slots.len() {
+        if (field_idx as usize) >= receiver.slots().len() {
             return Err(VMError::RuntimeError(format!(
                 "MakeFieldRef field_idx {} out of bounds (slot count {})",
                 field_idx,
-                receiver.slots.len()
+                receiver.slots().len()
             )));
         }
+        // R3 carrier-authoritative ref kind: for a heap-backed field, the
+        // receiver's `field_kinds[field_idx]` records the EXACT stored carrier
+        // (`String` vs `StringV2`, `Decimal` vs `DecimalV2`, etc.) — the
+        // producer-side proof per ADR-006 §2.7.7. Prefer it over the
+        // tag-derived kind so the projected reference retains/releases the
+        // right carrier. Inline-scalar fields (heap_mask bit clear) keep the
+        // tag kind, which already matches their slot representation.
+        let field_is_heap = (receiver.heap_mask & (1u64 << field_idx)) != 0;
+        let projected_kind = if field_is_heap && (field_idx as usize) < receiver.field_kinds.len() {
+            receiver.field_kinds[field_idx as usize]
+        } else {
+            tag_kind
+        };
         let rt = shape_value::RefTarget::TypedField {
             receiver,
             field_offset: field_idx as u32,
@@ -2659,47 +2786,140 @@ impl VirtualMachine {
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
-    /// `MakeIndexRef` — pops [base_ref, index] from the kinded stack.
+    /// `MakeIndexRef` — pops [base_ref, index] from the kinded stack and
+    /// pushes a projected `RefTarget::IndexedElement` ref.
     ///
-    /// ## V3-S5 ckpt-5 surface (2026-05-15)
+    /// ## V3-S5 Seam #2 (2026-06-05)
     ///
     /// The pre-ckpt-1 body constructed `RefTarget::TypedIndex { receiver:
-    /// Arc<TypedArrayData>, index, elem_kind }`. The
-    /// `RefTarget::TypedIndex` variant was DELETED at ckpt-4 in lockstep
-    /// with the `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer
-    /// deletion (commits `aac8495e` ckpt-1 + `654c7202` ckpt-4) per
-    /// W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006 §2.7.24
-    /// Q25.A SUPERSEDED.
+    /// Arc<TypedArrayData>, index, elem_kind }`. That variant + its
+    /// `Arc<TypedArrayData>` carrier + the `TypedBuffer<T>` wrapper layer
+    /// were DELETED at ckpt-1..ckpt-4 per W12-typed-array-data-deletion-
+    /// audit §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED.
     ///
-    /// Construction-site rebuild lands at ckpt-6 STRICT close per the
-    /// per-element-kind receiver variant target (`Arc<TypedArray<f64>>` /
-    /// `Arc<TypedArray<i64>>` / etc.) — the replacement requires
-    /// per-element-kind RefTarget variants, not a single
-    /// `Arc<TypedArrayData>` enum.
+    /// The replacement is the per-element-kind `RefTarget::IndexedElement`
+    /// variant over the LIVE flat-struct `TypedArray<T>` carrier (the
+    /// W17-typed-carrier-monomorphization target). It owns one v2-raw
+    /// HeapHeader refcount share via `TypedArrayPtr` — NOT a resurrected
+    /// `Arc<TypedArrayData>` enum / `TypedBuffer<T>` wrapper (REFUSED ON
+    /// SIGHT, Refusal #1).
     ///
-    /// Stack discipline: pops [base_ref, index] and retires both shares
-    /// via `drop_with_kind` before surfacing. Refusal #1 binding.
+    /// `base_ref` is a `RefTarget` whose projected slot holds the array's
+    /// `*mut TypedArray<T>` pointer (kind `Ptr(HeapKind::TypedArray)`).
+    /// `index` is decoded from the integer-family top-of-stack. The
+    /// element kind is sourced from the array's stamped `_pad` discriminant
+    /// via `V2ElemType` (never fabricated; surface-and-stop on an
+    /// unknown / heterogeneous discriminant per §2.7.7 #9).
+    ///
+    /// Stack discipline: pops [base_ref, index]; both shares are retired
+    /// (the index via `drop_with_kind`, the base-ref `Arc<RefTarget>` via
+    /// its `from_raw` drop). The owning array share for the new variant is
+    /// bumped via `clone()` on the borrowed `TypedArrayPtr`.
     pub(in crate::executor) fn op_make_index_ref(
         &mut self,
         _instruction: &Instruction,
     ) -> Result<(), VMError> {
+        use shape_value::HeapKind;
+        // Pop the index value; we own its share. Decode to a u32 ordinal.
         let (idx_bits, idx_kind) = self.pop_kinded()?;
+        let index = numeric_index_for_ref(idx_bits, idx_kind);
         crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
-        if let Ok((base_bits, base_kind)) = self.pop_kinded() {
+        let index = match index {
+            Ok(i) => i,
+            Err(e) => {
+                // Still retire the base-ref share before surfacing.
+                if let Ok((base_bits, base_kind)) = self.pop_kinded() {
+                    crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
+                }
+                return Err(e);
+            }
+        };
+        // Pop the base ref carrier; the stack transfers one
+        // `Arc<RefTarget>` share to us.
+        let (base_bits, base_kind) = self.pop_kinded()?;
+        if base_kind != NativeKind::Ptr(HeapKind::Reference) {
             crate::executor::vm_impl::stack::drop_with_kind(base_bits, base_kind);
+            return Err(VMError::RuntimeError(format!(
+                "MakeIndexRef expected Reference base, got {:?}",
+                base_kind
+            )));
         }
-        Err(VMError::NotImplemented(
-            "MakeIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
-             surface. `RefTarget::TypedIndex { receiver: Arc<TypedArrayData>, \
-             ... }` variant DELETED at ckpt-4 in lockstep with TypedArrayData \
-             enum + Buf<T> wrapper layer deletion (W12-typed-array-\
-             data-deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A \
-             SUPERSEDED). Construction-site rebuild lands at ckpt-6 STRICT \
-             close per per-element-kind RefTarget variant target. \
-             REFUSED ON SIGHT: TypedArrayData / RefTarget::TypedIndex \
-             resurrection under any rename (Refusal #1)."
-                .to_string(),
-        ))
+        // SAFETY: kind == Ptr(HeapKind::Reference) — `base_bits` is an
+        // `Arc::into_raw::<RefTarget>` pointer; the popped share is owned
+        // by `base_arc` and retired when it drops.
+        let base_arc: std::sync::Arc<shape_value::RefTarget> =
+            unsafe { std::sync::Arc::from_raw(base_bits as *const shape_value::RefTarget) };
+        // Read the base ref's projected slot — it holds the array pointer.
+        let (arr_bits, arr_kind) = match self.read_ref_target(&base_arc) {
+            Ok(pair) => pair,
+            Err(e) => {
+                drop(base_arc);
+                return Err(e);
+            }
+        };
+        if arr_kind != NativeKind::Ptr(HeapKind::TypedArray) {
+            drop(base_arc);
+            return Err(VMError::RuntimeError(format!(
+                "MakeIndexRef base must reference a TypedArray; got {:?}",
+                arr_kind
+            )));
+        }
+        // Resolve the element kind from the stamped element-type byte.
+        use crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array;
+        let view = match as_v2_typed_array(arr_bits, arr_kind) {
+            Some(v) => v,
+            None => {
+                drop(base_arc);
+                return Err(VMError::NotImplemented(
+                    "MakeIndexRef: TypedArray base did not resolve to a v2 \
+                     typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY header \
+                     missing). ADR-006 §2.7.6 / §2.7.7."
+                        .to_string(),
+                ));
+            }
+        };
+        // Bounds-check the captured index against the array length.
+        if index >= view.len {
+            drop(base_arc);
+            return Err(VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: view.len as usize,
+            });
+        }
+        let elem_kind = match view.elem_type.elem_kind() {
+            Some(kind) => kind,
+            None => {
+                drop(base_arc);
+                return Err(VMError::NotImplemented(
+                    "MakeIndexRef: callable typed-array elements carry per-element \
+                     callable kinds, so indexed references need a kinded-reference \
+                     redesign. W22 keeps get/push/set/call consumption live without \
+                     fabricating a single element NativeKind."
+                        .to_string(),
+                ));
+            }
+        };
+        // Bump the array's on-header refcount once and hand the resulting
+        // independent share to an owning `TypedArrayPtr` — the base binding
+        // retains its own share. `TypedArrayPtr::new` takes ownership of the
+        // share we just retained (mirror of the `TypedObjectPtr` receiver-
+        // recovery shape in `resolve_typed_object_receiver`).
+        // SAFETY: `view.ptr` is a live `*mut TypedArray<T>` (HeapHeader at
+        // offset 0) confirmed by `as_v2_typed_array`'s header-kind check.
+        unsafe {
+            shape_value::v2::typed_array::retain_v2_typed_array(view.ptr);
+        }
+        let array = shape_value::TypedArrayPtr::new(view.ptr);
+        // The base-ref share retires here as `base_arc` drops.
+        drop(base_arc);
+        let rt = shape_value::RefTarget::IndexedElement {
+            array,
+            index,
+            elem_kind,
+        };
+        let arc = std::sync::Arc::new(rt);
+        let bits = std::sync::Arc::into_raw(arc) as u64;
+        self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
     }
 
     /// `DerefLoad { Operand::Local(idx) }` — reads the ref-bearing local
@@ -2737,8 +2957,7 @@ impl VirtualMachine {
         // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
         // `Arc::into_raw::<RefTarget>` pointer and the slot keeps one
         // share live for us.
-        let rt: &shape_value::RefTarget =
-            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        let rt: &shape_value::RefTarget = unsafe { &*(ref_bits as *const shape_value::RefTarget) };
         let (out_bits, out_kind) = self.read_ref_target(rt)?;
         // WB2.4 retain-on-read: bump the projected share so the pushed
         // slot's share is independent of the place's share. The place
@@ -2784,8 +3003,7 @@ impl VirtualMachine {
             )));
         }
         // SAFETY: same as DerefLoad.
-        let rt: &shape_value::RefTarget =
-            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        let rt: &shape_value::RefTarget = unsafe { &*(ref_bits as *const shape_value::RefTarget) };
         // Cross-check: the popped value's kind matches the projected
         // slot's kind (§2.7.5.1 stack-contents-are-post-proof). On a
         // mismatch, surface — never silently fabricate.
@@ -2803,46 +3021,117 @@ impl VirtualMachine {
         self.write_ref_target(rt, val_bits, val_kind)
     }
 
-    /// `SetIndexRef { Operand::Local(idx) }` — `arr[i] = value` shape.
+    /// `SetIndexRef { Operand::Local(idx) }` — `arr[i] = value` where `arr`
+    /// is a reference parameter (`&mut Array`). The local at `idx` holds a
+    /// `RefTarget` whose projected slot is the array's `*mut TypedArray<T>`.
     ///
-    /// ## V3-S5 ckpt-5 surface (2026-05-15)
+    /// ## V3-S5 Seam #2 (2026-06-05)
     ///
-    /// The pre-ckpt-1 body resolved the ref's receiver to
-    /// `Arc<TypedArrayData>`, sourced the element kind from the variant,
-    /// constructed a synthetic `RefTarget::TypedIndex` projection, and
-    /// wrote through it via `write_index_in_place`. All three pieces
-    /// (`Arc<TypedArrayData>` carrier + `RefTarget::TypedIndex` variant +
-    /// the `write_index_in_place` API) were DELETED at ckpt-1..ckpt-4
-    /// per W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006
-    /// §2.7.24 Q25.A SUPERSEDED.
+    /// The pre-ckpt-1 body resolved the ref's receiver to the deleted
+    /// `Arc<TypedArrayData>` carrier and wrote through the deleted
+    /// `write_index_in_place` API. The replacement routes through
+    /// `write_ref_target` against a synthesized `RefTarget::IndexedElement`
+    /// over the live flat-struct `TypedArray<T>` carrier — per-element-kind
+    /// dispatch via `write_element`, NOT a resurrected `Arc<TypedArrayData>`
+    /// enum (REFUSED ON SIGHT, Refusal #1).
     ///
-    /// Construction-site rebuild lands at ckpt-6 STRICT close per the
-    /// per-element-kind v2-raw `TypedArray<T>` direct-mutation target.
-    ///
-    /// Stack discipline: pops [index, value] and retires both shares via
-    /// `drop_with_kind` before surfacing. Refusal #1 binding.
+    /// Stack discipline: pops [index, value] (value on top). The popped
+    /// value share is transferred to the array element by `write_element`;
+    /// the index share is retired; the ref-local's `Arc<RefTarget>` share
+    /// stays live (the local retains it — read via `from_raw` + re-`into_raw`).
     pub(in crate::executor) fn op_set_index_ref(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
+        use shape_value::HeapKind;
+        let Some(Operand::Local(local_idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop value (top) then index — we own both shares.
         let (val_bits, val_kind) = self.pop_kinded()?;
-        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
-        if let Ok((idx_bits, idx_kind)) = self.pop_kinded() {
-            crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+        let (idx_bits, idx_kind) = self.pop_kinded()?;
+        let index = match numeric_index_for_ref(idx_bits, idx_kind) {
+            Ok(i) => i,
+            Err(e) => {
+                crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+                crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+                return Err(e);
+            }
+        };
+        crate::executor::vm_impl::stack::drop_with_kind(idx_bits, idx_kind);
+
+        // Read the ref-bearing local WITHOUT consuming its share — the local
+        // retains the `Arc<RefTarget>`; we borrow.
+        let bp = self.current_locals_base();
+        let slot = bp + local_idx as usize;
+        if slot >= self.stack.len() {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetIndexRef slot {} out of bounds (stack len {})",
+                local_idx,
+                self.stack.len()
+            )));
         }
-        Err(VMError::NotImplemented(
-            "SetIndexRef: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 \
-             surface. `RefTarget::TypedIndex` variant + \
-             the deleted typed-array-data `write_index_in_place` API + the deleted-enum's \
-             `Arc<...>` carrier all DELETED at ckpt-1..ckpt-4 per \
-             W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006 \
-             §2.7.24 Q25.A SUPERSEDED. Rebuild lands at ckpt-6 STRICT \
-             close per per-element-kind v2-raw `TypedArray<T>` \
-             direct-mutation target. REFUSED ON SIGHT: TypedArrayData / \
-             RefTarget::TypedIndex resurrection under any rename \
-             (Refusal #1)."
-                .to_string(),
-        ))
+        let (ref_bits, ref_kind) = self.stack_read_kinded_raw(slot);
+        if ref_kind != NativeKind::Ptr(HeapKind::Reference) {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetIndexRef expected Reference local, got {:?}",
+                ref_kind
+            )));
+        }
+        // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
+        // `Arc::into_raw::<RefTarget>` pointer; the slot keeps one share
+        // live for us (we only borrow).
+        let rt: &shape_value::RefTarget = unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+
+        // Resolve the array pointer the ref projects to.
+        let (arr_bits, arr_kind) = match self.read_ref_target(rt) {
+            Ok(pair) => pair,
+            Err(e) => {
+                crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+                return Err(e);
+            }
+        };
+        if arr_kind != NativeKind::Ptr(HeapKind::TypedArray) {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetIndexRef base must reference a TypedArray; got {:?}",
+                arr_kind
+            )));
+        }
+        use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, write_element};
+        let view = match as_v2_typed_array(arr_bits, arr_kind) {
+            Some(v) => v,
+            None => {
+                crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+                return Err(VMError::NotImplemented(
+                    "SetIndexRef: TypedArray base did not resolve to a v2 \
+                     typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY header \
+                     missing). ADR-006 §2.7.6 / §2.7.7."
+                        .to_string(),
+                ));
+            }
+        };
+        if index >= view.len {
+            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+            return Err(VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: view.len as usize,
+            });
+        }
+        record_heap_write();
+        match write_element(&view, index, val_bits, val_kind) {
+            Ok(()) => Ok(()),
+            Err(msg) => {
+                // write_element did not consume the share on error.
+                crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+                Err(VMError::TypeError {
+                    expected: "v2 typed-array element",
+                    got: msg,
+                })
+            }
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────
@@ -2918,8 +3207,7 @@ impl VirtualMachine {
                         kind
                     )));
                 }
-                let (bits, _) =
-                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                let (bits, _) = self.module_binding_read_kinded_raw(*binding_idx as usize);
                 let ptr = bits as *const TypedObjectStorage;
                 // SAFETY: as above — v2-raw `_new` carrier, HeapHeader at
                 // offset 0. The module binding retains its own share.
@@ -2939,7 +3227,7 @@ impl VirtualMachine {
                         kind
                     )));
                 }
-                let bits = receiver.slots[*field_offset as usize].raw();
+                let bits = receiver.slots()[*field_offset as usize].raw();
                 let ptr = bits as *const TypedObjectStorage;
                 // SAFETY: as above — the chained-projection field slot
                 // holds a v2-raw `_new` `*const TypedObjectStorage`; the
@@ -2949,12 +3237,35 @@ impl VirtualMachine {
                 }
                 Ok(TypedObjectPtr::new(ptr))
             }
-            // V3-S5 ckpt-6 STRICT close (2026-05-15):
-            // `RefTarget::TypedIndex { .. }` arm DELETED in lockstep with
-            // the variant retirement at `shape-value/src/reference.rs`
-            // (per ADR-006 §2.7.24 Q25.A SUPERSEDED). The variant carried
-            // a deleted Arc payload; per-element-T v2-raw receiver
-            // variants are downstream-wave territory.
+            // ADR-006 §2.7.30 (R3): a promoted referent that is itself a
+            // TypedObject. The cell's interior bits are the v2-raw `_new`
+            // `*const TypedObjectStorage`; retain the on-header refcount to
+            // hand back an independent share (the cell retains its own).
+            shape_value::RefTarget::PromotedCell { cell, kind } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeFieldRef base (promoted) must reference a TypedObject; got {:?}",
+                        kind
+                    )));
+                }
+                let bits = *cell.lock();
+                let ptr = bits as *const TypedObjectStorage;
+                unsafe {
+                    shape_value::v2::refcount::v2_retain(&(*ptr).header);
+                }
+                Ok(TypedObjectPtr::new(ptr))
+            }
+            // V3-S5 Seam #2 (2026-06-05): an `IndexedElement` base projects
+            // into an array element, not a TypedObject. Chained field-ref
+            // through an array element (`&arr[i].field`) is not a supported
+            // base shape here — surface rather than fabricate a receiver.
+            shape_value::RefTarget::IndexedElement { elem_kind, .. } => {
+                Err(VMError::RuntimeError(format!(
+                    "MakeFieldRef base must reference a TypedObject; got an \
+                     array-element ref (elem kind {:?})",
+                    elem_kind
+                )))
+            }
         }
     }
 
@@ -2969,7 +3280,7 @@ impl VirtualMachine {
     /// Read the projected slot of a `RefTarget` as `(bits, kind)` —
     /// borrows the place's share (the place retains ownership). Caller
     /// is responsible for `clone_with_kind` if pushing onto the stack.
-    fn read_ref_target(
+    pub(in crate::executor) fn read_ref_target(
         &self,
         rt: &shape_value::RefTarget,
     ) -> Result<(u64, NativeKind), VMError> {
@@ -3007,14 +3318,74 @@ impl VirtualMachine {
                 field_offset,
                 kind,
             } => {
-                let bits = receiver.slots[*field_offset as usize].raw();
+                let bits = receiver.slots()[*field_offset as usize].raw();
                 Ok((bits, *kind))
             }
-            // V3-S5 ckpt-5: `RefTarget::TypedIndex` arm deleted (variant
-            // retired at ckpt-4 lockstep with TypedArrayData enum). The
-            // match is now exhaustive on Local | ModuleBinding |
-            // TypedField; the read-via-index path surface-and-stops at
-            // `op_make_index_ref` (one level up) per V3-S5 ckpt-5.
+            // ADR-006 §2.7.30 (R3): read the promoted referent through the
+            // owning cell. The owning `Arc<SharedCell>` share guarantees the
+            // cell (and its interior value) outlives this read regardless of
+            // whether the def-site frame has popped. Returns borrowed bits;
+            // the caller `clone_with_kind`s before pushing per the helper
+            // contract.
+            shape_value::RefTarget::PromotedCell { cell, kind } => {
+                let bits = *cell.lock();
+                Ok((bits, *kind))
+            }
+            // V3-S5 Seam #2 (2026-06-05): read the projected array element
+            // through the owning `TypedArrayPtr`. The owning share keeps the
+            // `TypedArray<T>` live for this read regardless of the def-site
+            // binding's state. `read_element` returns `(bits, elem_kind)`
+            // and, for heap-element kinds (String / Decimal / TypedObject),
+            // already bumps the element's per-pointer share — matching the
+            // helper contract that the caller `clone_with_kind`s POD shares
+            // before pushing (op_deref_load) but heap shares are pre-retained
+            // by read_element. For POD scalar kinds the returned bits carry
+            // no share, so the caller's `clone_with_kind` is a no-op.
+            shape_value::RefTarget::IndexedElement {
+                array,
+                index,
+                elem_kind,
+            } => {
+                use crate::executor::v2_handlers::v2_array_detect::{
+                    as_v2_typed_array, read_element,
+                };
+                let view = as_v2_typed_array(
+                    array.as_ptr() as u64,
+                    NativeKind::Ptr(shape_value::HeapKind::TypedArray),
+                )
+                .ok_or_else(|| {
+                    VMError::RuntimeError(
+                        "DerefLoad: IndexedElement array carrier did not \
+                         resolve to a v2 typed-array pointer (header missing)"
+                            .to_string(),
+                    )
+                })?;
+                let (bits, k) =
+                    read_element(&view, *index).ok_or_else(|| VMError::IndexOutOfBounds {
+                        index: *index as i32,
+                        length: view.len as usize,
+                    })?;
+                // read_element pre-retains heap-element shares; for those the
+                // op_deref_load caller's clone_with_kind would double-bump.
+                // Guard: heap-element kinds release the extra share so the
+                // pushed slot owns exactly one (the clone_with_kind in
+                // op_deref_load then bumps to the intended single share).
+                if matches!(
+                    k,
+                    NativeKind::StringV2
+                        | NativeKind::DecimalV2
+                        | NativeKind::Ptr(shape_value::HeapKind::TypedObject)
+                ) {
+                    crate::executor::vm_impl::stack::drop_with_kind(bits, k);
+                }
+                debug_assert_eq!(
+                    k, *elem_kind,
+                    "DerefLoad: IndexedElement read_element kind {:?} drift vs \
+                     captured elem_kind {:?} — ADR-006 §2.7.13",
+                    k, elem_kind
+                );
+                Ok((bits, k))
+            }
         }
     }
 
@@ -3041,9 +3412,7 @@ impl VirtualMachine {
                     match self.call_stack.get(*frame_index as usize) {
                         Some(f) => f.base_pointer,
                         None => {
-                            crate::executor::vm_impl::stack::drop_with_kind(
-                                val_bits, val_kind,
-                            );
+                            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
                             return Err(VMError::RuntimeError(format!(
                                 "DerefStore: RefTarget::Local frame_index {} out of bounds",
                                 frame_index
@@ -3075,11 +3444,7 @@ impl VirtualMachine {
                     prior_kind, kind
                 );
                 write_barrier_slot(prior_bits, val_bits);
-                self.module_binding_write_kinded(
-                    *binding_idx as usize,
-                    val_bits,
-                    val_kind,
-                );
+                self.module_binding_write_kinded(*binding_idx as usize, val_bits, val_kind);
                 Ok(())
             }
             shape_value::RefTarget::TypedField {
@@ -3099,15 +3464,13 @@ impl VirtualMachine {
                 // — prior occupant returned for caller release, new
                 // occupant transferred in.
                 let field_idx = *field_offset as usize;
-                if field_idx >= receiver.slots.len() {
-                    crate::executor::vm_impl::stack::drop_with_kind(
-                        val_bits, val_kind,
-                    );
+                if field_idx >= receiver.slots().len() {
+                    crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
                     return Err(VMError::RuntimeError(format!(
                         "DerefStore: TypedField field_offset {} out of bounds \
                          (slot count {})",
                         field_idx,
-                        receiver.slots.len()
+                        receiver.slots().len()
                     )));
                 }
                 // Kind invariance contract (§2.7.5.1 post-proof): the
@@ -3124,18 +3487,43 @@ impl VirtualMachine {
                      RefTarget captured kind {:?} — ADR-006 §2.7.13 / Q14",
                     field_idx, receiver.field_kinds[field_idx], kind,
                 );
-                // Pre-read the prior bits for the write-barrier helper.
-                let prior_bits = receiver.slots[field_idx].raw();
+                // R1 soundness (2026-06-23): the write goes through a RAW
+                // `*mut TypedObjectStorage` (no `&TypedObjectStorage` live
+                // across the write — forming one freezes the allocation and
+                // forbids the interior-mutable store). `TypedObjectPtr::as_ptr`
+                // returns the raw pointer WITHOUT forming a `&` (no Deref).
+                // The `.slots()` / `.field_kinds[..]` reads above completed
+                // before this point (their Deref `&` temporaries are dead).
+                let storage_ptr: *mut shape_value::heap_value::TypedObjectStorage =
+                    receiver.as_ptr() as *mut shape_value::heap_value::TypedObjectStorage;
+                // Pre-read prior bits via the SAME raw cell pointer the writer
+                // uses — no `&self`/`slots()` read borrow is formed here.
+                // SAFETY: `field_idx` in-bounds (checked above); `storage_ptr`
+                // valid/aligned (kept alive by the `receiver` wrapper's share);
+                // `UnsafeCell::raw_get` yields interior-mutable provenance.
+                let prior_bits = unsafe {
+                    let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
+                        &raw const *(*storage_ptr).slot_cells;
+                    let cell_ptr = (cells_ptr
+                        as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>)
+                        .add(field_idx);
+                    let slot_ptr = std::cell::UnsafeCell::raw_get(cell_ptr);
+                    (*slot_ptr).raw()
+                };
                 write_barrier_slot(prior_bits, val_bits);
                 // SAFETY: single-threaded VM; refs cannot escape across
-                // task boundaries (§3.1); no aliased `&mut ValueSlot`
-                // outstanding (this is the only mutator path in the VM
-                // for typed-object slots, gated by Q14 dispatch); kind
-                // invariance debug_asserted above. Per
-                // `TypedObjectStorage::write_slot_in_place` contract,
-                // returns the same `prior_bits` we just read.
+                // task boundaries (§3.1); no aliased `&mut ValueSlot` and
+                // (R1) NO live `&TypedObjectStorage` outstanding (this is the
+                // only mutator path in the VM for typed-object slots, gated by
+                // Q14 dispatch); kind invariance debug_asserted above. Per
+                // `TypedObjectStorage::write_slot_in_place` contract, returns
+                // the same `prior_bits` we just read.
                 let _returned_prior = unsafe {
-                    receiver.write_slot_in_place(field_idx, val_bits)
+                    shape_value::heap_value::TypedObjectStorage::write_slot_in_place(
+                        storage_ptr,
+                        field_idx,
+                        val_bits,
+                    )
                 };
                 debug_assert_eq!(
                     _returned_prior, prior_bits,
@@ -3144,17 +3532,81 @@ impl VirtualMachine {
                 );
                 // Release the prior occupant's share via the kind-aware
                 // dispatch table (§2.7.7 WB2.4).
-                crate::executor::vm_impl::stack::drop_with_kind(
-                    prior_bits, *kind,
-                );
+                crate::executor::vm_impl::stack::drop_with_kind(prior_bits, *kind);
                 Ok(())
             }
-            // V3-S5 ckpt-5: `RefTarget::TypedIndex` arm deleted (variant
-            // retired at ckpt-4 lockstep with TypedArrayData enum +
-            // `write_index_in_place` API). The match is now exhaustive on
-            // Local | ModuleBinding | TypedField; the write-via-index
-            // path surface-and-stops at `op_set_index_ref` (one level
-            // up) per V3-S5 ckpt-5.
+            // ADR-006 §2.7.30 (R3): write the new occupant through the owning
+            // cell, releasing the prior occupant's share. The cell's `kind`
+            // companion is invariant for the cell's lifetime (§2.7.8 lockstep)
+            // and equals the ref's captured projected kind by construction.
+            shape_value::RefTarget::PromotedCell { cell, kind } => {
+                debug_assert_eq!(
+                    cell.kind(),
+                    *kind,
+                    "DerefStore: promoted-cell kind drift (cell {:?}, ref {:?}) \
+                     — ADR-006 §2.7.30",
+                    cell.kind(),
+                    kind
+                );
+                let mut guard = cell.lock();
+                let prior_bits = *guard;
+                write_barrier_slot(prior_bits, val_bits);
+                *guard = val_bits;
+                drop(guard);
+                // Release the prior occupant's share via the kind-aware
+                // dispatch table (§2.7.7 WB2.4).
+                crate::executor::vm_impl::stack::drop_with_kind(prior_bits, *kind);
+                Ok(())
+            }
+            // V3-S5 Seam #2 (2026-06-05): write the new occupant into the
+            // projected array element through the owning `TypedArrayPtr`.
+            // `write_element` decodes the value per the array's stamped
+            // element type and, for heap-element kinds, releases the prior
+            // element's owned share and transfers the caller's share to the
+            // array (POD kinds just overwrite the bits). The caller passed
+            // ownership of `val_bits` to us; `write_element` consumes it.
+            shape_value::RefTarget::IndexedElement {
+                array,
+                index,
+                elem_kind,
+            } => {
+                use crate::executor::v2_handlers::v2_array_detect::{
+                    as_v2_typed_array, write_element,
+                };
+                debug_assert_eq!(
+                    val_kind, *elem_kind,
+                    "DerefStore: IndexedElement value kind {:?} drift vs \
+                     captured elem_kind {:?} — ADR-006 §2.7.13",
+                    val_kind, elem_kind
+                );
+                let view = match as_v2_typed_array(
+                    array.as_ptr() as u64,
+                    NativeKind::Ptr(shape_value::HeapKind::TypedArray),
+                ) {
+                    Some(v) => v,
+                    None => {
+                        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+                        return Err(VMError::RuntimeError(
+                            "DerefStore: IndexedElement array carrier did not \
+                             resolve to a v2 typed-array pointer (header \
+                             missing)"
+                                .to_string(),
+                        ));
+                    }
+                };
+                match write_element(&view, *index, val_bits, val_kind) {
+                    Ok(()) => Ok(()),
+                    Err(msg) => {
+                        // write_element did not consume the share on error;
+                        // retire it here to preserve refcount balance.
+                        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+                        Err(VMError::TypeError {
+                            expected: "v2 typed-array element",
+                            got: msg,
+                        })
+                    }
+                }
+            }
         }
     }
 
@@ -3207,10 +3659,7 @@ impl VirtualMachine {
     // typed Store fix at L3301+.
     // ─────────────────────────────────────────────────────────────────────
 
-    fn op_load_module_binding_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3219,10 +3668,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3231,10 +3677,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3243,10 +3686,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3255,10 +3695,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3267,10 +3704,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3279,10 +3713,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3291,10 +3722,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3303,10 +3731,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3315,10 +3740,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3331,10 +3753,7 @@ impl VirtualMachine {
     /// the parallel kind track now classifies the binding's
     /// heap-bearing arm; read kinded bits + bump the share via
     /// `clone_with_kind`.
-    fn op_load_module_binding_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3357,10 +3776,7 @@ impl VirtualMachine {
     // binding_ptr` already does this (L3411-3416); these arms now match.
     // ─────────────────────────────────────────────────────────────────────
 
-    fn op_store_module_binding_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3370,10 +3786,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3383,10 +3796,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3396,10 +3806,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3409,10 +3816,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3422,10 +3826,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3435,10 +3836,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3448,10 +3846,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3461,10 +3856,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3474,10 +3866,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3491,10 +3880,7 @@ impl VirtualMachine {
     /// pop kinded heap source and install via the kinded module-
     /// binding API; the prior occupant's share is released via
     /// `drop_with_kind` using the prior kind track entry.
-    fn op_store_module_binding_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3580,19 +3966,56 @@ impl VirtualMachine {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// V3-S5 ckpt-5 (2026-05-15): `typed_array_element_kind` +
-// `typed_array_read_index_raw` helpers DELETED. Both consumed
-// `Arc<TypedArrayData>` (deleted at ckpt-1) and dispatched through the
-// per-variant grid (`I64` / `F64` / `Bool` / `I8` / `I16` / `I32` / `U8`
-// / `U16` / `U32` / `U64` / `F32` / `String` / `Decimal` / `BigInt` /
-// `Char` / `TypedObject`) which is gone wholesale per W12-typed-array-
-// data-deletion-audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED.
-//
-// `op_make_index_ref` / `op_set_index_ref` (the only callers) surface-
-// and-stop at V3-S5 ckpt-5 per the multi-session-chain pattern step 2.
-// Per-element-kind v2-raw `TypedArray<T>` read/write helpers land at
-// ckpt-6 STRICT close per the per-element-kind RefTarget variant target.
+// V3-S5 Seam #2 (2026-06-05): per-element-kind array-index read/write now
+// routes through `RefTarget::IndexedElement` over the live flat-struct
+// `TypedArray<T>` carrier (read_ref_target / write_ref_target arms below),
+// dispatched per `elem_kind` via the `read_element` / `write_element`
+// helpers in `v2_handlers/v2_array_detect.rs`. The deleted-`Arc<
+// TypedArrayData>` per-variant grid is NOT resurrected (Refusal #1).
 // ────────────────────────────────────────────────────────────────────────
+
+/// Decode an integer-family `(bits, kind)` array index into a non-negative
+/// `u32` element ordinal for `RefTarget::IndexedElement` construction /
+/// dispatch. Mirrors `numeric_index_from_kinded` (property_access.rs) but
+/// yields the `u32` directly and rejects negatives (refs into a typed-array
+/// element have no negative-index wraparound). Surfaces on non-numeric kinds
+/// — never fabricates an ordinal.
+#[inline]
+fn numeric_index_for_ref(bits: u64, kind: NativeKind) -> Result<u32, VMError> {
+    let i: i64 = match kind {
+        NativeKind::Int64 => bits as i64,
+        NativeKind::Int8 => (bits as i8) as i64,
+        NativeKind::Int16 => (bits as i16) as i64,
+        NativeKind::Int32 => (bits as i32) as i64,
+        NativeKind::UInt8 => (bits as u8) as i64,
+        NativeKind::UInt16 => (bits as u16) as i64,
+        NativeKind::UInt32 => (bits as u32) as i64,
+        NativeKind::UInt64 => bits as i64,
+        NativeKind::Float64 => {
+            let f = f64::from_bits(bits);
+            if !f.is_finite() {
+                return Err(VMError::TypeError {
+                    expected: "finite numeric index",
+                    got: "non-finite float",
+                });
+            }
+            f as i64
+        }
+        _ => {
+            return Err(VMError::TypeError {
+                expected: "numeric array index",
+                got: "non-numeric key kind",
+            });
+        }
+    };
+    if i < 0 {
+        return Err(VMError::IndexOutOfBounds {
+            index: i as i32,
+            length: 0,
+        });
+    }
+    Ok(i as u32)
+}
 
 // ────────────────────────────────────────────────────────────────────────
 // Test module — gated until the deleted ValueWord / ValueWordExt ABI
@@ -3711,7 +4134,7 @@ mod typedfield_ref_tests {
                 "resolve_typed_object_receiver must bump refcount exactly once"
             );
             // Reading a field through the receiver works via Deref.
-            assert_eq!(receiver.slots[0].raw(), 9u64);
+            assert_eq!(receiver.slots()[0].raw(), 9u64);
             // `receiver` drops here — TypedObjectPtr::Drop retires its share.
         }
         assert_eq!(
@@ -3792,7 +4215,7 @@ mod typedfield_ref_tests {
             "&mut typed-field-ref write must be observable through the ref"
         );
         // The write is also visible on the underlying storage.
-        assert_eq!(unsafe { (*ptr).slots[0].raw() }, 10u64);
+        assert_eq!(unsafe { (*ptr).slots()[0].raw() }, 10u64);
 
         drop(projected);
         vm.module_binding_write_kinded(0, 0u64, NativeKind::Bool);
@@ -3803,7 +4226,7 @@ mod typedfield_ref_tests {
     /// 16-byte-misaligned address before erroring).
     #[test]
     fn typed_field_non_typed_object_base_errors_cleanly() {
-        let mut vm = VirtualMachine::new(VMConfig::default());
+        let vm = VirtualMachine::new(VMConfig::default());
         let bad_rt = RefTarget::ModuleBinding {
             binding_idx: 0,
             kind: NativeKind::Int64, // not a TypedObject

@@ -33,6 +33,72 @@ impl BytecodeCompiler {
         // Compile the inner fallible expression.
         self.compile_expr(inner)?;
 
+        // Resource-management-chapter L12 (v0.3.3): when `?` short-circuits
+        // (early-returns the Err / propagates None) it must run the pending
+        // `Drop` for in-scope Drop-bearing locals — exactly like an explicit
+        // `return` does via `emit_drops_for_early_exit`. The `?` early-return
+        // happens INSIDE `op_try_unwrap` (it calls `return_value_inner`), so
+        // the pending-Drop sequence is guarded by a non-consuming
+        // `IsTryFailure` probe and only runs on the failure branch:
+        //
+        //     <carrier>
+        //     Dup ; IsTryFailure          ; [carrier, would_short_circuit]
+        //     JumpIfFalse SUCCESS         ; [carrier]   (skip drops on Ok/Some)
+        //       <DropCall for each OTHER in-scope Drop local>
+        //     SUCCESS:
+        //     TryUnwrap                   ; unwrap (success) | early-return (failure)
+        //
+        // `Dup` clones the carrier's heap share (`clone_with_kind`) so the
+        // probe's popped copy and the `TryUnwrap` consumer each own a share —
+        // refcount-balanced. The drop sequence (`LoadLocal; DropCall` pairs)
+        // is stack-neutral, leaving `[carrier]` for `TryUnwrap`.
+        //
+        // ADR-006 §2.7.30 double-drop coordination (mirrors commit 47ced8d7):
+        // when `inner` is a bare identifier naming a Drop-bearing local, that
+        // local's value is the one being PROPAGATED via `?` — its `Drop`
+        // ownership moves to the caller (the returned Err carrier holds it),
+        // so we must NOT emit a `DropCall` for it here. `emit_drops_for_early_exit`
+        // already honours `return_escape_drop_skip_local`; we set it to that
+        // local so only the OTHER in-scope Drop locals are released.
+        let skip_local = match inner {
+            Expr::Identifier(name, _) => self
+                .resolve_local(name)
+                .filter(|&idx| self.local_drop_kind(idx).is_some()),
+            _ => None,
+        };
+        self.emit_try_unwrap_current_value(skip_local)?;
+
+        // WS-3 F2a: stamp the compile-time type tracker with the type of the
+        // UNWRAPPED success value. The `?` operator yields the inner `T` of a
+        // `Result<T, E>` / `Option<T>` (or `T?`); the runtime inference engine
+        // already does this (`try_unwrap_inner_type`,
+        // `type_system/inference/expressions.rs`), but the bytecode compiler's
+        // parallel tracker did not. Without this stamp, a `let v = expr?`
+        // binding records slot `v` with no type, and a later `v + 1` fails
+        // strict typing as `unknown + int`. We mirror the runtime engine's
+        // unwrap onto `last_expr_*` so `propagate_initializer_type_to_slot`
+        // records the unwrapped type on the binding's slot.
+        self.stamp_unwrapped_success_type(inner);
+        Ok(())
+    }
+
+    /// Consume the current top-of-stack fallible carrier with the same
+    /// unwrap/early-return sequence used by `?`.
+    pub(super) fn emit_try_unwrap_current_value(&mut self, skip_local: Option<u16>) -> Result<()> {
+        if self.has_failure_drop_locals(skip_local) {
+            self.emit(Instruction::simple(OpCode::Dup));
+            self.emit(Instruction::simple(OpCode::IsTryFailure));
+            let jump_success = self.emit_jump(OpCode::JumpIfFalse, 0);
+            // Failure branch: release every OTHER in-scope Drop local across
+            // ALL active drop scopes (the `?` short-circuit returns from the
+            // whole function frame, same as `return`).
+            let total_scopes = self.drop_locals.len();
+            self.return_escape_drop_skip_local = skip_local;
+            self.emit_drops_for_early_exit(total_scopes)?;
+            self.return_escape_drop_skip_local = None;
+            self.patch_jump(jump_success);
+        }
+
         // Emit TryUnwrap opcode which handles:
         // 1. Result propagation (Ok/Err)
         // 2. Option propagation (Some/None)
@@ -58,18 +124,6 @@ impl BytecodeCompiler {
         // `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
         // Sub-cluster — FN-REG-CORRECTNESS / RELEASE-BLOCKING).
         self.program.has_try_unwrap_residual = true;
-
-        // WS-3 F2a: stamp the compile-time type tracker with the type of the
-        // UNWRAPPED success value. The `?` operator yields the inner `T` of a
-        // `Result<T, E>` / `Option<T>` (or `T?`); the runtime inference engine
-        // already does this (`try_unwrap_inner_type`,
-        // `type_system/inference/expressions.rs`), but the bytecode compiler's
-        // parallel tracker did not. Without this stamp, a `let v = expr?`
-        // binding records slot `v` with no type, and a later `v + 1` fails
-        // strict typing as `unknown + int`. We mirror the runtime engine's
-        // unwrap onto `last_expr_*` so `propagate_initializer_type_to_slot`
-        // records the unwrapped type on the binding's slot.
-        self.stamp_unwrapped_success_type(inner);
         Ok(())
     }
 
@@ -77,14 +131,10 @@ impl BytecodeCompiler {
     /// wrapper to the success type, and stamp `last_expr_*` so a downstream
     /// `let`-binding records the unwrapped type on its slot.
     ///
-    /// Also reused for the `!!` error-context operator (WS-3 F3): both `?`
-    /// and `!!` yield the UNWRAPPED success value `T` on the success leg
-    /// (`Ok(v) => v`), so both stamp the same unwrapped type.
     pub(super) fn stamp_unwrapped_success_type(&mut self, inner: &Expr) {
         // Clear any stale stamps from `compile_expr(inner)` first — the
         // unwrapped value's type, not the wrapper's, is what flows out.
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_schema = None;
 
         // Primary path: full type inference on the `?` operand. Covers
@@ -108,9 +158,7 @@ impl BytecodeCompiler {
                 if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
                     let trimmed = type_name.trim();
                     if trimmed.starts_with("Result<") || trimmed.starts_with("Option<") {
-                        return Some(Type::Concrete(TypeAnnotation::Basic(
-                            type_name,
-                        )));
+                        return Some(Type::Concrete(TypeAnnotation::Basic(type_name)));
                     }
                 }
             }
@@ -150,10 +198,7 @@ impl BytecodeCompiler {
     /// substitute the enclosing return type when the inner expression
     /// genuinely failed to resolve its success arm; resolved-but-mismatched
     /// success types must surface as type errors, not get silently rewritten.
-    fn success_arm_is_unresolved_typevar(
-        &self,
-        ty: &shape_runtime::type_system::Type,
-    ) -> bool {
+    fn success_arm_is_unresolved_typevar(&self, ty: &shape_runtime::type_system::Type) -> bool {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
 
@@ -182,8 +227,7 @@ impl BytecodeCompiler {
             }
             Type::Concrete(TypeAnnotation::Basic(s)) => {
                 // Baked form: `Result<unknown, string>` etc.
-                Self::first_generic_arg_of_baked_name(s, is_fallible_name)
-                    .as_deref()
+                Self::first_generic_arg_of_baked_name(s, is_fallible_name).as_deref()
                     == Some("unknown")
             }
             _ => false,
@@ -199,17 +243,21 @@ impl BytecodeCompiler {
         use shape_ast::ast::TypeAnnotation;
 
         let func_idx = self.current_function?;
-        let func_name = self.program.functions.get(func_idx).map(|f| f.name.clone())?;
+        let func_name = self
+            .program
+            .functions
+            .get(func_idx)
+            .map(|f| f.name.clone())?;
         let func_def = self.function_defs.get(&func_name)?;
         let ann = func_def.return_type.as_ref()?;
         let is_fallible_name = |n: &str| n == "Result" || n == "Option";
         match ann {
-            TypeAnnotation::Generic { name, args } if is_fallible_name(name) && !args.is_empty() => {
+            TypeAnnotation::Generic { name, args }
+                if is_fallible_name(name) && !args.is_empty() =>
+            {
                 Some(args[0].to_type_string())
             }
-            TypeAnnotation::Basic(s) => {
-                Self::first_generic_arg_of_baked_name(s, is_fallible_name)
-            }
+            TypeAnnotation::Basic(s) => Self::first_generic_arg_of_baked_name(s, is_fallible_name),
             _ => None,
         }
     }
@@ -221,9 +269,7 @@ impl BytecodeCompiler {
     /// `Type::Concrete(Basic("Result<int, string>"))` string-baked form the
     /// function-return-type hint table produces. Returns `None` when the
     /// operand is not a recognised fallible wrapper.
-    fn try_operator_success_type_name(
-        ty: &shape_runtime::type_system::Type,
-    ) -> Option<String> {
+    fn try_operator_success_type_name(ty: &shape_runtime::type_system::Type) -> Option<String> {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
 
@@ -301,35 +347,156 @@ impl BytecodeCompiler {
     /// records the type. Mirrors the `tracked_callable_rt` stamping in
     /// `compile_expr_function_call`.
     fn stamp_last_expr_from_type_name(&mut self, name: &str) {
-        use crate::type_tracking::{NumericType, VariableTypeInfo};
+        use crate::type_tracking::VariableTypeInfo;
         use shape_runtime::type_system::BuiltinTypes;
 
         match name {
-            "int" => self.last_expr_numeric_type = Some(NumericType::Int),
-            "number" => self.last_expr_numeric_type = Some(NumericType::Number),
-            "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
+            // U4-4: the deleted `last_expr_numeric_type` register stamp is
+            // replaced by a `last_expr_type_info` name stamp (same shape as the
+            // width-aware-int arm below). `propagate_*_type_to_slot` re-derives
+            // the numeric storage hint from this recorded name (or, when an
+            // initializer expr is in hand, from its resolved Type).
+            "int" | "number" | "decimal" => {
+                self.last_expr_type_info = Some(VariableTypeInfo::named(name.to_string()));
+            }
             "string" | "bool" | "char" | "bigint" => {
-                self.last_expr_type_info =
-                    Some(VariableTypeInfo::named(name.to_string()));
+                self.last_expr_type_info = Some(VariableTypeInfo::named(name.to_string()));
             }
             other if BuiltinTypes::is_integer_type_name(other) => {
                 // Width-aware ints (i8/u8/i16/...): the name round-trips via
                 // `type_info`; `propagate_assignment_type_to_slot` re-derives
                 // the storage hint from the recorded name.
-                self.last_expr_type_info =
-                    Some(VariableTypeInfo::named(other.to_string()));
+                self.last_expr_type_info = Some(VariableTypeInfo::named(other.to_string()));
             }
             other => {
                 // A user struct / enum success type — stamp the schema so the
                 // binding inherits it. Strip any generic args before lookup.
                 let base = other.split('<').next().unwrap_or(other).trim();
-                if let Some(schema) =
-                    self.type_tracker.schema_registry().get(base)
-                {
+                if let Some(schema) = self.type_tracker.schema_registry().get(base) {
                     self.last_expr_schema = Some(schema.id);
                 }
             }
         }
+    }
+
+    /// STAGE-P1 (v0.3.3 strict-flip): recover a match scrutinee's `ConcreteType`
+    /// from the keystone expr-type-table when the structural
+    /// `concrete_type_for_expr` resolver declines.
+    ///
+    /// The structural resolver does not project a function CALL's declared
+    /// return type, so `match g() { Ok(p) => p.x + p.y }` (where `g() ->
+    /// Result<Point,string>`) reaches `compile_match_binding` with no scrutinee
+    /// ConcreteType, the `Ok(p)` payload binder is never stamped with `Point`,
+    /// and `p.x` / `p.y` erase to `unknown` at the binop. The inference engine
+    /// already proved the scrutinee's type and recorded it in
+    /// `resolved_expr_types` keyed by span (the T1 keystone). Read that proven
+    /// type back and convert it to a `ConcreteType` via the same declared-
+    /// annotation projection the explicit-annotation path uses
+    /// (`declared_annotation_concrete_type`). No fabrication: the table holds
+    /// only fully-resolved types (free vars are dropped by
+    /// `finalize_expr_type_table`), and a type that does not project to a
+    /// `ConcreteType` (or a dummy span) yields `None`, preserving the prior
+    /// surface-and-stop behaviour.
+    fn keystone_scrutinee_concrete_type(
+        &self,
+        scrutinee: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let span = shape_ast::ast::Spanned::span(scrutinee);
+        if span.is_dummy() {
+            return None;
+        }
+        let resolved = self.resolved_expr_types.get(&span)?;
+        let ann = resolved.to_annotation()?;
+        crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+            self, &ann,
+        )
+    }
+
+    /// STAGE S3 (strict-flip, 2026-06-22): resolve the element [`TypedArrayKind`]
+    /// for a bare empty-array (`[]`) RESULT value of a match ARM.
+    ///
+    /// A bare `[]` carries no element type of its own. In `let / call-arg`
+    /// position the element kind is threaded from the annotation via
+    /// `pending_variable_typed_array_kind` (consumed by the empty-array branch of
+    /// `compile_expr_array`). In match-ARM-result position (`match c { 1 => [1,2],
+    /// _ => [] }`) the empty `[]` had no such hand-off, so it fell through to the
+    /// placeholder `NewArray(0)` which SURFACEs `op_new_array(0)` NotImplemented
+    /// at runtime (V3-S5 ckpt-5). This mirrors the T4 empty-call-arg /
+    /// let-annotation fixes: derive the match's RESULT element kind from context,
+    /// in priority order:
+    ///
+    ///   1. The pending typed-array kind already in scope — the enclosing
+    ///      `let xs: Array<T> = match ...` annotation stamps
+    ///      `pending_variable_typed_array_kind` BEFORE compiling the match.
+    ///   2. A SIBLING arm whose body is a non-empty array literal that proves the
+    ///      element kind (`match c { 1 => [1,2], _ => [] }` — `[1,2]` proves int).
+    ///   3. The enclosing function's `Array<T>` return annotation (the binding the
+    ///      match feeds — `fn pick() -> Array<int> { match ... }`).
+    ///
+    /// Per ADR-006 §2.7.5 each source is a producer-side proof (annotation or
+    /// statically-typed sibling literal), never decoded from runtime bits. When
+    /// no source proves the element kind the result is `None` and the bare `[]`
+    /// arm surfaces a CLEAN compile-error (never a mid-program runtime SURFACE).
+    fn match_arm_empty_array_typed_kind(
+        &self,
+        match_expr: &shape_ast::ast::MatchExpr,
+    ) -> Option<crate::compiler::v2_typed_emission::TypedArrayKind> {
+        // Source 1: an enclosing `let xs: Array<T> = match ...` (or call-arg)
+        // already stamped the pending kind before compiling the match.
+        if let Some(kind) = self.pending_variable_typed_array_kind {
+            return Some(kind);
+        }
+        // Source 2: a sibling arm whose body is a non-empty array literal proves
+        // the element kind structurally.
+        for arm in &match_expr.arms {
+            if let Expr::Array(elements, _) = &*arm.body {
+                if !elements.is_empty() {
+                    if let Some(slot_kind) =
+                        crate::compiler::v2_array_emission::infer_array_element_type(
+                            elements,
+                            &self.type_tracker,
+                        )
+                    {
+                        if let Some(kind) =
+                            crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind(
+                                slot_kind,
+                            )
+                        {
+                            return Some(kind);
+                        }
+                    }
+                }
+            }
+        }
+        // Source 3: the enclosing function's `Array<T>` return annotation — the
+        // binding the match feeds when it is the function body's tail expression.
+        if let Some(ann) = self.current_function_return_type.clone() {
+            if let Some(kind) = self.resolve_typed_array_kind_from_annotation(&ann) {
+                return Some(kind);
+            }
+        }
+        None
+    }
+
+    /// STAGE S3: does this match expression have a bare empty-array (`[]`) ARM
+    /// whose element type is array-shaped (so the empty `[]` must construct a
+    /// typed array) but UNPROVABLE? Used to surface a clean compile-error instead
+    /// of letting the placeholder `NewArray(0)` SURFACE at runtime. The result
+    /// must be array-shaped — proven by a sibling non-empty array-literal arm or
+    /// an `Array<T>` return annotation — so a non-array match (where `[]` would
+    /// itself be a type error caught elsewhere) is NOT misclassified here.
+    fn match_result_is_array_shaped(&self, match_expr: &shape_ast::ast::MatchExpr) -> bool {
+        let sibling_array = match_expr
+            .arms
+            .iter()
+            .any(|arm| matches!(&*arm.body, Expr::Array(elements, _) if !elements.is_empty()));
+        if sibling_array {
+            return true;
+        }
+        self.current_function_return_type
+            .as_ref()
+            .map(Self::annotation_is_array_shaped)
+            .unwrap_or(false)
     }
 
     /// Compile a match expression
@@ -341,6 +508,30 @@ impl BytecodeCompiler {
         self.check_match_exhaustiveness(match_expr)?;
 
         self.push_scope();
+        // F5 (v0.3.3 strict-flip): capture the scrutinee's proven ConcreteType
+        // BEFORE compiling it (compilation may clobber `last_expr_*`). Threaded
+        // into `compile_match_binding` so `Ok(v)`/`Some(v)`/`Err(e)` payload
+        // recursion can derive binder tracker types directly from
+        // `Result(T,E)` / `Option(T)` without using match temp concrete facts.
+        let scrutinee_ct =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self,
+                &match_expr.scrutinee,
+            )
+            // STAGE-P1 (v0.3.3 strict-flip): when the structural
+            // `concrete_type_for_expr` declines (e.g. the scrutinee is a CALL —
+            // `match g() { Ok(p) => p.x + p.y }` — whose declared
+            // `Result<Point,string>` return type the structural resolver does
+            // not project), fall back to the keystone expr-type-table. The
+            // inference engine walked the full program and recorded `g()`'s
+            // resolved type (`Result<Point,string>`) keyed by the scrutinee's
+            // source span; converting that proven type to a `ConcreteType` lets
+            // `compile_match_binding` thread the payload (`Point`) onto the
+            // `Ok(p)` binder so `p.x` / `p.y` resolve instead of erasing to
+            // `unknown` at the binop. This reads inference's own output — no
+            // fabrication: a miss (free var dropped by `finalize_expr_type_table`)
+            // leaves `scrutinee_ct` None and the prior surface-and-stop behaviour.
+            .or_else(|| self.keystone_scrutinee_concrete_type(&match_expr.scrutinee));
         self.compile_expr(&match_expr.scrutinee)?;
         let scrutinee_local = self.declare_local("__match_scrutinee")?;
         if let Some(schema_id) = self.last_expr_schema {
@@ -350,8 +541,14 @@ impl BytecodeCompiler {
             );
         }
         // Propagate full type info (numeric type, storage hint) from the
-        // scrutinee expression so that match bindings inherit it.
-        self.propagate_initializer_type_to_slot(scrutinee_local, true, false);
+        // scrutinee expression so that match bindings inherit it. U4-4: the
+        // scrutinee numeric kind is derived from its resolved Type.
+        self.propagate_initializer_type_to_slot(
+            scrutinee_local,
+            true,
+            false,
+            Some(&match_expr.scrutinee),
+        );
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(scrutinee_local)),
@@ -367,24 +564,29 @@ impl BytecodeCompiler {
             .type_tracker
             .get_local_type(scrutinee_local)
             .and_then(|info| info.schema_id);
-        // Post-§2.7.5.1: `info.storage_hint` is `Option<StorageHint>`,
-        // so `.and_then` collapses both Option layers. `None` propagates
-        // "kind not yet proven" — no numeric type recorded.
-        let scrutinee_numeric_type = self
-            .type_tracker
-            .get_local_type(scrutinee_local)
-            .and_then(|info| info.storage_hint)
-            .and_then(Self::storage_hint_to_numeric_type);
+        // U4-4: the scrutinee numeric-type computation (formerly stamped onto
+        // the deleted `last_expr_numeric_type` register for the per-arm result)
+        // is removed — arm-body binops derive operand kinds from the one
+        // resolved Type.
         let scrutinee_type_info = self.type_tracker.get_local_type(scrutinee_local).cloned();
 
         for arm in &match_expr.arms {
+            // Resolve the pattern-identifier-vs-unit-variant ambiguity ONCE,
+            // up front, so every downstream pass (check, binding, and the
+            // binding-semantics walks below) sees the same refutable
+            // `Constructor` pattern instead of a catch-all `Identifier`
+            // binder. A bare capitalized `Red` that names a known unit enum
+            // variant becomes `Enum::Red` here; everything else is unchanged.
+            let normalized = self.normalize_unit_variant_pattern(&arm.pattern);
+            let arm_pattern: &shape_ast::ast::Pattern = normalized.as_ref().unwrap_or(&arm.pattern);
+
             // Pattern check — restore scrutinee schema before checking
             self.last_expr_schema = scrutinee_schema;
             self.emit(Instruction::new(
                 OpCode::LoadLocal,
                 Some(Operand::Local(scrutinee_local)),
             ));
-            self.compile_pattern_check(&arm.pattern, arm.pattern_span)?;
+            self.compile_pattern_check(arm_pattern, arm.pattern_span)?;
             let next_arm_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 
             // Guard (if present) evaluated with bindings
@@ -392,13 +594,12 @@ impl BytecodeCompiler {
             if let Some(guard) = &arm.guard {
                 self.push_scope();
                 self.last_expr_schema = scrutinee_schema;
-                self.last_expr_numeric_type = scrutinee_numeric_type;
                 self.last_expr_type_info = scrutinee_type_info.clone();
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
                     Some(Operand::Local(scrutinee_local)),
                 ));
-                self.compile_match_binding(&arm.pattern)?;
+                self.compile_match_binding(arm_pattern, scrutinee_ct.as_ref())?;
                 self.compile_expr(guard)?;
                 guard_fail_jump = Some(self.emit_jump(OpCode::JumpIfFalse, 0));
                 self.pop_scope();
@@ -407,18 +608,59 @@ impl BytecodeCompiler {
             // Arm body with bindings
             self.push_scope();
             self.last_expr_schema = scrutinee_schema;
-            self.last_expr_numeric_type = scrutinee_numeric_type;
             self.last_expr_type_info = scrutinee_type_info.clone();
             self.emit(Instruction::new(
                 OpCode::LoadLocal,
                 Some(Operand::Local(scrutinee_local)),
             ));
-            self.compile_match_binding(&arm.pattern)?;
-            if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
-                self.compile_expr_preserving_refs(&arm.body)?;
-            } else {
-                self.compile_expr(&arm.body)?;
+            self.compile_match_binding(arm_pattern, scrutinee_ct.as_ref())?;
+            // STAGE S3 (strict-flip, 2026-06-22): a bare empty-array ARM result
+            // (`match c { 1 => [1,2], _ => [] }`) carries no element type of its
+            // own. Thread the match's RESULT element kind (from a sibling
+            // non-empty array-literal arm / the enclosing `Array<T>` return /
+            // let-annotation pending kind) into the empty `[]` so it constructs a
+            // valid typed empty `TypedArray<T>` instead of falling through to the
+            // placeholder `NewArray(0)` that SURFACEs `op_new_array(0)` at
+            // runtime. Save / restore so the hand-off does not leak. When the
+            // result IS array-shaped but the element kind is unprovable, surface a
+            // CLEAN compile-error — never a mid-program runtime SURFACE.
+            let arm_body_is_bare_empty_array = matches!(
+                &*arm.body,
+                Expr::Array(elements, _) if elements.is_empty()
+            );
+            let saved_pending_typed_array_kind = self.pending_variable_typed_array_kind;
+            if arm_body_is_bare_empty_array {
+                match self.match_arm_empty_array_typed_kind(match_expr) {
+                    Some(kind) => {
+                        self.pending_variable_typed_array_kind = Some(kind);
+                    }
+                    None if self.match_result_is_array_shaped(match_expr) => {
+                        return Err(shape_ast::error::ShapeError::SemanticError {
+                            message: format!(
+                                "cannot construct an empty array for this `match` arm: the \
+                                 match result's element type has no typed-array carrier the \
+                                 compiler can construct from a bare `[]`. Annotate the binding \
+                                 the match feeds (`let xs: Array<T> = match ...`), give it an \
+                                 `Array<T>` return type, or have another arm produce a \
+                                 non-empty array literal proving the element type."
+                            ),
+                            location: Some(self.span_to_source_location(
+                                shape_ast::ast::Spanned::span(&*arm.body),
+                            )),
+                        });
+                    }
+                    None => {}
+                }
             }
+            let arm_compile = if self.current_expr_result_mode()
+                == crate::compiler::ExprResultMode::PreserveRef
+            {
+                self.compile_expr_preserving_refs(&arm.body)
+            } else {
+                self.compile_expr(&arm.body)
+            };
+            self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
+            arm_compile?;
             arm_reference_results.push(self.capture_last_expr_reference_result());
             self.pop_scope();
 
@@ -527,11 +769,12 @@ impl BytecodeCompiler {
         // type info is unread by `compile_async_let`.
         //
         // `propagate_assignment_type_to_slot` reads `last_expr_type_info` /
-        // `last_expr_numeric_type` / `last_expr_schema` set by
-        // `compile_expr(&async_let.expr)` above and stamps the local
-        // accordingly — same shape as `var_decl.value`-less local
-        // declarations in `compile_statement::Let`.
-        self.propagate_initializer_type_to_slot(local_idx, true, false);
+        // `last_expr_schema` set by `compile_expr(&async_let.expr)` above and
+        // stamps the local accordingly. U4-4: an `async let` binds a Future
+        // wrapper, not a bare numeric — pass `None` so the stamp comes from
+        // `last_expr_type_info` (the future/awaited-type carrier), never a
+        // numeric derivation.
+        self.propagate_initializer_type_to_slot(local_idx, true, false, None);
 
         // `async let` is an expression — push the future back onto the stack
         self.emit(Instruction::new(
@@ -897,6 +1140,85 @@ mod tests {
             msg.contains("Non-exhaustive match"),
             "Expected non-exhaustive diagnostic, got: {}",
             msg
+        );
+    }
+
+    /// STAGE S3 (strict-flip, 2026-06-22): a bare empty-array (`[]`) match-arm
+    /// RESULT value must NOT lower to the generic `NewArray(0)` placeholder (which
+    /// SURFACEs `op_new_array(0)` at runtime). The element kind is threaded from
+    /// the enclosing `Array<int>` return annotation, so the empty arm emits the
+    /// typed `NewTypedArrayI64(0)` allocator.
+    #[test]
+    fn test_match_arm_empty_array_uses_return_annotation_typed_allocator() {
+        let code = r#"
+            fn pick(c: int) -> Array<int> {
+                match c { 1 => [1, 2], _ => [] }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        let compiled = result.expect("empty match-arm should compile");
+        let has_generic_new_array = compiled.instructions.iter().any(|ins| {
+            matches!(ins.opcode, OpCode::NewArray) && matches!(ins.operand, Some(Operand::Count(0)))
+        });
+        assert!(
+            !has_generic_new_array,
+            "empty match-arm `[]` must NOT emit the generic NewArray(0) placeholder \
+             that SURFACEs op_new_array(0) — it should construct a typed empty array"
+        );
+        let has_typed_i64_alloc = compiled
+            .instructions
+            .iter()
+            .any(|ins| matches!(ins.opcode, OpCode::NewTypedArrayI64));
+        assert!(
+            has_typed_i64_alloc,
+            "empty match-arm `[]` should emit the typed NewTypedArrayI64 allocator \
+             from the `Array<int>` return annotation"
+        );
+    }
+
+    /// STAGE S3: a SIBLING arm whose body is a non-empty array literal proves the
+    /// empty arm's element kind — no annotation required.
+    #[test]
+    fn test_match_arm_empty_array_uses_sibling_arm_element_kind() {
+        let code = r#"
+            fn pick(c: int) -> Array<int> {
+                match c { 1 => [10, 20], _ => [] }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let compiled = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("sibling-proven empty match-arm should compile");
+        assert!(
+            !compiled.instructions.iter().any(|ins| {
+                matches!(ins.opcode, OpCode::NewArray)
+                    && matches!(ins.operand, Some(Operand::Count(0)))
+            }),
+            "sibling-proven empty match-arm must not emit the generic NewArray(0) placeholder"
+        );
+    }
+
+    /// STAGE S3: when the match result IS array-shaped but the element type has no
+    /// typed-array carrier constructible from a bare `[]` (e.g. `Array<Array<int>>`),
+    /// surface a CLEAN compile-error — never a mid-program runtime SURFACE.
+    #[test]
+    fn test_match_arm_empty_array_unprovable_element_is_clean_compile_error() {
+        let code = r#"
+            fn pick(c: int) -> Array<Array<int>> {
+                match c { _ => [] }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "unprovable empty match-arm element type should be a clean compile-error"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("cannot construct an empty array for this `match` arm"),
+            "expected the clean empty-array construction diagnostic, got: {msg}"
         );
     }
 

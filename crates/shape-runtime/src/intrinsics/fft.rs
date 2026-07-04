@@ -22,9 +22,7 @@
 //! - Audio/vibration analysis
 //! - General frequency domain analysis
 
-use crate::marshal::{
-    register_typed_fn_1, register_typed_fn_2_full, register_typed_fn_4_full,
-};
+use crate::marshal::{register_typed_fn_1, register_typed_fn_2_full, register_typed_fn_4_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use rustfft::{FftPlanner, num_complex::Complex};
@@ -313,4 +311,3 @@ fn empty_fft_pairs() -> Vec<(String, ConcreteReturn)> {
         ("n".to_string(), ConcreteReturn::F64(0.0)),
     ]
 }
-

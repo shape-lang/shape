@@ -10,11 +10,11 @@ use std::sync::Arc;
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::Runtime;
 use shape_runtime::module_loader::ModuleLoader;
-use shape_runtime::package_bundle::{
-    decide_cache_action, current_format_version, BundleMetadata, BundledModule, PackageBundle,
-    ResolvedInterface,
-};
 use shape_runtime::module_manifest::ModuleManifest;
+use shape_runtime::package_bundle::{
+    BundleMetadata, BundledModule, PackageBundle, ResolvedInterface, current_format_version,
+    decide_cache_action,
+};
 
 use crate::bytecode::BytecodeProgram;
 use crate::compiler::BytecodeCompiler;
@@ -282,6 +282,9 @@ pub fn build_core_prelude_bundle() -> Result<PackageBundle> {
     let trace = stdlib_compile_logs_enabled();
     let mut loader = ModuleLoader::new();
     let core_modules = loader.list_core_stdlib_module_imports()?;
+    let schema_registry =
+        Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib());
+    let _schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry);
 
     let mut merged = BytecodeProgram::new();
     let mut interface_items: Vec<shape_ast::ast::Item> = Vec::new();
@@ -325,7 +328,10 @@ pub fn build_core_prelude_bundle() -> Result<PackageBundle> {
     })?;
     let source_hash = hex::encode(Sha256::digest(&bytecode_bytes));
 
-    let mut manifest = ModuleManifest::new(PRELUDE_MODULE_PATH.to_string(), env!("CARGO_PKG_VERSION").to_string());
+    let mut manifest = ModuleManifest::new(
+        PRELUDE_MODULE_PATH.to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
     manifest.resolved_interface = Some(interface);
     // `finalize()` computes the manifest hash over `ManifestHashInput`, which
     // deliberately EXCLUDES `resolved_interface` (DESIGN §1.2 / decision 3).
@@ -395,6 +401,9 @@ pub fn compile_core_modules_from_source() -> Result<BytecodeProgram> {
     if core_modules.is_empty() {
         return Ok(BytecodeProgram::new());
     }
+    let schema_registry =
+        Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib());
+    let _schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry);
 
     let mut merged = BytecodeProgram::new();
     for import_path in core_modules {
@@ -776,12 +785,8 @@ mod tests {
         // DESIGN §2.3 — a bundle whose manifest has no `resolved_interface`
         // (pre-v4 / unannotated-public package) is a REBUILD, so the prelude
         // load chain falls through to the R6 bare-bytecode / source fallback.
-        use shape_runtime::package_bundle::{decide_cache_action, CacheAction, RebuildReason};
-        let action =
-            decide_cache_action(current_format_version(), "anyhash", None, None);
-        assert_eq!(
-            action,
-            CacheAction::Rebuild(RebuildReason::InterfaceAbsent)
-        );
+        use shape_runtime::package_bundle::{CacheAction, RebuildReason, decide_cache_action};
+        let action = decide_cache_action(current_format_version(), "anyhash", None, None);
+        assert_eq!(action, CacheAction::Rebuild(RebuildReason::InterfaceAbsent));
     }
 }

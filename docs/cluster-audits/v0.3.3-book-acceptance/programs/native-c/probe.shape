@@ -1,0 +1,10 @@
+---
+name = "probe"
+
+[native-dependencies]
+stub = { provider = "path", path = "./libstub.so" }
+---
+extern C fn stub_add_i64(a: i64, b: i64) -> i64 from "stub" as "stub_add_i64";
+
+let r = stub_add_i64(20, 22)
+print(r)

@@ -555,7 +555,6 @@ impl ExecutionContext {
     pub fn progress_registry(&self) -> Option<&Arc<super::progress::ProgressRegistry>> {
         self.progress_registry.as_ref()
     }
-
 }
 
 #[cfg(test)]

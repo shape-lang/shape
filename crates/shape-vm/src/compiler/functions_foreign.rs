@@ -199,9 +199,7 @@ impl BytecodeCompiler {
             for i in 0..arg_count {
                 self.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(i))));
             }
-            let arg_count_const = self
-                .program
-                .add_constant(Constant::Int(arg_count as i64));
+            let arg_count_const = self.program.add_constant(Constant::Int(arg_count as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count_const)),

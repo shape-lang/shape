@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod full_loop_tests {
-    use super::*;
     use crate::BytecodeExecutor;
     use shape_runtime::engine::ShapeEngine;
 
@@ -55,9 +54,12 @@ mod full_loop_tests {
                 pnl: 1500.0
             }
             print("=== Backtest Results ===")
-            print("Cash: $" + state.cash)
-            print("Trades: " + state.trades)
-            print("P&L: $" + state.pnl)
+            // Strict no-coercion ruling (user 2026-06-14): `string + non-string`
+            // is a compile error. Migrated from `"Cash: $" + state.cash` (etc.)
+            // to f-string interpolation, which is the sanctioned alternative.
+            print(f"Cash: ${state.cash}")
+            print(f"Trades: {state.trades}")
+            print(f"P&L: ${state.pnl}")
             "ok"
         "#;
 

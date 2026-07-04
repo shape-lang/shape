@@ -512,12 +512,30 @@ mod tests {
 
     #[test]
     fn parse_border_style_all() {
-        assert_eq!(parse_border_style_spec("rounded").unwrap(), BorderStyleSpec::Rounded);
-        assert_eq!(parse_border_style_spec("sharp").unwrap(), BorderStyleSpec::Sharp);
-        assert_eq!(parse_border_style_spec("heavy").unwrap(), BorderStyleSpec::Heavy);
-        assert_eq!(parse_border_style_spec("double").unwrap(), BorderStyleSpec::Double);
-        assert_eq!(parse_border_style_spec("minimal").unwrap(), BorderStyleSpec::Minimal);
-        assert_eq!(parse_border_style_spec("none").unwrap(), BorderStyleSpec::None);
+        assert_eq!(
+            parse_border_style_spec("rounded").unwrap(),
+            BorderStyleSpec::Rounded
+        );
+        assert_eq!(
+            parse_border_style_spec("sharp").unwrap(),
+            BorderStyleSpec::Sharp
+        );
+        assert_eq!(
+            parse_border_style_spec("heavy").unwrap(),
+            BorderStyleSpec::Heavy
+        );
+        assert_eq!(
+            parse_border_style_spec("double").unwrap(),
+            BorderStyleSpec::Double
+        );
+        assert_eq!(
+            parse_border_style_spec("minimal").unwrap(),
+            BorderStyleSpec::Minimal
+        );
+        assert_eq!(
+            parse_border_style_spec("none").unwrap(),
+            BorderStyleSpec::None
+        );
         assert!(parse_border_style_spec("triple").is_err());
     }
 
@@ -533,9 +551,15 @@ mod tests {
     fn parse_chart_type_all() {
         assert_eq!(parse_chart_type_spec("line").unwrap(), ChartTypeSpec::Line);
         assert_eq!(parse_chart_type_spec("bar").unwrap(), ChartTypeSpec::Bar);
-        assert_eq!(parse_chart_type_spec("scatter").unwrap(), ChartTypeSpec::Scatter);
+        assert_eq!(
+            parse_chart_type_spec("scatter").unwrap(),
+            ChartTypeSpec::Scatter
+        );
         assert_eq!(parse_chart_type_spec("area").unwrap(), ChartTypeSpec::Area);
-        assert_eq!(parse_chart_type_spec("histogram").unwrap(), ChartTypeSpec::Histogram);
+        assert_eq!(
+            parse_chart_type_spec("histogram").unwrap(),
+            ChartTypeSpec::Histogram
+        );
         assert!(parse_chart_type_spec("pie").is_err());
     }
 

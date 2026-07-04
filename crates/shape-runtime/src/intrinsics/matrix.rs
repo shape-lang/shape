@@ -44,14 +44,16 @@ use std::sync::Arc;
 /// Create the matrix intrinsics module with all 4 typed-marshal entry points.
 pub fn create_matrix_intrinsics_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::intrinsics::matrix");
-    module.description =
-        "Matrix intrinsics (matmul_vec, matmul_mat, mat_add, mat_sub)".to_string();
+    module.description = "Matrix intrinsics (matmul_vec, matmul_mat, mat_add, mat_sub)".to_string();
 
     register_typed_fn_2::<_, Vec<Arc<HeapValue>>, Arc<Vec<f64>>>(
         &mut module,
         "__intrinsic_matmul_vec",
         "Matrix-vector multiplication: `Mat<number> * Vec<number> -> Vec<number>`",
-        [("matrix", "Array<Array<number>>"), ("vector", "Array<number>")],
+        [
+            ("matrix", "Array<Array<number>>"),
+            ("vector", "Array<number>"),
+        ],
         ConcreteType::ArrayNumber,
         |matrix, vector, _ctx| {
             let (a, rows, inner) = extract_matrix(&matrix, "Left matrix")?;
@@ -81,10 +83,7 @@ pub fn create_matrix_intrinsics_module() -> ModuleExports {
         &mut module,
         "__intrinsic_matmul_mat",
         "Matrix-matrix multiplication: `Mat<number> * Mat<number> -> Mat<number>`",
-        [
-            ("a", "Array<Array<number>>"),
-            ("b", "Array<Array<number>>"),
-        ],
+        [("a", "Array<Array<number>>"), ("b", "Array<Array<number>>")],
         ConcreteType::ArrayHeapValue("Array<Array<number>>".to_string()),
         |a_rows_arc, b_rows_arc, _ctx| {
             let (a, a_rows, a_cols) = extract_matrix(&a_rows_arc, "Left matrix")?;
@@ -122,10 +121,7 @@ pub fn create_matrix_intrinsics_module() -> ModuleExports {
         &mut module,
         "__intrinsic_mat_add",
         "Element-wise matrix addition: `Mat<number> + Mat<number>`",
-        [
-            ("a", "Array<Array<number>>"),
-            ("b", "Array<Array<number>>"),
-        ],
+        [("a", "Array<Array<number>>"), ("b", "Array<Array<number>>")],
         ConcreteType::ArrayHeapValue("Array<Array<number>>".to_string()),
         |a_rows_arc, b_rows_arc, _ctx| {
             let a = matrix_data_from_heap_value_vec(&a_rows_arc, "Left matrix")?;
@@ -141,10 +137,7 @@ pub fn create_matrix_intrinsics_module() -> ModuleExports {
         &mut module,
         "__intrinsic_mat_sub",
         "Element-wise matrix subtraction: `Mat<number> - Mat<number>`",
-        [
-            ("a", "Array<Array<number>>"),
-            ("b", "Array<Array<number>>"),
-        ],
+        [("a", "Array<Array<number>>"), ("b", "Array<Array<number>>")],
         ConcreteType::ArrayHeapValue("Array<Array<number>>".to_string()),
         |a_rows_arc, b_rows_arc, _ctx| {
             let a = matrix_data_from_heap_value_vec(&a_rows_arc, "Left matrix")?;

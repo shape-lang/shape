@@ -1,8 +1,9 @@
 //! Stress tests for type inference from literals, arithmetic, string concat,
 //! comparisons, function calls, Option<T>, Result<T,E>, typeof/.type(),
-//! null/None, type preservation through control flow, int vs number separation,
+//! none/None, type preservation through control flow, int vs number separation,
 //! and complex inference interactions.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================
@@ -92,7 +93,7 @@ fn option_some_bool() {
     ShapeTest::new("let x = Some(true); x").expect_bool(true);
 }
 
-/// Verifies option none is none.
+/// Verifies option none is None.
 #[test]
 fn option_none_is_none() {
     ShapeTest::new("let x = None; x").expect_none();
@@ -104,9 +105,9 @@ fn option_some_number() {
     ShapeTest::new("let x = Some(3.14); x").expect_number(3.14);
 }
 
-/// Verifies option null coalesce.
+/// Verifies option coalesce.
 #[test]
-fn option_null_coalesce() {
+fn option_none_coalesce() {
     ShapeTest::new("let x = None; x ?? 42").expect_number(42.0);
 }
 
@@ -116,15 +117,15 @@ fn option_some_coalesce_returns_value() {
     ShapeTest::new("let x = Some(10); x ?? 42").expect_number(10.0);
 }
 
-/// Verifies option null check equality.
+/// Verifies option None check equality.
 #[test]
-fn option_null_check_equality() {
+fn option_none_check_equality() {
     ShapeTest::new("let x = None; x == None").expect_bool(true);
 }
 
-/// Verifies option some not null.
+/// Verifies option some not None.
 #[test]
-fn option_some_not_null() {
+fn option_some_not_none() {
     ShapeTest::new("let x = Some(5); x == None").expect_bool(false);
 }
 
@@ -352,30 +353,30 @@ fn number_mul_preserves_number() {
 }
 
 // =========================================================================
-// 16. NULL / NONE TYPE
+// 16. NONE TYPE
 // =========================================================================
 
-/// Verifies null value.
+/// Verifies None value.
 #[test]
-fn null_value() {
+fn none_value() {
     ShapeTest::new("None").expect_none();
 }
 
-/// Verifies null equality.
+/// Verifies None equality.
 #[test]
-fn null_equality() {
+fn none_equality() {
     ShapeTest::new("None == None").expect_bool(true);
 }
 
-/// Verifies null coalesce with string.
+/// Verifies coalesce with string.
 #[test]
-fn null_coalesce_with_string() {
+fn none_coalesce_with_string() {
     ShapeTest::new(r#"None ?? "default""#).expect_string("default");
 }
 
-/// Verifies non null does not coalesce.
+/// Verifies non-None value does not coalesce.
 #[test]
-fn non_null_does_not_coalesce() {
+fn non_none_does_not_coalesce() {
     ShapeTest::new(r#""value" ?? "default""#).expect_string("value");
 }
 

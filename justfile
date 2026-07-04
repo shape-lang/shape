@@ -2,6 +2,15 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 extension-crates := "shape-ext-python shape-ext-typescript"
 
+# Per-process virtual-memory backstop for test runs (KiB). A runaway test (an
+# unbounded allocating loop, e.g. from an inference regression) is bounded
+# in-process by the VM's per-buffer heap ceiling + instruction cap; this ulimit
+# is the hard system-level backstop so ANY runaway the in-VM caps miss (e.g. a
+# many-small-retained-buffer climb) fails THIS process at ~48 GiB instead of
+# climbing to ~83 GiB and OOM-killing / hanging the whole host. 48 GiB is
+# generous for rustc/link + legitimate tests (which use < 1 GiB).
+test-mem-cap-kib := "50331648"
+
 default: build-extensions build-treesitter
 
 # Build extension shared libraries and copy them into extensions/.
@@ -41,11 +50,11 @@ test-check: check-clean
 
 # Tier 1: Fast unit tests — no deep/soak, no integration
 test-fast:
-	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib
+	ulimit -v {{test-mem-cap-kib}} && cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib
 
 # Tier 2: Unit + deep tests, no integration
 test:
-	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests --features shape-jit/deep-tests
+	ulimit -v {{test-mem-cap-kib}} && cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests --features shape-jit/deep-tests
 
 # Tier 3: Everything that should currently pass — unit + deep + soak + integration (~10-15 min)
 #
@@ -69,27 +78,36 @@ test:
 # a parallel-contention flake (different test fails each run); single-thread
 # is stable. Same precedent as path-c2's gating decisions.
 test-all:
-	cargo test --workspace --exclude shape-test --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests
-	cargo test -p shape-test -- --test-threads=1
+	ulimit -v {{test-mem-cap-kib}} && cargo test --workspace --exclude shape-test --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests
+	ulimit -v {{test-mem-cap-kib}} && cargo test -p shape-test -- --test-threads=1
 
 # Run only deep/soak tests
 test-deep:
-	cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests --features shape-jit/deep-tests -- deep --include-ignored
+	ulimit -v {{test-mem-cap-kib}} && cargo test --workspace --exclude shape-test --exclude shape-ext-python --exclude shape-ext-typescript --lib --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests --features shape-jit/deep-tests -- deep --include-ignored
 
 # Run only shape-test integration suite
 test-integration:
-	cargo test -p shape-test
+	ulimit -v {{test-mem-cap-kib}} && cargo test -p shape-test
 
 # Run all tests for a single crate
 test-crate crate:
-	cargo test -p {{crate}} --features deep-tests 2>/dev/null || cargo test -p {{crate}}
+	ulimit -v {{test-mem-cap-kib}} && (cargo test -p {{crate}} --features deep-tests 2>/dev/null || cargo test -p {{crate}})
 
 # CI: full suite. Target set mirrors `check-clean`: `--all-targets` minus
 # `--benches` (the two shape-vm bench files reference deleted post-strict-typing
 # shapes; bench rebuild is Item 5's territory).
 ci-test:
-	cargo test --workspace --lib --bins --tests --examples --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
-	cargo run -p xtask -- workspace-smoke
+	ulimit -v {{test-mem-cap-kib}} && cargo test --workspace --lib --bins --tests --examples --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
+	ulimit -v {{test-mem-cap-kib}} && cargo run -p xtask -- workspace-smoke
+
+# Lightweight VM-vs-JIT differential gate. This uses the subprocess
+# shape-fuzz harness against a curated golden subset; the full corpus stays
+# in .github/workflows/nightly-fuzz.yml because it contains known negative
+# divergence seeds.
+differential-gate:
+	ulimit -v {{test-mem-cap-kib}} && cargo build -p shape-cli --bin shape
+	ulimit -v {{test-mem-cap-kib}} && cargo build -p shape-fuzz --bin shape-fuzz
+	ulimit -v {{test-mem-cap-kib}} && bash scripts/differential-gate.sh
 
 # --- Canonical clean-check gate ---
 
@@ -148,6 +166,11 @@ verify-phase-2:
 # wired up; see CLAUDE.md "Mechanical enforcement". When it lands, add it here.)
 verify-phase-5: check-no-dynamic
 	@echo "TODO: invoke sentinel test when crates/shape-vm/src/executor/tests/no_dynamic.rs lands"
+
+# Narrow provenance/Miri gate. This wraps the script in direnv because the
+# active devenv cargo is stable-only; the script uses rustup-run nightly.
+miri-provenance:
+	direnv exec {{justfile_directory()}} bash scripts/check-miri-provenance.sh
 
 # --- Phase 4c CI coverage gate (cargo-tarpaulin) ---
 #

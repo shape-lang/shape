@@ -95,13 +95,10 @@ pub static MUT_SELF_HASHMAP_METHODS: phf::Set<&'static str> = phf_set! {
 /// `compile_expr_method_call`); listed here so the generic fallback
 /// path also writes back when the bespoke path isn't taken.
 ///
-/// **NOT listed:** `pop`. Pop's return value is the popped element
-/// (`Option<T>`), not the mutated array — generic-writeback semantics
-/// would corrupt the binding by writing the element bits into the
-/// array slot. The pre-ruling `pop` behaviour (mutation visible only
-/// when the user does `arr = arr.pop()` and discards the popped
-/// element) is preserved; a future amendment can add a tuple-return
-/// ABI for pop-shaped methods.
+/// **NOT listed:** `pop`. Pop's return value is the popped element, not
+/// the mutated array — generic-writeback semantics would corrupt the
+/// binding by writing the element bits into the array slot. Pop is
+/// registered below in the tuple-return ABI set instead.
 pub static MUT_SELF_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
     "push",
 };
@@ -110,8 +107,9 @@ pub static MUT_SELF_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
 ///
 /// Same return-value rule as `MUT_SELF_ARRAY_METHODS`: only listed when
 /// the handler returns the (mutated) receiver Arc. `popBack` /
-/// `popFront` return the popped element, so they stay off the writeback
-/// set (deferred to a future tuple-return ABI).
+/// `popFront` return the popped element, so they stay off this
+/// self-returning writeback set and are registered below in the
+/// tuple-return ABI set instead.
 pub static MUT_SELF_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
     "pushBack",
     "pushFront",
@@ -119,8 +117,8 @@ pub static MUT_SELF_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
 
 /// PriorityQueue methods that opt into `&mut self` semantics.
 ///
-/// `pop` returns the popped element, not the mutated queue — see
-/// `MUT_SELF_ARRAY_METHODS` for the return-value rule.
+/// `pop` returns the popped element, not the mutated queue, so it is
+/// registered below in the tuple-return ABI set instead.
 pub static MUT_SELF_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
     "push",
 };
@@ -134,6 +132,7 @@ pub static MUT_SELF_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
 /// deleted. The shared mut-self set remains for the compiler's
 /// write-back gate, which is liberal across container kinds. `pop` is
 /// excluded per the same return-value rule as `MUT_SELF_ARRAY_METHODS`.
+#[allow(dead_code)]
 pub static MUT_SELF_TYPED_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
     "push",
     "set",
@@ -150,6 +149,7 @@ pub static MUT_SELF_TYPED_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
 /// re-stores the same bits — net effect: no-op modulo refcount churn).
 ///
 /// Used by `compile_expr_method_call`'s writeback emission gate.
+#[allow(dead_code)]
 pub fn is_mut_self_method_name(method: &str) -> bool {
     MUT_SELF_HASHSET_METHODS.contains(method)
         || MUT_SELF_HASHMAP_METHODS.contains(method)
@@ -260,7 +260,9 @@ pub fn is_mut_self_tuple_return_method_name(method: &str) -> bool {
 pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Higher-order — Native (closure-based, handler manages VM callbacks)
     "map" => crate::executor::objects::array_transform::handle_map_v2,
+    "mapIndexed" => crate::executor::objects::array_transform::handle_map_indexed_v2,
     "filter" => crate::executor::objects::array_transform::handle_filter_v2,
+    "filterIndexed" => crate::executor::objects::array_transform::handle_filter_indexed_v2,
     "reduce" => crate::executor::objects::array_aggregation::handle_reduce_v2,
     "fold" => crate::executor::objects::array_aggregation::handle_reduce_v2,
     "forEach" => crate::executor::objects::array_query::handle_for_each_v2,
@@ -270,6 +272,7 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "every" => crate::executor::objects::array_query::handle_every_v2,
     "sort" => crate::executor::objects::array_transform::handle_sort_v2,
     "groupBy" => crate::executor::objects::array_transform::handle_group_by_v2,
+    "groupByIndexed" => crate::executor::objects::array_transform::handle_group_by_indexed_v2,
     "flatMap" => crate::executor::objects::array_transform::handle_flat_map_v2,
 
     // Basic operations — Native
@@ -307,7 +310,7 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "includes" => crate::executor::objects::array_query::handle_includes_v2,
 
     // Transform — Native
-    "join" => crate::executor::objects::array_sort::handle_join_str_v2,
+    "join" => crate::executor::objects::array_transform::handle_join_v2,
     "flatten" => crate::executor::objects::array_transform::handle_flatten_v2,
     "unique" => crate::executor::objects::array_sets::handle_unique_v2,
     "distinct" => crate::executor::objects::array_sets::handle_distinct_v2,
@@ -642,6 +645,7 @@ pub static ITERATOR_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "take" => crate::executor::objects::iterator_methods::handle_take,
     "skip" => crate::executor::objects::iterator_methods::handle_skip,
     "flatMap" => crate::executor::objects::iterator_methods::handle_flat_map,
+    "flatten" => crate::executor::objects::iterator_methods::handle_flatten,
     "enumerate" => crate::executor::objects::iterator_methods::handle_enumerate,
     "chain" => crate::executor::objects::iterator_methods::handle_chain,
 
@@ -696,6 +700,7 @@ pub static MATRIX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// Inherited DataTable methods are dispatched via DATATABLE_METHODS fallback.
 ///
 /// **Query:** between, resample
+#[allow(dead_code)]
 pub static INDEXED_TABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "between" => crate::executor::objects::indexed_table_methods::handle_between,
     "resample" => crate::executor::objects::indexed_table_methods::handle_resample,
@@ -743,6 +748,7 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
 /// **Aggregations:** sum, avg, mean, min, max
 /// **Numeric:** abs
 /// **Standard:** len, length, map, filter, reduce, fold, forEach, find, some, every, toArray
+#[allow(dead_code)]
 pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Aggregations — MethodFnV2 (v2 typed array + v1 fallback)
     "sum" => crate::executor::objects::typed_array_methods::v2_int_sum,
@@ -880,6 +886,7 @@ pub static NUMBER_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "toString" => crate::executor::objects::number_methods::number_to_string_v2,
     "to_string" => crate::executor::objects::number_methods::number_to_string_v2,
     "clamp" => crate::executor::objects::number_methods::number_clamp_v2,
+    "cmp" => crate::executor::objects::number_methods::number_cmp_v2,
 };
 
 /// PHF registry for String methods (v2 native handlers)
@@ -900,6 +907,9 @@ pub static STRING_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Info
     "len" => crate::executor::objects::string_methods::v2_string_len,
     "length" => crate::executor::objects::string_methods::v2_string_len,
+
+    // Clone (backs the `clone` keyword desugar for strings)
+    "clone" => crate::executor::objects::string_methods::v2_string_clone,
 
     // Case
     "toUpperCase" => crate::executor::objects::string_methods::v2_string_to_upper,
@@ -935,6 +945,7 @@ pub static STRING_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "split" => crate::executor::objects::string_methods::v2_string_split,
     "replace" => crate::executor::objects::string_methods::v2_string_replace,
     "substring" => crate::executor::objects::string_methods::v2_string_substring,
+    "slice" => crate::executor::objects::string_methods::v2_string_slice,
     "join" => crate::executor::objects::string_methods::v2_string_join,
 
     // Padding
@@ -1019,12 +1030,15 @@ pub static CONTENT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "border" => crate::executor::objects::content_methods::v2_content_border,
     "max_rows" => crate::executor::objects::content_methods::v2_content_max_rows,
     "maxRows" => crate::executor::objects::content_methods::v2_content_max_rows_camel,
+    "add" => crate::executor::objects::content_methods::v2_content_add,
     "series" => crate::executor::objects::content_methods::v2_content_series,
     "title" => crate::executor::objects::content_methods::v2_content_title,
     "x_label" => crate::executor::objects::content_methods::v2_content_x_label,
     "xLabel" => crate::executor::objects::content_methods::v2_content_x_label_camel,
     "y_label" => crate::executor::objects::content_methods::v2_content_y_label,
     "yLabel" => crate::executor::objects::content_methods::v2_content_y_label_camel,
+    "width" => crate::executor::objects::content_methods::v2_content_width,
+    "height" => crate::executor::objects::content_methods::v2_content_height,
     // W18.5 builder methods (R8 W4, 2026-05-24 — supervisor D4): per-type
     // builder chain ergonomics for `Table::new()` / `Code::new()` /
     // `KeyValue::new()`. The receiver kind is always

@@ -1,0 +1,27 @@
+// Finding probe: escape-via-(let-then-return) double-drops the value.
+// Book chapter is SILENT on returning a Drop value (its read_data() returns
+// lines.map(...), not the handle). ADR-006 2.7.30 says escape DEFERS the drop.
+let mut N: int = 0
+type R { id: int }
+impl Drop for R {
+  method drop() { N = N + 1; print(f"DROP id={self.id} count={N}") }
+}
+fn make_via_let(n: int) -> R {
+  let r = R { id: n }   // bound, then returned (escapes)
+  r
+}
+fn make_direct(n: int) -> R {
+  R { id: n }           // returned directly, no intermediate let
+}
+fn main() {
+  print("-- via_let --")
+  N = 0
+  let x = make_via_let(7)
+  print(f"after make_via_let, x.id={x.id}")
+  print("-- direct --")
+  N = 0
+  let y = make_direct(8)
+  print(f"after make_direct, y.id={y.id}")
+  print("-- end main --")
+}
+main()

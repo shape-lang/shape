@@ -6,7 +6,7 @@
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::InterpolationMode;
-use shape_ast::content_style::{ColorSpec, ContentFormatSpec, NamedContentColor};
+use shape_ast::content_style::{ChartTypeSpec, ColorSpec, ContentFormatSpec, NamedContentColor};
 use shape_ast::error::{Result, ShapeError};
 use shape_ast::interpolation::{
     FormatAlignment, FormatColor, InterpolationFormatSpec, InterpolationPart,
@@ -284,8 +284,15 @@ impl BytecodeCompiler {
                         }
                     })?;
 
-                    // Compile the expression
-                    self.compile_expr(&expr)?;
+                    // Compile the expression. The re-parsed `expr` carries
+                    // parser-local spans; guard the ownership-move query so a
+                    // fragment-local span collision cannot emit a spurious
+                    // `LoadLocalMove` on a live binding (e.g. a loop counter).
+                    // See `in_interpolation_expr_depth`.
+                    self.in_interpolation_expr_depth += 1;
+                    let r = self.compile_expr(&expr);
+                    self.in_interpolation_expr_depth -= 1;
+                    r?;
 
                     // Format value using typed interpolation spec.
                     self.emit_interpolation_format_call(format_spec.as_ref())?;
@@ -328,13 +335,19 @@ impl BytecodeCompiler {
         }
 
         let part_count = parts.len();
+        let single_part_is_chart = matches!(
+            parts,
+            [InterpolationPart::Expression {
+                format_spec: Some(InterpolationFormatSpec::ContentStyle(spec)),
+                ..
+            }] if spec.chart_type.is_some()
+        );
 
         for part in parts {
             match part {
                 InterpolationPart::Literal(text) => {
                     // Push literal string, then FStringContentText.
-                    let const_idx =
-                        self.program.add_constant(Constant::String(text.clone()));
+                    let const_idx = self.program.add_constant(Constant::String(text.clone()));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(const_idx)),
@@ -353,23 +366,31 @@ impl BytecodeCompiler {
                                 location: None,
                             }
                         })?;
-                    self.compile_expr(&parsed_expr)?;
+                    // Parser-local spans on the re-parsed inner expression —
+                    // guard the ownership-move query (see the string-concat
+                    // path above and `in_interpolation_expr_depth`).
+                    self.in_interpolation_expr_depth += 1;
+                    let r = self.compile_expr(&parsed_expr);
+                    self.in_interpolation_expr_depth -= 1;
+                    r?;
 
                     match format_spec {
                         Some(InterpolationFormatSpec::ContentStyle(spec)) => {
-                            // Convert expression value to string first.
-                            self.emit_format_value_with_meta()?;
-                            // Then emit FStringContentStyledText with
-                            // encoded style payload.
-                            self.emit_fstring_content_styled_text(spec)?;
+                            if spec.chart_type.is_some() {
+                                self.emit_fstring_content_chart(spec)?;
+                            } else {
+                                // Convert expression value to string first.
+                                self.emit_format_value_with_meta()?;
+                                // Then emit FStringContentStyledText with
+                                // encoded style payload.
+                                self.emit_fstring_content_styled_text(spec)?;
+                            }
                         }
                         _ => {
                             // Plain or fixed/table-spec'd expression: route
                             // through the existing format path to a string,
                             // then wrap as plain content.
-                            self.emit_interpolation_format_call(
-                                format_spec.as_ref(),
-                            )?;
+                            self.emit_interpolation_format_call(format_spec.as_ref())?;
                             self.emit_fstring_content_text_call()?;
                         }
                     }
@@ -377,18 +398,20 @@ impl BytecodeCompiler {
             }
         }
 
-        // Combine all part-results into a Fragment.
-        let count_idx = self
-            .program
-            .add_constant(Constant::Int(part_count as i64));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(count_idx)),
-        ));
-        self.emit(Instruction::new(
-            OpCode::BuiltinCall,
-            Some(Operand::Builtin(BuiltinFunction::FStringContentFragment)),
-        ));
+        if !single_part_is_chart {
+            // Combine all part-results into a Fragment. A single chart-styled
+            // expression remains a Chart node so table-to-chart tests can
+            // assert the structural carrier directly.
+            let count_idx = self.program.add_constant(Constant::Int(part_count as i64));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(count_idx)),
+            ));
+            self.emit(Instruction::new(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::FStringContentFragment)),
+            ));
+        }
 
         Ok(())
     }
@@ -419,10 +442,7 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    fn emit_fstring_content_styled_text(
-        &mut self,
-        spec: &ContentFormatSpec,
-    ) -> Result<()> {
+    fn emit_fstring_content_styled_text(&mut self, spec: &ContentFormatSpec) -> Result<()> {
         // Stack on entry: [value_str]. Push 5 i64 style args, then 6 as
         // arg-count, then BuiltinCall.
         let (fg_kind, fg_payload) = encode_color_args(spec.fg.as_ref());
@@ -448,6 +468,54 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    fn emit_fstring_content_chart(&mut self, spec: &ContentFormatSpec) -> Result<()> {
+        let chart_type = spec
+            .chart_type
+            .as_ref()
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: "internal: chart content emitter called without chart type".to_string(),
+                location: None,
+            })?;
+        let chart_type_idx = self
+            .program
+            .add_constant(Constant::String(chart_type_name(chart_type).to_string()));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(chart_type_idx)),
+        ));
+
+        let x_column_idx = self
+            .program
+            .add_constant(Constant::String(spec.x_column.clone().unwrap_or_default()));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(x_column_idx)),
+        ));
+
+        for y_column in &spec.y_columns {
+            let idx = self
+                .program
+                .add_constant(Constant::String(y_column.clone()));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(idx)),
+            ));
+        }
+
+        let count_idx = self
+            .program
+            .add_constant(Constant::Int(3 + spec.y_columns.len() as i64));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(count_idx)),
+        ));
+        self.emit(Instruction::new(
+            OpCode::BuiltinCall,
+            Some(Operand::Builtin(BuiltinFunction::FStringContentChart)),
+        ));
+        Ok(())
+    }
+
     fn emit_empty_content_text(&mut self) -> Result<()> {
         let const_idx = self.program.add_constant(Constant::String(String::new()));
         self.emit(Instruction::new(
@@ -456,7 +524,16 @@ impl BytecodeCompiler {
         ));
         self.emit_fstring_content_text_call()
     }
+}
 
+fn chart_type_name(chart_type: &ChartTypeSpec) -> &'static str {
+    match chart_type {
+        ChartTypeSpec::Line => "line",
+        ChartTypeSpec::Bar => "bar",
+        ChartTypeSpec::Scatter => "scatter",
+        ChartTypeSpec::Area => "area",
+        ChartTypeSpec::Histogram => "histogram",
+    }
 }
 
 #[cfg(test)]

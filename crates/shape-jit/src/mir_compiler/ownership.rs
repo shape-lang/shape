@@ -53,7 +53,7 @@ enum RefcountDisposition {
     /// These have their own dedicated retain/release path (the matching
     /// per-FieldKind FFI in `ffi/object/closure.rs`, or no retain at all
     /// for stack closures) — emit nothing here.
-    Skip_TypedCellCarrier,
+    SkipTypedCellCarrier,
 }
 
 impl<'a, 'b> MirToIR<'a, 'b> {
@@ -70,7 +70,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // address, not a refcounted handle. (Phase E.)
         if let Place::Local(slot_id) = place {
             if self.stack_closure_slots.contains_key(slot_id) {
-                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+                return Ok(RefcountDisposition::SkipTypedCellCarrier);
             }
             // Track A.1D.2 / A.1E: OwnedMutable / Shared capture slots
             // hold raw `*mut ValueWord` / `*const SharedCell` pointers
@@ -81,14 +81,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             if self.owned_mutable_capture_slots.contains_key(slot_id)
                 || self.shared_capture_slots.contains_key(slot_id)
             {
-                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+                return Ok(RefcountDisposition::SkipTypedCellCarrier);
             }
             // Session 1 Commit 3: SharedCow outer-scope local slots
             // hold a `*const SharedCell` Arc pointer; their lifecycle
             // is `jit_arc_shared_release` (not the generic
             // `jit_arc_release`) at `Drop`. Skip here.
             if self.shared_local_slots.contains(slot_id) {
-                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+                return Ok(RefcountDisposition::SkipTypedCellCarrier);
             }
         }
 
@@ -97,7 +97,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // retain/release surface is the right path (a §2.7.14 follow-up);
         // skip the generic arc_retain/release here.
         if matches!(place, Place::Local(_)) && self.v2_typed_array_elem_kind(place).is_some() {
-            return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+            return Ok(RefcountDisposition::SkipTypedCellCarrier);
         }
 
         // W12-jit-binop-after-heap-read-kind-tracker: for projection
@@ -261,10 +261,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// fallback stays for kinds NOT in the typed-Arc family
     /// (Array / TypedObject / Closure / etc. — still on
     /// `UnifiedValue<T>` HeapHeader at offset 4).
-    pub(crate) fn retain_func_for_place(
-        &self,
-        place: &Place,
-    ) -> cranelift::codegen::ir::FuncRef {
+    pub(crate) fn retain_func_for_place(&self, place: &Place) -> cranelift::codegen::ir::FuncRef {
         use shape_value::heap_value::HeapKind;
         use shape_vm::type_tracking::NativeKind;
         let kind = self.place_native_kind(place);
@@ -307,10 +304,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     /// Mirror of `retain_func_for_place` for release.
-    pub(crate) fn release_func_for_place(
-        &self,
-        place: &Place,
-    ) -> cranelift::codegen::ir::FuncRef {
+    pub(crate) fn release_func_for_place(&self, place: &Place) -> cranelift::codegen::ir::FuncRef {
         use shape_value::heap_value::HeapKind;
         use shape_vm::type_tracking::NativeKind;
         let kind = self.place_native_kind(place);
@@ -372,18 +366,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         operand: &Operand,
     ) -> Result<Value, String> {
-        if let Operand::Move(place)
-        | Operand::MoveExplicit(place)
-        | Operand::Copy(place) = operand
+        if let Operand::Move(place) | Operand::MoveExplicit(place) | Operand::Copy(place) = operand
         {
             if let Place::Local(slot) = place {
                 if self.shared_local_slots.contains(slot) {
                     // Bypass the lock-gated read in `read_place` and
                     // produce the raw pointer bits held in the slot's
                     // Cranelift variable.
-                    let var = *self.locals.get(slot).ok_or_else(|| {
-                        format!("MirToIR: unknown local slot {}", slot)
-                    })?;
+                    let var = *self
+                        .locals
+                        .get(slot)
+                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                     return Ok(self.builder.use_var(var));
                 }
             }
@@ -426,8 +419,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // materializes via the VM's `NewDecimalV2` opcode and
                 // prints correctly). VM == JIT, both run the interpreter
                 // path. Native JIT decimal codegen is a follow-up.
-                Err(
-                    "Route A surface-and-stop: NotImplemented(SURFACE) — \
+                Err("Route A surface-and-stop: NotImplemented(SURFACE) — \
                      `MirConstant::Decimal` carries the decimal lexeme \
                      through MIR but native JIT decimal codegen is not yet \
                      wired (the `*const DecimalObj` producer + \
@@ -437,8 +429,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                      program under VM, which materializes decimals via \
                      `NewDecimalV2` and prints correctly. WS-8 audit §1.D / \
                      ADR-006 §2.7.5."
-                        .to_string(),
-                )
+                    .to_string())
             }
             MirConstant::Bool(b) => {
                 // Native I8 bool — 0 or 1.
@@ -457,12 +448,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // without NaN-box / `tag_bits` wrap (§2.7.7 #4 / #7 forbidden).
                 Ok(self.builder.ins().iconst(types::I32, *c as i64))
             }
-            MirConstant::None => {
-                Ok(self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, 0i64))
-            }
+            MirConstant::None => Ok(self.builder.ins().iconst(types::I64, 0i64)),
             MirConstant::StringId(id) => {
                 // W12-jit-string-carrier-unification (Phase 3 cluster-0 Round
                 // 12 T2/T3, 2026-05-13). ADR-006 §2.7.5: a `NativeKind::String`
@@ -508,10 +494,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.ins().call(self.ffi.arc_string_retain, &[bits]);
                     Ok(bits)
                 } else {
-                    Ok(self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, 0i64))
+                    Ok(self.builder.ins().iconst(types::I64, 0i64))
                 }
             }
             MirConstant::Str(s) => {
@@ -606,13 +589,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // holding a `*const SharedCell` Arc pointer use the dedicated
         // `jit_arc_shared_release` (not the generic `arc_release`).
         // Handled here BEFORE the generic disposition because the
-        // disposition's `Skip_TypedCellCarrier` arm would otherwise
+        // disposition's `SkipTypedCellCarrier` arm would otherwise
         // suppress this required release.
         if let Place::Local(slot_id) = place {
             if self.shared_local_slots.contains(slot_id) {
-                let var = *self.locals.get(slot_id).ok_or_else(|| {
-                    format!("MirToIR: unknown local slot {}", slot_id)
-                })?;
+                let var = *self
+                    .locals
+                    .get(slot_id)
+                    .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot_id))?;
                 let cell_ptr = self.builder.use_var(var);
                 self.builder
                     .ins()
@@ -642,7 +626,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // default-init value the runtime expects on re-read.
                 self.null_place(place)?;
             }
-            RefcountDisposition::Skip_TypedCellCarrier => {
+            RefcountDisposition::SkipTypedCellCarrier => {
                 // OwnedMutable / Shared capture slots: lifecycle is
                 // owned by `release_typed_closure`; per the
                 // Track A.1D.2 / A.1E SAFETY notes the slot must NOT
@@ -669,10 +653,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Release the old value of a local before overwriting it.
     /// This prevents Arc leaks when a heap local is reassigned.
-    pub(crate) fn release_old_value_if_heap(
-        &mut self,
-        place: &Place,
-    ) -> Result<(), String> {
+    pub(crate) fn release_old_value_if_heap(&mut self, place: &Place) -> Result<(), String> {
         // Skip non-local places — only Place::Local supplies the
         // discrimination plumbing.
         if !matches!(place, Place::Local(_)) {
@@ -685,7 +666,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let release_func = self.release_func_for_place(place);
                 self.builder.ins().call(release_func, &[old_val]);
             }
-            RefcountDisposition::Skip | RefcountDisposition::Skip_TypedCellCarrier => {
+            RefcountDisposition::Skip | RefcountDisposition::SkipTypedCellCarrier => {
                 // Scalar / typed-cell-carrier slots: no refcount work.
                 // (TypedCellCarrier: the dedicated reclaim path runs at
                 // Drop / closure-drop, not at reassign.)

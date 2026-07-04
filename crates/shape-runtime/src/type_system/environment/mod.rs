@@ -74,27 +74,116 @@ impl TypeEnvironment {
         // Numeric functions
         self.define_builtin("abs", vec![BuiltinTypes::number()], BuiltinTypes::number());
 
-        self.define_builtin(
-            "min",
-            vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            BuiltinTypes::number(),
+        // STRICT-FLIP (v0.3.3, R5): `min`/`max` are genuinely polymorphic over a
+        // single numeric type, mirroring the VM builtins (`math::builtin_min` /
+        // `builtin_max`) which preserve the Int kind when BOTH args are `int`
+        // (`(Int64, Int64) => from_int(a.min(b))`) and otherwise produce
+        // `number`. The pre-fix monomorphic `(number, number) -> number`
+        // rejected every `int` argument value (e.g. `min(max(x, 2), 10)` with
+        // `x: int`) at the checker BEFORE the compiler ran — same FP family as
+        // the cleared `acos`/`pow` numeric signatures, but those take only
+        // `number` so they were fixed by literal-adoption alone, whereas min/max
+        // flow an `int` *value* (a `let`-bound variable and the inner call's
+        // `int` result) that does NOT adopt (§5: only int LITERALS adopt). The
+        // fix registers `(T, T) -> T` with `T: Numeric` — a SINGLE type var, so
+        // `min(int, int) -> int` and `min(number, number) -> number` both
+        // type-check while `min(int, number)` still rejects (no loose
+        // int->number value widening; no dynamic fallback). `T: Numeric` keeps
+        // the checker from accepting `min("a", "b")` which would crash in the VM
+        // (acos/pow comment's "accept-then-crash" hazard).
+        let min_max_t = TypeVar::new("T".to_string());
+        let mut min_max_bounds = HashMap::new();
+        min_max_bounds.insert(min_max_t.0.clone(), vec!["Numeric".to_string()]);
+        let min_max_ty = BuiltinTypes::function(
+            vec![
+                Type::Variable(min_max_t.clone()),
+                Type::Variable(min_max_t.clone()),
+            ],
+            Type::Variable(min_max_t.clone()),
         );
-
-        self.define_builtin(
-            "max",
-            vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            BuiltinTypes::number(),
+        self.builtins.insert(
+            "min".to_string(),
+            TypeScheme::poly_bounded(
+                vec![min_max_t.clone()],
+                min_max_ty.clone(),
+                min_max_bounds.clone(),
+            ),
+        );
+        self.builtins.insert(
+            "max".to_string(),
+            TypeScheme::poly_bounded(vec![min_max_t], min_max_ty, min_max_bounds),
         );
 
         self.define_builtin("sqrt", vec![BuiltinTypes::number()], BuiltinTypes::number());
 
+        // floor/ceil/round return `int` per the book spec
+        // (stdlib/native/math.mdx: `(number) -> int`). The result is a real
+        // integer — usable as an array index and in int arithmetic. `int` and
+        // `number` never unify, so this return type is load-bearing for the
+        // strict checker (no implicit widening back to `number`).
         self.define_builtin(
             "floor",
             vec![BuiltinTypes::number()],
-            BuiltinTypes::number(),
+            BuiltinTypes::integer(),
         );
 
-        self.define_builtin("ceil", vec![BuiltinTypes::number()], BuiltinTypes::number());
+        self.define_builtin(
+            "ceil",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::integer(),
+        );
+
+        // STRICT-FLIP (v0.3.3, STAGE-2 MATH): the trig / transcendental /
+        // power math fns resolve at the bytecode-compiler level — bare `sin`,
+        // `acos`, `pow`, `round`, … map to `BuiltinFunction::*`
+        // (compiler/helpers.rs:4415-4430) and execute correctly in the VM — but
+        // were never registered in the inference env, so the strict checker
+        // rejected every `acos(-1.0)` / `sin(pi)` / `pow(x, 2.0)` with
+        // "Undefined function" at `access.rs:596` BEFORE the compiler ever ran.
+        // Same FAMILY as the SMOKE-s4 collection ctors (Set/Deque/…) and the D1
+        // Into/TryInto pre-registration above: the production type-check path
+        // (`analyze_program_with_mode`) runs on the USER program only, so stdlib
+        // prelude items never flow through `infer_item` for that pass — every
+        // stdlib-provided callable that the user invokes must be hand-registered
+        // here with its declared signature. Signatures are verbatim the
+        // `stdlib-src/core/intrinsics.shape:38-77` `builtin fn` declarations
+        // (all `(number) -> number`, the 2-arg `pow`, and `round` whose optional
+        // 2nd arg is already covered by `seed_builtin_callable_defaults` =
+        // `vec![false, true]`). `abs`/`sqrt`/`floor`/`ceil`/`min`/`max` were
+        // already registered above (which is why only THEY resolved pre-fix).
+        //
+        // SCOPE: only the fns that have a bare-name `BuiltinFunction::*`
+        // compiler mapping (and therefore EXECUTE at runtime by bare name) are
+        // registered. The `atan2` / `sinh` / `cosh` / `tanh` bare names are
+        // pure-Shape stdlib wrappers (`math.shape:161-177`) that route through
+        // `__intrinsic_*` and have NO bare-name compiler mapping — they still
+        // surface "Undefined function" at RUNTIME (a separate, broad
+        // prelude-export gap shared by `degrees`/`radians`/`PI`/`TAU`/`E`,
+        // tracked separately). Registering them here would make the checker
+        // accept calls that then crash at runtime, so they are intentionally
+        // left unregistered until the prelude-export gap is fixed.
+        for unary in [
+            "sin", "cos", "tan", "asin", "acos", "atan", "log", "exp", "ln",
+        ] {
+            self.define_builtin(unary, vec![BuiltinTypes::number()], BuiltinTypes::number());
+        }
+        // pow(base, exponent) — 2-arg `(number, number) -> number`.
+        self.define_builtin(
+            "pow",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        // round(value) -> int per the book spec (stdlib/native/math.mdx:
+        // `(number) -> int`). Single-arg only: the runtime `builtin_round`
+        // rejects a 2-arg call ("round() requires 1 argument"), so the legacy
+        // 2-arg `round(value, decimals) -> number` shape was dead at runtime
+        // and is not in the book — removed here (SURFACED to user). Returns a
+        // real `int`, never a coerced number.
+        self.define_builtin(
+            "round",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::integer(),
+        );
 
         // Array functions (polymorphic)
         let array_t = Type::Variable(TypeVar::new("T".to_string()));
@@ -213,7 +302,7 @@ impl TypeEnvironment {
     /// Built-in types (string, number, int, decimal, bool, array, hashmap, Table, DataTable)
     /// get automatic Content implementations so they can be used in c-strings and content dispatch.
     fn register_content_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature};
 
         let content_trait = TraitDef {
             name: "Content".to_string(),
@@ -300,7 +389,7 @@ impl TypeEnvironment {
     /// Types implementing Drop have their `drop(self)` method called automatically
     /// when a binding goes out of scope.
     fn register_drop_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature};
 
         let drop_trait = TraitDef {
             name: "Drop".to_string(),
@@ -338,7 +427,7 @@ impl TypeEnvironment {
     /// Concrete conversions are provided by trait implementations (for example
     /// in `std::core::into`) and may be named selectors.
     fn register_into_trait(&mut self) {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember, TypeParam};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature, TypeParam};
 
         let into_trait = TraitDef {
             name: "Into".to_string(),
@@ -371,7 +460,7 @@ impl TypeEnvironment {
     /// Concrete conversions are provided by trait implementations (for example
     /// in `std::core::try_into`) and may be named selectors.
     fn register_try_into_trait(&mut self) {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember, TypeParam};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature, TypeParam};
 
         let try_into_trait = TraitDef {
             name: "TryInto".to_string(),
@@ -410,7 +499,7 @@ impl TypeEnvironment {
     /// Types implementing Iterable have an `iter()` method that returns an `Iterator<T>`.
     /// Built-in impls: Array, String, Range, HashMap, DataTable.
     fn register_iterable_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember, TypeParam};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature, TypeParam};
 
         let iterable_trait = TraitDef {
             name: "Iterable".to_string(),
@@ -444,6 +533,47 @@ impl TypeEnvironment {
         };
         self.define_trait(&iterable_trait);
 
+        // Wave-1b SEAM A (user ruling 2026-06-15): Iterator is a REAL
+        // user-implementable trait. Its single REQUIRED member is
+        // `next(self) -> Option<T>`; the adapter/terminal methods (map/filter/
+        // collect/...) are seeded onto the `Iterator` receiver in the
+        // MethodTable and inherited by user impls via
+        // `MethodTable::register_iterator_methods` (items.rs::register_impl).
+        // A user writes `type Counter {...}  impl Iterator for Counter { fn
+        // next(self) -> Option<int> {...} }` and gets `.next()` + the full
+        // adapter/terminal surface. Runtime bodies are SEAM B.
+        let iterator_trait = TraitDef {
+            name: "Iterator".to_string(),
+            doc_comment: None,
+            type_params: Some(vec![TypeParam::Type {
+                name: "T".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
+                default_type: None,
+                trait_bounds: vec![],
+            }]),
+            super_traits: vec![],
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
+                name: "next".to_string(),
+                optional: false,
+                params: vec![FunctionParam {
+                    name: Some("self".to_string()),
+                    type_annotation: TypeAnnotation::Basic("Self".to_string()),
+                    optional: false,
+                }],
+                return_type: TypeAnnotation::Generic {
+                    name: "Option".into(),
+                    args: vec![TypeAnnotation::Reference("T".into())],
+                },
+                is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
+            })],
+            annotations: vec![],
+            is_comptime: false,
+        };
+        self.define_trait(&iterator_trait);
+
         // Register built-in Iterable impls for collection types.
         let iterable_types = [
             "Array",
@@ -468,7 +598,7 @@ impl TypeEnvironment {
     /// Unary:  Neg(neg) — `fn neg(self) -> Self`
     /// Comparison: Eq(eq) — `fn eq(self, other) -> bool`, Ord(cmp) — `fn cmp(self, other) -> int`
     fn register_operator_traits(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature};
 
         let self_param = FunctionParam {
             name: Some("self".to_string()),
@@ -607,25 +737,21 @@ impl TypeEnvironment {
         // The set is deliberately conservative: only types that have direct
         // typed comparison opcodes are registered. Decimal/BigInt/DateTime
         // can be added later when their stdlib impls land.
-        let comparable_types = ["int", "i8", "i16", "i32", "i64",
-                                "u8", "u16", "u32", "u64",
-                                "number", "f32", "f64",
-                                "bool", "string"];
+        let comparable_types = [
+            "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "number", "f32", "f64",
+            "bool", "string",
+        ];
         for type_name in &comparable_types {
             // Methods are no-ops at registration time; the typed opcode path
             // services the actual comparison. We pass the trait's required
             // method name so `register_trait_impl`'s arity/name validation
             // succeeds.
-            let _ = self.type_registry.register_trait_impl(
-                "Eq",
-                type_name,
-                vec!["eq".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Ord",
-                type_name,
-                vec!["cmp".to_string()],
-            );
+            let _ = self
+                .type_registry
+                .register_trait_impl("Eq", type_name, vec!["eq".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Ord", type_name, vec!["cmp".to_string()]);
         }
 
         // Phase 3b: register arithmetic trait impls (Add/Sub/Mul/Div/Neg) for
@@ -634,40 +760,28 @@ impl TypeEnvironment {
         // …) directly when both operands have the proven primitive type.
         // These impls exist so call-site bound checking on `<T: Add>` etc.
         // succeeds when `T` resolves to a primitive numeric type.
-        let arithmetic_types = ["int", "i8", "i16", "i32", "i64",
-                                "u8", "u16", "u32", "u64",
-                                "number", "f32", "f64"];
+        let arithmetic_types = [
+            "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "number", "f32", "f64",
+        ];
         for type_name in &arithmetic_types {
-            let _ = self.type_registry.register_trait_impl(
-                "Add",
-                type_name,
-                vec!["add".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Sub",
-                type_name,
-                vec!["sub".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Mul",
-                type_name,
-                vec!["mul".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Div",
-                type_name,
-                vec!["div".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Mod",
-                type_name,
-                vec!["mod".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Neg",
-                type_name,
-                vec!["neg".to_string()],
-            );
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Add", type_name, vec!["add".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Sub", type_name, vec!["sub".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Mul", type_name, vec!["mul".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Div", type_name, vec!["div".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Mod", type_name, vec!["mod".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Neg", type_name, vec!["neg".to_string()]);
         }
 
         // W1.6: register `Not` impl for `bool` so `<T: Not>` bound
@@ -675,11 +789,9 @@ impl TypeEnvironment {
         // `OpCode::Not` services the actual operation — this is a
         // bookkeeping-only registration, sibling of the Neg arithmetic
         // registrations above.
-        let _ = self.type_registry.register_trait_impl(
-            "Not",
-            "bool",
-            vec!["not".to_string()],
-        );
+        let _ = self
+            .type_registry
+            .register_trait_impl("Not", "bool", vec!["not".to_string()]);
 
         // W1.9: register `BitAnd` / `BitOr` / `BitXor` impls for
         // primitive integer types. Bitwise operators apply to integers
@@ -689,8 +801,7 @@ impl TypeEnvironment {
         // operations — these registrations are bookkeeping-only so
         // call-site bound checking on `<T: BitAnd>` etc. succeeds
         // when `T` resolves to a primitive integer type.
-        let bitwise_types = ["int", "i8", "i16", "i32", "i64",
-                             "u8", "u16", "u32", "u64"];
+        let bitwise_types = ["int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"];
         for type_name in &bitwise_types {
             let _ = self.type_registry.register_trait_impl(
                 "BitAnd",
@@ -812,18 +923,92 @@ impl TypeEnvironment {
         // bookkeeping so `<T: Shl>` / `<T: Shr>` bound checking
         // succeeds when T resolves to an integer type. Sibling of
         // the Add/Sub/Mul/Div/Mod registrations above.
-        let shift_types = ["int", "i8", "i16", "i32", "i64",
-                           "u8", "u16", "u32", "u64"];
+        let shift_types = ["int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"];
         for type_name in &shift_types {
-            let _ = self.type_registry.register_trait_impl(
-                "Shl",
-                type_name,
-                vec!["shl".to_string()],
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Shl", type_name, vec!["shl".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Shr", type_name, vec!["shr".to_string()]);
+        }
+
+        // D1 (numeric-conversion GREEN Stage 1): pre-register the prelude
+        // `Into<T>` / `TryInto<T>` primitive-conversion impls so that explicit
+        // `x as T` casts RESOLVE in the inference validation env.
+        //
+        // The stdlib declares these in `stdlib-src/core/into.shape` and
+        // `stdlib-src/core/try_into.shape`, each registered via
+        // `inference/items.rs:893` with `impl_name = the `as Target` selector`.
+        // But the production type-check path runs `analyze_program_with_mode`
+        // on the USER program ONLY — the prelude items never flow through
+        // `infer_item`/`register_impl` for that pass, so the impls are absent
+        // from this engine's `env.trait_impls` and EVERY Into/TryInto-dispatched
+        // cast (`int as number`, `number as int`, `int as string`,
+        // `int as decimal`, `string as int?`, …) rejects with
+        // "Cannot assert type X as Y" at `validate_infallible_conversion` /
+        // `validate_fallible_conversion` (`expressions.rs:1909`,`:1865`).
+        //
+        // Pre-registering here mirrors the Eq/Ord/Add/… bookkeeping pattern
+        // above: the named key (`Into::int::number`) is exactly what
+        // `has_into_impl`/`has_try_into_impl` look up via
+        // `lookup_trait_impl_named`. Re-registration is idempotent
+        // (`registry.rs:316-326`) so a user/stdlib module that declares the
+        // same impl explicitly is compatible. This is COMPILE-TIME acceptance
+        // only — the runtime conversion correctness (truncation, range,
+        // overflow) is handled by the conversion opcodes and is a separate
+        // stage. The matrix below is verbatim the `into.shape`/`try_into.shape`
+        // cells (source, target).
+        let into_conversions: &[(&str, &str)] = &[
+            ("int", "number"),
+            ("int", "decimal"),
+            ("int", "string"),
+            ("int", "bool"),
+            ("number", "string"),
+            ("number", "bool"),
+            ("decimal", "string"),
+            ("bool", "int"),
+            ("bool", "number"),
+            ("bool", "decimal"),
+            ("bool", "string"),
+        ];
+        for (source, target) in into_conversions {
+            let _ = self.type_registry.register_trait_impl_named(
+                "Into",
+                source,
+                target,
+                vec!["into".to_string()],
             );
-            let _ = self.type_registry.register_trait_impl(
-                "Shr",
-                type_name,
-                vec!["shr".to_string()],
+        }
+
+        let try_into_conversions: &[(&str, &str)] = &[
+            ("int", "number"),
+            ("int", "decimal"),
+            ("int", "string"),
+            ("int", "bool"),
+            ("number", "int"),
+            ("number", "decimal"),
+            ("number", "string"),
+            ("number", "bool"),
+            ("decimal", "number"),
+            ("decimal", "int"),
+            ("decimal", "string"),
+            ("decimal", "bool"),
+            ("string", "int"),
+            ("string", "number"),
+            ("string", "decimal"),
+            ("string", "bool"),
+            ("bool", "int"),
+            ("bool", "number"),
+            ("bool", "decimal"),
+            ("bool", "string"),
+        ];
+        for (source, target) in try_into_conversions {
+            let _ = self.type_registry.register_trait_impl_named(
+                "TryInto",
+                source,
+                target,
+                vec!["tryInto".to_string()],
             );
         }
     }
@@ -924,20 +1109,114 @@ impl TypeEnvironment {
             );
         }
 
-        // HashMap constructor: HashMap() -> HashMap<any, any>
+        // HashMap constructor: HashMap() -> HashMap<K, V> (K,V inferred from
+        // first .set/usage). Mirrors the Some/Ok/Err polymorphic constructors
+        // below: each callsite instantiates fresh K,V so `.set(k, v)` can flow
+        // the key/value types into the receiver's `<K,V>` slots. A bare
+        // `HashMap()` whose K,V are never pinned by usage stays unresolved and
+        // is rejected by `ensure_no_unresolved_generic_args` (project ruling:
+        // un-pinnable generic construction requires an explicit annotation).
+        let hm_k = TypeVar::new("K".to_string());
+        let hm_v = TypeVar::new("V".to_string());
+        let hashmap_result = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("HashMap".into()))),
+            args: vec![Type::Variable(hm_k.clone()), Type::Variable(hm_v.clone())],
+        };
+        self.define_polymorphic("HashMap", vec![hm_k, hm_v], vec![], hashmap_result);
+
+        // STRICT-FLIP (v0.3.3, SMOKE-s4): the non-HashMap collection /
+        // concurrency constructors are real `BuiltinFunction::*Ctor`
+        // (compiler/helpers.rs:4382-4388) executed by the VM
+        // (vm_impl/builtins.rs:680-832), but were never registered in the type
+        // env — so the strict checker rejected every valid `Set()` / `Deque()`
+        // / etc. with "Undefined function". Register each one with the SAME
+        // polymorphic shape as HashMap above (fresh element/payload type vars
+        // so element typing flows from usage). Arities mirror the VM ctor:
+        //   Set/Deque/PriorityQueue/Channel  -> 0 args
+        //   Mutex(initial: T)                -> 1 arg  (initial value)
+        //   Atomic(initial: int)             -> 1 arg  (int-only at landing)
+        //   Lazy(init: () -> T)              -> 1 arg  (initializer closure)
+        // A bare `Set()` whose element type is never pinned stays unresolved
+        // and is rejected by `ensure_no_unresolved_generic_args`, exactly like
+        // `HashMap()` — un-pinnable generic construction needs an annotation.
+
+        // Set() -> Set<T>
+        {
+            let set_t = TypeVar::new("T".to_string());
+            let set_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Set".into()))),
+                args: vec![Type::Variable(set_t.clone())],
+            };
+            self.define_polymorphic("Set", vec![set_t], vec![], set_result);
+        }
+
+        // Deque() -> Deque<T>
+        {
+            let deque_t = TypeVar::new("T".to_string());
+            let deque_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Deque".into()))),
+                args: vec![Type::Variable(deque_t.clone())],
+            };
+            self.define_polymorphic("Deque", vec![deque_t], vec![], deque_result);
+        }
+
+        // PriorityQueue() -> PriorityQueue<T>
+        {
+            let pq_t = TypeVar::new("T".to_string());
+            let pq_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                    "PriorityQueue".into(),
+                ))),
+                args: vec![Type::Variable(pq_t.clone())],
+            };
+            self.define_polymorphic("PriorityQueue", vec![pq_t], vec![], pq_result);
+        }
+
+        // Channel() -> Channel<T>
+        {
+            let chan_t = TypeVar::new("T".to_string());
+            let chan_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Channel".into()))),
+                args: vec![Type::Variable(chan_t.clone())],
+            };
+            self.define_polymorphic("Channel", vec![chan_t], vec![], chan_result);
+        }
+
+        // Mutex(initial: T) -> Mutex<T>
+        {
+            let mutex_t = TypeVar::new("T".to_string());
+            let mutex_inner = Type::Variable(mutex_t.clone());
+            let mutex_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Mutex".into()))),
+                args: vec![mutex_inner.clone()],
+            };
+            self.define_polymorphic("Mutex", vec![mutex_t], vec![mutex_inner], mutex_result);
+        }
+
+        // Atomic(initial: int) -> Atomic  (int-only at landing — monomorphic).
         self.define_builtin(
-            "HashMap",
-            vec![],
-            Type::Concrete(TypeAnnotation::Reference("HashMap".into())),
+            "Atomic",
+            vec![BuiltinTypes::integer()],
+            Type::Concrete(TypeAnnotation::Reference("Atomic".into())),
         );
+
+        // Lazy(init: () -> T) -> Lazy<T>
+        {
+            let lazy_t = TypeVar::new("T".to_string());
+            let lazy_inner = Type::Variable(lazy_t.clone());
+            let lazy_init = BuiltinTypes::function(vec![], lazy_inner.clone());
+            let lazy_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Lazy".into()))),
+                args: vec![lazy_inner],
+            };
+            self.define_polymorphic("Lazy", vec![lazy_t], vec![lazy_init], lazy_result);
+        }
 
         // Option/Result constructors are polymorphic and must never force `any`.
         let option_t = TypeVar::new("T".to_string());
         let option_inner = Type::Variable(option_t.clone());
         let option_result = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![option_inner.clone()],
         };
         self.define_polymorphic("Some", vec![option_t], vec![option_inner], option_result);
@@ -946,9 +1225,7 @@ impl TypeEnvironment {
         let ok_e = TypeVar::new("E".to_string());
         let ok_inner = Type::Variable(ok_t.clone());
         let ok_result = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![ok_inner.clone(), Type::Variable(ok_e.clone())],
         };
         let mut ok_defaults = std::collections::HashMap::new();
@@ -969,9 +1246,7 @@ impl TypeEnvironment {
         let err_ok_t = TypeVar::new("T".to_string());
         let err_payload_t = TypeVar::new("E".to_string());
         let err_result = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![
                 Type::Variable(err_ok_t.clone()),
                 Type::Variable(err_payload_t.clone()),
@@ -990,8 +1265,168 @@ impl TypeEnvironment {
         // Note: __into_*/__try_into_* type registrations removed — primitive conversions
         // now use typed ConvertTo*/TryConvertTo* opcodes emitted directly by the compiler.
 
+        // Wave 7 strict-flip: stdlib source and stdlib tests compile some
+        // internal `__intrinsic_*` calls under `allow_internal_builtins`, which
+        // bypasses local `builtin fn` declarations at the bytecode layer. Keep
+        // the checker honest by registering only signatures that already have a
+        // static typed-marshal shape (or a legacy fixed signature for char code).
+        self.define_builtin("__intrinsic_random", vec![], BuiltinTypes::number());
+        self.define_builtin(
+            "__intrinsic_random_int",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_random_seed",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::void(),
+        );
+        self.define_builtin(
+            "__intrinsic_random_normal",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_random_array",
+            vec![BuiltinTypes::integer()],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+
+        self.define_builtin(
+            "__intrinsic_dist_uniform",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_lognormal",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_exponential",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_poisson",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_sample_n",
+            vec![
+                BuiltinTypes::string(),
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::integer(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+
+        self.define_builtin(
+            "__intrinsic_mean",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_variance",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_std",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_correlation",
+            vec![
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::array(BuiltinTypes::number()),
+            ],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_covariance",
+            vec![
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::array(BuiltinTypes::number()),
+            ],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_percentile",
+            vec![
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_median",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_min",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_max",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+
+        self.define_builtin(
+            "__intrinsic_brownian_motion",
+            vec![
+                BuiltinTypes::integer(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+        self.define_builtin(
+            "__intrinsic_gbm",
+            vec![
+                BuiltinTypes::integer(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+        self.define_builtin(
+            "__intrinsic_ou_process",
+            vec![
+                BuiltinTypes::integer(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+        self.define_builtin(
+            "__intrinsic_random_walk",
+            vec![BuiltinTypes::integer(), BuiltinTypes::number()],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+
+        self.define_builtin(
+            "__intrinsic_char_code",
+            vec![BuiltinTypes::string()],
+            BuiltinTypes::integer(),
+        );
+        self.define_builtin(
+            "__intrinsic_from_char_code",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::string(),
+        );
+
         // Note: trading builtins (open_position, close_position, etc.) removed — use packages.
-        // Note: __intrinsic_* type registrations removed — stdlib has allow_internal_builtins.
         // Note: top-level map/filter/reduce removed — use method syntax: arr.map(fn).
     }
 
@@ -1214,6 +1649,13 @@ impl TypeEnvironment {
     /// Look up an enum definition by name
     pub fn get_enum(&self, name: &str) -> Option<&EnumDef> {
         self.type_registry.get_enum(name)
+    }
+
+    /// Resolve a bare capitalized identifier in pattern position to the enum
+    /// that declares it as a unit variant (see
+    /// `TypeRegistry::enum_for_unit_variant`).
+    pub fn enum_for_unit_variant(&self, name: &str) -> Option<String> {
+        self.type_registry.enum_for_unit_variant(name)
     }
 
     // =========================================================================
@@ -1652,8 +2094,60 @@ mod tests {
     }
 
     #[test]
+    fn test_internal_intrinsic_signatures_registered() {
+        let mut env = TypeEnvironment::new();
+        env.define_builtin_functions();
+
+        let random = env.lookup("__intrinsic_random").unwrap();
+        assert_eq!(
+            random.ty,
+            BuiltinTypes::function(vec![], BuiltinTypes::number())
+        );
+
+        let random_int = env.lookup("__intrinsic_random_int").unwrap();
+        assert_eq!(
+            random_int.ty,
+            BuiltinTypes::function(
+                vec![BuiltinTypes::number(), BuiltinTypes::number()],
+                BuiltinTypes::number()
+            )
+        );
+
+        let brownian = env.lookup("__intrinsic_brownian_motion").unwrap();
+        assert_eq!(
+            brownian.ty,
+            BuiltinTypes::function(
+                vec![
+                    BuiltinTypes::integer(),
+                    BuiltinTypes::number(),
+                    BuiltinTypes::number()
+                ],
+                BuiltinTypes::array(BuiltinTypes::number())
+            )
+        );
+
+        let char_code = env.lookup("__intrinsic_char_code").unwrap();
+        assert_eq!(
+            char_code.ty,
+            BuiltinTypes::function(vec![BuiltinTypes::string()], BuiltinTypes::integer())
+        );
+
+        let percentile = env.lookup("__intrinsic_percentile").unwrap();
+        assert_eq!(
+            percentile.ty,
+            BuiltinTypes::function(
+                vec![
+                    BuiltinTypes::array(BuiltinTypes::number()),
+                    BuiltinTypes::number()
+                ],
+                BuiltinTypes::number()
+            )
+        );
+    }
+
+    #[test]
     fn test_trait_define_and_lookup() {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature};
 
         let mut env = TypeEnvironment::new();
 
@@ -1698,7 +2192,7 @@ mod tests {
 
     #[test]
     fn test_trait_impl_registration() {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature};
 
         let mut env = TypeEnvironment::new();
 
@@ -1746,7 +2240,7 @@ mod tests {
 
     #[test]
     fn test_trait_impl_missing_method() {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature};
 
         let mut env = TypeEnvironment::new();
 

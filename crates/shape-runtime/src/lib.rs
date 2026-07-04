@@ -27,9 +27,7 @@ pub mod closure;
 pub mod code_search;
 pub mod columnar_aggregations;
 pub mod const_eval;
-pub mod content_builders;
 pub mod content_dispatch;
-pub mod content_methods;
 pub mod content_renderer;
 pub mod context;
 pub mod crypto;
@@ -49,24 +47,23 @@ pub mod fuzzy_property;
 pub mod hashing;
 pub mod intrinsics;
 pub mod json_value;
-pub mod marshal;
 pub mod leakage;
 pub mod lookahead_guard;
+pub mod marshal;
 pub mod metadata;
 pub mod module_bindings;
 pub mod module_exports;
-pub mod typed_module_exports;
 pub mod module_loader;
 pub mod module_manifest;
 pub mod multi_table;
 pub mod multiple_testing;
 pub mod native_resolution;
 pub mod output_adapter;
-pub mod print_result;
 pub mod package_bundle;
 pub mod package_lock;
 pub mod pattern_library;
 pub mod plugins;
+pub mod print_result;
 pub mod progress;
 pub mod project;
 #[cfg(all(test, feature = "deep-tests"))]
@@ -84,6 +81,7 @@ pub mod simd_i64;
 pub mod simd_rolling;
 pub mod simd_statistics;
 pub mod snapshot;
+pub mod typed_module_exports;
 // state_diff.rs was deleted in Phase 2b — its 1486 LoC of ValueWord-typed
 // value-diff/patch logic depends on the deleted ValueWord type and tag_bits.
 // The replacement (kind-threaded slot diff/patch) is part of the strict-typed
@@ -139,9 +137,7 @@ pub use sync_bridge::{
 pub use type_schema::{
     FieldDef, FieldType, SchemaId, TypeSchema, TypeSchemaBuilder, TypeSchemaRegistry,
 };
-pub use wire_conversion::{
-    slot_extract_content, slot_to_envelope, slot_to_wire, wire_to_slot,
-};
+pub use wire_conversion::{slot_extract_content, slot_to_envelope, slot_to_wire, wire_to_slot};
 
 use self::type_methods::TypeMethodRegistry;
 pub use error::{Result, ShapeError, SourceLocation};
@@ -248,17 +244,13 @@ impl Runtime {
             last_runtime_error: None,
             blob_store: None,
             keychain: None,
-            extension_module_schemas: Arc::new(
-                extension_context::ExtensionModuleSchemaCache::new(),
-            ),
+            extension_module_schemas: Arc::new(extension_context::ExtensionModuleSchemaCache::new()),
             core_stdlib_cache: OnceLock::new(),
         }
     }
 
     /// Borrow this runtime's extension module schema cache.
-    pub fn extension_module_schemas(
-        &self,
-    ) -> &Arc<extension_context::ExtensionModuleSchemaCache> {
+    pub fn extension_module_schemas(&self) -> &Arc<extension_context::ExtensionModuleSchemaCache> {
         &self.extension_module_schemas
     }
 

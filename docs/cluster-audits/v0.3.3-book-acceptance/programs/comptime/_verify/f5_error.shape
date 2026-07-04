@@ -1,0 +1,4 @@
+comptime {
+  error("my-custom-error-text")
+}
+print("done")

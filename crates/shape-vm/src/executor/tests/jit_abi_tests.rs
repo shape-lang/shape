@@ -156,8 +156,15 @@ fn jit_abi_arity_8() {
 
 #[test]
 fn jit_abi_mixed_int_float() {
+    // TP-REBASELINE (numeric-conversion GREEN Stage 2, THE RULE user
+    // 2026-06-01 / spec §5): `a + b` with `a: int` and `b: number` is a
+    // value-level cross-family mix — a silent `int -> number` promotion that is
+    // now FORBIDDEN (conformance `b_int_var_plus_number_var_rejected`). The test
+    // exercises the JIT ABI for a function with mixed int/number params; the
+    // numeric intent is preserved with the explicit `a as number` cast THE RULE
+    // requires.
     let source = r#"
-        fn f(a: int, b: number) -> number { a + b }
+        fn f(a: int, b: number) -> number { (a as number) + b }
         f(40, 2.0)
     "#;
     let result = eval(source).expect("should not error");

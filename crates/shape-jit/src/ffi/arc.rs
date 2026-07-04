@@ -36,7 +36,7 @@
 //!    ```
 //!    Used by `TypedArray<T>`, `TypedClosureHeader`, `v2_alloc_struct`.
 //!    These have their OWN dedicated FFI (`jit_v2_retain` / `jit_v2_release`)
-//!    and the MIR emitter routes them via `Skip_TypedCellCarrier`
+//!    and the MIR emitter routes them via `SkipTypedCellCarrier`
 //!    (`v2_typed_array_elem_kind`-guarded), so they do NOT reach this
 //!    function in production. Disambiguating the two shapes from
 //!    `ptr` alone would require a tag-bit probe (CLAUDE.md "Forbidden

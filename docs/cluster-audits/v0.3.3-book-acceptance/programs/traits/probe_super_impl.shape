@@ -1,0 +1,30 @@
+trait Describable {
+  fn describe() -> string;
+}
+
+trait Comparable {
+  fn compare(other: int) -> int;
+}
+
+trait Printable : Describable + Comparable {
+  fn print_it() -> string;
+}
+
+type Widget { id: int, label: string }
+
+impl Describable for Widget {
+  method describe() -> string { self.label }
+}
+
+impl Comparable for Widget {
+  method compare(other: int) -> int { self.id - other }
+}
+
+impl Printable for Widget {
+  method print_it() -> string { self.describe() }
+}
+
+let w = Widget { id: 5, label: "gizmo" }
+print(w.describe())
+print(w.compare(3))
+print(w.print_it())

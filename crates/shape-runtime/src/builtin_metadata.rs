@@ -198,7 +198,7 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     },
     BuiltinMetadata {
         name: "floor",
-        signature: "floor(value: number) -> number",
+        signature: "floor(value: number) -> int",
         description: "Round down to the nearest integer.",
         category: "Math",
         parameters: &[BuiltinParam {
@@ -207,12 +207,12 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
             optional: false,
             description: "Input value",
         }],
-        return_type: "number",
+        return_type: "int",
         example: Some("floor(3.7) // 3"),
     },
     BuiltinMetadata {
         name: "ceil",
-        signature: "ceil(value: number) -> number",
+        signature: "ceil(value: number) -> int",
         description: "Round up to the nearest integer.",
         category: "Math",
         parameters: &[BuiltinParam {
@@ -221,30 +221,22 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
             optional: false,
             description: "Input value",
         }],
-        return_type: "number",
+        return_type: "int",
         example: Some("ceil(3.2) // 4"),
     },
     BuiltinMetadata {
         name: "round",
-        signature: "round(value: number, decimals?: number) -> number",
-        description: "Round a number to the specified number of decimal places.",
+        signature: "round(value: number) -> int",
+        description: "Round to the nearest integer.",
         category: "Math",
-        parameters: &[
-            BuiltinParam {
-                name: "value",
-                param_type: "number",
-                optional: false,
-                description: "Input value",
-            },
-            BuiltinParam {
-                name: "decimals",
-                param_type: "number",
-                optional: true,
-                description: "Decimal places (default 0)",
-            },
-        ],
-        return_type: "number",
-        example: Some("round(3.456, 2) // 3.46"),
+        parameters: &[BuiltinParam {
+            name: "value",
+            param_type: "number",
+            optional: false,
+            description: "Input value",
+        }],
+        return_type: "int",
+        example: Some("round(3.5) // 4"),
     },
     BuiltinMetadata {
         name: "max",
@@ -307,30 +299,30 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     },
     BuiltinMetadata {
         name: "range",
-        signature: "range(start, end, step?) -> Vec<number>",
-        description: "Generate an array of numbers from start to end.",
+        signature: "range(start: int, end: int, step: int = 1) -> Vec<int>",
+        description: "Generate an array of integers from start to end.",
         category: "Utility",
         parameters: &[
             BuiltinParam {
                 name: "start",
-                param_type: "number",
+                param_type: "int",
                 optional: false,
                 description: "Start value",
             },
             BuiltinParam {
                 name: "end",
-                param_type: "number",
+                param_type: "int",
                 optional: false,
                 description: "End value (exclusive)",
             },
             BuiltinParam {
                 name: "step",
-                param_type: "number",
+                param_type: "int",
                 optional: true,
                 description: "Step size (default 1)",
             },
         ],
-        return_type: "Vec<number>",
+        return_type: "Vec<int>",
         example: Some("range(0, 5) // [0, 1, 2, 3, 4]"),
     },
     // throw removed: Shape uses Result types, not exceptions
@@ -818,5 +810,35 @@ mod tests {
         assert_eq!(info.return_type, "Number");
         assert_eq!(info.example, Some("test_fn(42)".to_string()));
         assert!(info.implemented);
+    }
+
+    #[test]
+    fn test_range_builtin_metadata_uses_strict_integer_signature() {
+        let range = collect_builtin_metadata()
+            .into_iter()
+            .find(|meta| meta.name == "range")
+            .expect("range builtin metadata should be registered");
+
+        assert_eq!(
+            range.signature,
+            "range(start: int, end: int, step: int = 1) -> Vec<int>"
+        );
+        assert_eq!(range.return_type, "Vec<int>");
+        assert_eq!(
+            range
+                .parameters
+                .iter()
+                .map(|param| (param.name, param.param_type, param.optional))
+                .collect::<Vec<_>>(),
+            vec![
+                ("start", "int", false),
+                ("end", "int", false),
+                ("step", "int", true),
+            ]
+        );
+
+        let info: FunctionInfo = range.into();
+        assert_eq!(info.signature, range.signature);
+        assert_eq!(info.return_type, "Vec<int>");
     }
 }

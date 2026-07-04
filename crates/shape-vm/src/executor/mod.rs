@@ -16,6 +16,7 @@ mod logical;
 mod loops;
 pub(crate) mod objects;
 mod osr;
+pub(crate) mod result_option_carrier;
 mod resume;
 mod snapshot;
 mod stack_ops;
@@ -252,6 +253,7 @@ pub type JitFnPtr = unsafe extern "C" fn(*mut u8, *const u8) -> u64;
 /// Native ABI entries (`extern "C"`) are linked directly through the VM's
 /// internal C ABI path.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) enum ForeignFunctionHandle {
     Runtime {
         runtime: std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
@@ -811,6 +813,7 @@ impl VirtualMachine {
     /// returned bits. Mirrors `stack_take_kinded` in
     /// `vm_impl/stack.rs:385`.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn module_binding_take_kinded(&mut self, index: usize) -> (u64, NativeKind) {
         if index >= self.module_bindings.len() {
             return (0u64, NativeKind::Bool);

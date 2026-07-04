@@ -63,6 +63,22 @@ pub enum LoanSinkKind {
     ModuleBindingStore,
 }
 
+/// ADR-006 §2.7.30 (R2): a sink-discriminated reference-escape promotion
+/// request. Derived by the solver ONLY for the two flipped floor sinks
+/// (`ReturnSlot` + `ModuleBindingStore`); every other sink keeps emitting its
+/// B0003/B0004/B0006/B0012 reject. The storage planner promotes the referent
+/// slot named by `referent_local` to a `SharedCow` (RC'd `SharedCell`) so the
+/// escaping reference's owning `PromotedCell` carrier keeps the referent alive
+/// past frame-pop. The flip set is EXACTLY these two sinks — widening requires
+/// a further ADR amendment (§2.7.30.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PromotionTrigger {
+    /// The referent slot to promote (the root local being borrowed).
+    pub referent_local: SlotId,
+    /// Which flipped floor sink requested the promotion.
+    pub sink_kind: LoanSinkKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LoanSink {
     pub loan_id: u32,
@@ -93,6 +109,12 @@ pub struct BorrowAnalysis {
     /// projection), records which parameter flows out and whether it is
     /// shared/exclusive.
     pub return_reference_summary: Option<ReturnReferenceSummary>,
+    /// ADR-006 §2.7.30 (R2): sink-discriminated reference-escape promotions.
+    /// One entry per loan that escapes via a flipped floor sink (`ReturnSlot`
+    /// or `ModuleBindingStore`); the named referent slot is promoted to a
+    /// `SharedCow` RC'd cell so the `PromotedCell` carrier can outlive the
+    /// referent's lexical frame. Every other sink keeps rejecting (B0003/etc).
+    pub reference_escape_promotions: Vec<PromotionTrigger>,
 }
 
 /// Information about a single loan (borrow).
@@ -297,7 +319,20 @@ pub enum OwnershipDecision {
     /// Move: source is dead after this point. Zero cost.
     Move,
     /// Clone: source is live after this point. Requires T: Clone.
+    ///
+    /// Emits a *shallow* heap share (refcount bump via `clone_with_kind`).
+    /// Correct for borrow-shaped non-consuming reads — a `&x` / `&mut x`
+    /// reference-parameter deref-read (`let old = x` inside `fn f(&x)`) and
+    /// unproven (`Unknown`) still-live sources, where the source and the
+    /// derived value are not independently mutated.
     Clone,
+    /// DeepClone: source is live after this point AND the destination is a
+    /// `var` heap-binding (the `var copy = data` auto-clone / SharedCow
+    /// intent, ADR-006). Produces an INDEPENDENT deep copy of the backing
+    /// heap value so that mutating the copy (`copy.push(...)`,
+    /// `copy[0] = ...`) does NOT touch the source. Routes to the same
+    /// per-kind deep-clone primitives as an explicit `.clone()`.
+    DeepClone,
     /// Copy: type is Copy (primitive). Trivially copied.
     Copy,
 }
@@ -345,16 +380,7 @@ pub struct FunctionBorrowSummary {
 ///
 /// `Unknown` is the conservative fallback — it preserves current Arc-everywhere
 /// behavior, so any inference uncertainty stays semantics-preserving.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ReturnOwnershipMode {
     /// Returns a newly-allocated owned value. Caller can take ownership directly
     /// (as Box) without an Arc round-trip.
@@ -419,6 +445,7 @@ impl BorrowAnalysis {
             ownership_decisions: HashMap::new(),
             mutability_errors: Vec::new(),
             return_reference_summary: None,
+            reference_escape_promotions: Vec::new(),
         }
     }
 
@@ -539,10 +566,7 @@ mod tests {
 
     #[test]
     fn test_use_after_move_maps_to_b0005() {
-        assert_eq!(
-            BorrowErrorKind::UseAfterMove.code(),
-            BorrowErrorCode::B0005
-        );
+        assert_eq!(BorrowErrorKind::UseAfterMove.code(), BorrowErrorCode::B0005);
     }
 
     #[test]

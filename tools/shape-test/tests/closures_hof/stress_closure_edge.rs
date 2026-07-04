@@ -84,7 +84,7 @@ fn test_two_closures_sharing_capture() {
     ShapeTest::new(
         r#"
         fn make_pair() {
-            let mut val = 0
+            var val = 0
             let inc = || { val = val + 1; val }
             let get = || val
             inc()

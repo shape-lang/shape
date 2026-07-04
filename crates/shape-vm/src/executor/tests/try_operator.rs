@@ -4,18 +4,19 @@ use crate::VMConfig;
 use crate::bytecode::*;
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
+use crate::executor::result_option_carrier;
 use shape_ast::parser::parse_program;
-use shape_value::VMError;
-use std::collections::HashMap;
-use std::sync::Arc;
+use shape_runtime::type_schema::builtin_schemas::{
+    ANYERROR_CATEGORY, ANYERROR_CAUSE, ANYERROR_MESSAGE, ANYERROR_PAYLOAD, BuiltinSchemaIds,
+};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError};
 
 // Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 // Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 fn compile_source(source: &str) -> Result<BytecodeProgram, VMError> {
-    let program =
-        parse_program(source).map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
+    let program = parse_program(source).map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
     let (graph, stdlib_names, prelude_imports) =
         crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
@@ -29,17 +30,91 @@ fn compile_source(source: &str) -> Result<BytecodeProgram, VMError> {
     Ok(bytecode)
 }
 
-// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
+fn execute_source(source: &str) -> Result<KindedSlot, VMError> {
+    let bytecode = compile_source(source)?;
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    vm.execute(None)
+}
+
+fn execute_with_preloaded_slots(
+    instructions: Vec<Instruction>,
+    make_slots: impl FnOnce(&BuiltinSchemaIds) -> Vec<KindedSlot>,
+) -> Result<(KindedSlot, BuiltinSchemaIds), VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        ..Default::default()
+    };
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let schemas = vm.builtin_schemas.clone();
+    for slot in make_slots(&schemas) {
+        vm.push_kinded_slot(slot)?;
+    }
+    let result = vm.execute(None)?;
+    Ok((result, schemas))
+}
 
 /// Slot-based TypedObject to HashMap conversion for test assertions.
 /// Looks up schemas from: program registry, then runtime registry.
-// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
+fn typed_object_storage(slot: &KindedSlot) -> &TypedObjectStorage {
+    assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+    slot.as_typed_object_storage()
+        .expect("TypedObject carrier should have provenance")
+}
 
-// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
+fn anyerror_field(storage: &TypedObjectStorage, idx: usize) -> Option<String> {
+    if ((storage.heap_mask >> idx) & 1) == 0 {
+        return None;
+    }
+    let bits = storage.slots()[idx].raw();
+    if bits == 0 {
+        return None;
+    }
+    // SAFETY: __AnyError declares all fields as String and heap_mask marks
+    // this slot as owning a live Arc<String> payload.
+    Some(unsafe { (&*(bits as *const String)).clone() })
+}
+
+fn assert_anyerror_field(
+    slot: &KindedSlot,
+    schemas: &BuiltinSchemaIds,
+    idx: usize,
+    expected: &str,
+) {
+    let storage = typed_object_storage(slot);
+    assert_eq!(storage.schema_id, schemas.any_error as u64);
+    assert_eq!(
+        anyerror_field(storage, idx).as_deref(),
+        Some(expected),
+        "unexpected AnyError field {idx}"
+    );
+}
+
+fn runtime_error_message(err: VMError) -> String {
+    match err {
+        VMError::RuntimeError(message) => message,
+        other => panic!("expected RuntimeError, got {other:?}"),
+    }
+}
 
 #[test]
 fn test_try_unwrap_ok_extracts_inner_value() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, _) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![result_option_carrier::build_ok(
+                schemas,
+                KindedSlot::from_int(42),
+            )]
+        },
+    )
+    .expect("Ok carrier should unwrap");
+
+    assert_eq!(slot.as_i64(), Some(42));
 }
 
 #[test]
@@ -75,22 +150,73 @@ match parse("12") {
 
 #[test]
 fn test_try_unwrap_err_raises_uncaught_exception_at_top_level() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let err = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![result_option_carrier::build_err(
+                schemas,
+                KindedSlot::from_string("boom"),
+            )]
+        },
+    )
+    .expect_err("Err carrier at top level should become uncaught error");
+
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: boom"), "{message}");
 }
 
 #[test]
 fn test_try_unwrap_none_raises_uncaught_exception_at_top_level() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_bytecode_with_vm helper)")
+    let err = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| vec![result_option_carrier::build_none(schemas)],
+    )
+    .expect_err("None carrier at top level should become uncaught error");
+
+    let message = runtime_error_message(err);
+    assert!(
+        message.contains("Uncaught error: Value was None"),
+        "{message}"
+    );
 }
 
 #[test]
 fn test_try_unwrap_passes_through_plain_non_none_values() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, _) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |_| vec![KindedSlot::from_int(7)],
+    )
+    .expect("plain non-null value should pass through");
+
+    assert_eq!(slot.as_i64(), Some(7));
 }
 
 #[test]
 fn test_try_unwrap_unwraps_explicit_some() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, _) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![result_option_carrier::build_some(
+                schemas,
+                KindedSlot::from_int(9),
+            )]
+        },
+    )
+    .expect("Some carrier should unwrap");
+
+    assert_eq!(slot.as_i64(), Some(9));
 }
 
 #[test]
@@ -107,6 +233,96 @@ fn test_try_operator_inside_pipe_lambda_compiles() {
             .iter()
             .any(|instr| instr.opcode == OpCode::TryUnwrap),
         "expected TryUnwrap opcode in compiled closure bytecode"
+    );
+}
+
+/// Resource-management-chapter L12 (v0.3.3): when `?` short-circuits
+/// (early-returns the Err), in-scope Drop-bearing locals must run their
+/// `Drop` — exactly like an explicit `return` does. Before the fix the `?`
+/// lowering emitted a bare `TryUnwrap` with NO pending-Drop emission, so
+/// the user `Drop::drop` body of a local bound before a failing `?` was
+/// skipped on the error path (an explicit `return Err(..)` dropped it
+/// correctly).
+///
+/// The fix emits a guarded failure-drop branch in `compile_expr_try_operator`:
+/// `Dup; IsTryFailure; JumpIfFalse SUCCESS; <DropCall ...>; SUCCESS:
+/// TryUnwrap`. This test asserts the branch is present: the `IsTryFailure`
+/// probe opcode and a `DropCall` for the Guard type both appear in the
+/// function body that binds a Drop-bearing local and then hits a `?`.
+#[test]
+fn try_short_circuit_emits_pending_drop_branch_for_inscope_local() {
+    let source = r#"
+type Guard { name: string }
+impl Drop for Guard {
+  method drop() { print("d") }
+}
+fn parse(raw: string) -> Result<int> {
+  let g = Guard { name: "g" }
+  let n = (raw as int?)?
+  Ok(n)
+}
+parse("1")
+"#;
+    let bc = compile_source(source).expect("compilation should succeed");
+    let func = bc
+        .functions
+        .iter()
+        .find(|f| f.name == "parse")
+        .expect("function `parse` not found");
+    let end = (func.entry_point + func.body_length).min(bc.instructions.len());
+    let body = &bc.instructions[func.entry_point..end];
+
+    assert!(
+        body.iter().any(|i| i.opcode == OpCode::IsTryFailure),
+        "expected IsTryFailure probe guarding the `?` failure-drop branch"
+    );
+
+    // A reachable `DropCall` naming the `Guard` type must appear on the `?`
+    // failure branch (between the IsTryFailure probe and the TryUnwrap).
+    let guard_dropcall = body.iter().any(|i| {
+        i.opcode == OpCode::DropCall
+            && matches!(i.operand, Some(crate::bytecode::Operand::Property(sid))
+                if bc.strings.get(sid as usize).map(String::as_str) == Some("Guard"))
+    });
+    assert!(
+        guard_dropcall,
+        "expected a Guard DropCall on the `?` Err short-circuit branch"
+    );
+}
+
+/// End-to-end: a fn that binds a Drop-bearing local then hits a failing `?`
+/// must execute cleanly (no double-free / use-after-free) on BOTH the
+/// success and failure legs. The runtime drop side-effect is exercised by
+/// `print` in the Guard's `drop` body; we assert clean termination (the
+/// refcount-balance regression — running the user Drop twice or freeing a
+/// still-shared carrier — surfaces as a VM error or panic here).
+#[test]
+fn try_short_circuit_drop_executes_cleanly_both_legs() {
+    use crate::executor::VirtualMachine;
+    let source = r#"
+type Guard { name: string }
+impl Drop for Guard {
+  method drop() { print(f"drop {self.name}") }
+}
+fn parse(raw: string) -> Result<int> {
+  let g = Guard { name: "g" }
+  let n = (raw as int?)?
+  Ok(n)
+}
+fn run() {
+  match parse("12") { Ok(v) => print(f"ok {v}"), Err(_) => print("err") }
+  match parse("nope") { Ok(v) => print(f"ok {v}"), Err(_) => print("err") }
+}
+run()
+"#;
+    let bc = compile_source(source).expect("compilation should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bc);
+    let result = vm.execute(None);
+    assert!(
+        result.is_ok(),
+        "`?`-short-circuit drop must execute cleanly on both legs; got {:?}",
+        result.err()
     );
 }
 
@@ -150,27 +366,115 @@ fn test_infallible_type_assertion_compiles_to_into_dispatch_metadata() {
 
 #[test]
 fn test_error_context_lifts_ok_into_result_ok() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, schemas) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_ok(schemas, KindedSlot::from_int(5)),
+                KindedSlot::from_string("ignored context"),
+            ]
+        },
+    )
+    .expect("ErrorContext on Ok should produce Ok");
+
+    let result = result_option_carrier::read_result(&schemas, &slot)
+        .expect("Result read should succeed")
+        .expect("ErrorContext should produce __Result");
+    assert!(result.is_ok());
+    let payload = result.clone_payload().expect("Ok payload should clone");
+    assert_eq!(payload.as_i64(), Some(5));
 }
 
 #[test]
 fn test_error_context_wraps_err_with_context_and_cause() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, schemas) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_err(schemas, KindedSlot::from_string("root")),
+                KindedSlot::from_string("outer"),
+            ]
+        },
+    )
+    .expect("ErrorContext on Err should produce Err");
+
+    let result = result_option_carrier::read_result(&schemas, &slot)
+        .expect("Result read should succeed")
+        .expect("ErrorContext should produce __Result");
+    assert!(!result.is_ok());
+    let payload = result.clone_payload().expect("Err payload should clone");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_MESSAGE, "outer");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_PAYLOAD, "outer");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_CAUSE, "root");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_CATEGORY, "RuntimeError");
 }
 
 #[test]
 fn test_error_context_wraps_none_with_synthetic_cause() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, schemas) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_none(schemas),
+                KindedSlot::from_string("missing value"),
+            ]
+        },
+    )
+    .expect("ErrorContext on None should produce Err");
+
+    let result = result_option_carrier::read_result(&schemas, &slot)
+        .expect("Result read should succeed")
+        .expect("ErrorContext should produce __Result");
+    assert!(!result.is_ok());
+    let payload = result.clone_payload().expect("Err payload should clone");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_MESSAGE, "missing value");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_CAUSE, "Value was None");
 }
 
 #[test]
 fn test_error_context_then_try_short_circuits_with_err() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let err = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_err(schemas, KindedSlot::from_string("root")),
+                KindedSlot::from_string("outer"),
+            ]
+        },
+    )
+    .expect_err("ErrorContext followed by TryUnwrap should surface Err");
+
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: outer"), "{message}");
+    assert!(message.contains("Caused by: root"), "{message}");
 }
 
 #[test]
 fn test_error_context_inline_try_syntax_without_parentheses() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_source_with_vm helper)")
+    let source = r#"
+fn fail() -> Result<int> {
+    Err("root")
+}
+
+fail() !! "outer"?
+"#;
+    let err = execute_source(source).expect_err("inline !!? should surface the contexted Err");
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: outer"), "{message}");
+    assert!(message.contains("Caused by: root"), "{message}");
 }
 
 /// Create a TraceFrame object matching the builtin schema field order:
@@ -189,7 +493,33 @@ fn test_error_context_inline_try_syntax_without_parentheses() {
 
 #[test]
 fn test_uncaught_any_error_formats_chain_and_trace() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+    let schemas = vm.builtin_schemas.clone();
+    let trace = vm
+        .trace_info_full()
+        .expect("trace placeholder should build");
+    let any_error = vm
+        .build_any_error(
+            KindedSlot::from_string("outer"),
+            Some(KindedSlot::from_string("root")),
+            trace,
+            Some("E_TEST"),
+        )
+        .expect("AnyError should build");
+
+    let err = vm
+        .handle_exception(any_error)
+        .expect_err("uncaught AnyError should surface as RuntimeError");
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: outer"), "{message}");
+    assert!(message.contains("Caused by: root"), "{message}");
+
+    let captured = vm
+        .take_last_uncaught_exception()
+        .expect("VM should retain structured uncaught payload");
+    assert_anyerror_field(&captured, &schemas, ANYERROR_MESSAGE, "outer");
+    assert_anyerror_field(&captured, &schemas, ANYERROR_CAUSE, "root");
 }
 
 // =========================================================================
@@ -208,7 +538,11 @@ val
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     let result = vm.execute(None).expect("execution should succeed").clone();
-    assert_eq!(result.as_f64(), Some(42.0), "Some(42) as number should be 42.0");
+    assert_eq!(
+        result.as_f64(),
+        Some(42.0),
+        "Some(42) as number should be 42.0"
+    );
 }
 
 #[test]
@@ -254,46 +588,54 @@ val
 }
 
 #[test]
-fn invalid_infallible_cast_option_string_as_int_fails_at_runtime() {
-    // Option<string> as int: string has no Into<int>, but the type tracker
-    // loses generic args for locals so the compiler emits lifting code and
-    // the inner conversion fails at runtime.
+fn invalid_infallible_cast_option_string_as_int_fails_at_compile_time() {
+    // Option<string> as int: string has no infallible Into<int>, so strict
+    // typing rejects the lifted cast before bytecode emission.
     let source = r#"
 let opt: Option<string> = Some("hello")
 let val = opt as int
 "#;
-    let bytecode = compile_source(source).expect("compile should succeed with bare wrapper");
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    let result = vm.execute(None);
+    let result = compile_source(source);
     assert!(
         result.is_err(),
-        "Option<string> as int should fail at runtime, got: {:?}",
+        "Option<string> as int should fail static validation, got: {:?}",
         result.ok()
+    );
+    let msg = format!("{:?}", result.err().unwrap());
+    assert!(
+        msg.contains("Cannot assert type") && msg.contains("Option") && msg.contains("int"),
+        "unexpected error for invalid Option cast: {msg}"
     );
 }
 
 // =========================================================================
-// PB5 (v0.3.3 Wave-1-extension, 2026-05-29) — direct fallible cast
-// `expr as Type?` yields None on conversion failure, not a throw.
+// Stage B5 (v0.3.3, 2026-06) — direct fallible cast `expr as Type?`
+// produces a real `Result<Type, AnyError>` carrier the book documents
+// (`fundamentals/error-handling.mdx` §Fallible: "result type is
+// `Result<Type, AnyError>`"), matchable via `Ok(v)` / `Err(e)`.
 //
-// `TryConvertTo*` is the fallible cast opcode. Its result is an
-// `Option<Target>` in the null-coded convention `op_try_unwrap` consumes:
-// a bare scalar ≡ Some, the `(0, NativeKind::Null)` sentinel ≡ None. A
-// successful parse produces Some(v); a FAILED parse produces None — so
-// the enclosing `?` propagates Err rather than the cast throwing. Before
-// PB5 the `op_try_convert_to_*` bodies delegated to the THROWING
-// infallible `op_convert_to_*`, so `(raw as int?)?` on a non-numeric
-// string threw "cannot convert string '…' to int" instead of yielding
-// None for `?` to propagate. Root: `executor/builtins/type_ops.rs`
+// `TryConvertTo*` is the fallible cast opcode. Pre-Stage-B5 (PB5,
+// 2026-05-29) its result was an Option-shaped null-coded sentinel — a
+// bare scalar ≡ Some, the `(0, NativeKind::Null)` sentinel ≡ None — which
+// ONLY the `?` operator (`op_try_unwrap`) understood: a `match` on it hit
+// NEITHER `Ok` nor `Err` ("No match arm matched"). Stage B5 makes the
+// opcode produce `ResultData::ok(v)` on success and
+// `ResultData::err(AnyError)` on conversion failure, so BOTH `match` and
+// `?` consume the SAME Result carrier. The success path still feeds `?`
+// (Ok → unwrap); the failure path still propagates (Err → early-return).
+// Root: `executor/builtins/type_ops.rs` `try_convert_or_none` /
 // `op_try_convert_to_int` family.
 // =========================================================================
 
 #[test]
-fn pb5_direct_string_as_int_fallible_success_yields_some() {
-    // "42" as int? → Some(42): the bare scalar (null-coded Some).
+fn stage_b5_direct_string_as_int_fallible_success_matches_ok_arm() {
+    // "12" as int? → Ok(12); a `match` destructures the Ok arm and binds
+    // the converted value. (Book §Fallible runnable contract.)
     let source = r#"
-"42" as int?
+match ("12" as int?) {
+    Ok(v) => v
+    Err(e) => -1
+}
 "#;
     let mut bytecode = compile_source(source).expect("compile should succeed");
     let mut frame = bytecode
@@ -305,24 +647,43 @@ fn pb5_direct_string_as_int_fallible_success_yields_some() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     let result = vm.execute(None).expect("execution should succeed").clone();
-    assert_eq!(result.as_i64(), Some(42), "\"42\" as int? should be Some(42)");
+    assert_eq!(
+        result.as_i64(),
+        Some(12),
+        "\"12\" as int? must be Ok(12) — the match Ok arm binds 12"
+    );
 }
 
 #[test]
-fn pb5_direct_string_as_int_fallible_failure_yields_none_not_throw() {
-    // "not-int" as int? → None (null sentinel). Must NOT throw — this is
-    // the PB5 root defect: the fallible cast on a non-numeric string used
-    // to surface VMError::RuntimeError instead of None.
+fn stage_b5_direct_string_as_int_fallible_failure_matches_err_arm() {
+    // "xx" as int? → Err(AnyError); a `match` destructures the Err arm
+    // (NOT a throw, NOT a None that matches neither arm). This is the
+    // Stage B5 root defect: the fallible cast produced an Option-shaped
+    // sentinel that matched neither `Ok` nor `Err`.
     let source = r#"
-("not-int" as int?) == None
+match ("xx" as int?) {
+    Ok(v) => v
+    Err(e) => -1
+}
 "#;
-    let bytecode = compile_source(source).expect("compile should succeed");
+    let mut bytecode = compile_source(source).expect("compile should succeed");
+    let mut frame = bytecode
+        .top_level_frame
+        .clone()
+        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
+    bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    let raw = vm
-        .execute_raw(None)
-        .expect("execution should succeed (None, not a throw)");
-    assert_eq!(raw, 1u64, "\"not-int\" as int? should be None");
+    let result = vm
+        .execute(None)
+        .expect("execution should succeed (Err, not a throw)")
+        .clone();
+    assert_eq!(
+        result.as_i64(),
+        Some(-1),
+        "\"xx\" as int? must be Err(_) — the match Err arm yields -1"
+    );
 }
 
 #[test]
@@ -437,21 +798,93 @@ s as number
 }
 
 #[test]
-fn direct_number_as_int_rejected_at_compile_time() {
-    // number has no Into<int>, only TryInto<int>
+fn direct_number_as_int_accepts_at_compile_time() {
+    // THE RULE (user 2026-06-01) / numeric-conversion-spec §3.2: `number as int`
+    // is a LEGAL explicit infallible cast that truncates toward zero. It must
+    // COMPILE (the inference + compiler cast gates now recognize the primitive
+    // numeric lattice and bypass the user-`Into` requirement — D1 root fix). The
+    // runtime truncation semantics (`3.7 as int == 3`) are pinned by the
+    // permanent conformance suite (`tools/shape-test/tests/numeric_conversions`,
+    // category C) and finalized in the runtime stage; here we only assert the
+    // cast is accepted by the compiler. (Pre-RULE this test asserted a
+    // compile-reject because `number` has only `TryInto<int>`, not `Into<int>`;
+    // the RULE overturns that.)
     let source = r#"
 let x: number = 42.0
 let y = x as int
 "#;
     let result = compile_source(source);
     assert!(
-        result.is_err(),
-        "number as int should be a compile error (no Into<int> for number), got: {:?}",
-        result.ok()
+        result.is_ok(),
+        "number as int should compile (primitive numeric cast, truncates at runtime), got: {:?}",
+        result.err()
     );
 }
 
 #[test]
 fn test_uncaught_non_any_error_uses_value_formatting() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+    let err = vm
+        .handle_exception(KindedSlot::from_int(42))
+        .expect_err("uncaught non-AnyError should surface as RuntimeError");
+    let message = runtime_error_message(err);
+    assert_eq!(message, "Uncaught error: 42");
+}
+
+#[test]
+fn null_coalesce_unwraps_some_option_to_inner() {
+    // v0.3.3 book-gate fix: `Some(5) ?? 99` must UNWRAP the Option carrier
+    // to its inner `5` (was leaking the whole `Some(5)` wrapper). The
+    // `CoalesceProbe` opcode replaces the old `Dup; IsNull` prologue.
+    let some_src = r#"
+let v = Some(5) ?? 99
+v
+"#;
+    let bytecode = compile_source(some_src).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(
+        result.as_i64(),
+        Some(5),
+        "Some(5) ?? 99 must unwrap to 5, not leak the Option wrapper"
+    );
+}
+
+#[test]
+fn null_coalesce_none_option_uses_default() {
+    // `None ?? 99` (typed Option<int> None) must take the default `99`.
+    let none_src = r#"
+let n: Option<int> = None
+let v = n ?? 99
+v
+"#;
+    let bytecode = compile_source(none_src).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(
+        result.as_i64(),
+        Some(99),
+        "None ?? 99 must yield the default 99"
+    );
+}
+
+#[test]
+fn null_coalesce_some_with_mismatched_default_type_is_rejected() {
+    // `Some(5) ?? "x"`: the default must match the unwrapped inner type
+    // `int`; a `string` default is a type error (the `??` result types as
+    // the unwrapped `T`, not `Option<T>`).
+    let bad_src = r#"
+fn f() -> int {
+    return Some(5) ?? "x"
+}
+f()
+"#;
+    let compiled = compile_source(bad_src);
+    assert!(
+        compiled.is_err(),
+        "Some(5) ?? \"x\" must be rejected (default type must match unwrapped T)"
+    );
 }

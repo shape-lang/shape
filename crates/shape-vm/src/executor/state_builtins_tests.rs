@@ -134,13 +134,13 @@ fn test_state_diff_patch_roundtrip() {}
 #[test]
 fn test_w17_state_bodies_return_structured_errors() {
     use crate::executor::state_builtins::core::{
-        state_deserialize, state_diff, state_fn_hash, state_hash, state_patch,
-        state_schema_hash, state_serialize,
+        state_deserialize, state_diff, state_fn_hash, state_hash, state_patch, state_schema_hash,
+        state_serialize,
     };
     use crate::executor::state_builtins::introspection::{
         state_args_stub, state_caller_stub, state_capture_all_stub, state_capture_call_stub,
-        state_capture_module_stub, state_capture_stub, state_locals_stub,
-        state_resume_frame_stub, state_resume_stub,
+        state_capture_module_stub, state_capture_stub, state_locals_stub, state_resume_frame_stub,
+        state_resume_stub,
     };
     use shape_runtime::module_exports::ModuleContext;
     use shape_runtime::type_schema::TypeSchemaRegistry;
@@ -168,10 +168,7 @@ fn test_w17_state_bodies_return_structured_errors() {
         fn(
             &[shape_value::KindedSlot],
             &ModuleContext,
-        ) -> Result<
-            shape_runtime::typed_module_exports::TypedReturn,
-            String,
-        >,
+        ) -> Result<shape_runtime::typed_module_exports::TypedReturn, String>,
     )] = &[
         ("state.capture", state_capture_stub),
         ("state.capture_all", state_capture_all_stub),

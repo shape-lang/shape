@@ -5,13 +5,13 @@
 //! expression forms (conditionals, blocks, match, loops) build their own
 //! control-flow subgraphs.
 
-use super::helpers::*;
-use super::stmt::{lower_statement, lower_statements, lower_var_decl, StatementSpan};
 use super::MirBuilder;
+use super::helpers::*;
 use super::immutable_binding_metadata;
+use super::stmt::{StatementSpan, lower_statement, lower_statements, lower_var_decl};
 use crate::mir::types::*;
 use shape_ast::ast::{self, Expr, Literal, Span, Spanned, Statement};
-use shape_ast::interpolation::{parse_interpolation_with_mode, InterpolationPart};
+use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
 use shape_runtime::closure::EnvironmentAnalyzer;
 
 // ---------------------------------------------------------------------------
@@ -95,15 +95,12 @@ fn expr_is_u64_typed(builder: &MirBuilder, expr: &Expr) -> bool {
             .lookup_local(name)
             .and_then(|slot| builder.lookup_local_declared_scalar_type(slot))
             .is_some_and(|ct| matches!(ct, ConcreteType::U64)),
-        Expr::BinaryOp { left, op, right, .. }
-            if matches!(
-                op,
-                BinaryOp::Add
-                    | BinaryOp::Sub
-                    | BinaryOp::Mul
-                    | BinaryOp::Div
-                    | BinaryOp::Mod
-            ) =>
+        Expr::BinaryOp {
+            left, op, right, ..
+        } if matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+        ) =>
         {
             expr_is_u64_typed(builder, left) || expr_is_u64_typed(builder, right)
         }
@@ -211,6 +208,18 @@ pub(super) fn emit_mut_self_writeback_if_needed(
     if !kind.is_mut_self_method(method) {
         return;
     }
+    // R2 chained-builder-on-immutable: a `&mut self` builder method on an
+    // immutable (`let`) receiver returns a NEW container Arc (clone-on-
+    // write); the original binding is left unchanged. Emitting the
+    // write-back `Assign(slot, ..)` would (a) flag a spurious "assign to
+    // immutable binding" in `compute_mutability_errors` and (b) mutate a
+    // binding the user declared immutable. Skip the write-back: the call
+    // still yields the new value (usable in `m.set(a,1).set(b,2)` chains),
+    // and `m` stays the value it was bound to. In-place mutation is the
+    // opt-in `let mut` feature.
+    if builder.is_slot_immutable_binding(slot) {
+        return;
+    }
     builder.push_stmt(
         StatementKind::Assign(
             Place::Local(slot),
@@ -252,10 +261,7 @@ pub(super) fn lower_exprs_to_aggregate<'a>(
     );
 }
 
-pub(super) fn lower_assign_target_place(
-    builder: &mut MirBuilder,
-    target: &Expr,
-) -> Option<Place> {
+pub(super) fn lower_assign_target_place(builder: &mut MirBuilder, target: &Expr) -> Option<Place> {
     match target {
         Expr::Identifier(name, _) => builder.lookup_local(name).map(Place::Local),
         Expr::PropertyAccess { .. } | Expr::IndexAccess { .. } => {
@@ -343,8 +349,7 @@ fn lower_window_function_operands(
 ) {
     use ast::windows::WindowFunction;
     match func {
-        WindowFunction::Lag { expr, default, .. }
-        | WindowFunction::Lead { expr, default, .. } => {
+        WindowFunction::Lag { expr, default, .. } | WindowFunction::Lead { expr, default, .. } => {
             operands.push(lower_expr_as_moved_operand(builder, expr));
             if let Some(d) = default {
                 operands.push(lower_expr_as_moved_operand(builder, d));
@@ -416,12 +421,7 @@ fn lower_async_let_expr(
     assign_copy_from_slot(builder, temp, future_slot, span);
 }
 
-fn lower_join_expr(
-    builder: &mut MirBuilder,
-    join_expr: &ast::JoinExpr,
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_join_expr(builder: &mut MirBuilder, join_expr: &ast::JoinExpr, temp: SlotId, span: Span) {
     if join_expr.branches.is_empty() {
         assign_none(builder, temp, span);
         return;
@@ -497,20 +497,18 @@ fn lower_list_comprehension_expr(
         // element-kind threading remains a follow-up scope (generic
         // `Iterable<T>` element kind not statically known at the MIR
         // emission site without a deeper signature classifier).
-        let iv_counter_simple_range = match (
-            clause.pattern.as_identifier(),
-            clause.iterable.as_ref(),
-        ) {
-            (
-                Some(iv_name),
-                Expr::Range {
-                    start: Some(start_expr),
-                    end: Some(end_expr),
-                    ..
-                },
-            ) => Some((iv_name.to_string(), start_expr, end_expr)),
-            _ => None,
-        };
+        let iv_counter_simple_range =
+            match (clause.pattern.as_identifier(), clause.iterable.as_ref()) {
+                (
+                    Some(iv_name),
+                    Expr::Range {
+                        start: Some(start_expr),
+                        end: Some(end_expr),
+                        ..
+                    },
+                ) => Some((iv_name.to_string(), start_expr, end_expr)),
+                _ => None,
+            };
 
         if let Some((iv_name, start_expr, end_expr)) = iv_counter_simple_range {
             let start_slot = lower_expr_to_temp(builder, start_expr);
@@ -624,8 +622,7 @@ fn lower_from_query_expr(
                 let _ = lower_expr_to_temp(builder, element);
                 let _ = lower_expr_to_temp(builder, key);
                 if let Some(into_var) = into_var {
-                    let group_slot =
-                        builder.alloc_local(into_var.clone(), LocalTypeInfo::Unknown);
+                    let group_slot = builder.alloc_local(into_var.clone(), LocalTypeInfo::Unknown);
                     assign_none(builder, group_slot, key.span());
                 }
             }
@@ -637,21 +634,18 @@ fn lower_from_query_expr(
                 into_var,
             } => {
                 let _ = lower_expr_to_temp(builder, source);
-                let join_slot =
-                    builder.alloc_local(variable.clone(), LocalTypeInfo::Unknown);
+                let join_slot = builder.alloc_local(variable.clone(), LocalTypeInfo::Unknown);
                 assign_none(builder, join_slot, source.span());
                 let _ = lower_expr_to_temp(builder, left_key);
                 let _ = lower_expr_to_temp(builder, right_key);
                 if let Some(into_var) = into_var {
-                    let into_slot =
-                        builder.alloc_local(into_var.clone(), LocalTypeInfo::Unknown);
+                    let into_slot = builder.alloc_local(into_var.clone(), LocalTypeInfo::Unknown);
                     assign_none(builder, into_slot, right_key.span());
                 }
             }
             ast::QueryClause::Let { variable, value } => {
                 let value_slot = lower_expr_to_temp(builder, value);
-                let local_slot =
-                    builder.alloc_local(variable.clone(), LocalTypeInfo::Unknown);
+                let local_slot = builder.alloc_local(variable.clone(), LocalTypeInfo::Unknown);
                 assign_copy_from_slot(builder, local_slot, value_slot, value.span());
             }
         }
@@ -662,12 +656,7 @@ fn lower_from_query_expr(
     builder.pop_scope();
 }
 
-fn lower_comptime_expr(
-    builder: &mut MirBuilder,
-    stmts: &[Statement],
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_comptime_expr(builder: &mut MirBuilder, stmts: &[Statement], temp: SlotId, span: Span) {
     builder.push_scope();
     let exit_block = builder.exit_block();
     lower_statements(builder, stmts, exit_block);
@@ -683,8 +672,7 @@ fn lower_comptime_for_expr(
 ) {
     builder.push_scope();
     let _ = lower_expr_to_temp(builder, &comptime_for.iterable);
-    let local_slot =
-        builder.alloc_local(comptime_for.variable.clone(), LocalTypeInfo::Unknown);
+    let local_slot = builder.alloc_local(comptime_for.variable.clone(), LocalTypeInfo::Unknown);
     assign_none(builder, local_slot, comptime_for.iterable.span());
     let exit_block = builder.exit_block();
     lower_statements(builder, &comptime_for.body, exit_block);
@@ -771,13 +759,7 @@ pub(super) fn lower_conditional_expr(
 ///
 ///   merge_bb:
 ///     // temp holds the result
-fn lower_null_coalesce(
-    builder: &mut MirBuilder,
-    lhs: &Expr,
-    rhs: &Expr,
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_null_coalesce(builder: &mut MirBuilder, lhs: &Expr, rhs: &Expr, temp: SlotId, span: Span) {
     // Evaluate LHS
     let lhs_slot = lower_expr_to_temp(builder, lhs);
 
@@ -1079,12 +1061,7 @@ fn lower_formatted_string(
     }
 }
 
-fn lower_block_expr(
-    builder: &mut MirBuilder,
-    block: &ast::BlockExpr,
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_block_expr(builder: &mut MirBuilder, block: &ast::BlockExpr, temp: SlotId, span: Span) {
     builder.push_scope();
 
     if block.items.is_empty() {
@@ -1157,12 +1134,7 @@ fn lower_block_expr(
     builder.pop_scope();
 }
 
-fn lower_let_expr(
-    builder: &mut MirBuilder,
-    let_expr: &ast::LetExpr,
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_let_expr(builder: &mut MirBuilder, let_expr: &ast::LetExpr, temp: SlotId, span: Span) {
     builder.push_scope();
 
     if let Some(name) = let_expr.pattern.as_simple_name() {
@@ -1256,12 +1228,7 @@ fn lower_while_expr(
     builder.start_block(after);
 }
 
-fn lower_for_expr(
-    builder: &mut MirBuilder,
-    for_expr: &ast::ForExpr,
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotId, span: Span) {
     // Check if the iterable is a Range expression with both start and end.
     // If so, generate a counter-based loop (like the bytecode compiler does).
     if let Expr::Range {
@@ -1284,7 +1251,7 @@ fn lower_for_expr(
         // (the common case: `for i in 0..10`), the counter IS the
         // loop variable.
         let counter_slot = match &for_expr.pattern {
-            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+            ast::Pattern::Identifier { name, .. } | ast::Pattern::Typed { name, .. } => {
                 builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
             }
             _ => builder.alloc_temp(LocalTypeInfo::Unknown),
@@ -1533,7 +1500,7 @@ fn lower_for_expr(
         // intermediate copy and matches the bytecode-VM-side path) or
         // an anonymous temp (compound patterns: destructured downstream).
         let elem_slot = match &for_expr.pattern {
-            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+            ast::Pattern::Identifier { name, .. } | ast::Pattern::Typed { name, .. } => {
                 builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
             }
             _ => builder.alloc_temp(LocalTypeInfo::Unknown),
@@ -1564,7 +1531,7 @@ fn lower_for_expr(
         // resolves to the slot we just allocated).
         if !matches!(
             &for_expr.pattern,
-            ast::Pattern::Identifier(_) | ast::Pattern::Typed { .. }
+            ast::Pattern::Identifier { .. } | ast::Pattern::Typed { .. }
         ) {
             super::stmt::lower_pattern_bindings_from_place(
                 builder,
@@ -1611,12 +1578,7 @@ fn lower_for_expr(
     }
 }
 
-fn lower_loop_expr(
-    builder: &mut MirBuilder,
-    loop_expr: &ast::LoopExpr,
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_loop_expr(builder: &mut MirBuilder, loop_expr: &ast::LoopExpr, temp: SlotId, span: Span) {
     let body_block = builder.new_block();
     let after = builder.new_block();
 
@@ -1663,8 +1625,9 @@ pub(super) fn lower_match_expr(
     }
 
     let scrutinee_slot = lower_expr_to_temp(builder, &match_expr.scrutinee);
-    let merge_block = builder.new_block();
+
     let no_match_block = builder.new_block();
+    let merge_placeholder = BasicBlockId(u32::MAX - builder.next_block_id);
     let mut next_test_block = builder.current_block;
 
     for (idx, arm) in match_expr.arms.iter().enumerate() {
@@ -1679,13 +1642,38 @@ pub(super) fn lower_match_expr(
             no_match_block
         };
         let pattern_span = arm.pattern_span.unwrap_or(span);
+
+        // Resolve the pattern-identifier-vs-unit-variant ambiguity. A bare
+        // capitalized `Red` that names a known enum unit variant is a
+        // refutable variant pattern (matches only that variant), NOT a
+        // catch-all binder. Rewrite it to the equivalent `Constructor` so
+        // both the binding walk (`pattern_has_bindings` → no binding) and the
+        // condition lowering (`EnumDiscriminantTest`, which the JIT preflight
+        // rejects → interpreter fallback, exactly like a syntactically-
+        // qualified `Enum::Red`) treat it as a variant rather than a binder.
+        // Genuine binders (unknown / lowercase names) are left unchanged.
+        let normalized_pattern: Option<ast::Pattern> = match &arm.pattern {
+            ast::Pattern::Identifier { name, .. }
+                if name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && builder.is_known_unit_variant(name) =>
+            {
+                Some(ast::Pattern::Constructor {
+                    enum_name: None,
+                    variant: name.clone(),
+                    fields: ast::PatternConstructorFields::Unit,
+                })
+            }
+            _ => None,
+        };
+        let arm_pattern: &ast::Pattern = normalized_pattern.as_ref().unwrap_or(&arm.pattern);
+
         let mut binding_scope_active = false;
-        if super::stmt::pattern_has_bindings(&arm.pattern) {
+        if super::stmt::pattern_has_bindings(arm_pattern) {
             builder.push_scope();
             binding_scope_active = true;
             super::stmt::lower_pattern_bindings_from_place(
                 builder,
-                &arm.pattern,
+                arm_pattern,
                 &Place::Local(scrutinee_slot),
                 pattern_span,
                 Some(immutable_binding_metadata(pattern_span, false, false)),
@@ -1694,7 +1682,7 @@ pub(super) fn lower_match_expr(
 
         if let Some(pattern_operand) = lower_match_pattern_condition_operand(
             builder,
-            &arm.pattern,
+            arm_pattern,
             scrutinee_slot,
             pattern_span,
         ) {
@@ -1751,7 +1739,7 @@ pub(super) fn lower_match_expr(
             ),
             arm.body.span(),
         );
-        builder.finish_block(TerminatorKind::Goto(merge_block), arm.body.span());
+        builder.finish_block(TerminatorKind::Goto(merge_placeholder), arm.body.span());
 
         if binding_scope_active {
             builder.pop_scope();
@@ -1767,9 +1755,30 @@ pub(super) fn lower_match_expr(
         ),
         span,
     );
-    builder.finish_block(TerminatorKind::Goto(merge_block), span);
+    builder.finish_block(TerminatorKind::Goto(merge_placeholder), span);
 
+    // MirBuilder::build sorts completed blocks by BasicBlockId. The JIT's
+    // static kind walk uses that sorted order, so the match merge block must
+    // have an ID after every arm/no-match writer. Otherwise a downstream
+    // `let r = match ...` copy in the merge sees the match temp before any arm
+    // has stamped its kind and the return path can be misclassified as unit.
+    let merge_block = builder.new_block();
+    retarget_match_merge_gotos(builder, merge_placeholder, merge_block);
     builder.start_block(merge_block);
+}
+
+fn retarget_match_merge_gotos(
+    builder: &mut MirBuilder,
+    placeholder: BasicBlockId,
+    merge_block: BasicBlockId,
+) {
+    for block in &mut builder.blocks {
+        if let TerminatorKind::Goto(target) = &mut block.terminator.kind
+            && *target == placeholder
+        {
+            *target = merge_block;
+        }
+    }
 }
 
 fn lower_match_pattern_condition_operand(
@@ -1779,7 +1788,7 @@ fn lower_match_pattern_condition_operand(
     pattern_span: Span,
 ) -> Option<Operand> {
     match pattern {
-        ast::Pattern::Identifier(_) | ast::Pattern::Wildcard => None,
+        ast::Pattern::Identifier { .. } | ast::Pattern::Wildcard => None,
         ast::Pattern::Typed {
             type_annotation, ..
         } => {
@@ -1830,9 +1839,7 @@ fn lower_match_pattern_condition_operand(
             Some(Operand::Copy(Place::Local(matches_slot)))
         }
         ast::Pattern::Constructor {
-            enum_name,
-            variant,
-            ..
+            enum_name, variant, ..
         } => {
             // W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
             // 2026-05-12). For `Ok(v)` / `Err(e)` / `Some(x)` / `None`
@@ -1945,16 +1952,13 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 // `NewDecimalV2` and prints correctly). VM == JIT.
                 Literal::Decimal(d) => MirConstant::Decimal(d.to_string()),
                 Literal::String(s) => MirConstant::Str(s.clone()),
-                // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
-                // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: preserve
-                // the Char kind through MIR lowering so the JIT's
-                // `operand_slot_kind` / `infer_constant_kind` classifiers stamp
-                // `NativeKind::Char` and the `print` dispatch routes to
-                // `print_char(codepoint)` instead of `print_i64(codepoint)`.
-                // Pre-fix divergence: `print('A')` → JIT prints "65", VM prints
-                // "A". The pre-fix `MirConstant::Int(*c as i64)` was a
-                // §2.7.5-violating producer-site kind-source loss.
-                Literal::Char(c) => MirConstant::Char(*c),
+                // A char literal evaluates to its integer code point
+                // (operators.mdx "Character Literals" — the interop escape
+                // hatch). `'A'` IS the int 65; there is NO distinct char type.
+                // Lower to a plain int constant so VM and JIT both treat it as
+                // int (`print('A')` → "65" on BOTH paths). To get a 1-char
+                // STRING use a string literal "a" or `s[i]` instead.
+                Literal::Char(c) => MirConstant::Int(*c as i64),
                 Literal::FormattedString { .. } => unreachable!("handled above"),
                 Literal::Bool(v) => MirConstant::Bool(*v),
                 Literal::None => MirConstant::None,
@@ -1962,10 +1966,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 Literal::Timeframe(_) => MirConstant::Int(0), // timeframe not yet modeled
             };
             builder.push_stmt(
-                StatementKind::Assign(
-                    Place::Local(temp),
-                    Rvalue::Use(Operand::Constant(constant)),
-                ),
+                StatementKind::Assign(Place::Local(temp), Rvalue::Use(Operand::Constant(constant))),
                 span,
             );
         }
@@ -2254,17 +2255,24 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             }
         }
         Expr::FuzzyComparison {
-            left, op, right, ..
+            left,
+            op,
+            right,
+            tolerance,
+            ..
         } => {
             let l = lower_expr_to_operand(builder, left, false);
             let r = lower_expr_to_operand(builder, right, false);
-            let mir_op = match op {
-                ast::operators::FuzzyOp::Equal => BinOp::Eq,
-                ast::operators::FuzzyOp::Greater => BinOp::Gt,
-                ast::operators::FuzzyOp::Less => BinOp::Lt,
-            };
             builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::BinaryOp(mir_op, l, r)),
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::FuzzyComparison {
+                        op: *op,
+                        lhs: l,
+                        rhs: r,
+                        tolerance: tolerance.clone(),
+                    },
+                ),
                 span,
             );
         }
@@ -2325,10 +2333,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                     .map(|arg| lower_expr_as_moved_operand(builder, arg))
                     .collect();
                 builder.push_stmt(
-                    StatementKind::Assign(
-                        Place::Local(temp),
-                        Rvalue::Aggregate(operands.clone()),
-                    ),
+                    StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
                 // ADR-006 §2.7.5 — thread the variant name into EnumStore
@@ -2437,7 +2442,9 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             )));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
-        Expr::EnumConstructor { variant, payload, .. } => match payload {
+        Expr::EnumConstructor {
+            variant, payload, ..
+        } => match payload {
             ast::EnumConstructorPayload::Unit => {
                 assign_none(builder, temp, span);
             }
@@ -2524,7 +2531,13 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             meta_param_overrides,
             ..
         } => {
-            lower_type_assertion_expr(builder, expr, type_annotation, meta_param_overrides, temp, span
+            lower_type_assertion_expr(
+                builder,
+                expr,
+                type_annotation,
+                meta_param_overrides,
+                temp,
+                span,
             );
         }
         Expr::InstanceOf { expr, .. } => {
@@ -2631,10 +2644,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 .iter()
                 .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr))
                 .collect();
-            let field_names: Vec<_> = fields
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
+            let field_names: Vec<_> = fields.iter().map(|(name, _)| name.clone()).collect();
             builder.push_stmt(
                 StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                 span,
@@ -2733,13 +2743,7 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
 // Pipe operator lowering
 // ---------------------------------------------------------------------------
 
-fn lower_pipe_expr(
-    builder: &mut MirBuilder,
-    left: &Expr,
-    right: &Expr,
-    temp: SlotId,
-    span: Span,
-) {
+fn lower_pipe_expr(builder: &mut MirBuilder, left: &Expr, right: &Expr, temp: SlotId, span: Span) {
     match right {
         Expr::FunctionCall {
             name,
@@ -2762,10 +2766,7 @@ fn lower_pipe_expr(
                         .map(|arg| lower_expr_as_moved_operand(builder, arg)),
                 );
                 builder.push_stmt(
-                    StatementKind::Assign(
-                        Place::Local(temp),
-                        Rvalue::Aggregate(operands.clone()),
-                    ),
+                    StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
                 emit_container_store_full(
@@ -2806,8 +2807,15 @@ fn lower_pipe_expr(
             let left_op = lower_expr_as_moved_operand(builder, left);
             let mut arg_ops = Vec::with_capacity(1 + args.len() + named_args.len());
             arg_ops.push(left_op);
-            arg_ops.extend(args.iter().map(|arg| lower_expr_as_moved_operand(builder, arg)));
-            arg_ops.extend(named_args.iter().map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)));
+            arg_ops.extend(
+                args.iter()
+                    .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+            );
+            arg_ops.extend(
+                named_args
+                    .iter()
+                    .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)),
+            );
             let func_op = Operand::Constant(MirConstant::Function(name.clone()));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
         }
@@ -2823,8 +2831,15 @@ fn lower_pipe_expr(
             let mut arg_ops = Vec::with_capacity(2 + args.len() + named_args.len());
             arg_ops.push(receiver_op);
             arg_ops.push(left_op);
-            arg_ops.extend(args.iter().map(|arg| lower_expr_as_moved_operand(builder, arg)));
-            arg_ops.extend(named_args.iter().map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)));
+            arg_ops.extend(
+                args.iter()
+                    .map(|arg| lower_expr_as_moved_operand(builder, arg)),
+            );
+            arg_ops.extend(
+                named_args
+                    .iter()
+                    .map(|(_, expr)| lower_expr_as_moved_operand(builder, expr)),
+            );
             let func_op = Operand::Constant(MirConstant::Method(method.clone()));
             builder.emit_call(func_op, arg_ops, Place::Local(temp), span);
             emit_mut_self_writeback_if_needed(builder, receiver, method, temp, span);
@@ -2841,9 +2856,7 @@ fn lower_pipe_expr(
             // mode). Apply intercept BEFORE the enum-variant intercept
             // since `Mutex`/`Atomic`/`Lazy` and `Ok`/`Err`/`Some` are
             // disjoint sets.
-            if builder.lookup_local(name).is_none()
-                && is_bare_collection_ctor_with_arg(name)
-            {
+            if builder.lookup_local(name).is_none() && is_bare_collection_ctor_with_arg(name) {
                 let left_op = lower_expr_as_moved_operand(builder, left);
                 let operands = vec![left_op];
                 emit_collection_ctor_store(builder, temp, operands, name.clone(), span);
@@ -2856,10 +2869,7 @@ fn lower_pipe_expr(
                 let left_op = lower_expr_as_moved_operand(builder, left);
                 let operands = vec![left_op];
                 builder.push_stmt(
-                    StatementKind::Assign(
-                        Place::Local(temp),
-                        Rvalue::Aggregate(operands.clone()),
-                    ),
+                    StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands.clone())),
                     span,
                 );
                 emit_container_store_full(
@@ -2900,52 +2910,51 @@ fn lower_type_assertion_expr(
     temp: SlotId,
     span: Span,
 ) {
-    // For primitive target types, emit a Call to the specific Into trait
-    // implementation. We don't know the source type at MIR lowering time,
-    // but the JIT's method dispatch for "into" resolves based on value type.
-    // However, method dispatch doesn't know the TARGET type.
+    // f-string bool-as-int VM!=JIT divergence fix (2026-06).
     //
-    // Alternative approach: use the bytecode compiler's ConvertTo* pattern.
-    // The `jit_call_method` handler for "into" doesn't exist, so instead
-    // we emit a method call that includes the target type name, which the
-    // JIT method dispatch can use for conversion.
-    // Use method dispatch for type conversion. The JIT method handler
-    // resolves "into" on values — for int.into() it returns number, etc.
-    // We use type-specific method names that exist in the method registry.
-    let conversion_method = match type_annotation {
+    // A primitive infallible `as`-cast to `int` / `number` / `string` /
+    // `bool` / `decimal` / `char` is lowered by the bytecode VM to the
+    // kind-RESTAMPING `OpCode::ConvertTo*` family (see
+    // `compiler/expressions/type_ops.rs::convert_opcode_for_primitive`).
+    // The JIT has no typed convert body — `vm_only_opcode_reason`
+    // (`shape-jit::compiler::accessors`) lists the whole `ConvertTo*` /
+    // `TryConvertTo*` family as VM-only, and the opcode-FFI trampoline
+    // (`ffi/generic_builtin::dispatch_opcode`) passes the operand bits
+    // through UNCHANGED.
+    //
+    // This function PREVIOUSLY mirrored that pass-through: `as int` lowered
+    // to `Rvalue::Use(arg)` ("the value is already the right bits, the
+    // executor reads the NaN-boxed type tag"), and `as number/string/bool`
+    // lowered to a `toNumber`/`toString`/`toBool` method call. The
+    // pass-through is the deleted W4-δ tagged-dispatch shape (the slot's
+    // kind stayed the SOURCE kind), so a JIT'd `f"{true as int}"` /
+    // `let v: int = true as int` formatted with kind `Bool` and rendered
+    // `true` instead of `1` — a real VM≠JIT correctness divergence.
+    //
+    // Fix: emit `Rvalue::PrimitiveCast { operand, target }` (ADR-006
+    // §2.7.5 producer-side stamp — the target type name carried verbatim).
+    // The JIT MIR preflight REJECTS this Rvalue → whole-program deopt via
+    // the W12 `[jit-fallback]` path routes to the bytecode interpreter,
+    // where `ConvertTo*` restamps the result kind correctly. VM never
+    // consumes MIR, so its `ConvertTo*` lowering is unchanged.
+    let primitive_cast_target = match type_annotation {
         ast::TypeAnnotation::Basic(name) => match name.as_str() {
-            // "toNumber" exists on int, bool, string via method registry
-            "number" => Some("toNumber"),
-            // "toString" exists on all types via method registry
-            "string" => Some("toString"),
-            // For "int": no universal "toInt" method. Use the Into function directly.
-            // The compiled Into::number::int::into is a regular function.
-            "int" => None, // handled below as Into function call
-            "bool" => Some("toBool"),
+            "int" | "number" | "string" | "bool" | "decimal" | "char" => Some(name.clone()),
             _ => None,
         },
         _ => None,
     };
 
-    if let Some(method_name) = conversion_method {
+    if let Some(target) = primitive_cast_target {
         let arg = lower_expr_as_moved_operand(builder, expr);
-        let func_op = Operand::Constant(MirConstant::Method(method_name.to_string()));
-        builder.emit_call(func_op, vec![arg], Place::Local(temp), span);
-    } else if matches!(type_annotation, ast::TypeAnnotation::Basic(n) if n == "int") {
-        // For "as int": emit BinaryOp with a floor-style conversion.
-        // Multiplying by 1 triggers the generic_mul FFI which handles
-        // number*int → int conversion. But a cleaner approach:
-        // just call the function directly by trying all Into variants.
-        // The simplest: use BinaryOp::Mul with 1 which coerces to int in the VM.
-        // Actually, the cleanest: use a special Or with 0 (bitwise) which is identity for ints.
-        // For now, use Aggregate (the value passes through unchanged, and the executor
-        // reads the NaN-boxed type tag to marshal correctly).
-        let arg = lower_expr_as_moved_operand(builder, expr);
-        // Emit: result = arg | 0  (bitwise OR with 0 is identity but triggers int coercion)
-        // Actually simpler: just pass through. The value is already the right bits,
-        // the executor's return marshaling handles the type interpretation.
         builder.push_stmt(
-            StatementKind::Assign(Place::Local(temp), Rvalue::Use(arg)),
+            StatementKind::Assign(
+                Place::Local(temp),
+                Rvalue::PrimitiveCast {
+                    operand: arg,
+                    target,
+                },
+            ),
             span,
         );
     } else {
@@ -2962,6 +2971,94 @@ fn lower_type_assertion_expr(
         builder.push_stmt(
             StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands)),
             span,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_result_writers_sort_before_merge_copy() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+function main() {
+    let x = 2
+    let result = match x {
+        1 => 10,
+        2 => if true { 20 } else { 21 },
+        3 => 30,
+        _ => 0
+    }
+    result
+}
+"#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            ast::Item::Function(func, _) => func,
+            other => panic!("expected function item, got {other:?}"),
+        };
+        let lowering = crate::mir::lowering::lower_function_detailed(
+            &func.name,
+            &func.params,
+            &func.body,
+            func.name_span,
+        );
+        let result_slot = lowering
+            .binding_infos
+            .iter()
+            .find(|binding| binding.name == "result")
+            .expect("result binding missing")
+            .slot;
+
+        let mut merge_copy: Option<(BasicBlockId, SlotId)> = None;
+        for block in &lowering.mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(
+                    Place::Local(dst),
+                    Rvalue::Use(
+                        Operand::Copy(Place::Local(src))
+                        | Operand::Move(Place::Local(src))
+                        | Operand::MoveExplicit(Place::Local(src)),
+                    ),
+                ) = &stmt.kind
+                {
+                    if *dst == result_slot {
+                        merge_copy = Some((block.id, *src));
+                    }
+                }
+            }
+        }
+        let (merge_block, match_temp) = merge_copy.expect("match result merge copy missing");
+
+        let writer_blocks: Vec<_> = lowering
+            .mir
+            .blocks
+            .iter()
+            .filter(|block| {
+                block.statements.iter().any(|stmt| {
+                    matches!(
+                        &stmt.kind,
+                        StatementKind::Assign(Place::Local(dst), _) if *dst == match_temp
+                    )
+                })
+            })
+            .map(|block| block.id)
+            .collect();
+
+        assert!(
+            writer_blocks.len() >= 4,
+            "expected arm writers for match temp {:?}, got {:?}",
+            match_temp,
+            writer_blocks
+        );
+        assert!(
+            writer_blocks.iter().all(|block| block.0 < merge_block.0),
+            "match temp writers must sort before merge block {:?}; writers: {:?}",
+            merge_block,
+            writer_blocks
         );
     }
 }

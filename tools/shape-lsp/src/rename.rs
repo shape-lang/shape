@@ -176,8 +176,7 @@ pub fn rename_cross_file(
                 continue;
             };
             let other_text = other_doc.text();
-            let edits =
-                collect_module_scope_edits_in_file(&other_text, &old_name, new_name);
+            let edits = collect_module_scope_edits_in_file(&other_text, &old_name, new_name);
             if !edits.is_empty() {
                 changes_map
                     .entry(other_uri)
@@ -199,8 +198,7 @@ pub fn rename_cross_file(
             let Ok(other_text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let edits =
-                collect_module_scope_edits_in_file(&other_text, &old_name, new_name);
+            let edits = collect_module_scope_edits_in_file(&other_text, &old_name, new_name);
             if !edits.is_empty() {
                 changes_map
                     .entry(other_uri)
@@ -247,7 +245,10 @@ fn is_module_scope_symbol_in_rename(program: &Program, name: &str) -> bool {
                         }
                     }
                 }
-                ImportItems::Namespace { name: ns_name, alias } => {
+                ImportItems::Namespace {
+                    name: ns_name,
+                    alias,
+                } => {
                     let local = alias.as_ref().unwrap_or(ns_name);
                     if local == name {
                         return true;
@@ -263,11 +264,7 @@ fn is_module_scope_symbol_in_rename(program: &Program, name: &str) -> bool {
 /// Collect TextEdits for module-scope occurrences of `old_name` in
 /// `text`, replacing each with `new_name`. Uses ScopeTree to skip
 /// locally-shadowing inner bindings.
-fn collect_module_scope_edits_in_file(
-    text: &str,
-    old_name: &str,
-    new_name: &str,
-) -> Vec<TextEdit> {
+fn collect_module_scope_edits_in_file(text: &str, old_name: &str, new_name: &str) -> Vec<TextEdit> {
     let program = match parse_program(text) {
         Ok(p) => p,
         Err(_) => {
@@ -416,40 +413,10 @@ fn is_valid_identifier(name: &str) -> bool {
 /// Check if a string is a Shape keyword
 fn is_keyword(name: &str) -> bool {
     const KEYWORDS: &[&str] = &[
-        "let",
-        "var",
-        "const",
-        "function",
-        "pattern",
-        "if",
-        "else",
-        "while",
-        "for",
-        "return",
-        "break",
-        "continue",
-        "in",
-        "and",
-        "or",
-        "not",
-        "true",
-        "false",
-        "None",
-        "Some",
-        "pub",
-        "from",
-        "type",
-        "trait",
-        "enum",
-        "extend",
-        "find",
-        "scan",
-        "analyze",
-        "backtest",
-        "alert",
-        "on",
-        "test",
-        "stream",
+        "let", "var", "const", "function", "pattern", "if", "else", "while", "for", "return",
+        "break", "continue", "in", "and", "or", "not", "true", "false", "None", "Some", "pub",
+        "from", "type", "trait", "enum", "extend", "find", "scan", "analyze", "backtest", "alert",
+        "on", "test", "stream",
     ];
     KEYWORDS.contains(&name)
 }
@@ -578,10 +545,8 @@ mod tests {
     fn test_rename_cross_file_local_binding_no_crossover() {
         use crate::document::DocumentManager;
         let docs = DocumentManager::new();
-        let main_text =
-            "fn outer() {\n  let local = 1\n  return local + local\n}".to_string();
-        let other_text =
-            "fn other() {\n  let local = 5\n  return local\n}".to_string();
+        let main_text = "fn outer() {\n  let local = 1\n  return local + local\n}".to_string();
+        let other_text = "fn other() {\n  let local = 5\n  return local\n}".to_string();
         let main_uri = Uri::from_file_path("/main.shape").unwrap();
         let other_uri = Uri::from_file_path("/other.shape").unwrap();
         docs.open(main_uri.clone(), 1, main_text.clone());
@@ -772,10 +737,7 @@ mod tests {
                 character: 0,
             },
         );
-        assert!(
-            result.is_none(),
-            "expected None at non-identifier position"
-        );
+        assert!(result.is_none(), "expected None at non-identifier position");
     }
 
     #[test]

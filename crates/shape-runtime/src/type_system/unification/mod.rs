@@ -10,5 +10,8 @@
 pub mod structural_equality;
 mod unifier;
 
-pub use structural_equality::{annotations_equal, constraints_equal, types_equal};
+// U1: `types_equal` / `constraints_equal` deleted — the single
+// type-equivalence relation is `ConstraintSolver::probe_equal`. Only the
+// annotation-layer structural comparison survives.
+pub use structural_equality::annotations_equal;
 pub use unifier::Unifier;

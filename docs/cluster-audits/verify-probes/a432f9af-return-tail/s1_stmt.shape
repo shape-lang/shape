@@ -1,0 +1,9 @@
+type Point { x: int, y: int }
+fn g() -> Result<Point, string> { Ok(Point { x: 1, y: 2 }) }
+fn use_it() {
+  match g() {
+    Ok(Some(n)) => { print(n); }
+    _ => {}
+  }
+}
+fn main() { use_it() }

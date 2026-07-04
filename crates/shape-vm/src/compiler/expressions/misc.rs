@@ -109,12 +109,15 @@ impl BytecodeCompiler {
                 shape_ast::ast::BlockItem::VariableDecl(var_decl) => {
                     if let Some(init_expr) = &var_decl.value {
                         let saved_pending_variable_name = self.pending_variable_name.clone();
+                        let saved_pending_variable_span = self.pending_variable_span;
                         self.pending_variable_name = var_decl
                             .pattern
                             .as_identifier()
                             .map(|name| name.to_string());
+                        self.pending_variable_span = var_decl.pattern.as_identifier_span();
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
+                        self.pending_variable_span = saved_pending_variable_span;
                         let ref_borrow = compile_result?;
                         // Use full destructure pattern support (array, object, identifier)
                         self.compile_destructure_pattern(&var_decl.pattern)?;
@@ -157,10 +160,29 @@ impl BytecodeCompiler {
                                 } else {
                                     // Propagate initializer type (e.g., var x = 0 → Int64 hint)
                                     // so typed opcodes can be emitted for operations on this variable.
+                                    // U4-4: simple-identifier pattern → the numeric kind derives
+                                    // from `init_expr`'s resolved Type.
                                     let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
                                     self.propagate_initializer_type_to_slot(
-                                        local_idx, true, is_mutable,
+                                        local_idx,
+                                        true,
+                                        is_mutable,
+                                        Some(init_expr),
                                     );
+                                    if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
+                                        if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
+                                            let existing = self.type_tracker.get_local_type(local_idx);
+                                            if !Self::ws6b_name_would_downgrade(existing, &tn) {
+                                                self.set_local_type_info(local_idx, &tn);
+                                            }
+                                        }
+                                        crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                            self,
+                                            crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                            ct,
+                                            crate::compiler::BindingConcreteFactSource::StructuralInitializer,
+                                        );
+                                    }
                                 }
                                 // Track for auto-drop at scope exit
                                 let drop_kind = self.local_drop_kind(local_idx).or_else(|| {
@@ -204,6 +226,42 @@ impl BytecodeCompiler {
                             if method == "push" && args.len() == 1 {
                                 if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                                     if recv_name == name {
+                                        // R1 empty-array-push let-gen (2026-06-14):
+                                        // `a = a.push(x*x)` inside a loop BODY
+                                        // BLOCK takes THIS path (a `BlockItem::
+                                        // Assignment`). When `a` is a bare empty-
+                                        // array accumulator (placeholder
+                                        // `NewArray(0)`), the v1 `ArrayPushLocal`
+                                        // below pushes into a slot that is not yet
+                                        // a typed array — at MODULE scope the slot
+                                        // read None and SIGSEGV'd. Route the first
+                                        // such self-push through the accumulator
+                                        // finalizer: it resolves the element kind
+                                        // from `x`'s producer-side proof, PATCHES
+                                        // the placeholder allocator to the typed
+                                        // `NewTypedArray*` opcode AFTER the element
+                                        // type resolves, emits the typed push, and
+                                        // leaves the typed array on the stack.
+                                        // Store it back into the slot (block-item
+                                        // statement context discards the result).
+                                        if self.compile_first_push_to_empty_accumulator(
+                                            recv_name, &args[0], None,
+                                        )? {
+                                            if let Some(local_idx) = self.resolve_local(name) {
+                                                self.emit(Instruction::new(
+                                                    OpCode::StoreLocal,
+                                                    Some(Operand::Local(local_idx)),
+                                                ));
+                                            } else {
+                                                let binding_idx =
+                                                    self.get_or_create_module_binding(name);
+                                                self.emit(Instruction::new(
+                                                    OpCode::StoreModuleBinding,
+                                                    Some(Operand::ModuleBinding(binding_idx)),
+                                                ));
+                                            }
+                                            break 'block_assign Ok::<(), ShapeError>(());
+                                        }
                                         if let Some(local_idx) = self.resolve_local(name) {
                                             if !self.ref_locals.contains(&local_idx) {
                                                 self.compile_expr(&args[0])?;
@@ -240,12 +298,15 @@ impl BytecodeCompiler {
                     }
 
                     let saved_pending_variable_name = self.pending_variable_name.clone();
+                    let saved_pending_variable_span = self.pending_variable_span;
                     self.pending_variable_name = assignment
                         .pattern
                         .as_identifier()
                         .map(|name| name.to_string());
+                    self.pending_variable_span = assignment.pattern.as_identifier_span();
                     let compile_result = self.compile_expr_for_reference_binding(&assignment.value);
                     self.pending_variable_name = saved_pending_variable_name;
+                    self.pending_variable_span = saved_pending_variable_span;
                     let ref_borrow = compile_result?;
                     // Store in local/module_binding/closure variable
                     self.compile_destructure_assignment(&assignment.pattern)?;
@@ -546,9 +607,7 @@ impl BytecodeCompiler {
         };
 
         // Push arg count and emit the builtin call
-        let count_const = self
-            .program
-            .add_constant(Constant::Int(arg_count as i64));
+        let count_const = self.program.add_constant(Constant::Int(arg_count as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count_const)),
@@ -729,7 +788,7 @@ impl BytecodeCompiler {
             }
 
             let for_expr = shape_ast::ast::ForExpr {
-                pattern: shape_ast::ast::Pattern::Identifier(cf.variable.clone()),
+                pattern: shape_ast::ast::Pattern::synthetic_identifier(cf.variable.clone()),
                 iterable: cf.iterable.clone(),
                 body: Box::new(Expr::Block(
                     shape_ast::ast::BlockExpr { items },
@@ -760,11 +819,10 @@ impl BytecodeCompiler {
         // top-level comptime-for outside a comptime block.
         let _ = cf;
         Err(ShapeError::SemanticError {
-            message:
-                "comptime-for unroll outside a comptime block is dormant pending the \
+            message: "comptime-for unroll outside a comptime block is dormant pending the \
                  phase-2c ComptimeExecutionResult / Literal-projection rebuild \
                  (ADR-006 §2.4 / §2.7.4)"
-                    .to_string(),
+                .to_string(),
             location: Some(self.span_to_source_location(span)),
         })
     }

@@ -50,7 +50,9 @@ pick(42)
 
 #[test]
 fn pm_24_non_exhaustive_enum_match_runs_when_matched() {
-    // Even with missing Blue variant, Red still matches the first arm
+    // Strict exhaustiveness: a match on `Color` that omits `Blue` is rejected at
+    // compile time regardless of which variant the call site supplies. The old
+    // "runs when matched" behavior (deferring the failure to runtime) is gone.
     let code = r#"
 enum Color { Red, Green, Blue }
 
@@ -62,13 +64,14 @@ function name(c: Color) -> string {
 }
 name(Color::Red)
 "#;
-    // This currently succeeds because Red matches, but Blue would fail at runtime
-    ShapeTest::new(code).expect_run_ok().expect_string("red");
+    ShapeTest::new(code)
+        .expect_run_err_contains("Non-exhaustive match on 'Color': missing variants Blue");
 }
 
 #[test]
 fn pm_24_non_exhaustive_enum_match_fails_at_runtime() {
-    // When the unmatched variant is actually used, runtime error occurs
+    // Strict exhaustiveness now rejects the non-exhaustive `match` at compile
+    // time, before any runtime "no arm matched" failure can occur.
     let code = r#"
 enum Color { Red, Green, Blue }
 
@@ -80,7 +83,8 @@ function name(c: Color) -> string {
 }
 name(Color::Blue)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("No match arm matched the value");
+    ShapeTest::new(code)
+        .expect_run_err_contains("Non-exhaustive match on 'Color': missing variants Blue");
 }
 
 // ============================================================================

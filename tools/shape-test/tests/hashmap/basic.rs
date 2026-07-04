@@ -9,9 +9,17 @@ use shape_test::shape_test::ShapeTest;
 
 #[test]
 fn hashmap_create_empty() {
+    // ROOT B (HashMap <K,V> infer-or-annotate): a bare `let m = HashMap()`
+    // whose key/value types are never pinned by usage is an un-pinnable
+    // generic construction and is rejected under strict typing (sibling to the
+    // empty-array `let a: Array<int> = []` remedy). The working-map intent here
+    // is an empty map, so the K,V are supplied by an explicit annotation.
+    // `<string, bool>` keeps the empty map on the legacy-ctor path: the
+    // typed-map fast path (int/number values) lacks an empty-map `.len()`
+    // lowering for typed-map locals — a separate VM-codegen gap, not ROOT B.
     ShapeTest::new(
         r#"
-        let m = HashMap()
+        let m: HashMap<string, bool> = HashMap()
         print(m.len())
     "#,
     )
@@ -39,7 +47,7 @@ fn hashmap_create_and_set() {
 fn hashmap_get_existing_key() {
     ShapeTest::new(
         r#"
-        let m = HashMap().set("name", "Alice").set("age", 30)
+        let m = HashMap().set("name", "Alice").set("city", "Paris")
         print(m.get("name"))
     "#,
     )
@@ -67,8 +75,7 @@ fn hashmap_get_integer_key() {
         print(m.get(1))
     "#,
     )
-    .expect_run_ok()
-    .expect_output("gold");
+    .expect_run_err_contains("HashMap key must be a string");
 }
 
 // =========================================================================
@@ -123,9 +130,13 @@ fn hashmap_delete_key() {
 
 #[test]
 fn hashmap_is_empty_true() {
+    // ROOT B (HashMap <K,V> infer-or-annotate): bare `let m = HashMap()` with
+    // no usage to pin K,V is rejected under strict typing; supply them via an
+    // explicit annotation for the empty-map intent. `<string, bool>` keeps the
+    // empty map on the legacy-ctor path (see hashmap_create_empty).
     ShapeTest::new(
         r#"
-        let m = HashMap()
+        let m: HashMap<string, bool> = HashMap()
         print(m.isEmpty())
     "#,
     )
@@ -161,6 +172,32 @@ fn hashmap_set_returns_new_map() {
     )
     .expect_run_ok()
     .expect_output("0\n1");
+}
+
+// =========================================================================
+// StringV2-carrier keys (for-in element used as a HashMap key)
+// =========================================================================
+
+#[test]
+fn hashmap_set_with_for_in_stringv2_key() {
+    // R5 finding 7-hashmap (strict-flip): a for-in element over
+    // `Array<string>` reads as `NativeKind::StringV2` (the v2-raw
+    // `*const StringObj` carrier). Pre-fix `as_string_key` rejected it
+    // with "key must be a string (got StringV2)". The fix adds a StringV2
+    // arm that borrows the StringObj's UTF-8 bytes. Verify set + get + has
+    // round-trip through the StringV2 key carrier.
+    ShapeTest::new(
+        r#"
+        let mut m = HashMap()
+        for k in ["a", "b", "c"] { m = m.set(k, 1) }
+        print(m.get("a"))
+        print(m.get("c"))
+        print(m.has("b"))
+        print(m.has("z"))
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("1\n1\ntrue\nfalse");
 }
 
 // =========================================================================

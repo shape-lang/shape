@@ -84,7 +84,9 @@ fn is_known_negative(path: &std::path::Path) -> bool {
 #[test]
 fn corpus_inventory_matches_audit_5_3_expected_layout() {
     // This part runs without the release binary — verifies the corpus
-    // shape on disk (audit §3 inventory: 50 hand-seeded + 3 negative).
+    // shape on disk. W13 audit §3 started at 50 hand-seeded + 3 negative;
+    // later corpus expansions are counted here explicitly so inventory drift
+    // does not masquerade as a semantic/convergence failure.
     let root = corpus_root();
     assert!(root.is_dir(), "corpus root missing: {}", root.display());
 
@@ -98,9 +100,17 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
         // added per audit v0.3-w16-2-c-empty-literal-audit.md §5.E.
         // Phase 4b Round 6 WS-1b W16.2-C residual — bare empty-array
         // accumulator construction (2026-05-21): c14_bare_accumulator.shape.
-        ("collections", 14),
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05):
+        // c15_array_trait_object.shape added (Array<dyn Trait> construction +
+        // index access + vtable method dispatch).
+        ("collections", 15),
         ("closures", 7),
-        ("patterns", 8),
+        // W88C Result/Option differential seeds (2026-07): m09_result_err,
+        // m10_option_question, m11_result_question, and
+        // m12_result_context_bangbang expand the positive patterns corpus.
+        // This is an expected inventory-only count change, not a hidden
+        // negative-corpus or convergence-semantics change.
+        ("patterns", 12),
         ("async", 5),
         ("generics", 8),
         ("fallthrough", 2),
@@ -123,7 +133,11 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
     // (c12_spread + c13_comprehension) → 53.
     // Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): total grows by
     // 1 (c14_bare_accumulator) → 54.
-    assert_eq!(total, 54, "audit §3 requires 54 hand-seeded total");
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05): total
+    // grows by 1 (c15_array_trait_object) → 55.
+    // W88C Result/Option differential seeds add 4 patterns entries
+    // (m09_result_err through m12_result_context_bangbang) → 59.
+    assert_eq!(total, 59, "current corpus inventory requires 59 hand-seeded total");
 
     // Audit §4.1 baseline negative-corpus inventory: a10 + c09 + c10 = 3
     // entries. W13.3 corpus surfaced 2 NEW divergence classes during the
@@ -200,9 +214,7 @@ fn corpus_all_seeds_converge_or_are_known_negative() {
 
 #[test]
 fn mutation_engine_produces_derived_seeds_for_a_base_corpus_seed() {
-    let base = corpus_root()
-        .join("arithmetic")
-        .join("a09_for_sum.shape");
+    let base = corpus_root().join("arithmetic").join("a09_for_sum.shape");
     assert!(base.is_file(), "base seed missing: {}", base.display());
     let source = std::fs::read_to_string(&base).unwrap();
     let cfg = MutationConfig {
@@ -220,7 +232,10 @@ fn mutation_engine_produces_derived_seeds_for_a_base_corpus_seed() {
     }
     // Determinism check.
     let derived_again = mutate_seed(&source, &cfg);
-    assert_eq!(derived, derived_again, "mutation engine must be deterministic");
+    assert_eq!(
+        derived, derived_again,
+        "mutation engine must be deterministic"
+    );
 }
 
 #[test]
@@ -245,7 +260,11 @@ fn minimizer_handles_a_base_not_high_signal_seed_correctly() {
     ));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let seed = tmp_dir.join("convergent.shape");
-    std::fs::write(&seed, "let mut sum = 0\nfor i in 0..10 { sum += i }\nprint(sum)\n").unwrap();
+    std::fs::write(
+        &seed,
+        "let mut sum = 0\nfor i in 0..10 { sum += i }\nprint(sum)\n",
+    )
+    .unwrap();
 
     let cfg = MinimizeConfig::new(
         tmp_dir.clone(),
@@ -273,8 +292,16 @@ fn minimizer_split_handles_multi_block_source_correctly() {
                print(f(2))\n\
                let trailing = 99\n";
     let blocks = shape_fuzz::minimizer::split_into_blocks(src);
-    assert!(blocks.len() >= 4, "expected >=4 blocks, got {}: {:?}", blocks.len(), blocks);
+    assert!(
+        blocks.len() >= 4,
+        "expected >=4 blocks, got {}: {:?}",
+        blocks.len(),
+        blocks
+    );
     // The fn block must remain intact (brace-balanced).
-    let fn_block = blocks.iter().find(|b| b.starts_with("fn f")).expect("fn block");
+    let fn_block = blocks
+        .iter()
+        .find(|b| b.starts_with("fn f"))
+        .expect("fn block");
     assert!(fn_block.ends_with("}"));
 }

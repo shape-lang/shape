@@ -44,9 +44,7 @@
 
 use shape_ast::ast::{TypeAnnotation, types::ImplBlock, types::TraitMember};
 use shape_ast::error::Result;
-use shape_value::value::{
-    ThunkSignature, VTable, VTableEntry, VTableEntryFlags, WrapTarget,
-};
+use shape_value::value::{ThunkSignature, VTable, VTableEntry, WrapTarget};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -89,29 +87,29 @@ impl BytecodeCompiler {
 
         // Build a method-name → declared signature map from the
         // trait's `Required`/`Default` members.
-        let mut trait_method_returns: HashMap<String, TypeAnnotation> =
-            HashMap::new();
-        let mut trait_method_self_args: HashMap<String, SmallVec<[u8; 4]>> =
-            HashMap::new();
-        let mut trait_method_generic_count: HashMap<String, u8> =
-            HashMap::new();
+        let mut trait_method_returns: HashMap<String, TypeAnnotation> = HashMap::new();
+        let mut trait_method_self_args: HashMap<String, SmallVec<[u8; 4]>> = HashMap::new();
+        let mut trait_method_generic_count: HashMap<String, u8> = HashMap::new();
         for member in &trait_def.members {
             let (mname, return_type, params, type_params) = match member {
-                TraitMember::Required(
-                    shape_ast::ast::types::TraitMemberSignature::Method {
-                        name,
-                        params,
-                        return_type,
-                        ..
-                    },
-                ) => (name.clone(), Some(return_type.clone()), Some(params.clone()), None),
+                TraitMember::Required(shape_ast::ast::types::TraitMemberSignature::Method {
+                    name,
+                    params,
+                    return_type,
+                    ..
+                }) => (
+                    name.clone(),
+                    Some(return_type.clone()),
+                    Some(params.clone()),
+                    None,
+                ),
                 TraitMember::Default(method) => (
                     method.name.clone(),
                     method.return_type.clone(),
                     None, // `MethodDef::params` is a different shape; we
-                          // only need the receiver-style params for
-                          // Self-arg detection, and required-method
-                          // declarations cover the common case.
+                    // only need the receiver-style params for
+                    // Self-arg detection, and required-method
+                    // declarations cover the common case.
                     method.type_params.clone(),
                 ),
                 _ => continue,
@@ -133,16 +131,14 @@ impl BytecodeCompiler {
                     }
                 }
                 if !self_positions.is_empty() {
-                    trait_method_self_args
-                        .insert(mname.clone(), self_positions);
+                    trait_method_self_args.insert(mname.clone(), self_positions);
                 }
             }
             // Detect method-generic parameter count.
             if let Some(tp) = type_params {
                 let n = tp.len();
                 if n > 0 {
-                    trait_method_generic_count
-                        .insert(mname.clone(), n.min(u8::MAX as usize) as u8);
+                    trait_method_generic_count.insert(mname.clone(), n.min(u8::MAX as usize) as u8);
                 }
             }
         }
@@ -225,14 +221,12 @@ impl BytecodeCompiler {
         let vtable = VTable {
             trait_names: vec![trait_basename.to_string()],
             concrete_type_id: 0, // not yet computed; round-2 uses
-                                  // `Arc::ptr_eq` on the vtable for
-                                  // identity per §Q25.C.2
+            // `Arc::ptr_eq` on the vtable for
+            // identity per §Q25.C.2
             methods,
         };
         let key = format!("{}::{}", trait_basename, type_name);
-        self.program
-            .trait_vtables
-            .insert(key, Arc::new(vtable));
+        self.program.trait_vtables.insert(key, Arc::new(vtable));
         Ok(())
     }
 }
@@ -259,21 +253,12 @@ pub(super) fn is_top_level_self(ann: &TypeAnnotation) -> bool {
 pub(super) fn has_nested_self(ann: &TypeAnnotation) -> bool {
     fn walk(ann: &TypeAnnotation, inside_generic: bool) -> bool {
         match ann {
-            TypeAnnotation::Basic(name) => {
-                inside_generic && (name == "Self")
-            }
-            TypeAnnotation::Reference(path) => {
-                inside_generic && (path.as_str() == "Self")
-            }
-            TypeAnnotation::Generic { args, .. } => {
-                args.iter().any(|a| walk(a, true))
-            }
-            TypeAnnotation::Tuple(items) => {
-                items.iter().any(|a| walk(a, true))
-            }
+            TypeAnnotation::Basic(name) => inside_generic && (name == "Self"),
+            TypeAnnotation::Reference(path) => inside_generic && (path.as_str() == "Self"),
+            TypeAnnotation::Generic { args, .. } => args.iter().any(|a| walk(a, true)),
+            TypeAnnotation::Tuple(items) => items.iter().any(|a| walk(a, true)),
             TypeAnnotation::Function { params, returns } => {
-                params.iter().any(|p| walk(&p.type_annotation, true))
-                    || walk(returns, true)
+                params.iter().any(|p| walk(&p.type_annotation, true)) || walk(returns, true)
             }
             TypeAnnotation::Array(inner) => walk(inner, true),
             _ => false,
@@ -297,9 +282,7 @@ pub(super) fn type_annotation_references_self(ann: &TypeAnnotation) -> bool {
 /// Returns `None` for non-dyn annotations.
 pub(crate) fn trait_name_from_annotation(ann: &TypeAnnotation) -> Option<&str> {
     match ann {
-        TypeAnnotation::Dyn(traits) if !traits.is_empty() => {
-            Some(traits[0].as_str())
-        }
+        TypeAnnotation::Dyn(traits) if !traits.is_empty() => Some(traits[0].as_str()),
         _ => None,
     }
 }
@@ -413,10 +396,7 @@ mod wrap_target_tests {
     #[test]
     fn result_of_self_yields_path_zero() {
         // `Result<Self, Error>` → wrap_targets = [{ path: [0] }]
-        let paths = run(&t_generic(
-            "Result",
-            vec![t_self(), t_concrete("Error")],
-        ));
+        let paths = run(&t_generic("Result", vec![t_self(), t_concrete("Error")]));
         assert_eq!(paths, vec![vec![0u8]]);
     }
 

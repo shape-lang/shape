@@ -149,11 +149,11 @@ fn test_complex_gcd_euclidean() {
 fn test_complex_accumulate_with_hashmap() {
     ShapeTest::new(
         r#"
-        let m = HashMap()
+        let m: HashMap<string, int> = HashMap()
             .set("apples", 3)
             .set("bananas", 5)
             .set("oranges", 2)
-        let total = m.get("apples") + m.get("bananas") + m.get("oranges")
+        let total = m.getOrDefault("apples", 0) + m.getOrDefault("bananas", 0) + m.getOrDefault("oranges", 0)
         total
     "#,
     )

@@ -116,40 +116,79 @@ fn parse_positional_op_chain(
 /// The precedence chain is:
 ///
 ///   null_coalesce -> context -> or -> and -> bitwise_or -> bitwise_xor
-///     -> bitwise_and -> comparison -> [range ->] additive -> shift
+///     -> bitwise_and -> comparison -> [range ->] shift -> additive
 ///     -> multiplicative -> exponential -> unary
+///
+/// (additive binds tighter than shift, matching the book's precedence table
+/// and standard C/Rust order — see fundamentals/operators.mdx.)
 ///
 /// The only difference between the range and no-range chains is that
 /// comparison delegates to `parse_range_expr` (which then delegates to
-/// additive) when ranges are allowed, and directly to `parse_additive_expr`
+/// shift) when ranges are allowed, and directly to `parse_shift_expr`
 /// when they are not.
 
 fn select_null_coalesce(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_null_coalesce_expr } else { parse_null_coalesce_expr_no_range }
+    if allow_range {
+        parse_null_coalesce_expr
+    } else {
+        parse_null_coalesce_expr_no_range
+    }
 }
 fn child_of_null_coalesce(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_context_expr } else { parse_context_expr_no_range }
+    if allow_range {
+        parse_context_expr
+    } else {
+        parse_context_expr_no_range
+    }
 }
 fn child_of_context(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_or_expr } else { parse_or_expr_no_range }
+    if allow_range {
+        parse_or_expr
+    } else {
+        parse_or_expr_no_range
+    }
 }
 fn child_of_or(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_and_expr } else { parse_and_expr_no_range }
+    if allow_range {
+        parse_and_expr
+    } else {
+        parse_and_expr_no_range
+    }
 }
 fn child_of_and(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_bitwise_or_expr } else { parse_bitwise_or_expr_no_range }
+    if allow_range {
+        parse_bitwise_or_expr
+    } else {
+        parse_bitwise_or_expr_no_range
+    }
 }
 fn child_of_bitwise_or(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_bitwise_xor_expr } else { parse_bitwise_xor_expr_no_range }
+    if allow_range {
+        parse_bitwise_xor_expr
+    } else {
+        parse_bitwise_xor_expr_no_range
+    }
 }
 fn child_of_bitwise_xor(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_bitwise_and_expr } else { parse_bitwise_and_expr_no_range }
+    if allow_range {
+        parse_bitwise_and_expr
+    } else {
+        parse_bitwise_and_expr_no_range
+    }
 }
 fn child_of_bitwise_and(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_comparison_expr } else { parse_comparison_expr_no_range }
+    if allow_range {
+        parse_comparison_expr
+    } else {
+        parse_comparison_expr_no_range
+    }
 }
 fn child_of_comparison(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
-    if allow_range { parse_range_expr } else { parse_additive_expr }
+    if allow_range {
+        parse_range_expr
+    } else {
+        parse_shift_expr
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -354,11 +393,21 @@ fn parse_assignment_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
 
 /// Parse null coalescing expression (a ?? b)
 pub fn parse_null_coalesce_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "null coalesce", BinaryOp::NullCoalesce, child_of_null_coalesce(true))
+    parse_binary_chain(
+        pair,
+        "null coalesce",
+        BinaryOp::NullCoalesce,
+        child_of_null_coalesce(true),
+    )
 }
 
 fn parse_null_coalesce_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "null coalesce", BinaryOp::NullCoalesce, child_of_null_coalesce(false))
+    parse_binary_chain(
+        pair,
+        "null coalesce",
+        BinaryOp::NullCoalesce,
+        child_of_null_coalesce(false),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -436,26 +485,56 @@ fn parse_and_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
 
 /// Parse bitwise OR expression (a | b)
 fn parse_bitwise_or_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "bitwise OR", BinaryOp::BitOr, child_of_bitwise_or(true))
+    parse_binary_chain(
+        pair,
+        "bitwise OR",
+        BinaryOp::BitOr,
+        child_of_bitwise_or(true),
+    )
 }
 fn parse_bitwise_or_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "bitwise OR", BinaryOp::BitOr, child_of_bitwise_or(false))
+    parse_binary_chain(
+        pair,
+        "bitwise OR",
+        BinaryOp::BitOr,
+        child_of_bitwise_or(false),
+    )
 }
 
 /// Parse bitwise XOR expression (a ^ b)
 fn parse_bitwise_xor_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "bitwise XOR", BinaryOp::BitXor, child_of_bitwise_xor(true))
+    parse_binary_chain(
+        pair,
+        "bitwise XOR",
+        BinaryOp::BitXor,
+        child_of_bitwise_xor(true),
+    )
 }
 fn parse_bitwise_xor_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "bitwise XOR", BinaryOp::BitXor, child_of_bitwise_xor(false))
+    parse_binary_chain(
+        pair,
+        "bitwise XOR",
+        BinaryOp::BitXor,
+        child_of_bitwise_xor(false),
+    )
 }
 
 /// Parse bitwise AND expression (a & b)
 fn parse_bitwise_and_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "bitwise AND", BinaryOp::BitAnd, child_of_bitwise_and(true))
+    parse_binary_chain(
+        pair,
+        "bitwise AND",
+        BinaryOp::BitAnd,
+        child_of_bitwise_and(true),
+    )
 }
 fn parse_bitwise_and_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
-    parse_binary_chain(pair, "bitwise AND", BinaryOp::BitAnd, child_of_bitwise_and(false))
+    parse_binary_chain(
+        pair,
+        "bitwise AND",
+        BinaryOp::BitAnd,
+        child_of_bitwise_and(false),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -642,20 +721,30 @@ pub fn parse_range_expr(pair: Pair<Rule>) -> Result<Expr> {
         Rule::range_op => {
             let kind = parse_range_op(&first);
             if let Some(end_pair) = inner.next() {
-                let end = parse_additive_expr(end_pair)?;
-                Ok(Expr::Range { start: None, end: Some(Box::new(end)), kind, span })
+                let end = parse_shift_expr(end_pair)?;
+                Ok(Expr::Range {
+                    start: None,
+                    end: Some(Box::new(end)),
+                    kind,
+                    span,
+                })
             } else {
-                Ok(Expr::Range { start: None, end: None, kind, span })
+                Ok(Expr::Range {
+                    start: None,
+                    end: None,
+                    kind,
+                    span,
+                })
             }
         }
-        Rule::additive_expr => {
-            let start = parse_additive_expr(first)?;
+        Rule::shift_expr => {
+            let start = parse_shift_expr(first)?;
             if let Some(next) = inner.next() {
                 match next.as_rule() {
                     Rule::range_op => {
                         let kind = parse_range_op(&next);
                         if let Some(end_pair) = inner.next() {
-                            let end = parse_additive_expr(end_pair)?;
+                            let end = parse_shift_expr(end_pair)?;
                             Ok(Expr::Range {
                                 start: Some(Box::new(start)),
                                 end: Some(Box::new(end)),
@@ -683,12 +772,16 @@ pub fn parse_range_expr(pair: Pair<Rule>) -> Result<Expr> {
                 Ok(start)
             }
         }
-        _ => parse_additive_expr(first),
+        _ => parse_shift_expr(first),
     }
 }
 
 fn parse_range_op(pair: &Pair<Rule>) -> RangeKind {
-    if pair.as_str() == "..=" { RangeKind::Inclusive } else { RangeKind::Exclusive }
+    if pair.as_str() == "..=" {
+        RangeKind::Inclusive
+    } else {
+        RangeKind::Exclusive
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -729,19 +822,29 @@ fn resolve_multiplicative_op(op_str: &str) -> Result<BinaryOp> {
     }
 }
 
-/// Parse additive expression (a + b, a - b)
-pub fn parse_additive_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_positional_op_chain(pair, "additive", parse_shift_expr, resolve_additive_op)
-}
-
 /// Parse shift expression (a << b, a >> b)
 pub fn parse_shift_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_positional_op_chain(pair, "shift", parse_multiplicative_expr, resolve_shift_op)
+    parse_positional_op_chain(pair, "shift", parse_additive_expr, resolve_shift_op)
+}
+
+/// Parse additive expression (a + b, a - b)
+pub fn parse_additive_expr(pair: Pair<Rule>) -> Result<Expr> {
+    parse_positional_op_chain(
+        pair,
+        "additive",
+        parse_multiplicative_expr,
+        resolve_additive_op,
+    )
 }
 
 /// Parse multiplicative expression (a * b, a / b, a % b)
 pub fn parse_multiplicative_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_positional_op_chain(pair, "multiplicative", parse_exponential_expr, resolve_multiplicative_op)
+    parse_positional_op_chain(
+        pair,
+        "multiplicative",
+        parse_exponential_expr,
+        resolve_multiplicative_op,
+    )
 }
 
 // ---------------------------------------------------------------------------

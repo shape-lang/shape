@@ -1,0 +1,7 @@
+fn id<T>(x: T) -> T { x }
+fn main() {
+    let a = id(5);
+    let r = a + 1.0;
+    print(r);
+}
+main();

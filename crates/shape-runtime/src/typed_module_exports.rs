@@ -71,6 +71,13 @@ pub enum ConcreteReturn {
     ArrayF64(Vec<f64>),
     /// Array of strings (compiles to `Array<string>`).
     ArrayString(Vec<String>),
+    /// Nested array of strings (compiles to `Array<Array<string>>`).
+    ///
+    /// This is a slot-level nested typed-array carrier:
+    /// `TypedArray<*const TypedArrayElem>` containing row-level
+    /// `TypedArray<*const StringObj>` values. It is intentionally distinct
+    /// from `ArrayHeapValue`, whose elements are `Arc<HeapValue>` payloads.
+    ArrayStringRows(Vec<Vec<Arc<String>>>),
     /// Array whose elements are heap-allocated typed values (Phase 2d
     /// Array cluster, 2026-05-07). Each element is an opaque
     /// `Arc<HeapValue>`; the body is responsible for ensuring all
@@ -260,6 +267,8 @@ pub enum ConcreteType {
     ArrayInt,
     ArrayNumber,
     ArrayString,
+    /// `Array<Array<string>>` backed by the v2 nested typed-array carrier.
+    ArrayStringRows,
     /// Array of heap-allocated typed values. The displayed type-name is
     /// caller-provided to keep the LSP surface readable
     /// (`Array<DataTable>`, `Array<Array<string>>`, etc.); element-kind
@@ -345,6 +354,7 @@ impl ConcreteType {
             ConcreteType::ArrayInt => "Array<int>".to_string(),
             ConcreteType::ArrayNumber => "Array<number>".to_string(),
             ConcreteType::ArrayString => "Array<string>".to_string(),
+            ConcreteType::ArrayStringRows => "Array<Array<string>>".to_string(),
             ConcreteType::ArrayHeapValue(s) => s.clone(),
             ConcreteType::Bytes => "Array<int>".to_string(),
             ConcreteType::HashMapStringString => "HashMap<string, string>".to_string(),
@@ -385,9 +395,7 @@ pub struct TypedModuleFunction {
     /// [`Self::arg_kinds`]) plus the `ModuleContext`; returns a
     /// `TypedReturn`.
     pub invoke: Arc<
-        dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-            + Send
-            + Sync,
+        dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String> + Send + Sync,
     >,
     /// Declared return type (used for LSP and consistency checks).
     pub return_type: ConcreteType,
@@ -413,9 +421,7 @@ pub struct TypedModuleAsyncFunction {
     /// `'static` future bounds. Receives raw `Vec<u64>` slot bits
     /// whose kinds match `Self::arg_kinds`.
     pub invoke: Arc<
-        dyn Fn(
-                Vec<u64>,
-            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+        dyn Fn(Vec<u64>) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
             + Send
             + Sync,
     >,

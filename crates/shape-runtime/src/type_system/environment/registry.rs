@@ -265,7 +265,7 @@ impl TypeRegistry {
         // Validate against trait definition if it exists
         // Clone required data out to avoid holding a borrow on self.traits
         if let Some(trait_def) = self.traits.get(trait_name) {
-            use shape_ast::ast::{TraitMemberSignature, TraitMember};
+            use shape_ast::ast::{TraitMember, TraitMemberSignature};
             let required_methods: Vec<String> = trait_def
                 .members
                 .iter()
@@ -483,7 +483,9 @@ impl TypeRegistry {
     /// Returns false in test mode without prelude, allowing the bytecode
     /// compiler to skip conversion validation when no stdlib impls exist.
     pub fn has_any_into_impls(&self) -> bool {
-        self.trait_impls.keys().any(|k| k.starts_with("Into::") || k.starts_with("TryInto::"))
+        self.trait_impls
+            .keys()
+            .any(|k| k.starts_with("Into::") || k.starts_with("TryInto::"))
     }
 
     /// Resolve an associated type: given a trait, an implementing type, and
@@ -537,6 +539,28 @@ impl TypeRegistry {
         self.enum_defs.get(name)
     }
 
+    /// Resolve a bare capitalized identifier in pattern position to the enum
+    /// that declares it as a **unit** variant. Mirrors
+    /// `TypeSchemaRegistry::enum_for_unit_variant` at the inference tier so
+    /// `match l { Red => … }` binds `Red` as a refutable variant pattern, not
+    /// a catch-all binder. Returns `None` when no enum declares `name` as a
+    /// unit variant, or when the name is ambiguous across two or more enums.
+    pub fn enum_for_unit_variant(&self, name: &str) -> Option<String> {
+        let mut found: Option<&str> = None;
+        for enum_def in self.enum_defs.values() {
+            let is_unit_variant = enum_def.members.iter().any(|m| {
+                m.name == name && matches!(m.kind, shape_ast::ast::EnumMemberKind::Unit { .. })
+            });
+            if is_unit_variant {
+                if found.is_some() && found != Some(enum_def.name.as_str()) {
+                    return None;
+                }
+                found = Some(enum_def.name.as_str());
+            }
+        }
+        found.map(|s| s.to_string())
+    }
+
     /// Register a record schema
     pub fn register_record_schema(&mut self, name: &str, schema: RecordSchema) {
         self.record_schemas.insert(name.to_string(), schema);
@@ -572,7 +596,7 @@ impl TypeRegistry {
 mod tests {
     use super::*;
     use shape_ast::ast::{
-        FunctionParam, TraitMemberSignature, Span, TraitDef, TraitMember, TypeAnnotation,
+        FunctionParam, Span, TraitDef, TraitMember, TraitMemberSignature, TypeAnnotation,
     };
 
     /// Helper: build a simple trait with one required method
@@ -1110,11 +1134,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// Helper: build a trait with supertraits
-    fn make_trait_with_supers(
-        name: &str,
-        methods: Vec<&str>,
-        super_traits: Vec<&str>,
-    ) -> TraitDef {
+    fn make_trait_with_supers(name: &str, methods: Vec<&str>, super_traits: Vec<&str>) -> TraitDef {
         TraitDef {
             name: name.to_string(),
             doc_comment: None,
@@ -1165,8 +1185,16 @@ mod tests {
     fn transitive_supertrait_names_work() {
         let mut reg = TypeRegistry::new();
         reg.define_trait(&make_trait("Base", vec!["base_method"]));
-        reg.define_trait(&make_trait_with_supers("Mid", vec!["mid_method"], vec!["Base"]));
-        reg.define_trait(&make_trait_with_supers("Top", vec!["top_method"], vec!["Mid"]));
+        reg.define_trait(&make_trait_with_supers(
+            "Mid",
+            vec!["mid_method"],
+            vec!["Base"],
+        ));
+        reg.define_trait(&make_trait_with_supers(
+            "Top",
+            vec!["top_method"],
+            vec!["Mid"],
+        ));
 
         let names = reg.get_transitive_supertrait_names("Top");
         assert!(names.contains(&"Mid".to_string()));

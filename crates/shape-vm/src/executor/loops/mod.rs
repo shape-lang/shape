@@ -37,17 +37,15 @@
 //! §2.7.4 — never papered over with a Bool-default fallback (the
 //! W-series rationalization §2.7.7 #9 names verbatim).
 //!
-//! `RowView` / `TypedTable` row materialization at `IterNext` requires
-//! the deleted `ValueWord::from_row_view` packed-tag carrier; the
-//! kinded redesign of the row-view payload is Phase 2c work
-//! (ADR-006 §2.7.4). Same disposition as the existing
-//! `executor/tests/table_iteration.rs` `todo!("phase-2c …")` markers.
+//! DataTable / TypedTable row materialization at `IterNext` produces an
+//! `Arc<TableViewData::RowView>` carried as `Ptr(HeapKind::TableView)`,
+//! the same kinded row carrier used by LoadCol* host-injected constants.
 
+use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::{LoopContext, VirtualMachine},
 };
-use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::datatable::DataTable;
 // V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the enum
 // was retired at ckpt-1 per W12-typed-array-data-deletion-audit §3.5 +
@@ -93,9 +91,7 @@ fn decode_iter_idx(bits: u64, kind: NativeKind) -> Result<i64, VMError> {
         return Ok(bits as i64);
     }
     match kind {
-        NativeKind::Float64 | NativeKind::NullableFloat64 => {
-            Ok(f64::from_bits(bits) as i64)
-        }
+        NativeKind::Float64 | NativeKind::NullableFloat64 => Ok(f64::from_bits(bits) as i64),
         NativeKind::Bool => Ok(bits as i64),
         _ => Err(VMError::TypeError {
             expected: "number",
@@ -117,6 +113,7 @@ impl VirtualMachine {
     pub(in crate::executor) fn exec_loops(
         &mut self,
         instruction: &Instruction,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
         use OpCode::*;
         match instruction.opcode {
@@ -124,8 +121,8 @@ impl VirtualMachine {
             LoopEnd => self.op_loop_end()?,
             Break => self.op_break()?,
             Continue => self.op_continue()?,
-            IterNext => self.op_iter_next()?,
-            IterDone => self.op_iter_done()?,
+            IterNext => self.op_iter_next(ctx)?,
+            IterDone => self.op_iter_done(ctx)?,
             _ => unreachable!(
                 "exec_loops called with non-loop opcode: {:?}",
                 instruction.opcode
@@ -208,10 +205,44 @@ impl VirtualMachine {
     /// raw bits per ADR-006 §2.7.13 / §2.7.16 typed-Arc dispatch label
     /// discipline — never `slot.as_heap_value()` (wrong-type cast under
     /// the 5-arm receiver-recovery soundness rule).
-    pub(in crate::executor) fn op_iter_done(&mut self) -> Result<(), VMError> {
+    pub(in crate::executor) fn op_iter_done(
+        &mut self,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         let (idx_bits, idx_kind) = self.pop_kinded()?;
         let (iter_bits, iter_kind) = self.pop_kinded()?;
         let idx = decode_iter_idx(idx_bits, idx_kind)?;
+
+        // Wave 1b SEAM C (2026-06-15): lazy `Arc<IteratorState>` carrier.
+        // `for x in arr.iter()` / `for x in someIterator` — the iterator
+        // pipeline (source + map/filter/take/skip/enumerate/chain transforms)
+        // is driven ONCE through the SEAM B `materialize_yields` terminal
+        // driver and memoized on the `IteratorState`; `done` is a positional
+        // length check against the materialized yield vec. The slot bits are
+        // `Arc::into_raw(Arc<IteratorState>)` per ADR-006 §2.7.16 / Q17;
+        // recover by reconstruct + clone-share + restore (the canonical
+        // receiver-recovery pattern, see `iterator_methods::clone_iterator_arc`).
+        if iter_kind == NativeKind::Ptr(HeapKind::Iterator) {
+            // SAFETY: per `KindedSlot::from_iterator`, Iterator slot bits are
+            // `Arc::into_raw(Arc<IteratorState>)` and the slot owns one share.
+            // Reconstruct, clone (bump), restore so the popped slot's share is
+            // retired by `drop_with_kind` at the bottom without a double-free.
+            let arc = unsafe {
+                Arc::<shape_value::iterator_state::IteratorState>::from_raw(
+                    iter_bits as *const shape_value::iterator_state::IteratorState,
+                )
+            };
+            let state = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            let drive = crate::executor::objects::iterator_methods::drive_for_loop_yields(
+                self, &state, ctx,
+            );
+            drop_with_kind(idx_bits, idx_kind);
+            drop_with_kind(iter_bits, iter_kind);
+            let yields = drive?;
+            let done = idx < 0 || idx as usize >= yields.len();
+            return self.push_kinded(done as u64, NativeKind::Bool);
+        }
 
         // v2 typed array fast path: `as_v2_typed_array(bits, kind)` returns
         // Some only when `kind == Ptr(HeapKind::TypedArray)` (r5c-2-β-CKPT-C
@@ -250,12 +281,10 @@ impl VirtualMachine {
             // typed-array iteration via parallel `Ptr(HeapKind::
             // TypedArrayF64)` / `Ptr(HeapKind::TypedArrayI64)` arms
             // (downstream wave).
-            NativeKind::Ptr(HeapKind::TypedArray) => {
-                Err(ckpt4_surface(
-                    "op_iter_done",
-                    "iteration over legacy Arc<TypedArrayData> carrier",
-                ))
-            }
+            NativeKind::Ptr(HeapKind::TypedArray) => Err(ckpt4_surface(
+                "op_iter_done",
+                "iteration over legacy Arc<TypedArrayData> carrier",
+            )),
             NativeKind::Ptr(HeapKind::String) | NativeKind::String => {
                 // SAFETY: per `KindedSlot::from_string_arc` / `String`
                 // construction contract, slot bits are
@@ -276,9 +305,8 @@ impl VirtualMachine {
             NativeKind::Ptr(HeapKind::TableView) => {
                 // SAFETY: per `ValueSlot::from_table_view`-style contract,
                 // slot bits are `Arc::into_raw(Arc<TableViewData>)`.
-                let arc = unsafe {
-                    Arc::<TableViewData>::from_raw(iter_bits as *const TableViewData)
-                };
+                let arc =
+                    unsafe { Arc::<TableViewData>::from_raw(iter_bits as *const TableViewData) };
                 let result = match arc.as_ref() {
                     TableViewData::TypedTable { table, .. } => {
                         Ok(idx < 0 || idx as usize >= table.row_count())
@@ -310,15 +338,54 @@ impl VirtualMachine {
             // Per playbook §7 #4: legacy `HeapValue::Array` / `Range` /
             // `Iterator` variants were deleted from the heap layout
             // (post-§2.7.6 typed-Arc payload migration). Iteration over
-            // those shapes is Phase 2c work — the kinded carrier for
-            // ranges + the boxed-Vec `Array` payload both need redesign.
-            // Surface, do not invent a Bool-default fallback (§2.7.7 #9).
-            _ => Err(VMError::NotImplemented(format!(
+            // unsupported heap carriers remains Phase 2c work — the
+            // kinded carrier for ranges + the boxed-Vec `Array` payload
+            // both need redesign. Surface, do not invent a Bool-default
+            // fallback (§2.7.7 #9).
+            NativeKind::Ptr(
+                HeapKind::TypedObject
+                | HeapKind::Closure
+                | HeapKind::Decimal
+                | HeapKind::BigInt
+                | HeapKind::Future
+                | HeapKind::TaskGroup
+                | HeapKind::Temporal
+                | HeapKind::Content
+                | HeapKind::Instant
+                | HeapKind::IoHandle
+                | HeapKind::NativeScalar
+                | HeapKind::NativeView
+                | HeapKind::Char
+                | HeapKind::FilterExpr
+                | HeapKind::Reference
+                | HeapKind::SharedCell
+                | HeapKind::HashSet
+                | HeapKind::Iterator
+                | HeapKind::Deque
+                | HeapKind::Channel
+                | HeapKind::PriorityQueue
+                | HeapKind::Range
+                | HeapKind::Result
+                | HeapKind::Option
+                | HeapKind::TraitObject
+                | HeapKind::Mutex
+                | HeapKind::Atomic
+                | HeapKind::Lazy
+                | HeapKind::ModuleFn
+                | HeapKind::Matrix
+                | HeapKind::MatrixSlice,
+            ) => Err(VMError::NotImplemented(format!(
                 "op_iter_done SURFACE: iter_kind={:?} not supported as iterator \
                  in the kinded API (legacy Array/Range/Iterator HeapValue \
                  variants deleted) — phase-2c, see ADR-006 §2.7.4",
                 iter_kind
             ))),
+            // Known scalar non-iterators are not missing host-boundary
+            // carriers; they are ordinary type errors.
+            _ => Err(VMError::TypeError {
+                expected: "table, table view, string, hashmap, or iterator",
+                got: "scalar",
+            }),
         };
 
         // Retire both popped shares. Idx kind has no heap payload; iter
@@ -354,10 +421,51 @@ impl VirtualMachine {
     ///
     /// Both popped shares (`iter`, `idx`) are retired with `drop_with_kind`
     /// before return; the pushed element owns its own retained share.
-    pub(in crate::executor) fn op_iter_next(&mut self) -> Result<(), VMError> {
+    pub(in crate::executor) fn op_iter_next(
+        &mut self,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         let (idx_bits, idx_kind) = self.pop_kinded()?;
         let (iter_bits, iter_kind) = self.pop_kinded()?;
         let idx = decode_iter_idx(idx_bits, idx_kind)?;
+
+        // Wave 1b SEAM C (2026-06-15): lazy `Arc<IteratorState>` carrier —
+        // positional element read from the memoized yield vec (filled by the
+        // matching `op_iter_done` earlier in the same iteration; re-driven
+        // here only if `op_iter_done` was skipped). The loop body owns the
+        // pushed element via a share-bumped `KindedSlot::clone`; the memo
+        // retains its owned share until the `Arc<IteratorState>` drops.
+        if iter_kind == NativeKind::Ptr(HeapKind::Iterator) {
+            // SAFETY: same `Arc::into_raw(Arc<IteratorState>)` contract as
+            // op_iter_done — reconstruct, clone-share, restore.
+            let arc = unsafe {
+                Arc::<shape_value::iterator_state::IteratorState>::from_raw(
+                    iter_bits as *const shape_value::iterator_state::IteratorState,
+                )
+            };
+            let state = Arc::clone(&arc);
+            let _ = Arc::into_raw(arc);
+            let drive = crate::executor::objects::iterator_methods::drive_for_loop_yields(
+                self, &state, ctx,
+            );
+            drop_with_kind(idx_bits, idx_kind);
+            drop_with_kind(iter_bits, iter_kind);
+            let yields = drive?;
+            // Out-of-range: push the §2 sentinel (zero bits + Bool kind),
+            // mirroring the v2-typed-array past-end arm. `op_iter_done` gates
+            // the loop, so the body never observes this in practice.
+            if idx < 0 || idx as usize >= yields.len() {
+                return self.push_kinded(Self::NONE_BITS, NativeKind::Bool);
+            }
+            // Share-bumped clone — the loop body owns one share; the memo keeps
+            // its own. `push_kinded` adopts the cloned slot's owned bits, so
+            // `forget` the local handle to avoid releasing the transferred
+            // share (it now lives on the VM stack under the parallel-kind track).
+            let elem = yields[idx as usize].clone();
+            let (bits, kind) = (elem.raw(), elem.kind);
+            std::mem::forget(elem);
+            return self.push_kinded(bits, kind);
+        }
 
         // v2 typed array fast path. Element kind from `view.elem_type`
         // per playbook §2 (capture per element from the iterator's
@@ -367,7 +475,7 @@ impl VirtualMachine {
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(iter_bits, iter_kind)
         {
             use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
-            use shape_value::v2::typed_array::TypedArray;
+            use shape_value::v2::typed_array::{CallableArrayElem, TypedArray};
             // Out-of-range push the §2 sentinel (zero bits + Bool kind).
             if idx < 0 || idx as u32 >= view.len {
                 drop_with_kind(idx_bits, idx_kind);
@@ -450,7 +558,8 @@ impl VirtualMachine {
                     use shape_value::v2::decimal_obj::DecimalObj;
                     use shape_value::v2::refcount::v2_retain;
                     let arr = view.ptr as *const TypedArray<*const DecimalObj>;
-                    let elem_ptr = unsafe { TypedArray::<*const DecimalObj>::get_unchecked(arr, i) };
+                    let elem_ptr =
+                        unsafe { TypedArray::<*const DecimalObj>::get_unchecked(arr, i) };
                     unsafe { v2_retain(&(*elem_ptr).header) };
                     self.push_kinded(elem_ptr as u64, NativeKind::DecimalV2)
                 }
@@ -461,14 +570,46 @@ impl VirtualMachine {
                     use shape_value::heap_value::TypedObjectStorage;
                     use shape_value::v2::refcount::v2_retain;
                     let arr = view.ptr as *const TypedArray<*const TypedObjectStorage>;
-                    let elem_ptr = unsafe {
-                        TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, i)
-                    };
+                    let elem_ptr =
+                        unsafe { TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, i) };
                     unsafe { v2_retain(&(*elem_ptr).header) };
-                    self.push_kinded(
-                        elem_ptr as u64,
-                        NativeKind::Ptr(HeapKind::TypedObject),
-                    )
+                    self.push_kinded(elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
+                }
+                // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+                // `for t in arr` where arr: Array<dyn Trait>. Retain per-element
+                // so the loop body owns a valid TraitObject share; push with
+                // `Ptr(HeapKind::TraitObject)` (DynMethodCall dispatches on it).
+                V2ElemType::TraitObject => {
+                    use shape_value::heap_value::TraitObjectStorage;
+                    use shape_value::v2::refcount::v2_retain;
+                    let arr = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+                    let elem_ptr =
+                        unsafe { TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, i) };
+                    unsafe { v2_retain(&(*elem_ptr).header) };
+                    self.push_kinded(elem_ptr as u64, NativeKind::Ptr(HeapKind::TraitObject))
+                }
+                // Construction strict-typing close (2026-06-05) — nested array
+                // iteration (`for row in matrix`). Retain the inner array's
+                // on-header refcount and push with the same carrier kind the
+                // outer array uses.
+                V2ElemType::TypedArray => {
+                    use shape_value::v2::refcount::v2_retain;
+                    use shape_value::v2::typed_array::TypedArrayElem;
+                    let arr = view.ptr as *const TypedArray<*const TypedArrayElem>;
+                    let elem_ptr =
+                        unsafe { TypedArray::<*const TypedArrayElem>::get_unchecked(arr, i) };
+                    unsafe { v2_retain(&(*elem_ptr).header) };
+                    self.push_kinded(elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                }
+                // W22 callable-array element carrier. Iteration produces the
+                // stored callable shape exactly (`Ptr(Closure)`, `UInt64`
+                // function id, or `Ptr(ModuleFn)`) and retains closure shares
+                // so the loop body owns the pushed callable slot.
+                V2ElemType::Callable => {
+                    let arr = view.ptr as *const TypedArray<CallableArrayElem>;
+                    let elem = unsafe { TypedArray::<CallableArrayElem>::get_unchecked(arr, i) };
+                    unsafe { elem.retain() };
+                    self.push_kinded(elem.bits, elem.native_kind())
                 }
             };
             drop_with_kind(idx_bits, idx_kind);
@@ -512,29 +653,51 @@ impl VirtualMachine {
                 result
             }
             NativeKind::Ptr(HeapKind::DataTable) => {
-                // Phase-2c surface: DataTable row materialization at
-                // `IterNext` used the deleted `ValueWord::from_row_view`
-                // packed-tag carrier; the kinded redesign of the row-view
-                // payload is pending. Same disposition as
-                // `executor/tests/table_iteration.rs` `todo!("phase-2c …")`
-                // markers.
-                Err(VMError::NotImplemented(
-                    "op_iter_next SURFACE: DataTable row materialization \
-                     — phase-2c, see ADR-006 §2.7.4 \
-                     (RowView carrier pending kinded redesign)"
-                        .to_string(),
-                ))
+                // SAFETY: slot bits are `Arc::into_raw(Arc<DataTable>)`.
+                let arc = unsafe { Arc::<DataTable>::from_raw(iter_bits as *const DataTable) };
+                let result = if idx < 0 || idx as usize >= arc.row_count() {
+                    self.push_kinded(Self::NONE_BITS, NativeKind::Bool)
+                } else {
+                    let tv = Arc::new(TableViewData::RowView {
+                        schema_id: arc.schema_id().unwrap_or(0) as u64,
+                        table: Arc::clone(&arc),
+                        row_idx: idx as usize,
+                    });
+                    let bits = Arc::into_raw(tv) as u64;
+                    self.push_kinded(bits, NativeKind::Ptr(HeapKind::TableView))
+                };
+                let _ = Arc::into_raw(arc);
+                result
             }
             NativeKind::Ptr(HeapKind::TableView) => {
-                // Phase-2c surface: TableView row materialization at
-                // `IterNext` used the deleted `ValueWord::from_row_view`
-                // packed-tag carrier. Same disposition as DataTable.
-                Err(VMError::NotImplemented(
-                    "op_iter_next SURFACE: TableView row materialization \
-                     — phase-2c, see ADR-006 §2.7.4 \
-                     (RowView carrier pending kinded redesign)"
-                        .to_string(),
-                ))
+                // SAFETY: slot bits are `Arc::into_raw(Arc<TableViewData>)`.
+                let arc =
+                    unsafe { Arc::<TableViewData>::from_raw(iter_bits as *const TableViewData) };
+                let result = match arc.as_ref() {
+                    TableViewData::TypedTable { schema_id, table } => {
+                        if idx < 0 || idx as usize >= table.row_count() {
+                            self.push_kinded(Self::NONE_BITS, NativeKind::Bool)
+                        } else {
+                            let tv = Arc::new(TableViewData::RowView {
+                                schema_id: *schema_id,
+                                table: Arc::clone(table),
+                                row_idx: idx as usize,
+                            });
+                            let bits = Arc::into_raw(tv) as u64;
+                            self.push_kinded(bits, NativeKind::Ptr(HeapKind::TableView))
+                        }
+                    }
+                    // Phase-2c surface: RowView / ColumnRef / IndexedTable
+                    // iteration semantics weren't part of the kinded
+                    // for-loop redesign. ADR-006 §2.7.4.
+                    _ => Err(VMError::NotImplemented(
+                        "op_iter_next SURFACE: TableViewData::{RowView,ColumnRef,\
+                         IndexedTable} iteration — phase-2c, see ADR-006 §2.7.4"
+                            .to_string(),
+                    )),
+                };
+                let _ = Arc::into_raw(arc);
+                result
             }
             NativeKind::Ptr(HeapKind::HashMap) => {
                 // Phase-2c surface: HashMap iteration yields a

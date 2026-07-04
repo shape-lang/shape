@@ -3,6 +3,7 @@
 //! Migrated from shape-vm stress_02_arithmetic.rs — addition, subtraction,
 //! and negation sections.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =====================================================================
@@ -206,15 +207,18 @@ x + y",
     .expect_number(9007199254741000.0);
 }
 
-/// Verifies large integer overflow multiply produces a numeric result.
+/// i64 multiply overflow is a structured RUNTIME error (THE RULE, user
+/// 2026-06-01 / numeric-conversion D3) — never a silent wrap and never a
+/// silent f64 promotion. `4503599627370496^2` (= 2^104) overflows i64.
+/// Pre-rule this either wrapped or promoted to f64; now it must error.
 #[test]
-fn overflow_mul_promotes_to_float() {
+fn overflow_mul_is_runtime_error() {
     ShapeTest::new(
         "let x = 4503599627370496
 let y = 4503599627370496
 x * y",
     )
-    .expect_run_ok();
+    .expect_run_err();
 }
 
 /// Verifies large integer overflow subtract produces a numeric result.

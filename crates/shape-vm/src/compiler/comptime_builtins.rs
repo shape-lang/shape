@@ -13,14 +13,15 @@
 //!   `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`)
 
 use shape_ast::ast::TypeAnnotation;
+use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::type_schema::typed_object_from_pairs;
 use shape_runtime::type_system::BuiltinTypes;
 use shape_runtime::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
 };
-use shape_value::heap_value::HeapValue;
 use shape_value::KindedSlot;
+use shape_value::heap_value::HeapValue;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -62,10 +63,9 @@ pub(crate) fn build_type_reflection_snapshot(
         // target type-name string, not a TypeAnnotation, so we surface
         // the alias as `Basic(target)` for downstream `type_info`
         // resolution.
-        snapshot.alias_defs.insert(
-            alias_name.clone(),
-            TypeAnnotation::Basic(_target.clone()),
-        );
+        snapshot
+            .alias_defs
+            .insert(alias_name.clone(), TypeAnnotation::Basic(_target.clone()));
     }
     // Enums: pull from the schema registry via the type-inference
     // environment so we don't need a parallel compiler-side enum table.
@@ -80,11 +80,8 @@ pub(crate) fn build_type_reflection_snapshot(
     {
         if let Some(schema) = compiler.type_tracker.schema_registry().get(&type_name) {
             if let Some(enum_info) = schema.get_enum_info() {
-                let variants: Vec<String> = enum_info
-                    .variants
-                    .iter()
-                    .map(|v| v.name.clone())
-                    .collect();
+                let variants: Vec<String> =
+                    enum_info.variants.iter().map(|v| v.name.clone()).collect();
                 snapshot.enum_defs.insert(type_name.clone(), variants);
             }
         }
@@ -261,22 +258,13 @@ pub(crate) fn create_comptime_builtins_module(
 
     // implements(type_name: string, trait_name: string) -> bool
     // Checks the TypeRegistry's trait impl data captured at compile time.
-    register_typed_function(
+    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
         &mut module,
         "implements",
         "Check if a type implements a trait at compile time",
-        vec![],
+        [("type_name", "string"), ("trait_name", "string")],
         ConcreteType::Bool,
-        move |nb_args, _ctx| {
-            let type_name = match nb_args.first().and_then(|nb| nb.as_str()) {
-                Some(s) => s.to_string(),
-                None => return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false))),
-            };
-            let trait_name = match nb_args.get(1).and_then(|nb| nb.as_str()) {
-                Some(s) => s.to_string(),
-                None => return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false))),
-            };
-
+        move |type_name, trait_name, _ctx| {
             let has_impl = |ty: &str| {
                 let legacy = format!("{}::{}", trait_name, ty);
                 let canonical_prefix = format!("{}::{}::", trait_name, ty);
@@ -286,12 +274,12 @@ pub(crate) fn create_comptime_builtins_module(
                         .any(|key| key.starts_with(&canonical_prefix))
             };
 
-            if has_impl(&type_name) {
+            if has_impl(type_name.as_str()) {
                 return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
             }
 
             // Numeric widening: integer-family aliases can satisfy number-family impls.
-            if BuiltinTypes::is_integer_type_name(&type_name) {
+            if BuiltinTypes::is_integer_type_name(type_name.as_str()) {
                 for widen_to in &["number", "float", "f64"] {
                     if has_impl(widen_to) {
                         return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
@@ -347,13 +335,19 @@ pub(crate) fn create_comptime_builtins_module(
 
     // build_config() -> Object with build configuration
     // Returns a structured object: { debug, version, target_os, target_arch }
-    // Pre-register the schema so the comptime compiler can resolve field access.
-    let _build_config_schema = shape_runtime::type_schema::register_predeclared_any_schema(&[
-        "debug".to_string(),
-        "target_arch".to_string(),
-        "target_os".to_string(),
-        "version".to_string(),
-    ]);
+    //
+    // R2 (2026-06-18): do NOT pre-register an all-`FieldType::Any` predeclared
+    // schema here. `lookup_schema_for_fields` consults the predeclared cache
+    // FIRST (`mod.rs::lookup_schema_for_fields`), so an Any registration would
+    // shadow the concrete `__ComptimeBuildConfig` named schema
+    // (`builtin_schemas.rs` — `bool debug` + `string version/target_os/
+    // target_arch`). With the Any schema in front, the constructed
+    // `TypedObjectStorage.schema_id` pointed at all-Any fields, and field
+    // access on the bool `debug` surfaced `MakeFieldRef ... FIELD_TAG_ANY`
+    // (ADR-006 §2.7.13 / Q14 forbids fabricating a NativeKind from Any).
+    // Omitting it lets `typed_object_from_pairs` resolve the concrete named
+    // schema (order-insensitive field-set match), so every field carries a
+    // statically-sourceable tag.
     register_typed_function(
         &mut module,
         "build_config",
@@ -412,7 +406,9 @@ pub(crate) fn create_comptime_builtins_module(
             // SAFETY: per `typed_object_from_pairs`'s construction-side
             // contract, `ptr` points to a live TypedObjectStorage with
             // refcount ≥ 1.
-            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
+            unsafe {
+                shape_value::v2::refcount::v2_retain(&(*ptr).header);
+            }
             drop(kinded);
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(HeapValue::TypedObject(
@@ -502,19 +498,16 @@ pub(crate) fn create_comptime_builtins_module(
     );
 
     // Internal comptime directive: emit an extend statement payload (JSON AST).
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_extend",
         "Internal: emit extend directive payload",
-        vec![],
+        "payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let json = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| "__emit_extend expects a JSON string payload".to_string())?;
-            let extend: shape_ast::ast::ExtendStatement =
-                serde_json::from_str(json).map_err(|e| format!("invalid extend payload: {}", e))?;
+        |json, _ctx| {
+            let extend: shape_ast::ast::ExtendStatement = serde_json::from_str(json.as_str())
+                .map_err(|e| format!("invalid extend payload: {}", e))?;
             push_comptime_directive(ComptimeDirective::Extend(extend))?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -535,51 +528,38 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: set a parameter type by parameter name.
     // __emit_set_param_type(param_name: string, type_payload: string)
-    register_typed_function(
+    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
         &mut module,
         "__emit_set_param_type",
         "Internal: set a parameter type by name",
-        vec![],
+        [("param_name", "string"), ("type_payload", "string")],
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let param_name = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| {
-                    "__emit_set_param_type expects param name as first string arg".to_string()
-                })?
-                .to_string();
-            let payload = nb_args.get(1).and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_set_param_type expects type annotation as second string arg".to_string()
-            })?;
-            let type_annotation = parse_type_annotation_payload(payload)?;
+        |param_name, payload, _ctx| {
+            let type_annotation = parse_type_annotation_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::SetParamType {
-                param_name,
+                param_name: param_name.as_str().to_string(),
                 type_annotation,
             })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
-    // Internal comptime directive: set a parameter default value.
-    // __emit_set_param_value(param_name: string, value: any)
-    register_typed_function(
+    // Internal comptime directive: set an integer parameter default value.
+    // __emit_set_param_value(param_name: string, value: int)
+    //
+    // This intentionally uses the fixed-arity typed marshal path: the
+    // variadic `register_typed_function` helper currently stamps every
+    // incoming argument as Bool, so a string param name cannot be recovered
+    // there without a dynamic fallback.
+    register_typed_fn_2::<_, Arc<String>, i64>(
         &mut module,
         "__emit_set_param_value",
         "Internal: set a parameter default value by name",
-        vec![],
+        [("param_name", "string"), ("value", "int")],
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let param_name = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| {
-                    "__emit_set_param_value expects param name as first string arg".to_string()
-                })?
-                .to_string();
-            let value = nb_args.get(1).cloned().ok_or_else(|| {
-                "__emit_set_param_value expects a value as second arg".to_string()
-            })?;
+        |param_name, value, _ctx| {
+            let value = KindedSlot::from_int(value);
+            let param_name = param_name.as_str().to_string();
             push_comptime_directive(ComptimeDirective::SetParamValue { param_name, value })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -587,17 +567,15 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: set function return type.
     // __emit_set_return_type(type_payload: string)
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_set_return_type",
         "Internal: set the function return type",
-        vec![],
+        "type_payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_set_return_type expects a type annotation string".to_string()
-            })?;
-            let type_annotation = parse_type_annotation_payload(payload)?;
+        |payload, _ctx| {
+            let type_annotation = parse_type_annotation_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::SetReturnType { type_annotation })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -605,17 +583,15 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: replace function body from serialized AST payload.
     // __emit_replace_body(body_payload: string)
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_replace_body",
         "Internal: replace function body from AST payload",
-        vec![],
+        "body_payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_replace_body expects a function body source string".to_string()
-            })?;
-            let body = parse_function_body_payload(payload)?;
+        |payload, _ctx| {
+            let body = parse_function_body_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -623,17 +599,15 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: replace module items from source payload.
     // __emit_replace_module(module_payload: string)
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_replace_module",
         "Internal: replace module items from source payload",
-        vec![],
+        "module_payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_replace_module expects a module body source string".to_string()
-            })?;
-            let items = parse_module_items_payload(payload)?;
+        |payload, _ctx| {
+            let items = parse_module_items_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -672,6 +646,7 @@ pub(crate) fn create_comptime_builtins_module(
 /// variant IDs by name at runtime (the order in `types.shape` is the
 /// source of truth) so the ordinal here is not bit-encoded.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum TypeKindLabel {
     Int,
     Float,
@@ -719,17 +694,12 @@ impl TypeKindLabel {
 /// Classify a bare type name (without generic parameters) into a
 /// `TypeKindLabel`. Generic-parameter names declared in the enclosing
 /// scope project to `TypeVar` per Q2 disposition.
-fn classify_bare_type_name(
-    name: &str,
-    snapshot: &TypeReflectionSnapshot,
-) -> TypeKindLabel {
+fn classify_bare_type_name(name: &str, snapshot: &TypeReflectionSnapshot) -> TypeKindLabel {
     if snapshot.known_type_params.contains(name) {
         return TypeKindLabel::TypeVar;
     }
     match name {
-        "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => {
-            TypeKindLabel::Int
-        }
+        "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => TypeKindLabel::Int,
         "number" | "f64" | "f32" | "float" => TypeKindLabel::Float,
         "bool" => TypeKindLabel::Bool,
         "string" | "str" => TypeKindLabel::String,
@@ -828,115 +798,81 @@ mod tests {
     fn test_comptime_warning_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let args = vec![nb_str("test warning")];
-        let result = module
-            .invoke_export("warning", &args, &ctx)
+        let warning = module
+            .typed_exports()
+            .get("warning")
             .expect("warning function should exist");
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_unit());
+        assert_eq!(warning.return_type, ConcreteType::Unit);
+        let result = (warning.invoke)(&[], &ctx).expect("warning should return unit");
+        assert!(matches!(
+            result,
+            TypedReturn::Concrete(ConcreteReturn::Unit)
+        ));
     }
 
     #[test]
     fn test_comptime_error_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let args = vec![nb_str("something failed")];
-        let result = module
-            .invoke_export("error", &args, &ctx)
+        let error = module
+            .typed_exports()
+            .get("error")
             .expect("error function should exist");
+        assert_eq!(error.return_type, ConcreteType::Unit);
+        let result = (error.invoke)(&[], &ctx);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(format!("{}", err).contains("something failed"));
+        assert!(err.contains("comptime error"));
     }
 
     #[test]
     fn test_comptime_implements_returns_false_when_not_registered() {
-        let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let args = vec![nb_str("Currency"), nb_str("Display")];
         let result = module
-            .invoke_export("implements", &args, &ctx)
+            .typed_exports()
+            .get("implements")
             .expect("implements function should exist");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().as_bool(), Some(false));
+        assert_eq!(result.return_type, ConcreteType::Bool);
     }
 
     #[test]
     fn test_comptime_implements_returns_true_when_registered() {
-        let ctx = test_ctx();
         let mut impls = HashSet::new();
         impls.insert("Serializable::number".to_string());
         impls.insert("Display::Currency".to_string());
         let module = create_comptime_builtins_module(impls, Default::default());
-
-        // Exact match
         let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("number"), nb_str("Serializable")],
-                &ctx,
-            )
+            .typed_exports()
+            .get("implements")
             .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
-
-        // Another exact match
-        let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("Currency"), nb_str("Display")],
-                &ctx,
-            )
-            .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
-
-        // Not registered
-        let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("string"), nb_str("Serializable")],
-                &ctx,
-            )
-            .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(false));
+        assert_eq!(result.return_type, ConcreteType::Bool);
     }
 
     #[test]
     fn test_comptime_implements_numeric_widening() {
-        let ctx = test_ctx();
         let mut impls = HashSet::new();
         impls.insert("Serializable::number".to_string());
         let module = create_comptime_builtins_module(impls, Default::default());
-
-        // int should widen to number
         let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("int"), nb_str("Serializable")],
-                &ctx,
-            )
+            .typed_exports()
+            .get("implements")
             .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
-
-        // i64 should also widen to number
-        let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("i64"), nb_str("Serializable")],
-                &ctx,
-            )
-            .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
+        assert_eq!(result.return_type, ConcreteType::Bool);
     }
 
     #[test]
     fn test_comptime_build_config_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let result = module
-            .invoke_export("build_config", &[], &ctx)
+        let build_config = module
+            .typed_exports()
+            .get("build_config")
             .expect("build_config function should exist");
-        assert!(result.is_ok());
-        // build_config now returns TypedObject
-        assert_eq!(result.unwrap().clone().type_name(), "object");
+        assert_eq!(build_config.return_type, ConcreteType::Object);
+        let result = (build_config.invoke)(&[], &ctx).expect("build_config should return object");
+        assert!(matches!(
+            result,
+            TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(_))
+        ));
     }
 }

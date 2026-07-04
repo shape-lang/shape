@@ -6,8 +6,31 @@ use crate::type_tracking::VariableTypeInfo;
 use shape_ast::ast::{Literal, Pattern, PatternConstructorFields, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 
-use crate::compiler::BytecodeCompiler;
 use super::helpers::typed_eq_opcode_for_literal;
+use crate::compiler::BytecodeCompiler;
+
+/// Tracker type-name for a `ConcreteType` payload binder (F5). Scalars map
+/// to their Shape surface names; arrays/hashmaps to the `Vec<…>` / `HashMap<…>`
+/// tracker-name forms the type tracker and `iter_element_type_name` recognise;
+/// named struct/enum types to their name. Returns `None` for shapes with no
+/// stable tracker name (tuple/function/etc.) — the caller then leaves the
+/// whole-binding `ConcreteType` stamp it already recorded in place.
+pub(crate) fn concrete_type_tracker_name(ct: &shape_value::v2::ConcreteType) -> Option<String> {
+    use shape_value::v2::ConcreteType;
+    match ct {
+        ConcreteType::I64 => Some("int".to_string()),
+        ConcreteType::F64 => Some("number".to_string()),
+        ConcreteType::Bool => Some("bool".to_string()),
+        ConcreteType::String => Some("string".to_string()),
+        ConcreteType::Decimal => Some("decimal".to_string()),
+        ConcreteType::Array(elem) => {
+            concrete_type_tracker_name(elem).map(|inner| format!("Vec<{inner}>"))
+        }
+        ConcreteType::Struct(layout) => layout.name.as_ref().map(|n| n.to_string()),
+        ConcreteType::Enum(layout) => layout.name.as_ref().map(|n| n.to_string()),
+        _ => None,
+    }
+}
 
 impl BytecodeCompiler {
     fn resolve_typed_field_operand_binding(
@@ -34,7 +57,7 @@ impl BytecodeCompiler {
 
     pub(in crate::compiler) fn compile_pattern_binding(&mut self, pattern: &Pattern) -> Result<()> {
         match pattern {
-            Pattern::Identifier(name) => {
+            Pattern::Identifier { name, .. } => {
                 let local_idx = self.declare_local(name)?;
                 self.emit(Instruction::new(
                     OpCode::StoreLocal,
@@ -45,6 +68,7 @@ impl BytecodeCompiler {
             Pattern::Typed {
                 name,
                 type_annotation,
+                ..
             } => {
                 let value_local = self.declare_temp_local("__typed_pattern_value_")?;
                 self.emit(Instruction::new(
@@ -104,15 +128,33 @@ impl BytecodeCompiler {
                 Ok(())
             }
             Pattern::Literal(lit) => {
-                // Stage 2.6.4: Bool patterns desugar to direct conditional
-                // jump (the scrutinee on top of stack IS the bool to test).
-                if let Literal::Bool(b) = lit {
-                    let jump_op = if *b {
-                        OpCode::JumpIfTrue
-                    } else {
-                        OpCode::JumpIfFalse
-                    };
-                    let ok_jump = self.emit_jump(jump_op, 0);
+                // Bool patterns are strict literal equality, not truthiness.
+                // Keep a copy of the scrutinee for equality after TypeCheck
+                // consumes the duplicate.
+                if let Literal::Bool(_) = lit {
+                    self.emit(Instruction::simple(OpCode::Dup));
+                    let type_const = self.program.add_constant(Constant::TypeAnnotation(
+                        shape_ast::ast::TypeAnnotation::Basic("bool".to_string()),
+                    ));
+                    self.emit(Instruction::new(
+                        OpCode::TypeCheck,
+                        Some(Operand::Const(type_const)),
+                    ));
+                    let ok_type_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
+                    self.emit(Instruction::simple(OpCode::Pop));
+                    let msg = self
+                        .program
+                        .add_constant(Constant::String("Pattern match failed".to_string()));
+                    self.emit(Instruction::new(
+                        OpCode::PushConst,
+                        Some(Operand::Const(msg)),
+                    ));
+                    self.emit(Instruction::simple(OpCode::Throw));
+
+                    self.patch_jump(ok_type_jump);
+                    self.compile_literal(lit)?;
+                    self.emit(Instruction::simple(OpCode::EqInt));
+                    let ok_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
                     let msg = self
                         .program
                         .add_constant(Constant::String("Pattern match failed".to_string()));
@@ -126,15 +168,14 @@ impl BytecodeCompiler {
                 }
 
                 self.compile_literal(lit)?;
-                let eq_op = typed_eq_opcode_for_literal(lit).ok_or_else(|| {
-                    ShapeError::SemanticError {
+                let eq_op =
+                    typed_eq_opcode_for_literal(lit).ok_or_else(|| ShapeError::SemanticError {
                         message: format!(
                             "Pattern matching on {} literals is not yet supported",
                             lit
                         ),
                         location: None,
-                    }
-                })?;
+                    })?;
                 self.emit(Instruction::simple(eq_op));
                 let ok_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
 
@@ -248,12 +289,16 @@ impl BytecodeCompiler {
                 self.emit(Instruction::simple(OpCode::Throw));
 
                 self.patch_jump(ok_jump);
-                self.compile_match_binding_local(pattern, value_local)
+                self.compile_match_binding_local(pattern, value_local, None)
             }
         }
     }
 
-    pub(in crate::compiler) fn compile_match_binding(&mut self, pattern: &Pattern) -> Result<()> {
+    pub(in crate::compiler) fn compile_match_binding(
+        &mut self,
+        pattern: &Pattern,
+        scrutinee_ct: Option<&shape_value::v2::ConcreteType>,
+    ) -> Result<()> {
         let value_local = self.declare_temp_local("__match_value_")?;
         if let Some(schema_id) = self.last_expr_schema {
             self.type_tracker.set_local_type(
@@ -261,14 +306,16 @@ impl BytecodeCompiler {
                 VariableTypeInfo::known(schema_id, format!("__typed_obj_{}", schema_id)),
             );
         }
-        // Propagate numeric type info from the scrutinee expression so that
-        // match binding variables inherit the correct storage hint (e.g., Int64).
-        self.propagate_initializer_type_to_slot(value_local, true, false);
+        // Propagate type info from the scrutinee so match binding variables
+        // inherit the correct storage hint. U4-4: the match-value temp has no
+        // single value expr here (the scrutinee was already compiled to the
+        // temp), so the stamp comes from `last_expr_type_info` / schema.
+        self.propagate_initializer_type_to_slot(value_local, true, false, None);
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(value_local)),
         ));
-        self.compile_match_binding_local(pattern, value_local)?;
+        self.compile_match_binding_local(pattern, value_local, scrutinee_ct)?;
         self.mark_value_pattern_bindings_immutable(pattern);
         self.apply_binding_semantics_to_value_pattern_bindings(
             pattern,
@@ -281,10 +328,14 @@ impl BytecodeCompiler {
         &mut self,
         pattern: &Pattern,
         value_local: u16,
+        value_ct: Option<&shape_value::v2::ConcreteType>,
     ) -> Result<()> {
         match pattern {
-            Pattern::Identifier(name) => {
+            Pattern::Identifier { name, span } => {
                 let local_idx = self.declare_local(name)?;
+                if !span.is_dummy() {
+                    self.local_binding_spans.insert(local_idx, *span);
+                }
                 // Propagate type info from the scrutinee to the binding variable
                 // so that downstream expressions (e.g., function calls) can use
                 // typed opcodes when the scrutinee type is known.
@@ -301,8 +352,13 @@ impl BytecodeCompiler {
                 ));
                 Ok(())
             }
-            Pattern::Typed { name, .. } => {
+            Pattern::Typed {
+                name, name_span, ..
+            } => {
                 let local_idx = self.declare_local(name)?;
+                if !name_span.is_dummy() {
+                    self.local_binding_spans.insert(local_idx, *name_span);
+                }
                 if let Some(source_info) = self.type_tracker.get_local_type(value_local).cloned() {
                     self.type_tracker.set_local_type(local_idx, source_info);
                 }
@@ -334,7 +390,11 @@ impl BytecodeCompiler {
                         OpCode::StoreLocal,
                         Some(Operand::Local(elem_local)),
                     ));
-                    self.compile_match_binding_local(pat, elem_local)?;
+                    let elem_ct = Self::array_element_concrete_type(value_ct);
+                    if let Some(ct) = elem_ct.as_ref() {
+                        self.stamp_local_tracker_name_from_concrete_type(elem_local, ct);
+                    }
+                    self.compile_match_binding_local(pat, elem_local, elem_ct.as_ref())?;
                 }
                 Ok(())
             }
@@ -352,19 +412,16 @@ impl BytecodeCompiler {
                         OpCode::LoadLocal,
                         Some(Operand::Local(value_local)),
                     ));
-                    let operand = self.resolve_typed_field_operand_binding(schema_id, key).ok_or_else(|| {
-                        ShapeError::SemanticError {
+                    let operand = self
+                        .resolve_typed_field_operand_binding(schema_id, key)
+                        .ok_or_else(|| ShapeError::SemanticError {
                             message: format!(
                                 "Field '{}' is not declared in object schema for match binding.",
                                 key
                             ),
                             location: None,
-                        }
-                    })?;
-                    self.emit(Instruction::new(
-                        OpCode::GetFieldTyped,
-                        Some(operand),
-                    ));
+                        })?;
+                    self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
                     let field_local = self.declare_temp_local("__match_field_")?;
                     // Phase 3e: propagate the schema field's type onto the
                     // temp local so the downstream binding (Pattern::Identifier
@@ -396,7 +453,7 @@ impl BytecodeCompiler {
                         OpCode::StoreLocal,
                         Some(Operand::Local(field_local)),
                     ));
-                    self.compile_match_binding_local(pat, field_local)?;
+                    self.compile_match_binding_local(pat, field_local, None)?;
                 }
                 Ok(())
             }
@@ -419,7 +476,15 @@ impl BytecodeCompiler {
                                 OpCode::StoreLocal,
                                 Some(Operand::Local(inner_local)),
                             ));
-                            return self.compile_match_binding_local(&pats[0], inner_local);
+                            let payload_ct = Self::payload_concrete_type(value_ct, "Some");
+                            if let Some(ct) = payload_ct.as_ref() {
+                                self.stamp_local_tracker_name_from_concrete_type(inner_local, ct);
+                            }
+                            return self.compile_match_binding_local(
+                                &pats[0],
+                                inner_local,
+                                payload_ct.as_ref(),
+                            );
                         }
                     }
                     Ok(())
@@ -443,14 +508,26 @@ impl BytecodeCompiler {
                             OpCode::StoreLocal,
                             Some(Operand::Local(inner_local)),
                         ));
-                        return self.compile_match_binding_local(&pats[0], inner_local);
+                        let payload_ct = Self::payload_concrete_type(value_ct, variant);
+                        if let Some(ct) = payload_ct.as_ref() {
+                            self.stamp_local_tracker_name_from_concrete_type(inner_local, ct);
+                        }
+                        return self.compile_match_binding_local(
+                            &pats[0],
+                            inner_local,
+                            payload_ct.as_ref(),
+                        );
                     }
                     Ok(())
                 }
                 (Some(enum_name), _) => {
                     // Look up enum schema - must be registered (no generic fallback)
                     let resolved_name = self.resolve_type_name(enum_name);
-                    if let Some(schema) = self.type_tracker.schema_registry().get(resolved_name.as_str()) {
+                    if let Some(schema) = self
+                        .type_tracker
+                        .schema_registry()
+                        .get(resolved_name.as_str())
+                    {
                         if schema.get_enum_info().is_some() {
                             let schema_id = schema.id;
                             return self.compile_typed_enum_binding(
@@ -479,18 +556,12 @@ impl BytecodeCompiler {
                     // `Pattern::Object` struct-pattern codegen. The
                     // bare-enum-variant reject stays only for the genuine
                     // case (no schema, or an enum schema).
-                    let resolved_name = self.resolve_type_name(variant);
-                    let is_struct_schema = self
-                        .type_tracker
-                        .schema_registry()
-                        .get(resolved_name.as_str())
-                        .map(|s| !s.is_enum())
-                        .unwrap_or(false);
-                    if is_struct_schema {
+                    if self.resolve_struct_constructor_pattern(variant).is_some() {
                         if let PatternConstructorFields::Struct(field_pats) = fields {
                             return self.compile_match_binding_local(
                                 &Pattern::Object(field_pats.clone()),
                                 value_local,
+                                value_ct,
                             );
                         }
                     }
@@ -500,6 +571,95 @@ impl BytecodeCompiler {
                     })
                 }
             },
+        }
+    }
+
+    fn array_element_concrete_type(
+        value_ct: Option<&shape_value::v2::ConcreteType>,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        use shape_value::v2::ConcreteType;
+        match value_ct? {
+            ConcreteType::Array(elem) => Some((**elem).clone()),
+            _ => None,
+        }
+    }
+
+    fn payload_concrete_type(
+        value_ct: Option<&shape_value::v2::ConcreteType>,
+        variant: &str,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        use shape_value::v2::ConcreteType;
+        match (value_ct?, variant) {
+            (ConcreteType::Result(ok, _), "Ok") => Some((**ok).clone()),
+            (ConcreteType::Result(_, err), "Err") => Some((**err).clone()),
+            (ConcreteType::Option(inner), "Some") => Some((**inner).clone()),
+            _ => None,
+        }
+    }
+
+    /// F5 (v0.3.3 strict-flip): checker-side helper for paths that stamp
+    /// proven payload `ConcreteType`s into explicit binding facts. Match
+    /// binding no longer uses the match-value temp table entry; it threads the
+    /// scrutinee/payload `ConcreteType` explicitly through
+    /// `compile_match_binding_local`.
+    ///
+    /// When this legacy path has no recorded concrete type (still generic /
+    /// unannotated), nothing is stamped and the pre-existing behavior is
+    /// preserved.
+    pub(in crate::compiler) fn stamp_unwrapped_payload_local(
+        &mut self,
+        value_local: u16,
+        inner_local: u16,
+        variant: &str,
+    ) {
+        use shape_value::v2::ConcreteType;
+        let Some(scrutinee_ct) = self
+            .current_function_local_concrete_facts
+            .get(&value_local)
+            .map(|fact| fact.concrete_type.clone())
+        else {
+            return;
+        };
+        let payload_ct = match (&scrutinee_ct, variant) {
+            (ConcreteType::Result(ok, _), "Ok") => (**ok).clone(),
+            (ConcreteType::Result(_, err), "Err") => (**err).clone(),
+            (ConcreteType::Option(inner), "Some") => (**inner).clone(),
+            _ => return,
+        };
+        self.stamp_local_from_concrete_type(inner_local, &payload_ct);
+    }
+
+    fn stamp_local_tracker_name_from_concrete_type(
+        &mut self,
+        local_idx: u16,
+        ct: &shape_value::v2::ConcreteType,
+    ) {
+        if let Some(name) = concrete_type_tracker_name(ct) {
+            self.set_local_type_info(local_idx, &name);
+        }
+    }
+
+    /// Stamp a local slot's tracked type info (explicit binding fact, including
+    /// `ConcreteType::HashMap(k, v)`, plus tracker type-name) from a known
+    /// `ConcreteType`. Mirrors the stamps
+    /// `finalize_empty_array_accumulator_kind` records for a promoted
+    /// accumulator, so a downstream `xs[i]` / `.method()` / operator resolves
+    /// exactly as for an annotated binding (ADR-006 §2.7.5).
+    fn stamp_local_from_concrete_type(
+        &mut self,
+        local_idx: u16,
+        ct: &shape_value::v2::ConcreteType,
+    ) {
+        crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+            self,
+            crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(
+                local_idx,
+            ),
+            ct.clone(),
+            crate::compiler::BindingConcreteFactSource::MatchPayload,
+        );
+        if let Some(name) = concrete_type_tracker_name(ct) {
+            self.set_local_type_info(local_idx, &name);
         }
     }
 
@@ -572,7 +732,7 @@ impl BytecodeCompiler {
                         OpCode::StoreLocal,
                         Some(Operand::Local(elem_local)),
                     ));
-                    self.compile_match_binding_local(pat, elem_local)?;
+                    self.compile_match_binding_local(pat, elem_local, None)?;
                 }
                 Ok(())
             }
@@ -585,26 +745,25 @@ impl BytecodeCompiler {
                 // field types live on the side in
                 // `enum_struct_variant_fields`, populated by
                 // `register_enum`.
-                let variant_fields: Option<
-                    Vec<(String, shape_ast::ast::TypeAnnotation)>,
-                > = match (enum_name, variant_name) {
-                    (Some(en), Some(vn)) => self
-                        .enum_struct_variant_fields
-                        .get(&(en.to_string(), vn.to_string()))
-                        .cloned()
-                        .or_else(|| {
-                            // Fall back to bare-name lookup (e.g. inside
-                            // a `mod m` block, an `E::V` pattern may
-                            // resolve `enum_name` differently than the
-                            // qualified key).
-                            en.rsplit("::").next().and_then(|bare| {
-                                self.enum_struct_variant_fields
-                                    .get(&(bare.to_string(), vn.to_string()))
-                                    .cloned()
-                            })
-                        }),
-                    _ => None,
-                };
+                let variant_fields: Option<Vec<(String, shape_ast::ast::TypeAnnotation)>> =
+                    match (enum_name, variant_name) {
+                        (Some(en), Some(vn)) => self
+                            .enum_struct_variant_fields
+                            .get(&(en.to_string(), vn.to_string()))
+                            .cloned()
+                            .or_else(|| {
+                                // Fall back to bare-name lookup (e.g. inside
+                                // a `mod m` block, an `E::V` pattern may
+                                // resolve `enum_name` differently than the
+                                // qualified key).
+                                en.rsplit("::").next().and_then(|bare| {
+                                    self.enum_struct_variant_fields
+                                        .get(&(bare.to_string(), vn.to_string()))
+                                        .cloned()
+                                })
+                            }),
+                        _ => None,
+                    };
 
                 // For struct payloads, we access fields by index
                 for (idx, (_key, pat)) in patterns.iter().enumerate() {
@@ -639,7 +798,7 @@ impl BytecodeCompiler {
                         OpCode::StoreLocal,
                         Some(Operand::Local(field_local)),
                     ));
-                    self.compile_match_binding_local(pat, field_local)?;
+                    self.compile_match_binding_local(pat, field_local, None)?;
                 }
                 Ok(())
             }
@@ -651,7 +810,7 @@ impl BytecodeCompiler {
 mod tests {
     use crate::compiler::BytecodeCompiler;
     use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
-    use shape_ast::ast::Pattern;
+    use shape_ast::ast::{Pattern, Span, TypeAnnotation};
 
     #[test]
     fn test_value_pattern_bindings_get_owned_semantics_recursively() {
@@ -660,10 +819,13 @@ mod tests {
         let left = compiler.declare_local("left").expect("declare left");
         let right = compiler.declare_local("right").expect("declare right");
         let pattern = Pattern::Object(vec![
-            ("lhs".to_string(), Pattern::Identifier("left".to_string())),
+            (
+                "lhs".to_string(),
+                Pattern::synthetic_identifier("left".to_string()),
+            ),
             (
                 "rhs".to_string(),
-                Pattern::Array(vec![Pattern::Identifier("right".to_string())]),
+                Pattern::Array(vec![Pattern::synthetic_identifier("right".to_string())]),
             ),
         ]);
 
@@ -693,6 +855,56 @@ mod tests {
                 .map(|semantics| semantics.ownership_class),
             Some(BindingOwnershipClass::OwnedMutable)
         );
+    }
+
+    #[test]
+    fn u4_6_match_binding_local_records_source_spans_and_skips_dummy_binders() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.push_scope();
+        let value_local = compiler
+            .declare_local("__match_value")
+            .expect("value local");
+
+        let ident_span = Span::new(12, 14);
+        let ident_pat = Pattern::Identifier {
+            name: "xs".to_string(),
+            span: ident_span,
+        };
+        compiler
+            .compile_match_binding_local(&ident_pat, value_local, None)
+            .expect("identifier binding compiles");
+        let xs_idx = compiler.locals.last().unwrap().get("xs").copied().unwrap();
+        assert_eq!(compiler.local_binding_spans.get(&xs_idx), Some(&ident_span));
+
+        let typed_span = Span::new(20, 22);
+        let typed_pat = Pattern::Typed {
+            name: "ys".to_string(),
+            name_span: typed_span,
+            type_annotation: TypeAnnotation::Basic("int".to_string()),
+        };
+        compiler
+            .compile_match_binding_local(&typed_pat, value_local, None)
+            .expect("typed binding compiles");
+        let ys_idx = compiler.locals.last().unwrap().get("ys").copied().unwrap();
+        assert_eq!(compiler.local_binding_spans.get(&ys_idx), Some(&typed_span));
+
+        let synthetic_pat = Pattern::synthetic_identifier("tmp".to_string());
+        compiler
+            .compile_match_binding_local(&synthetic_pat, value_local, None)
+            .expect("synthetic binding compiles");
+        let tmp_idx = compiler.locals.last().unwrap().get("tmp").copied().unwrap();
+        assert!(!compiler.local_binding_spans.contains_key(&tmp_idx));
+
+        let dummy_typed_pat = Pattern::Typed {
+            name: "zt".to_string(),
+            name_span: Span::default(),
+            type_annotation: TypeAnnotation::Basic("int".to_string()),
+        };
+        compiler
+            .compile_match_binding_local(&dummy_typed_pat, value_local, None)
+            .expect("dummy typed binding compiles");
+        let zt_idx = compiler.locals.last().unwrap().get("zt").copied().unwrap();
+        assert!(!compiler.local_binding_spans.contains_key(&zt_idx));
     }
 
     // ─── WS-4 4c: `match` struct-pattern classification ─────────────
@@ -778,5 +990,48 @@ mod tests {
             "#,
         );
         assert_eq!(result.as_i64(), Some(20));
+    }
+
+    #[test]
+    fn u4_6_match_ok_payload_threaded_without_temp_concrete_table() {
+        let result = eval(
+            r#"
+            match Ok(5) { Ok(v) => v * 2 }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(10));
+    }
+
+    #[test]
+    fn u4_6_nested_some_ok_payload_threaded_without_temp_concrete_table() {
+        let result = eval(
+            r#"
+            match Some(Ok(5)) { Some(Ok(v)) => v * 2 }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(10));
+    }
+
+    #[test]
+    fn u4_6_match_call_result_object_payload_threaded_without_temp_concrete_table() {
+        let result = eval(
+            r#"
+            type Point { x: int, y: int }
+            fn g() -> Result<Point, string> { Ok(Point { x: 3, y: 4 }) }
+            match g() { Ok(p) => p.x + p.y, Err(_) => 0 }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(7));
+    }
+
+    #[test]
+    fn u4_6_match_result_array_payload_uses_binding_fact_for_index() {
+        let result = eval(
+            r#"
+            fn g() -> Result<Array<int>, string> { Ok([41]) }
+            match g() { Ok(xs) => xs[0], Err(_) => 0 }
+            "#,
+        );
+        assert_eq!(result.as_i64(), Some(41));
     }
 }

@@ -51,7 +51,9 @@ fn test_while_loop() {
         5.0
     );
     assert_eq!(
-        eval_to_number("let mut sum = 0; let mut i = 1; while i <= 5 { sum = sum + i; i = i + 1 }; sum"),
+        eval_to_number(
+            "let mut sum = 0; let mut i = 1; while i <= 5 { sum = sum + i; i = i + 1 }; sum"
+        ),
         15.0
     );
 }

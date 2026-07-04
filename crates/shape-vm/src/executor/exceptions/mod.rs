@@ -91,17 +91,16 @@
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
-    executor::{ExceptionHandler, VirtualMachine},
+    executor::result_option_carrier,
     executor::vm_impl::stack::drop_with_kind,
+    executor::{ExceptionHandler, VirtualMachine},
+    type_tracking::FrameReturnWrapper,
 };
 use shape_runtime::type_schema::builtin_schemas::{
-    ANYERROR_CATEGORY, ANYERROR_CAUSE, ANYERROR_CODE, ANYERROR_MESSAGE,
-    ANYERROR_PAYLOAD, ANYERROR_TRACE_INFO,
+    ANYERROR_CATEGORY, ANYERROR_CAUSE, ANYERROR_CODE, ANYERROR_MESSAGE, ANYERROR_PAYLOAD,
+    ANYERROR_TRACE_INFO,
 };
-use shape_value::{
-    HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot,
-};
-use shape_value::heap_value::{OptionData, ResultData};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot};
 use std::sync::Arc;
 
 // WS-3 F4: the `PHASE_2C_EXCEPTION_OBJECT_SURFACE` and
@@ -171,6 +170,7 @@ impl VirtualMachine {
             // is a v0.4 follow-up (`trace_info_*` builders return empty
             // strings today) — a clean message simply omits the trace.
             let message = self.uncaught_error_message(&payload);
+            self.set_last_uncaught_exception(payload.clone());
             // Release the payload share via `KindedSlot::Drop`
             // (kind-dispatched refcount retire per §2.7.6 / Q8) so the
             // kind track stays balanced.
@@ -200,8 +200,7 @@ impl VirtualMachine {
                 // SAFETY: kind says Ptr(TypedObject); bits are
                 // `Arc::into_raw::<TypedObjectStorage>`. Borrow transiently
                 // (no share retire) to inspect the schema + message field.
-                let obj: &TypedObjectStorage =
-                    unsafe { &*(bits as *const TypedObjectStorage) };
+                let obj: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
                 if obj.schema_id == self.builtin_schemas.any_error as u64 {
                     let msg = anyerror_message_field(obj);
                     let cause = anyerror_cause_field(obj);
@@ -216,9 +215,8 @@ impl VirtualMachine {
                 }
             }
         }
-        let formatter = crate::executor::printing::ValueFormatter::new(
-            &self.program.type_schema_registry,
-        );
+        let formatter =
+            crate::executor::printing::ValueFormatter::new(&self.program.type_schema_registry);
         format!("Uncaught error: {}", formatter.format_kinded(payload))
     }
 
@@ -236,7 +234,9 @@ impl VirtualMachine {
             PopHandler => self.op_pop_handler()?,
             Throw => self.op_throw()?,
             TryUnwrap => self.op_try_unwrap()?,
+            IsTryFailure => self.op_is_try_failure()?,
             UnwrapOption => self.op_unwrap_option()?,
+            CoalesceProbe => self.op_coalesce_probe()?,
             ErrorContext => self.op_error_context()?,
             IsOk => self.op_is_ok()?,
             IsErr => self.op_is_err()?,
@@ -304,7 +304,7 @@ impl VirtualMachine {
         // reject (push false), preserving the surface-and-stop
         // refusal-to-fabricate discipline at the cost of false
         // negatives on those forms.
-        let matches = type_check_kinded(&annotation, &value);
+        let matches = type_check_kinded(&self.builtin_schemas, &annotation, &value)?;
         drop(value);
         self.push_kinded_slot(KindedSlot::from_bool(matches))
     }
@@ -371,6 +371,7 @@ impl VirtualMachine {
         Ok(empty_string_kinded_slot())
     }
 
+    #[allow(dead_code)]
     pub(in crate::executor) fn trace_info_single(&mut self) -> Result<KindedSlot, VMError> {
         Ok(empty_string_kinded_slot())
     }
@@ -462,9 +463,8 @@ impl VirtualMachine {
         // sharing (one allocation per schema) is an optimization
         // tracked separately — the Drop dispatch only cares that
         // each entry matches the slot's actual payload type.
-        let field_kinds: Arc<[NativeKind]> = Arc::from(
-            vec![NativeKind::String; 6].into_boxed_slice(),
-        );
+        let field_kinds: Arc<[NativeKind]> =
+            Arc::from(vec![NativeKind::String; 6].into_boxed_slice());
 
         // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` + D1's
         // `from_typed_object_raw` constructor — no variant signature
@@ -498,13 +498,19 @@ impl VirtualMachine {
         if let NativeKind::Ptr(HeapKind::TypedObject) = payload.kind() {
             let bits = payload.slot().raw();
             if bits != 0 {
-                // SAFETY: kind says Ptr(TypedObject); bits are
-                // `Arc::into_raw::<TypedObjectStorage>`; carrier owns one
-                // strong-count share. Borrow transiently to read schema_id.
-                let arc: Arc<TypedObjectStorage> =
-                    unsafe { Arc::from_raw(bits as *const _) };
-                let is_any_error = arc.schema_id == self.builtin_schemas.any_error as u64;
-                let _ = Arc::into_raw(arc);
+                // R5 soundness (2026-06-23): `bits` is a v2-raw
+                // `TypedObjectStorage::_new` pointer (HeapHeader at offset 0),
+                // NOT `Arc::into_raw`. Recovering it via `Arc::from_raw`
+                // steps `byte_sub(16)` into a non-ArcInner allocation → Miri
+                // UB. Mirror `uncaught_error_message` (~:201): read schema_id
+                // through a transient read-only `&TypedObjectStorage` — no
+                // `Arc::from_raw`, no refcount touch (the `payload` carrier
+                // keeps owning its single share).
+                // SAFETY: kind says Ptr(TypedObject); `bits` is a live `_new`
+                // pointer (non-null, checked above) owned by `payload`; the
+                // borrow is a read-only `schema_id` read that does not escape.
+                let obj: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
+                let is_any_error = obj.schema_id == self.builtin_schemas.any_error as u64;
                 if is_any_error {
                     return Ok(payload);
                 }
@@ -566,8 +572,8 @@ impl VirtualMachine {
         let value = KindedSlot::new(ValueSlot::from_raw(value_bits), value_kind);
 
         // Five branches per the canonical contract table above. Every
-        // branch produces a `KindedSlot::from_result(Arc<ResultData>)`
-        // carrier (kind = `Ptr(HeapKind::Result)`). NO throw path:
+        // branch produces a canonical `__Result` TypedObject carrier
+        // (kind = `Ptr(HeapKind::TypedObject)`). NO throw path:
         // `!!` is a wrap operator, not a runtime assertion.
         //
         // Doc-coherence binder (JOINT-FIX-1a, 2026-05-28): if you find
@@ -575,48 +581,58 @@ impl VirtualMachine {
         // STOP — that contradicts the book + the 26 Group A WRAP-shaped
         // tests. The throw shape was the deleted pre-fix behavior; do
         // not reintroduce.
-        if let Some(rd) = read_result(&value)? {
-            if rd.is_ok {
-                // Ok(v) → Ok(v). Re-wrap as a fresh Result carrier so
-                // the output kind stays `Ptr(HeapKind::Result)`
-                // regardless of input refcount sharing. `context` is
-                // discarded (book: "should not appear").
-                let inner = rd.payload.clone();
+        if let Some(rd) = read_result(self, &value)? {
+            if rd.is_ok() {
+                // Ok(v) → Ok(v). Re-wrap as a fresh `__Result` carrier.
+                // `context` is discarded (book: "should not appear").
+                let inner = rd.clone_payload()?;
+                drop(rd);
                 drop(value);
                 drop(context);
-                let res = Arc::new(ResultData::ok(inner));
-                self.push_kinded_slot(KindedSlot::from_result(res))
+                self.push_kinded_slot(result_option_carrier::build_ok(
+                    &self.builtin_schemas,
+                    inner,
+                ))
             } else {
                 // Err(e) → Err(AnyError { payload: rhs, cause: e, ... }).
                 // The book contract puts the high-level context as the
                 // visible `payload`/`message`, and the original error
                 // as the `cause`. The uncaught-render path reads
                 // `message` (= payload) so the user sees the context.
-                let inner = rd.payload.clone();
+                let inner = rd.clone_payload()?;
+                drop(rd);
                 drop(value);
                 let trace = self.trace_info_full()?;
                 let any_err = self.build_any_error(context, Some(inner), trace, None)?;
-                let res = Arc::new(ResultData::err(any_err));
-                self.push_kinded_slot(KindedSlot::from_result(res))
+                self.push_kinded_slot(result_option_carrier::build_err(
+                    &self.builtin_schemas,
+                    any_err,
+                ))
             }
-        } else if let Some(od) = read_option(&value)? {
-            if od.is_some {
+        } else if let Some(od) = read_option(self, &value)? {
+            if od.is_some() {
                 // Some(v) → Ok(v). Lift Option → Result. `context`
                 // discarded.
-                let inner = od.payload.clone();
+                let inner = od.clone_payload()?;
+                drop(od);
                 drop(value);
                 drop(context);
-                let res = Arc::new(ResultData::ok(inner));
-                self.push_kinded_slot(KindedSlot::from_result(res))
+                self.push_kinded_slot(result_option_carrier::build_ok(
+                    &self.builtin_schemas,
+                    inner,
+                ))
             } else {
                 // None → Err(AnyError { payload: rhs, cause: "Value was None", ... }).
+                drop(od);
                 drop(value);
                 let none_cause =
                     KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
                 let trace = self.trace_info_full()?;
                 let any_err = self.build_any_error(context, Some(none_cause), trace, None)?;
-                let res = Arc::new(ResultData::err(any_err));
-                self.push_kinded_slot(KindedSlot::from_result(res))
+                self.push_kinded_slot(result_option_carrier::build_err(
+                    &self.builtin_schemas,
+                    any_err,
+                ))
             }
         } else if is_null_sentinel(&value) {
             // Null-coded None → Err(AnyError { payload: rhs, cause: "Value was None", ... }).
@@ -624,20 +640,23 @@ impl VirtualMachine {
             // wire-tier representation of None, the user-facing
             // contract is identical.
             drop(value);
-            let none_cause =
-                KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
+            let none_cause = KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
             let trace = self.trace_info_full()?;
             let any_err = self.build_any_error(context, Some(none_cause), trace, None)?;
-            let res = Arc::new(ResultData::err(any_err));
-            self.push_kinded_slot(KindedSlot::from_result(res))
+            self.push_kinded_slot(result_option_carrier::build_err(
+                &self.builtin_schemas,
+                any_err,
+            ))
         } else {
             // Bare non-null value `v` → Ok(v). `context` discarded.
             // Per book: "plain value `v` | `Ok(v)`". This is NOT
             // null-coding pass-through — the value must be wrapped in
-            // Ok so the result kind is `Ptr(HeapKind::Result)`.
+            // Ok so the value is explicitly wrapped in `__Result`.
             drop(context);
-            let res = Arc::new(ResultData::ok(value));
-            self.push_kinded_slot(KindedSlot::from_result(res))
+            self.push_kinded_slot(result_option_carrier::build_ok(
+                &self.builtin_schemas,
+                value,
+            ))
         }
     }
 
@@ -706,16 +725,16 @@ impl VirtualMachine {
         // semantics, two targets — the `self.call_stack.is_empty()`
         // check at each early-return site expresses the target
         // dispatch. There is no `op_try_unwrap_toplevel` variant.
-        if let Some(rd) = read_result(&value)? {
-            if rd.is_ok {
-                let inner = rd.payload.clone();
+        if let Some(rd) = read_result(self, &value)? {
+            if rd.is_ok() {
+                let inner = rd.clone_payload()?;
+                drop(rd);
                 drop(value);
                 self.push_kinded_slot(inner)
             } else {
                 // Err(e) — early-return.
                 let result_kind = value.kind();
                 let result_bits = value.slot().raw();
-                std::mem::forget(value);
                 if self.call_stack.is_empty() {
                     // Toplevel: surface as uncaught exception (audit
                     // 14a (A)). The Err wrapper's payload is normalized
@@ -728,10 +747,9 @@ impl VirtualMachine {
                     // carrier (mirrors how a fn-position `?` exposes
                     // the Err carrier as the frame return; here the
                     // host frame consumes the inner directly).
-                    let result_arc: Arc<shape_value::heap_value::ResultData> =
-                        unsafe { Arc::from_raw(result_bits as *const _) };
-                    let inner = result_arc.payload.clone();
-                    drop(result_arc);
+                    let inner = rd.clone_payload()?;
+                    drop(rd);
+                    drop(value);
                     let normalized = self.normalize_err_payload(inner)?;
                     self.handle_exception(normalized)
                 } else {
@@ -740,18 +758,22 @@ impl VirtualMachine {
                     // return value, NOT unwrap the inner — `?` on Err
                     // propagates the wrapper to the enclosing fallible
                     // scope.
+                    drop(rd);
+                    std::mem::forget(value);
                     self.return_value_inner(result_bits, result_kind)
                 }
             }
-        } else if let Some(od) = read_option(&value)? {
-            if od.is_some {
-                let inner = od.payload.clone();
+        } else if let Some(od) = read_option(self, &value)? {
+            if od.is_some() {
+                let inner = od.clone_payload()?;
+                drop(od);
                 drop(value);
                 self.push_kinded_slot(inner)
             } else {
                 // None — early-return. Target-dispatch identical to
                 // the null-coded-None arm below; both delegate to
                 // `propagate_none_early_return`.
+                drop(od);
                 drop(value);
                 self.propagate_none_early_return()
             }
@@ -770,6 +792,37 @@ impl VirtualMachine {
         }
     }
 
+    /// `IsTryFailure`: non-consuming classifier for the `?` lowering's
+    /// pending-Drop branch. Pops one carrier (retiring its share via the
+    /// kinded `KindedSlot::Drop`), pushes a `Bool`:
+    ///   - `true`  when `op_try_unwrap` WOULD short-circuit:
+    ///       Err(e) / None / null-coded-None
+    ///   - `false` when `op_try_unwrap` would unwrap-and-continue:
+    ///       Ok(v) / Some(v) / bare non-null value
+    ///
+    /// The compiler emits `Dup; IsTryFailure; JumpIfFalse SUCCESS;
+    /// <DropCall for each other in-scope Drop local>; SUCCESS: TryUnwrap`.
+    /// `Dup` bumps the carrier's refcount so this classifier's popped copy
+    /// and the `TryUnwrap` consumer each own an independent share — no
+    /// over/under-count. Classification routes through the SAME
+    /// `read_result` / `read_option` / `is_null_sentinel` helpers as
+    /// `op_try_unwrap`, so the branch the compiler takes can never diverge
+    /// from the branch the opcode takes (single source of truth).
+    pub(in crate::executor) fn op_is_try_failure(&mut self) -> Result<(), VMError> {
+        let (bits, kind) = self.pop_kinded()?;
+        let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let is_failure = if let Some(rd) = read_result(self, &value)? {
+            !rd.is_ok()
+        } else if let Some(od) = read_option(self, &value)? {
+            !od.is_some()
+        } else {
+            // null-coded None => failure; bare non-null value => success.
+            is_null_sentinel(&value)
+        };
+        drop(value);
+        self.push_kinded_slot(KindedSlot::from_bool(is_failure))
+    }
+
     /// PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): shared
     /// early-return helper for the None / null-coded-None arms of
     /// `op_try_unwrap`. Target-dispatched per the audit-14a single-mode
@@ -782,26 +835,23 @@ impl VirtualMachine {
     ///   fallible scope for bare-toplevel `?`.
     ///
     /// - **Inside-fn** — discriminate by the enclosing frame's declared
-    ///   return-type kind (read from
-    ///   `current_frame_descriptor().return_kind`):
+    ///   return-wrapper semantics (read from
+    ///   `current_frame_descriptor().effective_return_wrapper()`):
     ///
-    ///   - **Result-returning** (`return_kind ==
-    ///     Some(NativeKind::Ptr(HeapKind::Result))`): LIFT None to
+    ///   - **Result-returning** (`return_wrapper == Result`): LIFT None to
     ///     `Err(AnyError{ payload: "Value was None", code: "OPTION_NONE" })`
     ///     wrapped in a Result-Err carrier, and return that to the
     ///     caller. Per audit 14b sub-root #1 inside-fn None-to-Err
     ///     lift, this is the documented book contract (L114: "None →
     ///     early-return `Err(AnyError)` (code `OPTION_NONE`)").
     ///
-    ///   - **Option-returning** (`return_kind ==
-    ///     Some(NativeKind::Ptr(HeapKind::Option))`) or **unknown**:
-    ///     propagate None verbatim as the early-return value. For
-    ///     Option-typed enclosing frames, None IS the valid early-
-    ///     return; lifting to Err would break that semantics. For
-    ///     unknown frame return kinds (no FrameDescriptor or no
-    ///     `return_kind` stamp), propagate verbatim — the pre-PB1
-    ///     behavior is preserved for any compile-time emit site that
-    ///     hasn't reached return-kind-stamp territory yet.
+    ///   - **Option-returning**, **plain**, or **unknown**: propagate
+    ///     None verbatim as the early-return value. For Option-typed
+    ///     enclosing frames, None IS the valid early-return; lifting to
+    ///     Err would break that semantics. For unknown frame metadata
+    ///     (no FrameDescriptor or no wrapper stamp), propagate verbatim
+    ///     — the pre-PB1 behavior is preserved for any compile-time emit
+    ///     site that hasn't reached return-wrapper-stamp territory yet.
     ///
     /// Per audit 14a binder: this is NOT two operators. The `?`
     /// semantics is single-mode "early-return failure to nearest
@@ -820,14 +870,14 @@ impl VirtualMachine {
         }
 
         // In-fn: discriminate on the enclosing frame's declared
-        // return-type kind.
-        let return_kind = self
+        // return-wrapper semantics. `effective_return_wrapper` retains
+        // compatibility with old descriptors that encoded Result/Option
+        // in `return_kind`.
+        let return_wrapper = self
             .current_frame_descriptor()
-            .and_then(|fd| fd.return_kind);
-        let lift_to_result_err = matches!(
-            return_kind,
-            Some(NativeKind::Ptr(HeapKind::Result))
-        );
+            .map(|fd| fd.effective_return_wrapper())
+            .unwrap_or(FrameReturnWrapper::Unknown);
+        let lift_to_result_err = matches!(return_wrapper, FrameReturnWrapper::Result);
 
         if lift_to_result_err {
             // Result-returning fn: LIFT None to Err(AnyError) wrapped
@@ -835,8 +885,7 @@ impl VirtualMachine {
             // 14b sub-root #1 (inside-fn None-to-Err lift). Matches
             // the book contract at L114.
             let any_err = self.build_option_none_any_error()?;
-            let res = Arc::new(shape_value::heap_value::ResultData::err(any_err));
-            let carrier = KindedSlot::from_result(res);
+            let carrier = result_option_carrier::build_err(&self.builtin_schemas, any_err);
             let bits = carrier.slot().raw();
             let kind = carrier.kind();
             std::mem::forget(carrier);
@@ -858,10 +907,9 @@ impl VirtualMachine {
     /// `KindedSlot` with kind `NativeKind::Ptr(HeapKind::TypedObject)`
     /// owning one strong-count share — the caller transfers the share
     /// either to `handle_exception` (toplevel surface) or into a
-    /// `ResultData::err` carrier (in-fn lift).
+    /// `__Result` Err carrier (in-fn lift).
     fn build_option_none_any_error(&mut self) -> Result<KindedSlot, VMError> {
-        let payload =
-            KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
+        let payload = KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
         let trace = self.trace_info_full()?;
         self.build_any_error(payload, None, trace, Some("OPTION_NONE"))
     }
@@ -892,18 +940,21 @@ impl VirtualMachine {
     pub(in crate::executor) fn op_unwrap_option(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-        // 2026-05-10): the canonical Option<T> representation is
-        // `Ptr(HeapKind::Option)` with `Arc<OptionData>` payload. The
-        // legacy null-coding path (where `Some(x) ≡ x` and `None ≡ null
+        // The canonical Option<T> representation is a `__Option`
+        // TypedObject. The legacy null-coding path (where `Some(x) ≡ x` and `None ≡ null
         // sentinel`) is preserved as a fallback for compiler emit
         // sites that haven't migrated to the kinded ctor yet — the
         // pattern-checking phase still emits `LoadLocal; IsNull;
         // JumpIfTrue fail` for `None`. Both forms surface the inner
         // value on success.
-        let inner = match read_option(&value)? {
-            Some(od) if od.is_some => od.payload.clone(),
-            Some(_) => {
+        let inner = match read_option(self, &value)? {
+            Some(od) if od.is_some() => {
+                let inner = od.clone_payload()?;
+                drop(od);
+                inner
+            }
+            Some(od) => {
+                drop(od);
                 drop(value);
                 return Err(VMError::RuntimeError(
                     "called UnwrapOption on None value".to_string(),
@@ -930,22 +981,72 @@ impl VirtualMachine {
         self.push_kinded_slot(inner)
     }
 
+    /// `CoalesceProbe` (`??`): pop one value and push back TWO slots
+    /// `[present_value, is_absent_bool]`. The `??` lowering replaces its
+    /// `Dup; IsNull` prologue with this opcode so that an `Option<T>`
+    /// carrier is correctly UNWRAPPED to its inner `T`
+    /// on the present branch instead of leaking the whole `Some(v)` wrapper.
+    ///
+    /// v0.3.3 book-gate fix: `Some(5) ?? 99 -> 5` (was `Some(5)`).
+    ///
+    /// Cases (mirrors `op_try_unwrap` / `op_unwrap_option` discriminator):
+    ///   - `Some(v)` Option → push inner `v` (cloned share), Bool(false)
+    ///   - `None` Option     → push Null placeholder, Bool(true)
+    ///   - null sentinel     → push the sentinel back, Bool(true)
+    ///   - bare non-null     → push the value back (null-coding `Some(x)≡x`),
+    ///                         Bool(false)
+    ///
+    /// The `is_absent_bool` matches `IsNull` polarity (`true` == absent),
+    /// so the existing `JumpIfFalse use_lhs` branch structure is unchanged.
+    pub(in crate::executor) fn op_coalesce_probe(&mut self) -> Result<(), VMError> {
+        let (bits, kind) = self.pop_kinded()?;
+        let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        if let Some(od) = read_option(self, &value)? {
+            if od.is_some() {
+                // Some(v): retain a share of the inner payload, drop the
+                // Option wrapper, push inner + present(false).
+                let inner = od.clone_payload()?;
+                drop(od);
+                drop(value);
+                self.push_kinded_slot(inner)?;
+                self.push_kinded_slot(KindedSlot::from_bool(false))
+            } else {
+                // None: drop the wrapper, push a Null placeholder (it is
+                // discarded by the `??` lowering on the absent branch) +
+                // absent(true).
+                drop(od);
+                drop(value);
+                self.push_kinded(Self::NONE_BITS, NativeKind::Null)?;
+                self.push_kinded_slot(KindedSlot::from_bool(true))
+            }
+        } else if is_null_sentinel(&value) {
+            // null-coded None.
+            drop(value);
+            self.push_kinded(Self::NONE_BITS, NativeKind::Null)?;
+            self.push_kinded_slot(KindedSlot::from_bool(true))
+        } else {
+            // Bare non-null value — null-coding `Some(x) ≡ x`. Pass the
+            // share through verbatim via mem::forget (no clone+drop pair),
+            // then push present(false).
+            let kind = value.kind();
+            let bits = value.slot().raw();
+            std::mem::forget(value);
+            self.push_kinded(bits, kind)?;
+            self.push_kinded_slot(KindedSlot::from_bool(false))
+        }
+    }
+
     /// `IsOk`: pop a `Result<_,_>`, push `Bool` indicating Ok variant.
     ///
-    /// Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
-    /// the kinded payload arrives as `NativeKind::Ptr(HeapKind::Result)`
-    /// with bits = `Arc::into_raw(Arc<ResultData>)`. Recovery via
-    /// `slot.as_heap_value()` → `HeapValue::Result(arc)` per ADR-005 §1
-    /// single-discriminator; the `is_ok` discriminator drives the
-    /// pushed Bool. The popped carrier's `Drop` retires the wrapper
-    /// share (kind-dispatched per Q8) — the inner payload's share
-    /// stays held by the wrapper via `ResultData::Drop` cascade.
+    /// The value arrives as a canonical `__Result` TypedObject. Its
+    /// variant discriminator drives the pushed Bool, and payload ownership
+    /// is retained/released through the object's `field_kinds` table.
     #[inline(always)]
     pub(in crate::executor) fn op_is_ok(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let is_ok = match read_result(&value)? {
-            Some(rd) => rd.is_ok,
+        let is_ok = match read_result(self, &value)? {
+            Some(rd) => rd.is_ok(),
             None => false,
         };
         drop(value);
@@ -960,8 +1061,8 @@ impl VirtualMachine {
     pub(in crate::executor) fn op_is_err(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let is_err = match read_result(&value)? {
-            Some(rd) => !rd.is_ok,
+        let is_err = match read_result(self, &value)? {
+            Some(rd) => !rd.is_ok(),
             None => false,
         };
         drop(value);
@@ -970,24 +1071,21 @@ impl VirtualMachine {
 
     /// `UnwrapOk`: pop an `Ok(_)`, push the inner value.
     ///
-    /// Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
-    /// retain-on-extract per WB2.4 / §2.7.7. The wrapper carrier's
-    /// share is owned by `value`; the inner payload's share is owned
-    /// by the wrapper via `ResultData::payload`. To extract the inner
-    /// value as a fresh top-of-stack `KindedSlot`, we (a) clone the
-    /// inner `KindedSlot` (`KindedSlot::Clone` bumps the inner share
-    /// per Q8), (b) push the clone (transferring its share onto the
-    /// stack), (c) drop the wrapper carrier (`KindedSlot::Drop`
-    /// retires the wrapper share, which transitively retires the
-    /// inner share if the wrapper's refcount reaches zero — the
-    /// per-bump on (a) is what survives onto the stack).
+    /// Retain-on-extract per WB2.4 / §2.7.7: the wrapper owns the payload
+    /// field share, `clone_payload` bumps a new share for the stack, and
+    /// dropping the wrapper retires only the wrapper-owned share.
     #[inline(always)]
     pub(in crate::executor) fn op_unwrap_ok(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let inner = match read_result(&value)? {
-            Some(rd) if rd.is_ok => rd.payload.clone(),
-            Some(_) => {
+        let inner = match read_result(self, &value)? {
+            Some(rd) if rd.is_ok() => {
+                let inner = rd.clone_payload()?;
+                drop(rd);
+                inner
+            }
+            Some(rd) => {
+                drop(rd);
                 drop(value);
                 return Err(VMError::RuntimeError(
                     "called UnwrapOk on Err value".to_string(),
@@ -1013,9 +1111,14 @@ impl VirtualMachine {
     pub(in crate::executor) fn op_unwrap_err(&mut self) -> Result<(), VMError> {
         let (bits, kind) = self.pop_kinded()?;
         let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let inner = match read_result(&value)? {
-            Some(rd) if !rd.is_ok => rd.payload.clone(),
-            Some(_) => {
+        let inner = match read_result(self, &value)? {
+            Some(rd) if !rd.is_ok() => {
+                let inner = rd.clone_payload()?;
+                drop(rd);
+                inner
+            }
+            Some(rd) => {
+                drop(rd);
                 drop(value);
                 return Err(VMError::RuntimeError(
                     "called UnwrapErr on Ok value".to_string(),
@@ -1035,63 +1138,66 @@ impl VirtualMachine {
 }
 
 // =========================================================================
-// W14-variant-codegen helpers — Result/Option payload recovery
-//
-// These free functions implement the kinded recovery shape per ADR-006
-// §2.7.10 / Q11 carrier-API-bound: classify the carrier kind, route
-// through `slot.as_heap_value()` for the heap arm, return a borrowed
-// reference to the typed payload struct. The receiver retains its
-// strong-count share — the caller borrows through `&Arc<…>` and never
-// decrements (mirror of `iterator_methods.rs::as_iterator`).
+// Result/Option carrier helpers
 // =========================================================================
 
-/// Recover the `ResultData` from a kinded carrier. Returns `Ok(None)` if
-/// the carrier is not a Result-kinded slot (the upstream caller decides
-/// whether that's an error).
-///
-/// W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10): Result-kind
-/// slot bits are `Arc::into_raw(Arc<ResultData>) as u64` — pointer to a
-/// `ResultData` directly, NOT a `Box<HeapValue>` wrapper. Recovery casts
-/// `bits as *const ResultData` and borrows; the receiver retains its
-/// strong-count share for the borrow's lifetime.
 #[inline]
-fn read_result(slot: &KindedSlot) -> Result<Option<&ResultData>, VMError> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Result)) {
-        return Ok(None);
-    }
-    let bits = slot.slot.raw();
-    if bits == 0 {
-        return Err(VMError::RuntimeError(
-            "Result-kind slot has null payload bits".to_string(),
-        ));
-    }
-    // SAFETY: per the construction-side contract on
-    // `KindedSlot::from_result`, when `kind` is `Ptr(HeapKind::Result)`
-    // the slot bits are `Arc::into_raw(Arc<ResultData>) as u64`. The
-    // slot owns one strong-count share; we borrow `&ResultData` for
-    // the slot's lifetime.
-    let r: &ResultData = unsafe { &*(bits as *const ResultData) };
-    Ok(Some(r))
+fn read_result<'a>(
+    vm: &VirtualMachine,
+    slot: &'a KindedSlot,
+) -> Result<Option<result_option_carrier::ResultCarrier<'a>>, VMError> {
+    result_option_carrier::read_result(&vm.builtin_schemas, slot)
 }
 
-/// Recover the `OptionData` from a kinded carrier. Returns `Ok(None)` if
-/// the carrier is not an Option-kinded slot.
 #[inline]
-fn read_option(slot: &KindedSlot) -> Result<Option<&OptionData>, VMError> {
-    if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Option)) {
-        return Ok(None);
+fn read_option<'a>(
+    vm: &VirtualMachine,
+    slot: &'a KindedSlot,
+) -> Result<Option<result_option_carrier::OptionCarrier<'a>>, VMError> {
+    result_option_carrier::read_option(&vm.builtin_schemas, slot)
+}
+
+/// Exhaustive HeapKind sink for pointer-null checks.
+#[inline]
+fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits == 0,
     }
-    let bits = slot.slot.raw();
-    if bits == 0 {
-        return Err(VMError::RuntimeError(
-            "Option-kind slot has null payload bits".to_string(),
-        ));
-    }
-    // SAFETY: per the construction-side contract on
-    // `KindedSlot::from_option`, when `kind` is `Ptr(HeapKind::Option)`
-    // the slot bits are `Arc::into_raw(Arc<OptionData>) as u64`.
-    let o: &OptionData = unsafe { &*(bits as *const OptionData) };
-    Ok(Some(o))
 }
 
 /// Whether a kinded carrier represents the `null` sentinel — used by
@@ -1122,7 +1228,8 @@ fn is_null_sentinel(slot: &KindedSlot) -> bool {
         // R5b-2 disposition: Null IS the absence-of-value discriminator;
         // kind alone is decisive, bits unused.
         NativeKind::Null => true,
-        NativeKind::String | NativeKind::Ptr(_) => bits == 0,
+        NativeKind::String => bits == 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_null(bits, heap_kind),
         NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
         NativeKind::NullableInt8
         | NativeKind::NullableInt16
@@ -1143,11 +1250,12 @@ fn is_null_sentinel(slot: &KindedSlot) -> bool {
 /// Basic scalars + Result/Option generics. Other forms conservatively
 /// return `false` rather than fabricate a match contract.
 fn type_check_kinded(
+    schemas: &shape_runtime::type_schema::BuiltinSchemaIds,
     annotation: &shape_ast::ast::TypeAnnotation,
     value: &KindedSlot,
-) -> bool {
+) -> Result<bool, VMError> {
     use shape_ast::ast::TypeAnnotation;
-    match annotation {
+    let matches = match annotation {
         TypeAnnotation::Basic(name) => match name.as_str() {
             "int" => matches!(
                 value.kind,
@@ -1163,8 +1271,7 @@ fn type_check_kinded(
                     | NativeKind::UIntSize
             ),
             "number" | "float" => matches!(value.kind, NativeKind::Float64),
-            "bool" => matches!(value.kind, NativeKind::Bool) && value.slot.raw() != 0
-                || matches!(value.kind, NativeKind::Bool),
+            "bool" => matches!(value.kind, NativeKind::Bool),
             "string" => matches!(
                 value.kind,
                 NativeKind::String | NativeKind::Ptr(HeapKind::String)
@@ -1187,10 +1294,12 @@ fn type_check_kinded(
         },
         TypeAnnotation::Null => value.slot.raw() == 0,
         TypeAnnotation::Generic { name, .. } => match name.as_str() {
-            "Result" => matches!(value.kind, NativeKind::Ptr(HeapKind::Result)),
+            "Result" => return Ok(result_option_carrier::read_result(schemas, value)?.is_some()),
             "Option" => {
-                matches!(value.kind, NativeKind::Ptr(HeapKind::Option))
-                    || value.slot.raw() == 0
+                return Ok(
+                    result_option_carrier::read_option(schemas, value)?.is_some()
+                        || is_null_sentinel(value),
+                );
             }
             "Array" | "Vec" => matches!(value.kind, NativeKind::Ptr(HeapKind::TypedArray)),
             "HashMap" | "Map" => matches!(value.kind, NativeKind::Ptr(HeapKind::HashMap)),
@@ -1204,7 +1313,8 @@ fn type_check_kinded(
         // its own follow-up. Return false rather than fabricate a
         // match (forbidden patterns: Bool-default fallback).
         _ => false,
-    }
+    };
+    Ok(matches)
 }
 
 // =========================================================================
@@ -1256,8 +1366,7 @@ fn kinded_to_string_arc(slot: KindedSlot) -> Arc<String> {
             // `Arc::into_raw::<String>`; carrier owns one strong-count
             // share. `Arc::from_raw` reclaims that share into the
             // returned `Arc<String>`.
-            let arc: Arc<String> =
-                unsafe { Arc::from_raw(bits as *const String) };
+            let arc: Arc<String> = unsafe { Arc::from_raw(bits as *const String) };
             std::mem::forget(slot);
             return arc;
         }
@@ -1288,7 +1397,7 @@ fn anyerror_message_field(obj: &TypedObjectStorage) -> Option<String> {
     if (obj.heap_mask >> idx) & 1 == 0 {
         return None;
     }
-    let bits = obj.slots.get(idx)?.raw();
+    let bits = obj.slots().get(idx)?.raw();
     if bits == 0 {
         return None;
     }
@@ -1310,7 +1419,7 @@ fn anyerror_cause_field(obj: &TypedObjectStorage) -> Option<String> {
     if (obj.heap_mask >> idx) & 1 == 0 {
         return None;
     }
-    let bits = obj.slots.get(idx)?.raw();
+    let bits = obj.slots().get(idx)?.raw();
     if bits == 0 {
         return None;
     }
@@ -1367,9 +1476,7 @@ fn stringify_non_string_kinded(slot: &KindedSlot) -> String {
         | NativeKind::NullableUInt32
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => slot.slot().as_u64().to_string(),
-        NativeKind::Float64 | NativeKind::NullableFloat64 => {
-            slot.slot().as_f64().to_string()
-        }
+        NativeKind::Float64 | NativeKind::NullableFloat64 => slot.slot().as_f64().to_string(),
         other => format!("<error payload kind={:?}>", other),
     }
 }
@@ -1399,16 +1506,17 @@ mod build_any_error_tests {
         let bits = result.slot().raw();
         assert!(bits != 0, "AnyError TypedObject pointer should be non-null");
 
-        // SAFETY: kind says Ptr(TypedObject); bits are Arc::into_raw of
-        // an Arc<TypedObjectStorage>. We claim ownership of the share
-        // for the duration of the test (the `result` carrier still owns
-        // its share — we reconstruct without bumping).
-        let storage: Arc<TypedObjectStorage> =
-            unsafe { Arc::from_raw(bits as *const _) };
+        // R5 soundness (2026-06-23): TypedObject is a `_new`/HeapHeader
+        // carrier — `bits` is NOT `Arc::into_raw`. Read through a transient
+        // `&TypedObjectStorage` (no `Arc::from_raw`, no refcount touch). The
+        // `result` carrier keeps owning its single share.
+        // SAFETY: kind == Ptr(TypedObject); `bits` is a live `_new` pointer
+        // (non-null, checked above) owned by `result`.
+        let storage: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
 
         // Schema ID matches AnyError.
         assert_eq!(storage.schema_id, vm.builtin_schemas.any_error as u64);
-        assert_eq!(storage.slots.len(), 6);
+        assert_eq!(storage.slots().len(), 6);
         assert_eq!(storage.field_kinds.len(), 6);
 
         // All field_kinds are NativeKind::String per the schema's
@@ -1418,7 +1526,7 @@ mod build_any_error_tests {
         }
 
         // The message field's bits are an Arc<String> raw pointer.
-        let msg_bits = storage.slots[ANYERROR_MESSAGE].raw();
+        let msg_bits = storage.slots()[ANYERROR_MESSAGE].raw();
         assert!(msg_bits != 0);
         // SAFETY: field_kinds[ANYERROR_MESSAGE] = NativeKind::String;
         // slot bits are Arc::into_raw::<String>; storage owns the share.
@@ -1426,17 +1534,16 @@ mod build_any_error_tests {
         assert_eq!(msg_str.as_str(), "boom");
 
         // The category field is "RuntimeError".
-        let cat_bits = storage.slots[ANYERROR_CATEGORY].raw();
+        let cat_bits = storage.slots()[ANYERROR_CATEGORY].raw();
         let cat_str: &String = unsafe { &*(cat_bits as *const String) };
         assert_eq!(cat_str.as_str(), "RuntimeError");
 
         // The cause field is None (zero-bits + heap_mask bit clear).
-        assert_eq!(storage.slots[ANYERROR_CAUSE].raw(), 0);
+        assert_eq!(storage.slots()[ANYERROR_CAUSE].raw(), 0);
         assert_eq!((storage.heap_mask >> ANYERROR_CAUSE) & 1, 0);
 
-        // Re-into_raw to balance the temporary Arc; the original
-        // `result` carrier's Drop will release the storage share.
-        let _ = Arc::into_raw(storage);
+        // No Arc to balance (transient `&` borrow). The `result` carrier's
+        // Drop releases the storage share.
         drop(result);
     }
 
@@ -1451,12 +1558,13 @@ mod build_any_error_tests {
 
         assert_eq!(wrapped.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         let bits = wrapped.slot().raw();
-        let storage: Arc<TypedObjectStorage> =
-            unsafe { Arc::from_raw(bits as *const _) };
-        let msg_bits = storage.slots[ANYERROR_MESSAGE].raw();
+        // R5 soundness (2026-06-23): `_new` carrier — transient `&` read,
+        // no `Arc::from_raw`. `wrapped` keeps owning its share.
+        // SAFETY: kind == Ptr(TypedObject); `bits` is a live `_new` pointer.
+        let storage: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
+        let msg_bits = storage.slots()[ANYERROR_MESSAGE].raw();
         let msg_str: &String = unsafe { &*(msg_bits as *const String) };
         assert_eq!(msg_str.as_str(), "oops");
-        let _ = Arc::into_raw(storage);
         drop(wrapped);
     }
 
@@ -1477,15 +1585,114 @@ mod build_any_error_tests {
 }
 
 // =========================================================================
+// L5 frame return metadata split tests
+// =========================================================================
+
+#[cfg(test)]
+mod none_early_return_frame_metadata_tests {
+    use super::*;
+    use crate::bytecode::{BytecodeProgram, Function};
+    use crate::executor::{CallFrame, VMConfig};
+    use crate::type_tracking::{FrameDescriptor, FrameReturnWrapper};
+
+    fn function_with_frame(frame: FrameDescriptor) -> Function {
+        Function {
+            name: "fallible".to_string(),
+            arity: 0,
+            param_names: Vec::new(),
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: Vec::new(),
+            ref_mutates: Vec::new(),
+            mutable_captures: Vec::new(),
+            frame_descriptor: Some(frame),
+            osr_entry_points: Vec::new(),
+            mir_data: None,
+        }
+    }
+
+    fn vm_in_function_frame(frame: FrameDescriptor) -> VirtualMachine {
+        let mut program = BytecodeProgram::default();
+        program.functions.push(function_with_frame(frame));
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(program);
+        vm.call_stack.push(CallFrame {
+            return_ip: 0,
+            base_pointer: 0,
+            locals_count: 0,
+            function_id: Some(0),
+            upvalues: None,
+            blob_hash: None,
+            closure_heap_bits: None,
+            closure_heap_kind: None,
+        });
+        vm
+    }
+
+    fn wrapper_frame(wrapper: FrameReturnWrapper) -> FrameDescriptor {
+        let mut frame = FrameDescriptor::new();
+        frame.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
+        frame.return_wrapper = wrapper;
+        frame
+    }
+
+    #[test]
+    fn none_in_result_frame_with_typed_object_abi_lifts_to_err() {
+        let mut vm = vm_in_function_frame(wrapper_frame(FrameReturnWrapper::Result));
+
+        vm.propagate_none_early_return()
+            .expect("None? should early-return");
+        assert!(
+            vm.call_stack.is_empty(),
+            "early return should pop the function frame"
+        );
+
+        let (bits, kind) = vm.pop_kinded().expect("early-return value on stack");
+        assert_eq!(kind, NativeKind::Ptr(HeapKind::TypedObject));
+        let slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let result = read_result(&vm, &slot)
+            .expect("Result carrier should decode")
+            .expect("None? in Result frame should produce Result carrier");
+        assert!(
+            !result.is_ok(),
+            "None? in Result-returning frame should lift to Err"
+        );
+        let payload = result
+            .clone_payload()
+            .expect("Err payload should be cloneable AnyError");
+        assert_eq!(payload.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        drop(payload);
+        drop(slot);
+    }
+
+    #[test]
+    fn none_in_option_frame_with_typed_object_abi_propagates_none() {
+        let mut vm = vm_in_function_frame(wrapper_frame(FrameReturnWrapper::Option));
+
+        vm.propagate_none_early_return()
+            .expect("None? should early-return");
+
+        let (bits, kind) = vm.pop_kinded().expect("early-return value on stack");
+        assert_eq!(bits, VirtualMachine::NONE_BITS);
+        assert_eq!(kind, NativeKind::Null);
+    }
+}
+
+// =========================================================================
 // W14-variant-codegen unit tests — Result/Option op_* dispatch
 //
 // These exercise the kinded recovery path (read_result / read_option)
 // directly, validating the smoke target:
 // `let r = Ok(42); if r.is_ok() { print(r.unwrap_ok()) }` outputs `42`.
-// At the storage tier this is `ResultData::ok(KindedSlot::from_int(42))`
-// + `r.is_ok` + `r.payload.as_i64()`. The op_* handler bodies exercise
-// the same path but go through pop_kinded / push_kinded for stack
-// transit.
+// At the storage tier this is a `__Result` / `__Option` TypedObject with
+// a `variant` discriminator and a payload slot. The op_* handler bodies
+// exercise the same path but go through pop_kinded / push_kinded for
+// stack transit.
 // =========================================================================
 
 #[cfg(test)]
@@ -1496,32 +1703,27 @@ mod variant_codegen_tests {
     /// Smoke target: `Ok(42)` → is_ok() → unwrap_ok() yields 42.
     #[test]
     fn smoke_ok_int_is_ok_then_unwrap() {
-        // Build Ok(42) directly via the storage-tier ctor (mirrors
-        // what BuiltinFunction::OkCtor does at runtime).
-        let inner = KindedSlot::from_int(42);
-        let result_data = Arc::new(shape_value::heap_value::ResultData::ok(inner));
-        let ok_carrier = KindedSlot::from_result(result_data);
+        let vm = VirtualMachine::new(VMConfig::default());
+        let ok_carrier =
+            result_option_carrier::build_ok(&vm.builtin_schemas, KindedSlot::from_int(42));
 
         // op_is_ok: classify Ok carrier → true.
-        let is_ok_value = match read_result(&ok_carrier).unwrap() {
-            Some(rd) => rd.is_ok,
+        let is_ok_value = match read_result(&vm, &ok_carrier).unwrap() {
+            Some(rd) => rd.is_ok(),
             None => panic!("Result kind read failed"),
         };
         assert!(is_ok_value);
 
         // op_unwrap_ok: extract the inner i64 via KindedSlot::Clone
         // (retain-on-extract per WB2.4).
-        let unwrapped = match read_result(&ok_carrier).unwrap() {
-            Some(rd) if rd.is_ok => rd.payload.clone(),
+        let unwrapped = match read_result(&vm, &ok_carrier).unwrap() {
+            Some(rd) if rd.is_ok() => rd.clone_payload().unwrap(),
             _ => panic!("Ok unwrap failed"),
         };
         assert_eq!(unwrapped.as_i64(), Some(42));
 
-        // Wrapper carrier is still alive (its share retained the
-        // ResultData); when we drop it here, ResultData::Drop cascades
-        // through the embedded KindedSlot's Drop. The cloned `unwrapped`
-        // owns its own (Int64-kinded) share — Int64 is inline-scalar
-        // so its drop is a no-op.
+        // Wrapper carrier is still alive. The cloned `unwrapped` owns its
+        // own share; Int64 is inline-scalar so its drop is a no-op.
         drop(ok_carrier);
         drop(unwrapped);
     }
@@ -1529,18 +1731,20 @@ mod variant_codegen_tests {
     /// `Err("oops")` → is_err() yields true; unwrap_err yields "oops".
     #[test]
     fn err_string_is_err_then_unwrap() {
-        let inner = KindedSlot::from_string_arc(Arc::new("oops".to_string()));
-        let result_data = Arc::new(shape_value::heap_value::ResultData::err(inner));
-        let err_carrier = KindedSlot::from_result(result_data);
+        let vm = VirtualMachine::new(VMConfig::default());
+        let err_carrier = result_option_carrier::build_err(
+            &vm.builtin_schemas,
+            KindedSlot::from_string_arc(Arc::new("oops".to_string())),
+        );
 
-        let is_ok_value = match read_result(&err_carrier).unwrap() {
-            Some(rd) => rd.is_ok,
+        let is_ok_value = match read_result(&vm, &err_carrier).unwrap() {
+            Some(rd) => rd.is_ok(),
             None => panic!("Result kind read failed"),
         };
         assert!(!is_ok_value);
 
-        let unwrapped = match read_result(&err_carrier).unwrap() {
-            Some(rd) if !rd.is_ok => rd.payload.clone(),
+        let unwrapped = match read_result(&vm, &err_carrier).unwrap() {
+            Some(rd) if !rd.is_ok() => rd.clone_payload().unwrap(),
             _ => panic!("Err unwrap failed"),
         };
         assert_eq!(unwrapped.as_str(), Some("oops"));
@@ -1552,12 +1756,12 @@ mod variant_codegen_tests {
     /// `Some(42)` → unwrap_option yields 42.
     #[test]
     fn some_int_unwrap_option() {
-        let inner = KindedSlot::from_int(42);
-        let opt_data = Arc::new(shape_value::heap_value::OptionData::some(inner));
-        let some_carrier = KindedSlot::from_option(opt_data);
+        let vm = VirtualMachine::new(VMConfig::default());
+        let some_carrier =
+            result_option_carrier::build_some(&vm.builtin_schemas, KindedSlot::from_int(42));
 
-        let unwrapped = match read_option(&some_carrier).unwrap() {
-            Some(od) if od.is_some => od.payload.clone(),
+        let unwrapped = match read_option(&vm, &some_carrier).unwrap() {
+            Some(od) if od.is_some() => od.clone_payload().unwrap(),
             _ => panic!("Some unwrap failed"),
         };
         assert_eq!(unwrapped.as_i64(), Some(42));
@@ -1569,11 +1773,11 @@ mod variant_codegen_tests {
     /// `None` → is_some is false.
     #[test]
     fn none_carrier_is_some_false() {
-        let opt_data = Arc::new(shape_value::heap_value::OptionData::none());
-        let none_carrier = KindedSlot::from_option(opt_data);
+        let vm = VirtualMachine::new(VMConfig::default());
+        let none_carrier = result_option_carrier::build_none(&vm.builtin_schemas);
 
-        let is_some_value = match read_option(&none_carrier).unwrap() {
-            Some(od) => od.is_some,
+        let is_some_value = match read_option(&vm, &none_carrier).unwrap() {
+            Some(od) => od.is_some(),
             None => panic!("Option kind read failed"),
         };
         assert!(!is_some_value);
@@ -1594,8 +1798,8 @@ mod variant_codegen_tests {
         // payload now owns one share; outer Arc<String> has 2.
         assert_eq!(Arc::strong_count(&inner_arc), strong_before + 1);
 
-        let result_data = Arc::new(shape_value::heap_value::ResultData::err(payload));
-        let err_carrier = KindedSlot::from_result(result_data);
+        let vm = VirtualMachine::new(VMConfig::default());
+        let err_carrier = result_option_carrier::build_err(&vm.builtin_schemas, payload);
         // Wrapper retained the inner share; same count as after payload.
         assert_eq!(Arc::strong_count(&inner_arc), strong_before + 1);
 
@@ -1610,10 +1814,9 @@ mod variant_codegen_tests {
     fn type_check_result_matches_ok_carrier() {
         use shape_ast::ast::TypeAnnotation;
         use shape_ast::ast::TypePath;
-        let result_data = Arc::new(shape_value::heap_value::ResultData::ok(
-            KindedSlot::from_int(42),
-        ));
-        let carrier = KindedSlot::from_result(result_data);
+        let vm = VirtualMachine::new(VMConfig::default());
+        let carrier =
+            result_option_carrier::build_ok(&vm.builtin_schemas, KindedSlot::from_int(42));
         let annotation = TypeAnnotation::Generic {
             name: TypePath::simple("Result"),
             args: vec![
@@ -1621,7 +1824,7 @@ mod variant_codegen_tests {
                 TypeAnnotation::Basic("string".to_string()),
             ],
         };
-        assert!(type_check_kinded(&annotation, &carrier));
+        assert!(type_check_kinded(&vm.builtin_schemas, &annotation, &carrier).unwrap());
         drop(carrier);
     }
 
@@ -1631,19 +1834,19 @@ mod variant_codegen_tests {
     fn type_check_option_matches_some_and_null() {
         use shape_ast::ast::TypeAnnotation;
         use shape_ast::ast::TypePath;
-        let some_carrier = KindedSlot::from_option(Arc::new(
-            shape_value::heap_value::OptionData::some(KindedSlot::from_int(7)),
-        ));
+        let vm = VirtualMachine::new(VMConfig::default());
+        let some_carrier =
+            result_option_carrier::build_some(&vm.builtin_schemas, KindedSlot::from_int(7));
         let annotation = TypeAnnotation::Generic {
             name: TypePath::simple("Option"),
             args: vec![TypeAnnotation::Basic("int".to_string())],
         };
-        assert!(type_check_kinded(&annotation, &some_carrier));
+        assert!(type_check_kinded(&vm.builtin_schemas, &annotation, &some_carrier).unwrap());
 
         // Null sentinel (zero-bits Bool slot) matches Option per
         // null-coding fallback.
         let null_carrier = KindedSlot::none();
-        assert!(type_check_kinded(&annotation, &null_carrier));
+        assert!(type_check_kinded(&vm.builtin_schemas, &annotation, &null_carrier).unwrap());
 
         drop(some_carrier);
         drop(null_carrier);
@@ -1653,8 +1856,9 @@ mod variant_codegen_tests {
     /// None (lets the caller decide whether that's an error).
     #[test]
     fn read_result_on_non_result_returns_none() {
+        let vm = VirtualMachine::new(VMConfig::default());
         let int_carrier = KindedSlot::from_int(42);
-        let result = read_result(&int_carrier).unwrap();
+        let result = read_result(&vm, &int_carrier).unwrap();
         assert!(result.is_none());
         drop(int_carrier);
     }

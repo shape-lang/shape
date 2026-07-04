@@ -22,8 +22,7 @@
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use shape_runtime::context::ExecutionContext;
 use shape_value::{
-    DataTable, KindedSlot, NativeKind, TableViewData, ValueSlot, VMError,
-    heap_value::HeapKind,
+    DataTable, KindedSlot, NativeKind, TableViewData, VMError, ValueSlot, heap_value::HeapKind,
 };
 use std::sync::Arc;
 
@@ -230,8 +229,11 @@ fn filter_closure_form(
     let mut mask: Vec<bool> = Vec::with_capacity(n);
     for i in 0..n {
         let row_slot = make_row_view_slot(Arc::clone(&dt_arc), i);
-        let result =
-            vm.call_value_immediate_nb(closure, std::slice::from_ref(&row_slot), ctx.as_deref_mut())?;
+        let result = vm.call_value_immediate_nb(
+            closure,
+            std::slice::from_ref(&row_slot),
+            ctx.as_deref_mut(),
+        )?;
         let keep = result.as_bool().ok_or_else(|| {
             VMError::RuntimeError(format!(
                 "datatable.filter: predicate returned non-Bool kind {:?}",
@@ -321,9 +323,7 @@ pub(super) fn sort_by_closure_form(
 fn cmp_keys(a: &KindedSlot, b: &KindedSlot) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a.kind, b.kind) {
-        (NativeKind::Int64, NativeKind::Int64) => {
-            a.as_i64().unwrap().cmp(&b.as_i64().unwrap())
-        }
+        (NativeKind::Int64, NativeKind::Int64) => a.as_i64().unwrap().cmp(&b.as_i64().unwrap()),
         (NativeKind::Float64, NativeKind::Float64) => a
             .as_f64()
             .unwrap()
@@ -337,9 +337,7 @@ fn cmp_keys(a: &KindedSlot, b: &KindedSlot) -> std::cmp::Ordering {
             .unwrap()
             .partial_cmp(&(b.as_i64().unwrap() as f64))
             .unwrap_or(Ordering::Equal),
-        (NativeKind::Bool, NativeKind::Bool) => {
-            a.as_bool().unwrap().cmp(&b.as_bool().unwrap())
-        }
+        (NativeKind::Bool, NativeKind::Bool) => a.as_bool().unwrap().cmp(&b.as_bool().unwrap()),
         (NativeKind::String, NativeKind::String) => match (a.as_str(), b.as_str()) {
             (Some(sa), Some(sb)) => sa.cmp(sb),
             _ => Ordering::Equal,
@@ -349,14 +347,9 @@ fn cmp_keys(a: &KindedSlot, b: &KindedSlot) -> std::cmp::Ordering {
 }
 
 /// Take rows by index permutation.
-fn take_indices(
-    dt: &DataTable,
-    indices: &[usize],
-    method: &str,
-) -> Result<KindedSlot, VMError> {
-    let idx_array = arrow_array::UInt32Array::from(
-        indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
-    );
+fn take_indices(dt: &DataTable, indices: &[usize], method: &str) -> Result<KindedSlot, VMError> {
+    let idx_array =
+        arrow_array::UInt32Array::from(indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
     let inner = dt.inner();
     let n_cols = inner.num_columns();
     let mut new_cols = Vec::with_capacity(n_cols);

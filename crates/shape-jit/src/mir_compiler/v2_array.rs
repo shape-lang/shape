@@ -26,9 +26,11 @@
 //! | Int8/Bool | I8            | 1            |
 
 use cranelift::prelude::*;
+use shape_value::HeapKind;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::{Operand, Place, SlotId};
 use shape_vm::type_tracking::NativeKind;
+use std::collections::HashMap;
 
 use super::MirToIR;
 use super::types::is_v2_typed_array_slot;
@@ -43,6 +45,49 @@ const LEN_OFFSET: i32 = 16;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Exhaustive HeapKind sink for pointer-width typed-array element storage.
+#[inline]
+fn heap_ptr_element_type_info(heap_kind: HeapKind) -> (types::Type, i64) {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => (types::I64, 8),
+    }
+}
+
 /// Return the (Cranelift IR type, element byte size) for a given `NativeKind`.
 ///
 /// Panics on slot kinds that do not map to a scalar element type (e.g.
@@ -50,28 +95,35 @@ const LEN_OFFSET: i32 = 16;
 fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
     match kind {
         NativeKind::Float64 | NativeKind::NullableFloat64 => (types::F64, 8),
-        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
-            (types::I64, 8)
-        }
-        NativeKind::IntSize | NativeKind::NullableIntSize | NativeKind::UIntSize | NativeKind::NullableUIntSize => {
+        NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64 => (types::I64, 8),
+        NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => {
             // Pointer-sized — 8 bytes on 64-bit targets.
             (types::I64, 8)
         }
-        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
-            (types::I32, 4)
-        }
-        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
-            (types::I16, 2)
-        }
-        NativeKind::Int8 | NativeKind::NullableInt8 | NativeKind::UInt8 | NativeKind::NullableUInt8 => {
-            (types::I8, 1)
-        }
+        NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32 => (types::I32, 4),
+        NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16 => (types::I16, 2),
+        NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8 => (types::I8, 1),
         NativeKind::Bool => (types::I8, 1),
         // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
         // 8-byte raw pointer carrier (`*const TypedObjectStorage`). Same shape as
         // NativeKind::StringV2 / DecimalV2 heap-pointer carriers.
         NativeKind::StringV2 | NativeKind::DecimalV2 => (types::I64, 8),
-        NativeKind::Ptr(_) => (types::I64, 8),
+        NativeKind::Ptr(heap_kind) => heap_ptr_element_type_info(heap_kind),
         other => panic!("v2_array: unsupported element NativeKind: {:?}", other),
     }
 }
@@ -88,6 +140,40 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             None
         } else {
             Some(ct)
+        }
+    }
+
+    /// `true` when the indexing base is a `string` receiver (`s[i]`).
+    ///
+    /// String indexing is NOT an array element load: the VM lowers `s[i]`
+    /// through the `GetProp` String arm (`dispatch_get_prop`), which
+    /// allocates a real 1-char `NativeKind::String` (`Arc<String>`) —
+    /// byte-identical to `op_string_char_at` (typed_access.rs). The JIT's
+    /// `Place::Index` arms, in contrast, only model ARRAY element access
+    /// (`inline_array_get` / the v2 typed-array fast path), so a string
+    /// base falls through to `inline_array_get`, which reinterprets the
+    /// `Arc<String>` heap pointer as a v1 array layout (data@+0/len@+8),
+    /// reads a wild "element pointer", and then a downstream retain
+    /// (`Rvalue::Clone` / Copy disposition) dereferences it → SIGSEGV
+    /// (`jit_arc_retain` on garbage bits). The defended-against repro is
+    /// `s[i] == "x"` (book `fundamentals/strings.mdx`: "Index chars via
+    /// `s[i]`"). There is no JIT string-char producer wired today, so the
+    /// principled response per CLAUDE.md "surface-and-stop, not force" is
+    /// to fail JIT compilation here and fall through to the interpreter,
+    /// whose String-arm path is correct (verified: `--mode vm` returns the
+    /// right result). Returns `true` only when the base is statically stamped
+    /// as a string, either through the per-slot `NativeKind` track or the
+    /// older concrete-type side table.
+    pub(crate) fn index_base_is_string(&self, place: &Place) -> bool {
+        if matches!(self.place_native_kind(place), Some(NativeKind::String)) {
+            return true;
+        }
+        match place {
+            Place::Local(s) => matches!(
+                self.concrete_types.get(s.0 as usize),
+                Some(ConcreteType::String)
+            ),
+            _ => false,
         }
     }
 
@@ -169,12 +255,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             match rv {
                 Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => matches_slot(op),
                 Rvalue::BinaryOp(_, lhs, rhs) => matches_slot(lhs) || matches_slot(rhs),
+                Rvalue::FuzzyComparison { lhs, rhs, .. } => matches_slot(lhs) || matches_slot(rhs),
                 Rvalue::Aggregate(ops) => ops.iter().any(&matches_slot),
                 Rvalue::Borrow(_, _) => false,
                 Rvalue::EnumTest { operand, .. }
                 | Rvalue::EnumPayload { operand, .. }
                 | Rvalue::TypePatternTest { operand, .. }
-                | Rvalue::EnumDiscriminantTest { operand, .. } => matches_slot(operand),
+                | Rvalue::EnumDiscriminantTest { operand, .. }
+                | Rvalue::PrimitiveCast { operand, .. } => matches_slot(operand),
             }
         };
         for block in &self.mir.blocks {
@@ -209,11 +297,216 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         return true;
                     }
                 }
-                TerminatorKind::Goto(_)
-                | TerminatorKind::Return
-                | TerminatorKind::Unreachable => {}
+                TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             }
         }
+        false
+    }
+
+    /// v0.3.3 move-semantics JIT-divergence surface-and-stop detector.
+    ///
+    /// Root cause: `compile_operand` (`ownership.rs:225`) lowers every
+    /// `Operand::Move` / `Operand::MoveExplicit` by reading the value and
+    /// then NULLing the source slot (`null_place`) to prevent double-drop.
+    /// The MIR lowering of `let b = a` / `a = i` emits `Use(Move(src))`
+    /// unconditionally (`lowering/stmt.rs:261-270`), but the VM does NOT
+    /// honour that as a destructive move: `compute_ownership_decisions`
+    /// (`mir/solver.rs:1736`) downgrades the move to `Copy` (Copy types) or
+    /// `Clone` (still-live non-Copy) and keeps the source slot's value.
+    ///
+    /// Consequence — VM != JIT, and JIT is the default mode:
+    ///   * `let a = 42; let b = a; print(a)` — VM prints 42, JIT reads the
+    ///     nulled slot and prints 0 (silent-wrong-output).
+    ///   * `a = i` inside a `while` loop — the JIT nulls the loop counter
+    ///     `i` on every iteration's copy, so the condition re-reads 0 and
+    ///     the loop never terminates (JIT hangs -> timeout).
+    ///
+    /// Per CLAUDE.md "a JIT path that cannot match the VM MUST surface-and-
+    /// stop (deopt to the interpreter)". Replicating the VM's per-point
+    /// Copy/Clone/Move liveness decision inside the JIT operand lowering is
+    /// a v0.4 root-cause workstream; for v0.3.3 the binding-compliant fix is
+    /// a whole-function deopt whenever the divergence SHAPE is present —
+    /// i.e. a slot is `Move`/`MoveExplicit`-sourced and that same slot is
+    /// read again at a DIFFERENT program point with no guaranteed intervening
+    /// reinitialisation. Returns `true` to request the deopt.
+    ///
+    /// **Soundness over throughput.** The analysis is intentionally
+    /// conservative: a read in any other block, or a later read in the same
+    /// block not preceded by a reinitialising `Assign(slot, ..)`, both
+    /// trigger the deopt. Over-deopt costs JIT speed, never correctness; the
+    /// bytecode interpreter (which honours the VM ownership model) runs the
+    /// program and VM == JIT is preserved. Mirrors `mir_has_prior_move_of_slot`.
+    pub(crate) fn mir_has_move_then_read_divergence(&self) -> bool {
+        use shape_vm::mir::types::{Operand, Place, Rvalue, StatementKind, TerminatorKind};
+
+        // (block_idx, stmt_idx) of every Move/MoveExplicit source occurrence,
+        // keyed by the moved slot. stmt_idx == usize::MAX marks a move that
+        // occurs in the block's terminator operands.
+        let mut moves: HashMap<SlotId, Vec<(usize, usize)>> = HashMap::new();
+        // Same keying for every READ of a slot (Copy operand, borrow, or any
+        // operand position the JIT lowers as a value read). Move sources are
+        // ALSO reads (they read the value before nulling), but a move site is
+        // not a "later read" of itself — we exclude the exact move location.
+        let mut reads: HashMap<SlotId, Vec<(usize, usize)>> = HashMap::new();
+        // (block_idx, stmt_idx) of every Assign whose destination is a bare
+        // `Place::Local(slot)` — a reinitialisation point that clears the
+        // moved state for that slot.
+        let mut reinits: HashMap<SlotId, Vec<usize>> = HashMap::new();
+
+        let record_operand =
+            |op: &Operand,
+             bi: usize,
+             si: usize,
+             moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
+             reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+                // v0.3.3 move-then-read divergence: a `let q = p` whole-value
+                // bind lowers as `Use(Move(Local(p)))`, which `compile_operand`
+                // nulls. A SUBSEQUENT read of `p` — including a field/element
+                // projection such as `print(p.x)` lowered as
+                // `Copy(Field(Local(p), 0))` — then reads the nulled slot and
+                // (for a struct) dereferences a null/corrupted pointer → SIGSEGV
+                // under JIT (VM keeps `p` live and prints correctly). The read
+                // tracking MUST therefore key on the place's ROOT local, not
+                // only on a bare `Place::Local`, or a projected later read is
+                // missed and the whole-function deopt never fires. (Pre-fix this
+                // arm only matched `Place::Local`, so `let q = p; print(p.x)`
+                // segfaulted instead of deopting.)
+                match op {
+                    Operand::Move(place) | Operand::MoveExplicit(place) => {
+                        if let Place::Local(s) = place {
+                            moves.entry(*s).or_default().push((bi, si));
+                        }
+                        reads.entry(place.root_local()).or_default().push((bi, si));
+                    }
+                    Operand::Copy(place) => {
+                        reads.entry(place.root_local()).or_default().push((bi, si));
+                    }
+                    _ => {}
+                }
+            };
+
+        let record_rvalue_reads =
+            |rv: &Rvalue,
+             bi: usize,
+             si: usize,
+             moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
+             reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+                match rv {
+                    Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
+                        record_operand(op, bi, si, moves, reads);
+                    }
+                    Rvalue::BinaryOp(_, lhs, rhs) => {
+                        record_operand(lhs, bi, si, moves, reads);
+                        record_operand(rhs, bi, si, moves, reads);
+                    }
+                    Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+                        record_operand(lhs, bi, si, moves, reads);
+                        record_operand(rhs, bi, si, moves, reads);
+                    }
+                    Rvalue::Aggregate(ops) => {
+                        for op in ops {
+                            record_operand(op, bi, si, moves, reads);
+                        }
+                    }
+                    // A borrow reads the slot's value (the JIT loads it). Key on
+                    // the root local so a projected borrow (`&p.x`) still counts
+                    // as a later read of `p`.
+                    Rvalue::Borrow(_, place) => {
+                        reads.entry(place.root_local()).or_default().push((bi, si));
+                    }
+                    Rvalue::EnumTest { operand, .. }
+                    | Rvalue::EnumPayload { operand, .. }
+                    | Rvalue::TypePatternTest { operand, .. }
+                    | Rvalue::EnumDiscriminantTest { operand, .. }
+                    | Rvalue::PrimitiveCast { operand, .. } => {
+                        record_operand(operand, bi, si, moves, reads);
+                    }
+                }
+            };
+
+        for (bi, block) in self.mir.blocks.iter().enumerate() {
+            for (si, stmt) in block.statements.iter().enumerate() {
+                match &stmt.kind {
+                    StatementKind::Assign(dest, rv) => {
+                        if let Place::Local(d) = dest {
+                            reinits.entry(*d).or_default().push(si);
+                        }
+                        record_rvalue_reads(rv, bi, si, &mut moves, &mut reads);
+                    }
+                    StatementKind::ArrayStore { operands, .. }
+                    | StatementKind::ObjectStore { operands, .. }
+                    | StatementKind::EnumStore { operands, .. }
+                    | StatementKind::ClosureCapture { operands, .. }
+                    | StatementKind::ModuleBindingStore { operands, .. }
+                    | StatementKind::TaskBoundary(operands, _) => {
+                        for op in operands {
+                            record_operand(op, bi, si, &mut moves, &mut reads);
+                        }
+                    }
+                    StatementKind::Drop(_) | StatementKind::Nop => {}
+                }
+            }
+            // Terminator operands — stmt_idx sentinel usize::MAX sorts after
+            // every real statement in the same block.
+            match &block.terminator.kind {
+                TerminatorKind::Call { func, args, .. } => {
+                    record_operand(func, bi, usize::MAX, &mut moves, &mut reads);
+                    for op in args {
+                        record_operand(op, bi, usize::MAX, &mut moves, &mut reads);
+                    }
+                }
+                TerminatorKind::SwitchBool { operand, .. } => {
+                    record_operand(operand, bi, usize::MAX, &mut moves, &mut reads);
+                }
+                TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
+            }
+        }
+
+        // For each moved slot, deopt if it is read at any program point that
+        // is not exactly one of its move sites, unless that read is in the
+        // SAME block strictly after a reinitialising assign that itself
+        // follows the move (straight-line reinit clears the moved state).
+        for (slot, move_sites) in &moves {
+            let Some(slot_reads) = reads.get(slot) else {
+                continue;
+            };
+            let empty = Vec::new();
+            let slot_reinits = reinits.get(slot).unwrap_or(&empty);
+            for &(rb, rs) in slot_reads {
+                // Is there a move that this read can observe the null of?
+                // Conservative: any move in a DIFFERENT block, or an earlier
+                // move in the SAME block, is a divergence unless a same-block
+                // reinit sits strictly between the move and the read.
+                for &(mb, ms) in move_sites {
+                    // A move site reads the value before nulling — it is not a
+                    // "later read" of ITSELF. Exclude only the move at this
+                    // exact location; a move at a DIFFERENT location is still a
+                    // later read that can observe a prior move's null. (Pre-fix
+                    // this skipped the read against ALL moves when the read sat
+                    // on any move site, so `let q = p; let r = p` — two
+                    // consecutive whole-value moves of `p` — was missed and the
+                    // second move read the JIT-nulled `p` → SIGSEGV.)
+                    if (mb, ms) == (rb, rs) {
+                        continue;
+                    }
+                    let observable = if mb != rb {
+                        // Cross-block: the read may execute after the move on
+                        // some CFG path (including loop back-edges). Deopt.
+                        true
+                    } else {
+                        // Same block: only a read strictly after the move.
+                        ms < rs && {
+                            // Cleared if a reinit lies in (ms, rs].
+                            !slot_reinits.iter().any(|&ri| ri > ms && ri <= rs)
+                        }
+                    };
+                    if observable {
+                        return true;
+                    }
+                }
+            }
+        }
+
         false
     }
 
@@ -263,12 +556,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// v2-raw heap-element shape produced by VM-side `NewStringV2` /
     /// `NewDecimalV2` opcodes at
     /// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
-    pub(crate) fn v2_array_new_func(&self, elem: NativeKind) -> Option<cranelift::codegen::ir::FuncRef> {
+    pub(crate) fn v2_array_new_func(
+        &self,
+        elem: NativeKind,
+    ) -> Option<cranelift::codegen::ir::FuncRef> {
         match elem {
             NativeKind::Float64 => Some(self.ffi.v2_array_new_f64),
             NativeKind::Int64 | NativeKind::UInt64 => Some(self.ffi.v2_array_new_i64),
             NativeKind::Int32 | NativeKind::UInt32 => Some(self.ffi.v2_array_new_i32),
-            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(self.ffi.v2_array_new_bool),
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => {
+                Some(self.ffi.v2_array_new_bool)
+            }
             NativeKind::StringV2 => Some(self.ffi.v2_array_new_string),
             NativeKind::DecimalV2 => Some(self.ffi.v2_array_new_decimal),
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
@@ -279,6 +577,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // dispatcher (size=8 below). Mirrors the String/Decimal carriers.
             NativeKind::Ptr(shape_value::HeapKind::TypedObject) => {
                 Some(self.ffi.v2_array_new_typed_object)
+            }
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // v2-raw `TypedArray<*const TraitObjectStorage>` allocator per
+            // ADR-006 §2.7.5 + §2.7.24 Q25.C. 8-byte `*const TraitObjectStorage`
+            // raw pointer payload; mirrors the TypedObject carrier.
+            NativeKind::Ptr(shape_value::HeapKind::TraitObject) => {
+                Some(self.ffi.v2_array_new_trait_object)
             }
             _ => None,
         }
@@ -303,6 +608,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
             // 8-byte raw pointer carrier (`*const TypedObjectStorage`).
             NativeKind::Ptr(shape_value::HeapKind::TypedObject) => Some(8),
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // 8-byte raw pointer carrier (`*const TraitObjectStorage`).
+            NativeKind::Ptr(shape_value::HeapKind::TraitObject) => Some(8),
             _ => None,
         }
     }
@@ -338,10 +646,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
         } else if val_type == types::I64 {
             val
-        } else if val_type == types::I32
-            || val_type == types::I16
-            || val_type == types::I8
-        {
+        } else if val_type == types::I32 || val_type == types::I16 || val_type == types::I8 {
             // Zero-extend: the dispatcher uses only the low `elem_size` bytes,
             // so sign bits above that are ignored.
             self.builder.ins().uextend(types::I64, val)
@@ -417,6 +722,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
             // 8-byte raw pointer carrier, no coercion.
             NativeKind::Ptr(shape_value::HeapKind::TypedObject) => val,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // 8-byte raw pointer carrier, no coercion.
+            NativeKind::Ptr(shape_value::HeapKind::TraitObject) => val,
             _ => val,
         }
     }
@@ -427,10 +735,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if idx_type == types::I32 {
             index_val
         } else if idx_type == types::F64 {
-            let i64_val = self
-                .builder
-                .ins()
-                .fcvt_to_sint_sat(types::I64, index_val);
+            let i64_val = self.builder.ins().fcvt_to_sint_sat(types::I64, index_val);
             self.builder.ins().ireduce(types::I32, i64_val)
         } else if idx_type == types::I8 {
             self.builder.ins().uextend(types::I32, index_val)
@@ -503,7 +808,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                      out of bounds (pool len = {}) — string-pool conduit \
                                      mismatch at JIT compile time. ADR-006 §2.7.5 / Group X \
                                      JIT FFI String/Decimal BUILD.",
-                                    id, self.strings.len()
+                                    id,
+                                    self.strings.len()
                                 ));
                             }
                             self.strings[idx].clone()
@@ -597,9 +903,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // ordinary scalar array literals (`[1, 2, 3]`) are not
                 // over-broadly bailed.
                 for op in operands {
-                    if let Some(NativeKind::Ptr(heap_kind)) =
-                        self.operand_slot_kind(op)
-                    {
+                    if let Some(NativeKind::Ptr(heap_kind)) = self.operand_slot_kind(op) {
                         return Err(format!(
                             "emit_v2_array_aggregate: SURFACE — scalar \
                              element kind {:?} array has an operand with \
@@ -986,19 +1290,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `arr_ptr` is a Cranelift `i64` value pointing to a `TypedArrayHeader`.
     /// `index` is a Cranelift `i32` value (unsigned index).
     /// Returns the loaded element value (type depends on `elem_type`).
-    pub fn v2_array_get(
-        &mut self,
-        arr_ptr: Value,
-        index: Value,
-        elem_type: NativeKind,
-    ) -> Value {
+    pub fn v2_array_get(&mut self, arr_ptr: Value, index: Value, elem_type: NativeKind) -> Value {
         let (cl_type, elem_size) = elem_type_info(elem_type);
 
         // 1. Load data pointer (i64) from arr_ptr + DATA_PTR_OFFSET
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
+        let data_ptr =
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
 
         // 2. Load length (u32) from arr_ptr + LEN_OFFSET
         let len = self
@@ -1014,10 +1313,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // The merge block receives the result as a block parameter.
         self.builder.append_block_param(merge_block, cl_type);
 
-        let cmp = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, index, len);
+        let cmp = self.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
         self.builder
             .ins()
             .brif(cmp, in_bounds_block, &[], oob_block, &[]);
@@ -1101,10 +1397,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let (_cl_type, elem_size) = elem_type_info(elem_type);
 
         // 1. Load data pointer
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
+        let data_ptr =
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
 
         // 2. Load length
         let len = self
@@ -1117,10 +1413,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let oob_block = self.builder.create_block();
         let continue_block = self.builder.create_block();
 
-        let cmp = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, index, len);
+        let cmp = self.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
         self.builder
             .ins()
             .brif(cmp, in_bounds_block, &[], oob_block, &[]);
@@ -1170,4 +1463,3 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
-

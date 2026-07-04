@@ -59,16 +59,15 @@
 //!   `read_element` `None` surfaces a structured `RuntimeError`.
 //! - ADR-005 §1 single-discriminator preserved.
 
-use crate::executor::v2_handlers::v2_array_detect::{
-    allocate_empty_typed_array, as_v2_typed_array, contains_element,
-    native_kind_to_v2_elem_type, position_of, push_element, read_element, V2ElemType,
-    V2TypedArrayView,
-};
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2ElemType, V2TypedArrayView, allocate_empty_typed_array, as_v2_typed_array, contains_element,
+    native_kind_to_v2_elem_type, position_of, push_element, read_element,
+};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
 use shape_value::v2::typed_array::release_v2_typed_array;
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // W16.2-J.4-rest kind-generic header-view helpers (mirror of
@@ -92,6 +91,49 @@ fn extract_view(op: &'static str, slot: &KindedSlot) -> Result<V2TypedArrayView,
             slot.kind
         ))
     })
+}
+
+/// Exhaustive HeapKind sink for pointer-truthiness checks.
+#[inline]
+fn heap_ptr_is_truthy(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits != 0,
+    }
 }
 
 /// Test a `KindedSlot` for truthiness — mirrors
@@ -127,7 +169,8 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
         NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
         NativeKind::Char => bits != 0,
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
-        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        NativeKind::String => bits != 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_truthy(bits, heap_kind),
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9):
         // Null is the absence-of-value sentinel; falsy by definition.
         NativeKind::Null => false,
@@ -139,14 +182,49 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
 /// surfaced before any element read.
 #[inline]
 fn require_closure(op: &str, arg: &KindedSlot) -> Result<(), VMError> {
-    if arg.kind != NativeKind::Ptr(HeapKind::Closure) {
+    // A predicate may be either a closure value
+    // (`Ptr(HeapKind::Closure)`) or a *named-function value* carried as a
+    // bare function-id (`NativeKind::UInt64` — see
+    // `PushConst(Constant::Function)` in `stack_ops/mod.rs`). Both are
+    // dispatched by `vm.call_value_immediate_nb` (the per-element call
+    // path below): the `UInt64` arm value-calls the function-id directly.
+    // Accepting `UInt64` here is what lets `xs.map(square)` / `xs.filter(
+    // is_even)` work with a named fn (R1 named-fn-as-value fix). Anything
+    // else is a genuine non-callable and is rejected cleanly.
+    if arg.kind == NativeKind::Ptr(HeapKind::Closure) || arg.kind == NativeKind::UInt64 {
+        Ok(())
+    } else {
         Err(VMError::RuntimeError(format!(
-            "Array.{}: predicate must be a closure, got kind {:?}",
+            "Array.{}: predicate must be a closure or function reference, got kind {:?}",
             op, arg.kind
         )))
-    } else {
-        Ok(())
     }
+}
+
+fn position_of_string_needle(
+    op: &'static str,
+    view: &V2TypedArrayView,
+    needle: &KindedSlot,
+) -> Result<Option<u32>, VMError> {
+    let needle_str = needle.as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.{op}: expected string-compatible needle for Array<string>, got kind {:?}",
+            needle.kind
+        ))
+    })?;
+    for i in 0..view.len {
+        let (bits, kind) = read_element(view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.{op}: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        if elem.as_str() == Some(needle_str) {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -164,6 +242,7 @@ fn require_closure(op: &str, arg: &KindedSlot) -> Result<(), VMError> {
 /// `includes`). Class-shift target: J.5c.
 #[cold]
 #[inline(never)]
+#[allow(dead_code)]
 fn j5_builder_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
     let receiver_kind = if args.is_empty() {
         "<no args>".to_string()
@@ -233,6 +312,7 @@ fn run_filter_builder(
     vm: &mut VirtualMachine,
     view: &V2TypedArrayView,
     closure: &KindedSlot,
+    include_index: bool,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     // Output element kind = input elem_type (filter ops never change the
@@ -274,11 +354,22 @@ fn run_filter_builder(
         // copy pushed into the output. Clone the slot bits to share the
         // refcount for heap-element carriers.
         let elem_for_pred = elem_slot.clone();
-        let pred = match vm.call_value_immediate_nb(closure, &[elem_for_pred], ctx.as_deref_mut()) {
-            Ok(p) => p,
-            Err(e) => {
-                unsafe { release_v2_typed_array(out_ptr) };
-                return Err(e);
+        let pred = if include_index {
+            let index = KindedSlot::from_int(i as i64);
+            match vm.call_value_immediate_nb(closure, &[elem_for_pred, index], ctx.as_deref_mut()) {
+                Ok(p) => p,
+                Err(e) => {
+                    unsafe { release_v2_typed_array(out_ptr) };
+                    return Err(e);
+                }
+            }
+        } else {
+            match vm.call_value_immediate_nb(closure, &[elem_for_pred], ctx.as_deref_mut()) {
+                Ok(p) => p,
+                Err(e) => {
+                    unsafe { release_v2_typed_array(out_ptr) };
+                    return Err(e);
+                }
             }
         };
         let truthy = slot_truthy(&pred);
@@ -338,6 +429,7 @@ fn run_select_builder(
     vm: &mut VirtualMachine,
     view: &V2TypedArrayView,
     closure: &KindedSlot,
+    include_index: bool,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     // Edge case: empty input. No closure runs → no kind to establish.
@@ -362,7 +454,12 @@ fn run_select_builder(
             ))
         })?;
         let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let result = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+        let result = if include_index {
+            let index = KindedSlot::from_int(i as i64);
+            vm.call_value_immediate_nb(closure, &[elem_slot, index], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?
+        };
 
         match established_kind {
             None => {
@@ -458,7 +555,31 @@ pub(crate) fn handle_where_v2(
     require_closure("where", &args[1])?;
     let view = extract_view("where", &args[0])?;
     let closure = &args[1];
-    run_filter_builder("where", FilterMode::All, vm, &view, closure, ctx)
+    run_filter_builder("where", FilterMode::All, vm, &view, closure, false, ctx)
+}
+
+pub(crate) fn handle_where_indexed_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.filterIndexed expects 1 argument: (predicate)".into(),
+        ));
+    }
+    require_closure("filterIndexed", &args[1])?;
+    let view = extract_view("filterIndexed", &args[0])?;
+    let closure = &args[1];
+    run_filter_builder(
+        "filterIndexed",
+        FilterMode::All,
+        vm,
+        &view,
+        closure,
+        true,
+        ctx,
+    )
 }
 
 /// `arr.select(|x| ...)` — per-element transform projection. Output
@@ -479,7 +600,23 @@ pub(crate) fn handle_select_v2(
     require_closure("select", &args[1])?;
     let view = extract_view("select", &args[0])?;
     let closure = &args[1];
-    run_select_builder(vm, &view, closure, ctx)
+    run_select_builder(vm, &view, closure, false, ctx)
+}
+
+pub(crate) fn handle_select_indexed_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.mapIndexed expects 1 argument: (transform)".into(),
+        ));
+    }
+    require_closure("mapIndexed", &args[1])?;
+    let view = extract_view("mapIndexed", &args[0])?;
+    let closure = &args[1];
+    run_select_builder(vm, &view, closure, true, ctx)
 }
 
 /// `arr.find(|x| ...)` — first element satisfying the predicate, or the
@@ -582,6 +719,12 @@ pub(crate) fn handle_index_of_v2(
     }
     let view = extract_view("indexOf", &args[0])?;
     let needle = &args[1];
+    if view.elem_type == V2ElemType::String && needle.kind == NativeKind::String {
+        return match position_of_string_needle("indexOf", &view, needle)? {
+            Some(i) => Ok(KindedSlot::from_int(i as i64)),
+            None => Ok(KindedSlot::from_int(-1)),
+        };
+    }
     if !needle_kind_matches(view.elem_type, needle.kind) {
         return Ok(KindedSlot::from_int(-1));
     }
@@ -611,6 +754,11 @@ pub(crate) fn handle_includes_v2(
     }
     let view = extract_view("includes", &args[0])?;
     let needle = &args[1];
+    if view.elem_type == V2ElemType::String && needle.kind == NativeKind::String {
+        return Ok(KindedSlot::from_bool(
+            position_of_string_needle("includes", &view, needle)?.is_some(),
+        ));
+    }
     if !needle_kind_matches(view.elem_type, needle.kind) {
         return Ok(KindedSlot::from_bool(false));
     }
@@ -767,9 +915,7 @@ pub(crate) fn handle_single_v2(
         }
     }
     found.ok_or_else(|| {
-        VMError::RuntimeError(
-            "Array.single: no element matched the predicate".into(),
-        )
+        VMError::RuntimeError("Array.single: no element matched the predicate".into())
     })
 }
 
@@ -790,7 +936,15 @@ pub(crate) fn handle_take_while_v2(
     require_closure("takeWhile", &args[1])?;
     let view = extract_view("takeWhile", &args[0])?;
     let closure = &args[1];
-    run_filter_builder("takeWhile", FilterMode::TakePrefix, vm, &view, closure, ctx)
+    run_filter_builder(
+        "takeWhile",
+        FilterMode::TakePrefix,
+        vm,
+        &view,
+        closure,
+        false,
+        ctx,
+    )
 }
 
 /// `arr.skipWhile(|x| ...)` — drop prefix elements while the predicate
@@ -810,7 +964,15 @@ pub(crate) fn handle_skip_while_v2(
     require_closure("skipWhile", &args[1])?;
     let view = extract_view("skipWhile", &args[0])?;
     let closure = &args[1];
-    run_filter_builder("skipWhile", FilterMode::SkipPrefix, vm, &view, closure, ctx)
+    run_filter_builder(
+        "skipWhile",
+        FilterMode::SkipPrefix,
+        vm,
+        &view,
+        closure,
+        false,
+        ctx,
+    )
 }
 
 /// `arr.forEach(|x| ...)` — invoke the closure per element for side
@@ -842,4 +1004,3 @@ pub(crate) fn handle_for_each_v2(
     }
     Ok(KindedSlot::none())
 }
-

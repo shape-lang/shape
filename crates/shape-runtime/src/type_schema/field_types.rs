@@ -22,7 +22,10 @@ impl std::fmt::Display for FieldKindError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FieldKindError::AnyTypeNotStrictlyTyped => {
-                write!(f, "FieldType::Any has no strict-typed NativeKind projection")
+                write!(
+                    f,
+                    "FieldType::Any has no strict-typed NativeKind projection"
+                )
             }
         }
     }
@@ -601,10 +604,7 @@ mod tests {
     #[test]
     fn test_semantic_to_field_type_optional_object() {
         use crate::type_system::SemanticType;
-        let ft = semantic_to_field_type(
-            &SemanticType::Named("Candle".to_string()),
-            true,
-        );
+        let ft = semantic_to_field_type(&SemanticType::Named("Candle".to_string()), true);
         assert_eq!(
             ft,
             FieldType::Option(Box::new(FieldType::Object("Candle".to_string())))
@@ -628,10 +628,7 @@ mod tests {
     #[test]
     fn test_semantic_to_field_type_option_variant_bool() {
         use crate::type_system::SemanticType;
-        let ft = semantic_to_field_type(
-            &SemanticType::Option(Box::new(SemanticType::Bool)),
-            false,
-        );
+        let ft = semantic_to_field_type(&SemanticType::Option(Box::new(SemanticType::Bool)), false);
         assert_eq!(ft, FieldType::Option(Box::new(FieldType::Bool)));
     }
 
@@ -666,10 +663,8 @@ mod tests {
         );
 
         // Option(Bool) (was Any)
-        let ft2 = semantic_to_field_type(
-            &SemanticType::Option(Box::new(SemanticType::Bool)),
-            false,
-        );
+        let ft2 =
+            semantic_to_field_type(&SemanticType::Option(Box::new(SemanticType::Bool)), false);
         assert!(
             !matches!(ft2, FieldType::Any),
             "SemanticType::Option(_) must not return Any; got {:?}",
@@ -861,8 +856,7 @@ mod tests {
             value: Box::new(FieldType::I64),
         };
         let json = serde_json::to_string(&ft).expect("serialize HashMap variant");
-        let decoded: FieldType =
-            serde_json::from_str(&json).expect("deserialize HashMap variant");
+        let decoded: FieldType = serde_json::from_str(&json).expect("deserialize HashMap variant");
         assert_eq!(decoded, ft);
     }
 
@@ -906,8 +900,7 @@ mod tests {
         ];
 
         for variant in variants {
-            let json =
-                serde_json::to_string(&variant).expect("serialize all-variant round-trip");
+            let json = serde_json::to_string(&variant).expect("serialize all-variant round-trip");
             let decoded: FieldType =
                 serde_json::from_str(&json).expect("deserialize all-variant round-trip");
             assert_eq!(
@@ -937,8 +930,7 @@ mod tests {
             value: Box::new(FieldType::Bool),
         }))));
         let json2 = serde_json::to_string(&ft2).expect("serialize deeply-nested");
-        let decoded2: FieldType =
-            serde_json::from_str(&json2).expect("deserialize deeply-nested");
+        let decoded2: FieldType = serde_json::from_str(&json2).expect("deserialize deeply-nested");
         assert_eq!(decoded2, ft2);
     }
 

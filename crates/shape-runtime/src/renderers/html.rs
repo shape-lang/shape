@@ -484,4 +484,59 @@ mod tests {
         assert!(output.contains("data-type=\"bar\""));
         assert!(output.contains("Sales"));
     }
+
+    #[test]
+    fn test_html_chart_echarts_two_series() {
+        // A 2-series line chart must emit ECharts options carrying both
+        // series' data and labels through the data-chart-options attribute.
+        use shape_value::content::{ChartChannel, ChartSpec, ChartType};
+        let chart = ContentNode::Chart(ChartSpec {
+            chart_type: ChartType::Line,
+            channels: vec![
+                ChartChannel {
+                    name: "x".into(),
+                    label: "x".into(),
+                    values: vec![1.0, 2.0, 3.0],
+                    color: None,
+                },
+                ChartChannel {
+                    name: "y".into(),
+                    label: "Alpha".into(),
+                    values: vec![10.0, 20.0, 30.0],
+                    color: None,
+                },
+                ChartChannel {
+                    name: "y".into(),
+                    label: "Beta".into(),
+                    values: vec![30.0, 15.0, 5.0],
+                    color: None,
+                },
+            ],
+            x_categories: None,
+            title: Some("Two Series".into()),
+            x_label: None,
+            y_label: None,
+            width: None,
+            height: None,
+            echarts_options: None,
+            interactive: true,
+        });
+        let output = renderer().render(&chart);
+        // ECharts hydration markers present.
+        assert!(output.contains("data-echarts=\"true\""));
+        assert!(output.contains("data-chart-options="));
+        // The serialized ECharts option (HTML-escaped) carries both series'
+        // labels and data points. `"` escapes to `&quot;` in attribute text.
+        assert!(output.contains("Alpha"), "series A label missing: {output}");
+        assert!(output.contains("Beta"), "series B label missing: {output}");
+        // Both series' y-values are paired with x in the [x, y] data arrays.
+        assert!(
+            output.contains("[1.0,10.0]"),
+            "series A data missing: {output}"
+        );
+        assert!(
+            output.contains("[1.0,30.0]"),
+            "series B data missing: {output}"
+        );
+    }
 }

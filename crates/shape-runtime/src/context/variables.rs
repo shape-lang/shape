@@ -208,10 +208,7 @@ impl super::ExecutionContext {
     /// `HashMap<String, KindedSlot>` bumps each override value's refcount
     /// (via `KindedSlot::Clone`) so the original variable keeps its own
     /// ownership.
-    pub fn get_variable_format_overrides(
-        &self,
-        name: &str,
-    ) -> Option<HashMap<String, KindedSlot>> {
+    pub fn get_variable_format_overrides(&self, name: &str) -> Option<HashMap<String, KindedSlot>> {
         // Search from innermost to outermost scope
         for scope in self.variable_scopes.iter().rev() {
             if let Some(variable) = scope.get(name) {
@@ -364,7 +361,9 @@ mod tests {
         assert!(var.format_overrides.is_some());
         let stored_overrides = var.format_overrides.unwrap();
         assert_eq!(
-            stored_overrides.get("decimals").map(|ks| ks.slot().as_f64()),
+            stored_overrides
+                .get("decimals")
+                .map(|ks| ks.slot().as_f64()),
             Some(4.0)
         );
     }

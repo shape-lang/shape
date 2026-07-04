@@ -15,9 +15,10 @@
 // E-tests reference template `executor/v2_stack_tests.rs` and
 // playbook §3 canonical rewrite).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use super::*;
 use crate::bytecode::*;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 /// Shared test helpers (eval, eval_result, compile, etc.)
 pub(crate) mod test_utils;
@@ -29,7 +30,15 @@ mod decimal_ops;
 mod deque_ops;
 mod io_integration;
 mod jit_abi_tests;
+// Strict-typing defection sentinel — scans the source tree for the
+// Bool-default slot-fabrication pattern (ADR-006 §2.7.7 forbidden),
+// mirroring scripts/check-no-dynamic.sh at the Rust-test layer.
 mod matrix_ops;
+// R1 named-fn-as-value carrier tests — a named function referenced as a
+// value (captured into an escaping closure, forwarded as a call arg, or
+// passed to an array HOF) must dispatch correctly and NEVER SIGSEGV.
+mod named_fn_value;
+mod no_dynamic;
 // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
 // source-level smoke tests for `&mut self` method writeback semantics.
 mod mutation_writeback;
@@ -37,10 +46,13 @@ mod mutation_writeback;
 // smoke tests for the tuple-return `&mut self` ABI variant covering
 // pop-shaped methods (Array.pop / Deque.popBack / popFront /
 // PriorityQueue.pop / HashMap.remove).
+mod hashmap_readback_kind;
 mod pop_mutation;
 mod priority_queue_ops;
+mod seam_c_for_loop;
 mod set_ops;
 mod soak_tests;
+mod string_method_aliases;
 mod table_iteration;
 mod try_operator;
 mod type_system_integration;
@@ -123,13 +135,70 @@ fn execute_bytecode_typed(
     vm.execute_raw(None)
 }
 
+/// Helper to execute hand-built bytecode through the post-strict-typing
+/// host boundary, preserving the actual top-of-stack [`KindedSlot`].
+#[allow(dead_code)]
+fn execute_bytecode_slot(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+) -> Result<KindedSlot, VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        ..Default::default()
+    };
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None)
+}
+
+/// [`execute_bytecode_slot`] variant for programs that use top-level locals.
+#[allow(dead_code)]
+fn execute_bytecode_slot_with_locals(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+    num_locals: u16,
+) -> Result<KindedSlot, VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        top_level_locals_count: num_locals,
+        ..Default::default()
+    };
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None)
+}
+
+/// [`execute_bytecode_slot`] variant for hand-built bytecode that references
+/// the program string pool, such as typed `CallMethod` instructions.
+#[allow(dead_code)]
+fn execute_bytecode_slot_with_strings(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+    strings: Vec<String>,
+) -> Result<KindedSlot, VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        strings,
+        ..Default::default()
+    };
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None)
+}
+
 #[test]
 fn test_basic_arithmetic() {
     // Test: 2 + 3 = 5
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // Push 2
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // Push 3
-        Instruction::simple(OpCode::AddNumber),                             // Add
+        Instruction::simple(OpCode::AddNumber),                       // Add
     ];
     let constants = vec![Constant::Number(2.0), Constant::Number(3.0)];
 
@@ -179,16 +248,15 @@ fn test_division() {
     assert_eq!(f64::from_bits(result), 5.0);
 }
 
-/// Regression (R5c-2-β-γ checkpoint (a)): `int` is i64; arithmetic is EXACT
-/// across the full i64 range and overflow has two's-complement WRAPPING
-/// semantics — defined behavior per the 2026-05-20 integer-semantics ruling
-/// (#1 exact, #3 wrapping). The previous "promote to f64 on overflow"
-/// behavior was a vestige of the deleted v1 `ValueWord` i48-inline NaN-box
-/// encoding; it silently corrupted any `int` arithmetic above 2^53. `AddInt`
-/// now wraps and stays `Int64`.
+/// `int` (i64) arithmetic is EXACT across the full i64 range; overflow is a
+/// structured RUNTIME error (THE RULE, user 2026-06-01 / numeric-conversion
+/// D3) — never a silent two's-complement wrap and never a silent f64
+/// promotion. (This supersedes the 2026-05-20 wrapping ruling these tests
+/// previously pinned: a silent wrap is the same hidden-data-loss class as a
+/// silent narrowing cast.) Widen explicitly via `as number` / `as bigint`.
 #[test]
-fn test_integer_add_overflow_wraps_two_complement() {
-    // AddInt: i64::MAX + 1 wraps to i64::MIN, stays int.
+fn test_integer_add_overflow_is_runtime_error() {
+    // AddInt: i64::MAX + 1 overflows — D3 runtime error, no wrap.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -196,14 +264,14 @@ fn test_integer_add_overflow_wraps_two_complement() {
     ];
     let constants = vec![Constant::Int(i64::MAX), Constant::Int(1)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result as i64, i64::MIN);
+    let err = execute_bytecode(instructions, constants).unwrap_err();
+    assert!(matches!(err, VMError::RuntimeError(ref m) if m.contains("overflow")));
 }
 
-/// `MulInt` wraps on overflow (two's-complement) and stays `Int64`.
+/// `MulInt` overflow is a structured RUNTIME error (D3), not a wrap.
 #[test]
-fn test_integer_mul_overflow_wraps_two_complement() {
-    // MulInt: 3037000500^2 overflows i64; result is the wrapped product.
+fn test_integer_mul_overflow_is_runtime_error() {
+    // MulInt: 3037000500^2 overflows i64 — D3 runtime error.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -211,15 +279,14 @@ fn test_integer_mul_overflow_wraps_two_complement() {
     ];
     let constants = vec![Constant::Int(3_037_000_500), Constant::Int(3_037_000_500)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result as i64, 3_037_000_500i64.wrapping_mul(3_037_000_500));
-    assert_eq!(result as i64, -9_223_372_036_709_301_616);
+    let err = execute_bytecode(instructions, constants).unwrap_err();
+    assert!(matches!(err, VMError::RuntimeError(ref m) if m.contains("overflow")));
 }
 
-/// `SubInt` wraps on underflow (two's-complement) and stays `Int64`.
+/// `SubInt` underflow is a structured RUNTIME error (D3), not a wrap.
 #[test]
-fn test_integer_sub_overflow_wraps_two_complement() {
-    // SubInt: i64::MIN - 1 wraps to i64::MAX, stays int.
+fn test_integer_sub_overflow_is_runtime_error() {
+    // SubInt: i64::MIN - 1 underflows — D3 runtime error.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -227,8 +294,8 @@ fn test_integer_sub_overflow_wraps_two_complement() {
     ];
     let constants = vec![Constant::Int(i64::MIN), Constant::Int(1)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result as i64, i64::MAX);
+    let err = execute_bytecode(instructions, constants).unwrap_err();
+    assert!(matches!(err, VMError::RuntimeError(ref m) if m.contains("overflow")));
 }
 
 #[test]
@@ -337,17 +404,20 @@ fn test_arrays() {
 fn test_array_indexing() {
     // Test: [10, 20, 30][1] = 20
     //
-    // Index uses `Constant::Int(1)` not `Number(1.0)`. After Wave-E+5,
-    // PushConst for Number constants pushes raw native f64 bits; the
-    // array indexer's untagged-bits path interprets those as i64 (per
-    // op_get_prop's `Some(raw as i64)` branch), so f64 1.0 = bits
-    // 0x3FF0000000000000 ≈ 4.6e18 — way out of bounds, returns None.
-    // Int constants push native i64 directly, matching the indexer.
+    // The legacy `NewArray` opcode has no element-kind proof, so this
+    // hand-built bytecode uses the typed producer opcodes and then exercises
+    // the generic `GetProp` index path against the v2 typed-array carrier.
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // Push index 1
         Instruction::simple(OpCode::GetProp),
     ];
@@ -882,7 +952,9 @@ fn test_wrap_type_annotation_preserves_operations() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_multiple_type_annotations() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 // ===== Typed Column Access Tests =====
@@ -967,7 +1039,12 @@ fn test_load_col_f64() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Float64,
+    )
+    .unwrap();
     let v = f64::from_bits(bits);
     assert_eq!(v, 42.5, "Expected 42.5, got {}", v);
 }
@@ -1002,7 +1079,12 @@ fn test_load_col_i64() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Int64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Int64,
+    )
+    .unwrap();
     assert_eq!(bits as i64, 2000, "Expected 2000, got {}", bits as i64);
 }
 
@@ -1044,10 +1126,7 @@ fn test_load_col_str() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
-    assert_eq!(
-        result.as_str().expect("Expected String"),
-        "AAPL"
-    );
+    assert_eq!(result.as_str().expect("Expected String"), "AAPL");
 }
 
 #[test]
@@ -1097,8 +1176,7 @@ fn test_bind_schema_success() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 2);
 }
@@ -1239,8 +1317,7 @@ fn test_load_pipeline_correct_mapping() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1348,8 +1425,7 @@ fn test_load_pipeline_subset_columns() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1378,8 +1454,7 @@ fn test_load_pipeline_column_alias() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1432,8 +1507,7 @@ fn test_load_pipeline_timestamp_field() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1454,8 +1528,7 @@ fn test_load_pipeline_numeric_promotion() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1527,7 +1600,12 @@ fn test_load_col_bool() {
         Instruction::simple(OpCode::Halt),
     ];
     let constants = vec![Constant::Value(row_view)];
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Bool).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Bool,
+    )
+    .unwrap();
     assert_eq!(bits != 0, false, "Expected false, got {}", bits != 0);
 
     // Read row 2 (true) — verifies bit-level read at offset > 0
@@ -1541,7 +1619,12 @@ fn test_load_col_bool() {
         Instruction::simple(OpCode::Halt),
     ];
     let constants2 = vec![Constant::Value(row_view2)];
-    let bits2 = execute_bytecode_typed(instructions2, constants2, crate::type_tracking::NativeKind::Bool).unwrap();
+    let bits2 = execute_bytecode_typed(
+        instructions2,
+        constants2,
+        crate::type_tracking::NativeKind::Bool,
+    )
+    .unwrap();
     assert_eq!(bits2 != 0, true, "Expected true, got {}", bits2 != 0);
 }
 
@@ -1576,7 +1659,12 @@ fn test_load_col_f64_from_float32() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Float64,
+    )
+    .unwrap();
     let n = f64::from_bits(bits);
     assert!((n - 3.14).abs() < 0.001, "Expected ~3.14, got {}", n);
 }
@@ -1610,7 +1698,12 @@ fn test_load_col_f64_from_int64() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Float64,
+    )
+    .unwrap();
     let v = f64::from_bits(bits);
     assert_eq!(v, 42.0, "Expected 42.0, got {}", v);
 }
@@ -1644,7 +1737,12 @@ fn test_load_col_i64_from_int32() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Int64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Int64,
+    )
+    .unwrap();
     assert_eq!(bits as i64, 456, "Expected 456, got {}", bits as i64);
 }
 
@@ -1899,19 +1997,25 @@ fn test_dynamic_object_methods_are_rejected() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_extension_intrinsic_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_extension_intrinsic_takes_priority_over_ufcs() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_extension_intrinsic_fallback_to_ufcs_when_no_match() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 // Phase-2c surface: helpers `compile_and_run` and
@@ -1941,7 +2045,7 @@ fn test_array_index_assignment_accepts_int_keys() {
 }
 
 #[test]
-#[ignore = "Wave B made array literals emit v2 typed opcodes unconditionally; v2 TypedArray uses refcounting (no Arc) so copy-on-write aliasing semantics differ from v1 VMArray. Test exercises v1 semantics; needs rewrite for v2 semantics."]
+#[ignore = "deleted v1 VMArray alias-preservation path: v2 TypedArray uses refcounting (no Arc), and this placeholder still depends on deleted host-tier ValueWord helpers. Rewrite as a v2 mutation/share test before unignoring."]
 fn test_array_index_assignment_preserves_copy_on_write_aliasing() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }
@@ -2033,11 +2137,17 @@ fn test_window_sum_builtin_executes() {
     // Test that WindowSum builtin can be dispatched through the executor.
     // We manually construct bytecodes that push an array and call WindowSum.
     let instructions = vec![
-        // Push array [1, 2, 3]
+        // Push v2 TypedArray<f64> [1, 2, 3]
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 1.0
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 2.0
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 3.0
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         // Push window spec (empty string = no partitioning)
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         // Push arg count (2: array + spec)
@@ -2053,7 +2163,7 @@ fn test_window_sum_builtin_executes() {
         Constant::Number(2.0),
         Constant::Number(3.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0), // arg count
+        Constant::Int(2), // arg count
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2062,20 +2172,22 @@ fn test_window_sum_builtin_executes() {
         "WindowSum should execute: {:?}",
         result.err()
     );
-    assert_eq!(
-        f64::from_bits(result.unwrap()),
-        6.0,
-        "sum([1,2,3]) = 6"
-    );
+    assert_eq!(f64::from_bits(result.unwrap()), 6.0, "sum([1,2,3]) = 6");
 }
 
 #[test]
 fn test_window_avg_builtin_executes() {
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
         Instruction::new(
@@ -2088,7 +2200,7 @@ fn test_window_avg_builtin_executes() {
         Constant::Number(20.0),
         Constant::Number(30.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2107,9 +2219,13 @@ fn test_window_avg_builtin_executes() {
 #[test]
 fn test_window_count_builtin_executes() {
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(2))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(2))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(
@@ -2121,7 +2237,7 @@ fn test_window_count_builtin_executes() {
         Constant::Number(5.0),
         Constant::Number(10.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2130,19 +2246,24 @@ fn test_window_count_builtin_executes() {
         "WindowCount should execute: {:?}",
         result.err()
     );
-    let _result_val = result.unwrap();
-    let n = f64::from_bits(_result_val);
-    assert_eq!(n, 2.0, "count([5,10]) = 2");
+    let n = result.unwrap() as i64;
+    assert_eq!(n, 2, "count([5,10]) = 2");
 }
 
 #[test]
 fn test_window_min_max_builtin_executes() {
     // Test WindowMin
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
         Instruction::new(
@@ -2155,7 +2276,7 @@ fn test_window_min_max_builtin_executes() {
         Constant::Number(3.0),
         Constant::Number(9.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2164,18 +2285,20 @@ fn test_window_min_max_builtin_executes() {
         "WindowMin should execute: {:?}",
         result.err()
     );
-    assert_eq!(
-        f64::from_bits(result.unwrap()),
-        3.0,
-        "min([7,3,9]) = 3"
-    );
+    assert_eq!(f64::from_bits(result.unwrap()), 3.0, "min([7,3,9]) = 3");
 
     // Test WindowMax
     let instructions2 = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
         Instruction::new(
@@ -2188,7 +2311,7 @@ fn test_window_min_max_builtin_executes() {
         Constant::Number(3.0),
         Constant::Number(9.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result2 = execute_bytecode(instructions2, constants2);
@@ -2197,11 +2320,7 @@ fn test_window_min_max_builtin_executes() {
         "WindowMax should execute: {:?}",
         result2.err()
     );
-    assert_eq!(
-        f64::from_bits(result2.unwrap()),
-        9.0,
-        "max([7,3,9]) = 9"
-    );
+    assert_eq!(f64::from_bits(result2.unwrap()), 9.0, "max([7,3,9]) = 9");
 }
 
 #[test]
@@ -2219,7 +2338,7 @@ fn test_window_row_number_builtin_executes() {
     let constants = vec![
         Constant::Number(42.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2249,7 +2368,7 @@ fn test_window_lag_lead_builtin_executes() {
         Constant::Number(1.0),
         Constant::Number(0.0),
         Constant::String("".to_string()),
-        Constant::Number(4.0),
+        Constant::Int(4),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2275,7 +2394,9 @@ fn test_cte_compiles_and_runs() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_module_context_can_invoke_shape_callable() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 // ============================================================================
@@ -2297,17 +2418,23 @@ fn test_module_context_can_invoke_shape_callable() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_r5_4d_intrinsic_vec_add_i64_bytecode_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_r5_4d_intrinsic_mat_add_bytecode_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_r5_4d_intrinsic_mat_sub_bytecode_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }

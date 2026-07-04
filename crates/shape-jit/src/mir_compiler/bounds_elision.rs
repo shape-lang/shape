@@ -51,8 +51,7 @@
 use std::collections::{HashMap, HashSet};
 
 use shape_vm::mir::types::{
-    BasicBlockId, BinOp, MirFunction, Operand, Place, Rvalue, SlotId, StatementKind,
-    TerminatorKind,
+    BasicBlockId, BinOp, MirFunction, Operand, Place, Rvalue, SlotId, StatementKind, TerminatorKind,
 };
 
 /// Result of bounds-elision analysis: per-MIR-function set of `(arr_slot, iv_slot)`
@@ -217,7 +216,9 @@ pub fn analyze(mir: &MirFunction) -> BoundsElisionPlan {
 fn successors(term: &TerminatorKind) -> Vec<BasicBlockId> {
     match term {
         TerminatorKind::Goto(b) => vec![*b],
-        TerminatorKind::SwitchBool { true_bb, false_bb, .. } => vec![*true_bb, *false_bb],
+        TerminatorKind::SwitchBool {
+            true_bb, false_bb, ..
+        } => vec![*true_bb, *false_bb],
         TerminatorKind::Call { next, .. } => vec![*next],
         TerminatorKind::Return | TerminatorKind::Unreachable => vec![],
     }
@@ -232,10 +233,7 @@ fn operand_local(op: &Operand) -> Option<SlotId> {
     }
 }
 
-fn rvalue_field_length_source(
-    rvalue: &Rvalue,
-    length_field_idxs: &HashSet<u16>,
-) -> Option<SlotId> {
+fn rvalue_field_length_source(rvalue: &Rvalue, length_field_idxs: &HashSet<u16>) -> Option<SlotId> {
     let inner_op = match rvalue {
         Rvalue::Use(op) | Rvalue::Clone(op) => op,
         _ => return None,
@@ -327,7 +325,9 @@ fn iv_starts_non_negative(mir: &MirFunction, iv: SlotId, header: BasicBlockId) -
             // We only accept const Int initializers; anything else is
             // potentially negative.
             let value = match rv {
-                Rvalue::Use(Operand::Constant(shape_vm::mir::types::MirConstant::Int(v))) => Some(*v),
+                Rvalue::Use(Operand::Constant(shape_vm::mir::types::MirConstant::Int(v))) => {
+                    Some(*v)
+                }
                 _ => None,
             };
             last_const_init = value;
@@ -373,11 +373,11 @@ fn iv_only_monotonic_in_body(body: &shape_vm::mir::types::BasicBlock, iv: SlotId
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_ast::ast::Span;
     use shape_vm::mir::types::{
         BasicBlock, BasicBlockId, BinOp, FieldIdx, LocalTypeInfo, MirConstant, MirFunction,
         MirStatement, Place, Point, Rvalue, SlotId, StatementKind, Terminator, TerminatorKind,
     };
-    use shape_ast::ast::Span;
 
     fn s(kind: StatementKind) -> MirStatement {
         MirStatement {
@@ -394,7 +394,12 @@ mod tests {
         }
     }
 
-    fn mir_for_loop_with_arr_index(arr: SlotId, iv: SlotId, bnd: SlotId, cond: SlotId) -> MirFunction {
+    fn mir_for_loop_with_arr_index(
+        arr: SlotId,
+        iv: SlotId,
+        bnd: SlotId,
+        cond: SlotId,
+    ) -> MirFunction {
         // bb0: arr param implicitly held in slot `arr`
         //   bnd = arr.length
         //   iv  = 0
@@ -484,6 +489,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         }
     }
 
@@ -554,7 +561,11 @@ mod tests {
 
         let mut mir = mir_for_loop_with_arr_index(arr, iv, bnd, cond);
         // Strip the back-edge: bb2 returns instead of jumping to bb1.
-        let bb2 = mir.blocks.iter_mut().find(|b| b.id == BasicBlockId(2)).unwrap();
+        let bb2 = mir
+            .blocks
+            .iter_mut()
+            .find(|b| b.id == BasicBlockId(2))
+            .unwrap();
         bb2.terminator = term(TerminatorKind::Return);
         let plan = analyze(&mir);
         assert!(

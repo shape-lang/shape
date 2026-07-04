@@ -719,8 +719,16 @@ mydep = { path = "deps/mydep" }
             .iter()
             .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
             .collect();
-        assert!(names.contains(&"a.shape".to_string()), "expected a.shape, got {:?}", names);
-        assert!(names.contains(&"b.shape".to_string()), "expected b.shape, got {:?}", names);
+        assert!(
+            names.contains(&"a.shape".to_string()),
+            "expected a.shape, got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"b.shape".to_string()),
+            "expected b.shape, got {:?}",
+            names
+        );
         assert!(
             !names.contains(&"c.shape".to_string()),
             "hidden dir .git must be excluded, got {:?}",

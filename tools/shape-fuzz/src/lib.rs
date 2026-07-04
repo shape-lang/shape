@@ -13,7 +13,8 @@
 //! - `record_finding` — write divergence record to a findings directory.
 //! - `mutation::mutate_seed` — bounded AST-aware mutation engine (audit §4.2).
 //! - `minimizer::minimize_failure` — statement-removal bisect (audit §5.1).
-//! - 50-seed hand-seeded corpus at `tests/corpus/<domain>/` (audit §3).
+//! - 59-seed hand-seeded corpus at `tests/corpus/<domain>/` (audit §3 plus
+//!   later corpus-expansion seeds).
 //!
 //! W13.4 wires the nightly GitHub Actions job per audit §6.2.
 
@@ -47,10 +48,7 @@ pub enum HarnessError {
     /// Failed to read the snippet at the requested path.
     SnippetRead { path: PathBuf, source: io::Error },
     /// Failed to spawn the `shape` binary subprocess.
-    SpawnFailed {
-        binary: PathBuf,
-        source: io::Error,
-    },
+    SpawnFailed { binary: PathBuf, source: io::Error },
     /// Failed while waiting on or killing the subprocess.
     WaitFailed(io::Error),
     /// I/O failure while writing a findings record.
@@ -207,12 +205,11 @@ pub fn record_finding(
 ) -> Result<PathBuf, HarnessError> {
     fs::create_dir_all(output_dir).map_err(HarnessError::FindingsWrite)?;
 
-    let snippet_source = fs::read_to_string(&cmp.snippet).map_err(|source| {
-        HarnessError::SnippetRead {
+    let snippet_source =
+        fs::read_to_string(&cmp.snippet).map_err(|source| HarnessError::SnippetRead {
             path: cmp.snippet.clone(),
             source,
-        }
-    })?;
+        })?;
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

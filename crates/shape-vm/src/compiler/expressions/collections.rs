@@ -36,6 +36,100 @@ pub(super) fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
     }
 }
 
+fn field_type_is_strictly_proven(ft: &FieldType) -> bool {
+    match ft {
+        FieldType::Any => false,
+        FieldType::Object(name) => name != "unknown",
+        FieldType::Array(inner) | FieldType::Option(inner) | FieldType::Set(inner) => {
+            field_type_is_strictly_proven(inner)
+        }
+        FieldType::HashMap { key, value } => {
+            field_type_is_strictly_proven(key) && field_type_is_strictly_proven(value)
+        }
+        FieldType::F64
+        | FieldType::I64
+        | FieldType::Bool
+        | FieldType::String
+        | FieldType::Timestamp
+        | FieldType::Decimal
+        | FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::U64 => true,
+    }
+}
+
+/// Numeric-conversion LITERAL ADOPTION (numeric-conversion-spec §4), struct
+/// construction site. A bare integer literal field value adopts the field's
+/// declared numeric `FieldType` IFF the literal value is losslessly
+/// representable in it (`P { x: 1 }` where `x: number` → `1` is the number
+/// literal `1.0`; `Sized { b: 200 }` where `b: u8` → ok). An out-of-range
+/// literal does NOT adopt (returns `false`) — the construction then rejects
+/// exactly as a non-literal value would. A non-`Int` value expr never adopts.
+///
+/// This is the construction-site twin of the inference-engine literal adoption
+/// (`adopt_int_literal_in_context`): the runtime already widens the literal to
+/// the field's declared kind at `object_creation.rs:448-487`, so adopting is
+/// value-correct. The c2a-cluster construction-side strict reject is preserved
+/// for non-literal mismatches and for out-of-range literals.
+pub(super) fn int_literal_adopts_field_type(value_expr: &Expr, field_ty: &FieldType) -> bool {
+    let v: i128 = match value_expr {
+        Expr::Literal(Literal::Int(v), _) => *v as i128,
+        Expr::Literal(Literal::UInt(v), _) => *v as i128,
+        _ => return false,
+    };
+    match field_ty {
+        FieldType::I8 => v >= i8::MIN as i128 && v <= i8::MAX as i128,
+        FieldType::U8 => v >= 0 && v <= u8::MAX as i128,
+        FieldType::I16 => v >= i16::MIN as i128 && v <= i16::MAX as i128,
+        FieldType::U16 => v >= 0 && v <= u16::MAX as i128,
+        FieldType::I32 => v >= i32::MIN as i128 && v <= i32::MAX as i128,
+        FieldType::U32 => v >= 0 && v <= u32::MAX as i128,
+        FieldType::I64 => v >= i64::MIN as i128 && v <= i64::MAX as i128,
+        FieldType::U64 => v >= 0 && v <= u64::MAX as i128,
+        // number / f64 exact-integer range [-2^53, 2^53].
+        FieldType::F64 => v >= -(1i128 << 53) && v <= (1i128 << 53),
+        // decimal: arbitrary precision — any integer literal fits.
+        FieldType::Decimal => true,
+        _ => false,
+    }
+}
+
+/// The integer value of a bare `Int`/`UInt` literal as `i128`, else `None`.
+/// Used by the R5a-literal array-element lossless adoption: a typed-int
+/// literal (`42u8`) is NOT a bare integer literal and does not context-adopt.
+fn int_literal_value_i128(lit: &Literal) -> Option<i128> {
+    match lit {
+        Literal::Int(v) => Some(*v as i128),
+        Literal::UInt(v) => Some(*v as i128),
+        _ => None,
+    }
+}
+
+/// R5a-literal: whether a bare integer literal losslessly fits the FLOAT
+/// element kind of a typed array, mirroring the scalar lossless-literal
+/// context-adoption (`int_literal_adopts_field_type` F64 arm). `F64`/`number`
+/// uses the exact-integer range `[-2^53, 2^53]`; `F32` uses `[-2^24, 2^24]`.
+/// A non-float array kind or a non-bare-int literal returns `false` (the
+/// caller only consults this for the `(Integer, Float)` family pair).
+fn int_literal_fits_float_array_kind(
+    lit: &Literal,
+    kind: super::super::v2_typed_emission::TypedArrayKind,
+) -> bool {
+    use super::super::v2_typed_emission::TypedArrayKind;
+    let Some(v) = int_literal_value_i128(lit) else {
+        return false;
+    };
+    match kind {
+        TypedArrayKind::F64 => v >= -(1i128 << 53) && v <= (1i128 << 53),
+        TypedArrayKind::F32 => v >= -(1i128 << 24) && v <= (1i128 << 24),
+        _ => false,
+    }
+}
+
 fn infer_array_literal_numeric_type(elements: &[Expr]) -> Option<NumericType> {
     let mut acc: Option<NumericType> = None;
     for elem in elements {
@@ -118,12 +212,14 @@ fn substitute_type_param_field_type(
             // nested-struct reference. Leave it unchanged.
             None => ft.clone(),
         },
-        FieldType::Array(inner) => FieldType::Array(Box::new(
-            substitute_type_param_field_type(inner, substitution),
-        )),
-        FieldType::Option(inner) => FieldType::Option(Box::new(
-            substitute_type_param_field_type(inner, substitution),
-        )),
+        FieldType::Array(inner) => FieldType::Array(Box::new(substitute_type_param_field_type(
+            inner,
+            substitution,
+        ))),
+        FieldType::Option(inner) => FieldType::Option(Box::new(substitute_type_param_field_type(
+            inner,
+            substitution,
+        ))),
         // W17.3-4.2 — per-container substitution. `type Bag<T> { items:
         // HashMap<string, T>, tags: Set<T> }` monomorphized to
         // `Bag<int>` must thread `T` through the inner key/value/element
@@ -139,9 +235,10 @@ fn substitute_type_param_field_type(
             key: Box::new(substitute_type_param_field_type(key, substitution)),
             value: Box::new(substitute_type_param_field_type(value, substitution)),
         },
-        FieldType::Set(inner) => FieldType::Set(Box::new(
-            substitute_type_param_field_type(inner, substitution),
-        )),
+        FieldType::Set(inner) => FieldType::Set(Box::new(substitute_type_param_field_type(
+            inner,
+            substitution,
+        ))),
         // Primitive / non-parametric field types carry no type-parameter
         // reference; return unchanged. Per audit §4.D.2 + CLAUDE.md
         // exhaustive-match guidance — explicit per-variant arms keep the
@@ -194,6 +291,42 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    fn infer_nested_empty_array_kind_from_siblings(
+        &mut self,
+        elements: &[Expr],
+    ) -> Option<super::super::v2_typed_emission::TypedArrayKind> {
+        use super::super::v2_array_emission::infer_array_element_type;
+        use super::super::v2_typed_emission::{
+            TypedArrayKind, should_use_typed_array_from_slot_kind,
+        };
+
+        let mut proven: Option<TypedArrayKind> = None;
+        for elem in elements {
+            let Expr::Array(inner, _) = elem else {
+                continue;
+            };
+            if inner.is_empty() {
+                continue;
+            }
+            let kind = if inner.iter().all(|e| matches!(e, Expr::Array(..))) {
+                Some(TypedArrayKind::TypedArray)
+            } else if let Some(slot_kind) = infer_array_element_type(inner, &self.type_tracker) {
+                should_use_typed_array_from_slot_kind(slot_kind)
+            } else if self.array_elements_all_typed_object(inner) {
+                Some(TypedArrayKind::TypedObject)
+            } else {
+                self.infer_array_element_kind_from_concrete_types(inner)
+            }?;
+
+            match proven {
+                Some(prev) if prev != kind => return None,
+                Some(_) => {}
+                None => proven = Some(kind),
+            }
+        }
+        proven
+    }
+
     /// Reject reference storage in collections/aggregates for **top-level code only**.
     /// Inside function bodies the MIR solver detects these via `array_store_loans`,
     /// `object_store_loans`, and `enum_store_loans` facts, so we defer to it.
@@ -219,7 +352,7 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_array(&mut self, elements: &[Expr], span: Span) -> Result<()> {
         use super::super::v2_array_emission::infer_array_element_type;
         use super::super::v2_typed_emission::{
-            should_use_typed_array_from_slot_kind, TypedArrayKind,
+            TypedArrayKind, should_use_typed_array_from_slot_kind,
         };
 
         // Inside function bodies the MIR solver handles ref-in-collection;
@@ -233,6 +366,24 @@ impl BytecodeCompiler {
         // un-annotated, un-inferable literal compiled by THIS call sets it;
         // the enclosing `VariableDecl` reads it immediately after.
         self.pending_empty_array_alloc_idx = None;
+        // R3 sibling-leak fix (strict-flip, content/large.shape SIGABRT):
+        // `pending_variable_typed_array_kind` is an INPUT hand-off from the
+        // enclosing `let arr: Array<T> = [...]` annotation (read at the
+        // `typed_kind` resolution below). The inference branches there ALSO
+        // write it back as a side-channel so the bare-`let x = [...]` binding
+        // capture can record the element kind. That write must NOT leak into a
+        // SIBLING array literal compiled later in the same initializer — e.g.
+        // `Content.table(headers, [row])` compiles `headers` (element kind
+        // String, stamping pending=Some(String)) and then `[row]` (element
+        // `Array<string>`), which mis-read the stale `Some(String)` and emitted
+        // `TypedArrayPushString` against a `Ptr(TypedArray)` element → heap
+        // corruption / SIGABRT. Snapshot the entry value and restore it on
+        // success so each array literal resolves its kind independently. The
+        // binding capture re-derives the bare-let kind authoritatively via
+        // `reconcile_binding_typed_array_kind` (Statement path) or reads the
+        // restored annotation value (Item path already restores pending itself),
+        // so dropping the leaked write changes no correct capture.
+        let entry_pending_typed_array_kind = self.pending_variable_typed_array_kind;
         let literal_numeric = infer_array_literal_numeric_type(elements);
         let is_bool = is_homogeneous_bool_array(elements);
 
@@ -259,33 +410,43 @@ impl BytecodeCompiler {
         // in `Statement::VarDecl` records the typed kind against the
         // local slot / module binding (Phase 3.1 Agent 3 wiring).
         // R5.4B: detect nested-array literal shape upfront. When any
-        // element is itself an array literal, the outer array CANNOT use
-        // the typed fast path — `NewTypedArrayF64/I64/I32/Bool` store
-        // scalars, and splicing inner typed-array pointers in as f64
-        // bits produces a value that can't be decoded downstream (see
-        // `intrinsic_matmul_mat`'s `as_any_array()` failure). Also, the
-        // inner arrays themselves must be forced off the typed path so
-        // they round-trip as heap-ref pointers through the outer
-        // generic `NewArray`; `nested_array_literal_depth` propagates
-        // that signal into the recursive `compile_expr_array` call.
-        let has_nested_array_elem = elements
-            .iter()
-            .any(|e| matches!(e, Expr::Array(..)));
-        let in_nested_context = self.nested_array_literal_depth > 0;
-        let typed_kind: Option<TypedArrayKind> = if elements
-            .iter()
-            .any(|e| matches!(e, Expr::Spread(..)))
-            || has_nested_array_elem
-            || in_nested_context
-        {
+        // element is itself an array literal, the outer array is a nested
+        // array and lowers to the dedicated `TypedArray<*const
+        // TypedArrayElem>` carrier (the `all_nested_array_elem` branch
+        // below) — NOT the scalar `NewTypedArrayF64/I64/I32/Bool` path
+        // (those store scalars, not inner-array pointers).
+        // Construction strict-typing close (USER RULING 2026-06-05): a
+        // homogeneous nested-array literal (`[[1,2],[3,4]]`) lowers to the
+        // v2-raw `TypedArray<*const TypedArrayElem>` carrier — every element
+        // is itself an `Expr::Array`, structurally an inner typed array. The
+        // outer carrier stores inner-array pointers; per-element release goes
+        // through the kind-erased `release_v2_typed_array`. Per ADR-006
+        // §2.7.5 the element kind (`Ptr(HeapKind::TypedArray)`) is proven at
+        // the producer site without runtime inspection.
+        let all_nested_array_elem =
+            !elements.is_empty() && elements.iter().all(|e| matches!(e, Expr::Array(..)));
+        let nested_empty_inner_typed_kind = all_nested_array_elem
+            .then(|| self.infer_nested_empty_array_kind_from_siblings(elements))
+            .flatten();
+        let has_spread = elements.iter().any(|e| matches!(e, Expr::Spread(..)));
+        let typed_kind: Option<TypedArrayKind> = if has_spread {
             None
+        } else if all_nested_array_elem {
+            self.pending_variable_typed_array_kind = Some(TypedArrayKind::TypedArray);
+            Some(TypedArrayKind::TypedArray)
         } else if let Some(kind) = self.pending_variable_typed_array_kind {
             // The enclosing `let arr: Array<T> = [...]` already proved
             // the element type via annotation; trust it.
             Some(kind)
-        } else if let Some(slot_kind) =
-            infer_array_element_type(elements, &self.type_tracker)
-        {
+        } else if let Some(kind) = self.infer_array_kind_from_inference_fact(span) {
+            // The reference-model inference pass can prove an array literal's
+            // full `Array<T>` type from callsite/function facts even when the
+            // literal elements are indirect callable results (`[f(a), f(b)]`).
+            // This is a finalized compile-time span fact; no runtime element
+            // probing or numeric defaulting is involved.
+            self.pending_variable_typed_array_kind = Some(kind);
+            Some(kind)
+        } else if let Some(slot_kind) = infer_array_element_type(elements, &self.type_tracker) {
             // Bare literal with a homogeneous, statically-resolvable
             // element type. Pick a typed kind if we have one and signal
             // it back to the binding code path.
@@ -305,36 +466,45 @@ impl BytecodeCompiler {
             // `TypedArray<*const TypedObjectStorage>` carrier fast path.
             self.pending_variable_typed_array_kind = Some(TypedArrayKind::TypedObject);
             Some(TypedArrayKind::TypedObject)
+        } else if let Some(kind) = self.infer_array_element_kind_from_concrete_types(elements) {
+            // Construction strict-typing close (USER RULING 2026-06-05) —
+            // non-literal homogeneous element case. Every element resolves
+            // through `concrete_type_for_expr` (the type tracker) to the SAME
+            // scalar `ConcreteType` that has a typed-array carrier: a
+            // function-call return (`[factorial(0), factorial(1)]` where
+            // `factorial` is inferred to return `int`), a type-tracked
+            // identifier, a range-loop counter, etc. Per ADR-006 §2.7.5 the
+            // element kind is proven at the producer site (the type tracker's
+            // structural proof), never decoded from runtime bits.
+            self.pending_variable_typed_array_kind = Some(kind);
+            Some(kind)
+        } else if self.array_elements_all_callable(elements) {
+            // W22 callable-array carrier: every element is statically proven to
+            // be a function value (closure literal, named function, or a binding
+            // with `ConcreteType::Function` / `Closure`). Lower to the dedicated
+            // descriptor carrier; no runtime probing and no heap-element pointer
+            // reinterpretation.
+            self.pending_variable_typed_array_kind = Some(TypedArrayKind::Callable);
+            Some(TypedArrayKind::Callable)
         } else {
             None
         };
 
         if let Some(kind) = typed_kind {
-            // LANG-9 fix (Phase 4b round 2, 2026-05-18): record the
-            // proven element `ConcreteType` against this array literal's
-            // AST span so subsequent `try_monomorphize_method_call` on an
-            // inline receiver (`[1,2,3].map(|x| x*2)`) can reach the
-            // typed-array specialization. Pre-fix, `concrete_type_for_expr`
-            // hit the `Expr::Array` arm at
-            // `monomorphization/type_resolution.rs:1381`, looked up
-            // `array_element_types[span]`, found nothing, returned `None`,
-            // and `try_monomorphize_method_call` fell back to the generic
-            // `Vec.map` (entry_point=0 stub). The bound form
-            // (`let xs = [...]; xs.map(...)`) succeeded because
-            // `identifier_concrete_type` reads from
-            // `local_array_element_types`/`type_tracker`, which are
-            // populated by the binding propagation path. Per ADR-006
-            // §2.7.5 stamp-at-compile-time, the producer-side `typed_kind`
-            // IS the proof of element type — record it now so the
-            // bytecode-time monomorphizer can consume it. No
-            // Bool-default, no inference fabrication: the typed-kind
-            // branch only fires when `infer_array_literal_numeric_type` /
-            // `infer_array_element_type` / `pending_variable_typed_array_kind`
-            // already proved the element type at the producer site.
-            self.record_array_element_type(
-                span,
-                super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind),
-            );
+            // LANG-9 (Phase 4b round 2) + R3-subcase struct-array HOF
+            // (strict-flip): an inline array literal (`[1,2,3].map(...)` /
+            // `[User{..}].filter(...)`) monomorphizes its method call through
+            // `concrete_type_for_expr(Expr::Array)`. Per ADR-006 §2.7.5
+            // stamp-at-compile-time, the producer-side `typed_kind` is the proof
+            // of element type; the typed-kind branch only fires when
+            // `infer_array_literal_numeric_type` / `infer_array_element_type` /
+            // `pending_variable_typed_array_kind` already proved it.
+            // U4-6a: the former per-span `array_element_types` record at this
+            // producer site is deleted along with the table. The sole reader
+            // (`concrete_type_for_expr` for `Expr::Array`) now derives the
+            // element `ConcreteType` structurally from the literal's own
+            // elements — the same recursion this site used to pre-compute, so
+            // dropping the cache changes nothing observable.
             // Allocate the typed array with capacity = element count.
             self.emit(Instruction::new(
                 kind.new_opcode(),
@@ -367,43 +537,120 @@ impl BytecodeCompiler {
             // Until then, non-literal elements emit through the legacy path
             // and surface the same structured kind-mismatch RuntimeError at
             // push time that Round 3a' gate-flip introduced — NOT a SIGSEGV.
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // for an `Array<dyn Trait>`, snapshot the trait name resolved from
+            // the annotation BEFORE the element loop (compiling an element may
+            // clobber `pending_trait_object_array_trait`). Each concrete struct
+            // element is compiled to a `Ptr(HeapKind::TypedObject)` value, then
+            // boxed via `BoxTraitObject(trait_name)` into a
+            // `Ptr(HeapKind::TraitObject)` fat pointer that
+            // `TypedArrayPushTraitObject` requires. The trait-name operand
+            // drives the runtime `(concrete_type, trait_name) → vtable` lookup
+            // per ADR-006 §2.7.24 Q25.C (all-traits-dyn-able).
+            let trait_object_box_sid: Option<u32> = if kind == TypedArrayKind::TraitObject {
+                self.pending_trait_object_array_trait
+                    .clone()
+                    .map(|t| self.program.add_string(t) as u32)
+            } else {
+                None
+            };
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
                 self.emit(Instruction::simple(OpCode::Dup));
-                self.compile_typed_array_element_value(kind, elem)?;
+                // Construction strict-typing close (2026-06-05): for a nested
+                // array, each element is itself an `Expr::Array` that must be
+                // lowered to its OWN typed array (picking its own inner
+                // element kind). Clear the outer's pending kind so the inner
+                // `compile_expr_array` resolves independently, then restore it.
+                if kind == TypedArrayKind::TypedArray {
+                    let saved = self.pending_variable_typed_array_kind;
+                    self.pending_variable_typed_array_kind = match elem {
+                        Expr::Array(inner, _) if inner.is_empty() => nested_empty_inner_typed_kind,
+                        _ => None,
+                    };
+                    let result = self.compile_expr(elem);
+                    self.pending_variable_typed_array_kind = saved;
+                    result?;
+                } else {
+                    self.compile_typed_array_element_value(kind, elem)?;
+                }
+                // W16.2-B: box the concrete struct element into a trait object
+                // before pushing into the `TypedArray<*const TraitObjectStorage>`.
+                if let Some(sid) = trait_object_box_sid {
+                    self.emit(Instruction::new(
+                        OpCode::BoxTraitObject,
+                        Some(Operand::Name(shape_value::StringId(sid))),
+                    ));
+                }
                 self.emit(Instruction::simple(kind.push_opcode()));
             }
         } else if elements.iter().any(|elem| matches!(elem, Expr::Spread(..))) {
             self.compile_array_with_spread(elements)?;
-        } else {
-            // R5.4B: while compiling elements of a generic-array literal,
-            // mark inner array-literal children as nested so they also
-            // refuse the typed fast path (see comment above).
-            self.nested_array_literal_depth += 1;
-            for elem in elements {
-                self.plan_flexible_binding_escape_from_expr(elem);
-                // Phase F: closure literals stored into an array escape
-                // per `docs/v2-closure-specialization.md` §2.1 row 2.
-                // Force heap-ABI emission so the JIT (and Phase H cleanup)
-                // can rely on the signal.
-                if matches!(elem, Expr::FunctionExpr { .. }) {
-                    self.emit_make_closure_heap_next = true;
+        } else if !elements.is_empty() {
+            // Construction strict-typing close (USER RULING 2026-06-05): a
+            // NON-empty array literal whose element type the compiler could
+            // not prove (heterogeneous literals, or non-resolvable element
+            // expressions) has NO typed-array carrier. There is no untyped
+            // runtime array — `op_new_array` is unreachable from well-typed
+            // code — so this surface-and-stops with a clean compile error
+            // rather than emitting a runtime-surfacing `NewArray`.
+            //
+            // Closure-element arrays (`[|x| x+1, ...]`) are called out
+            // specifically: their element carrier is an `Arc<HeapValue>`
+            // closure share (`NativeKind::Ptr(HeapKind::Closure)`), a
+            // different carrier shape than the v2-raw `HeapElement` element
+            // carriers — a genuine divergence surfaced here per the stage
+            // binders (SURFACE, do not fabricate a parallel carrier).
+            //
+            // SB-2: a NAMED function value used as an element (`[add]`,
+            // `[add, sub]`) is the SAME closure-share carrier at runtime — an
+            // identifier that resolves to a registered user/foreign function,
+            // not a scalar/struct value. Inference already projects it to the
+            // canonical `Type::Function` carrier (`[add]` infers
+            // `Array<(int)->int>`), but the typed-array element carrier for
+            // function values does not exist yet. Recognize this case so the
+            // SURFACE message is ACCURATE (a closure-carrier limitation) rather
+            // than the misleading "make every element the same proven type" —
+            // SURFACE, do not fabricate a parallel carrier.
+            let is_named_fn_value = |e: &Expr| {
+                if let Expr::Identifier(name, _) = e {
+                    self.function_defs.contains_key(name)
+                        || self.foreign_function_defs.contains_key(name)
+                } else {
+                    false
                 }
-                self.compile_expr_as_value_or_placeholder(elem)?;
-            }
-            self.nested_array_literal_depth -= 1;
-            // Emit NewTypedArray for homogeneous int/number/bool literals
-            let use_typed = !elements.is_empty()
-                && (matches!(
-                    literal_numeric,
-                    Some(NumericType::Int | NumericType::Number)
-                ) || is_bool);
-            if use_typed {
-                self.emit(Instruction::new(
-                    OpCode::NewTypedArray,
-                    Some(Operand::Count(elements.len() as u16)),
-                ));
+            };
+            let has_closure_elem = elements
+                .iter()
+                .any(|e| matches!(e, Expr::FunctionExpr { .. }) || is_named_fn_value(e));
+            let (kind_hint, detail) = if has_closure_elem {
+                (
+                    "function values",
+                    "Arrays of function values (closures or named functions) are \
+                     not yet supported — a function element's runtime carrier (a \
+                     closure share) differs from the value carriers arrays \
+                     currently store. Inference proves the element type (e.g. \
+                     `Array<(int) -> int>`); the typed-array carrier is the gap.",
+                )
             } else {
+                (
+                    "a single concrete type",
+                    "Either make every element the same proven type, or \
+                     annotate the binding (`let a: Array<T> = ...`).",
+                )
+            };
+            self.pending_variable_typed_array_kind = entry_pending_typed_array_kind;
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "cannot infer the element type of this array literal. \
+                     Strict typing requires every array to have {kind_hint} \
+                     of element. {detail}"
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        } else {
+            // Empty array literal (`[]`). No elements to compile.
+            {
                 // Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21):
                 // a bare empty array literal (`let mut out = []`, no
                 // `Array<T>` annotation) cannot resolve its element
@@ -421,13 +668,8 @@ impl BytecodeCompiler {
                 // surface-and-stopped cleanly by
                 // `finalize_unresolved_empty_array_accumulators`.
                 let alloc_idx = self.program.instructions.len();
-                self.emit(Instruction::new(
-                    OpCode::NewArray,
-                    Some(Operand::Count(elements.len() as u16)),
-                ));
-                if elements.is_empty() {
-                    self.pending_empty_array_alloc_idx = Some(alloc_idx);
-                }
+                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+                self.pending_empty_array_alloc_idx = Some(alloc_idx);
             }
         }
         // Arrays don't produce TypedObjects
@@ -459,30 +701,34 @@ impl BytecodeCompiler {
                 VariableTypeInfo::named(type_name.to_string())
             })
         };
-        // LANG-9 fix (legacy path): the spread / nested-array / heterogeneous
-        // fall-through above still produces a homogeneous-numeric receiver
-        // when `literal_numeric` is `Some` or `is_bool` (`NewTypedArray`
-        // emission). Record the element type at the same producer site so
-        // the inline `[...].method(...)` monomorphizer can reach
-        // `array_element_types[span]` from this branch too. Idempotent with
-        // the typed-kind branch's `record_array_element_type` above (which
-        // covers the v2 typed-array fast path) — both lower into the same
-        // map keyed by span.
-        let legacy_elem: Option<shape_value::v2::ConcreteType> = if is_bool {
-            Some(shape_value::v2::ConcreteType::Bool)
-        } else {
-            literal_numeric.and_then(|nt| match nt {
-                NumericType::Int => Some(shape_value::v2::ConcreteType::I64),
-                NumericType::Number => Some(shape_value::v2::ConcreteType::F64),
-                NumericType::Decimal => Some(shape_value::v2::ConcreteType::Decimal),
-                NumericType::IntWidth(_) => None,
-            })
-        };
-        if let Some(elem_ct) = legacy_elem {
-            self.record_array_element_type(span, elem_ct);
-        }
-        self.last_expr_numeric_type = None;
+        // U4-6a: the former legacy-path `array_element_types[span]` record is
+        // deleted with the table. The sole reader derives the array element
+        // `ConcreteType` structurally from the literal's own elements
+        // (`concrete_type_for_expr` for `Expr::Array`), which already covers the
+        // bool / homogeneous-numeric literals this branch used to cache.
+        // R3 sibling-leak fix: restore the entry hand-off value so this
+        // literal's inferred element kind does not leak into a sibling array
+        // literal compiled later in the same initializer expression.
+        self.pending_variable_typed_array_kind = entry_pending_typed_array_kind;
         Ok(())
+    }
+
+    fn infer_array_kind_from_inference_fact(
+        &self,
+        span: Span,
+    ) -> Option<super::super::v2_typed_emission::TypedArrayKind> {
+        use shape_value::v2::ConcreteType;
+
+        let ty = self
+            .resolved_expr_types
+            .get(&span)
+            .or_else(|| self.inference_facts.expression_type(span))?;
+        let ann = ty.to_annotation()?;
+        let ct = super::super::v2_map_emission::concrete_type_from_annotation(&ann)?;
+        let ConcreteType::Array(elem) = ct else {
+            return None;
+        };
+        super::super::v2_typed_emission::should_use_typed_array(elem.as_ref())
     }
 
     /// Compile an object expression
@@ -651,8 +897,35 @@ impl BytecodeCompiler {
             }),
         ));
 
-        // Track result schema for typed merge optimization
+        // Track result schema for typed merge optimization.
+        //
+        // R5c-objfield (v0.3.3 strict-flip): the result-type metadata MUST
+        // reflect the freshly-registered inline TypedObject schema, NOT the
+        // last compiled field value's `last_expr_type_info` (which is left
+        // stale by the per-field `compile_expr_as_value_or_placeholder` loop
+        // above — e.g. `{id: 1, name: "Alice"}` leaves `type_name=Some("string")`
+        // from the trailing `"Alice"`). Without this, a `let mut u = {…}`
+        // binding propagates the stale primitive type through
+        // `propagate_assignment_type_to_slot`'s `last_expr_type_info`-first
+        // branch (helpers.rs:3858) and never reaches the `last_expr_schema`
+        // arm — so the binding records `schema_id=None` and a later
+        // existing-field write `u.name = "Bob"` fails `try_resolve_typed_field_place`
+        // and hits the "requires compile-time field resolution" reject.
+        // Mirrors the named-struct-literal path (collections.rs:1407-1412)
+        // which already stamps the schema-known `VariableTypeInfo`. This is a
+        // compile-time producer-side stamp of the proven schema (ADR-006
+        // §2.7.5) — no runtime decode, no generic property-lookup fallback.
         self.last_expr_schema = Some(schema_id);
+        let schema_name = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("__inline_obj_{}", schema_id));
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+            schema_id,
+            schema_name,
+        ));
 
         Ok(())
     }
@@ -664,7 +937,7 @@ impl BytecodeCompiler {
     fn compile_dynamic_object(&mut self, entries: &[shape_ast::ast::ObjectEntry]) -> Result<()> {
         use shape_ast::ast::ObjectEntry;
 
-        let mut pending_field_names: Vec<String> = Vec::new();
+        let mut pending_fields: Vec<(String, FieldType)> = Vec::new();
         let mut has_initial_object = false;
         let mut current_schema: Option<shape_runtime::type_schema::SchemaId> = None;
 
@@ -672,19 +945,17 @@ impl BytecodeCompiler {
             match entry {
                 ObjectEntry::Field { key, value, .. } => {
                     // Push ONLY the value (keys are embedded in the schema)
+                    let field_type = self.prove_object_spread_field_type(key, value)?;
                     self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
-                    pending_field_names.push(key.clone());
+                    pending_fields.push((key.clone(), field_type));
                 }
                 ObjectEntry::Spread(spread_expr) => {
                     // Create TypedObject from pending fields before the spread
-                    if !pending_field_names.is_empty() || !has_initial_object {
-                        // W17.2-C §4.D.5 migration: pending spread-fields
-                        // have no per-field type info at this dynamic
-                        // construction site; route through typed-with-Any.
-                        let typed_fields: Vec<(&str, FieldType)> = pending_field_names
+                    if !pending_fields.is_empty() || !has_initial_object {
+                        let typed_fields: Vec<(&str, FieldType)> = pending_fields
                             .iter()
-                            .map(|s| (s.as_str(), FieldType::Any))
+                            .map(|(name, ft)| (name.as_str(), ft.clone()))
                             .collect();
                         let schema_id = self
                             .type_tracker
@@ -693,7 +964,7 @@ impl BytecodeCompiler {
                             OpCode::NewTypedObject,
                             Some(Operand::TypedObjectAlloc {
                                 schema_id: schema_id as u16,
-                                field_count: pending_field_names.len() as u16,
+                                field_count: pending_fields.len() as u16,
                             }),
                         ));
                         if let Some(base_schema) = current_schema {
@@ -706,7 +977,7 @@ impl BytecodeCompiler {
                             current_schema = Some(schema_id);
                             self.last_expr_schema = Some(schema_id);
                         }
-                        pending_field_names.clear();
+                        pending_fields.clear();
                         has_initial_object = true;
                     }
 
@@ -740,12 +1011,10 @@ impl BytecodeCompiler {
         }
 
         // Finalize remaining fields
-        if !pending_field_names.is_empty() {
-            // W17.2-C §4.D.5 migration: pending-fields finalize site, no
-            // per-field type info available; typed-with-Any + verification.
-            let typed_fields: Vec<(&str, FieldType)> = pending_field_names
+        if !pending_fields.is_empty() {
+            let typed_fields: Vec<(&str, FieldType)> = pending_fields
                 .iter()
-                .map(|s| (s.as_str(), FieldType::Any))
+                .map(|(name, ft)| (name.as_str(), ft.clone()))
                 .collect();
             let schema_id = self
                 .type_tracker
@@ -754,7 +1023,7 @@ impl BytecodeCompiler {
                 OpCode::NewTypedObject,
                 Some(Operand::TypedObjectAlloc {
                     schema_id: schema_id as u16,
-                    field_count: pending_field_names.len() as u16,
+                    field_count: pending_fields.len() as u16,
                 }),
             ));
             if has_initial_object {
@@ -793,6 +1062,35 @@ impl BytecodeCompiler {
         }
 
         Ok(())
+    }
+
+    fn prove_object_spread_field_type(&self, key: &str, value: &Expr) -> Result<FieldType> {
+        if let Some(ft) = infer_field_type_from_expr(value)
+            && field_type_is_strictly_proven(&ft)
+        {
+            return Ok(ft);
+        }
+
+        let span = value.span();
+        if let Some(ft) = self
+            .resolved_expr_types
+            .get(&span)
+            .or_else(|| self.inference_facts.expression_type(span))
+            .and_then(|ty| ty.to_annotation())
+            .map(|ann| Self::type_annotation_to_field_type(&ann))
+            .filter(field_type_is_strictly_proven)
+        {
+            return Ok(ft);
+        }
+
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Object spread field '{}' requires a statically proven concrete field type; \
+                 refusing to register a user-facing schema with FieldType::Any",
+                key
+            ),
+            location: Some(self.span_to_source_location(value.span())),
+        })
     }
 
     fn register_object_merge_schema(
@@ -946,11 +1244,15 @@ impl BytecodeCompiler {
         // Resolve through module scope for qualified type lookups
         let type_name = &self.resolve_type_name(type_name);
         // Look up struct type definition, resolving through type aliases if needed
-        let struct_info = self.struct_types.get(type_name.as_str()).cloned().or_else(|| {
-            self.type_aliases
-                .get(type_name.as_str())
-                .and_then(|resolved| self.struct_types.get(resolved).cloned())
-        });
+        let struct_info = self
+            .struct_types
+            .get(type_name.as_str())
+            .cloned()
+            .or_else(|| {
+                self.type_aliases
+                    .get(type_name.as_str())
+                    .and_then(|resolved| self.struct_types.get(resolved).cloned())
+            });
 
         match struct_info {
             Some((expected_fields, type_def_span)) => {
@@ -1066,7 +1368,20 @@ impl BytecodeCompiler {
                                 // audit, the construction site should reject for symmetry instead
                                 // of mirroring the widening shape (which would be the W4-δ
                                 // Convert-opcode defection-attractor named in §Forbidden Patterns).
-                                if field_def.field_type != inferred {
+                                // Numeric-conversion §4 literal adoption: a bare
+                                // integer literal field value that losslessly
+                                // fits the declared numeric field type adopts it
+                                // (`P { x: 1 }`, `x: number` → ok), instead of the
+                                // strict reject below. An out-of-range literal
+                                // (`u8` field with `300`) does NOT adopt and still
+                                // rejects. Only literals adopt — a value/variable
+                                // mismatch keeps the c2a-cluster compile-reject.
+                                if field_def.field_type != inferred
+                                    && !int_literal_adopts_field_type(
+                                        value_expr,
+                                        &field_def.field_type,
+                                    )
+                                {
                                     let value_loc = self.span_to_source_location(value_expr.span());
                                     let mut loc = value_loc;
                                     loc.hints.push(format!(
@@ -1140,17 +1455,17 @@ impl BytecodeCompiler {
                             .iter()
                             .map(|f| {
                                 let ft = match &type_param_substitution {
-                                    Some(subst) => substitute_type_param_field_type(
-                                        &f.field_type,
-                                        subst,
-                                    ),
+                                    Some(subst) => {
+                                        substitute_type_param_field_type(&f.field_type, subst)
+                                    }
                                     None => f.field_type.clone(),
                                 };
                                 (f.name.clone(), ft)
                             })
                             .collect::<Vec<_>>();
-                        let schema = TypeSchema::new(runtime_type_name.clone(), fields);
-                        let schema_id = schema.id;
+                        let schema_id = self.type_tracker.schema_registry().allocate_id();
+                        let schema =
+                            TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
                         self.type_tracker.schema_registry_mut().register(schema);
                         schema_id
                     } else if let Some(alias_base) = alias_target.as_deref()
@@ -1165,8 +1480,9 @@ impl BytecodeCompiler {
                             .iter()
                             .map(|f| (f.name.clone(), f.field_type.clone()))
                             .collect::<Vec<_>>();
-                        let schema = TypeSchema::new(runtime_type_name.clone(), fields);
-                        let schema_id = schema.id;
+                        let schema_id = self.type_tracker.schema_registry().allocate_id();
+                        let schema =
+                            TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
                         self.type_tracker.schema_registry_mut().register(schema);
                         schema_id
                     } else {
@@ -1203,8 +1519,7 @@ impl BytecodeCompiler {
                 } else if let Some(schema) = self.type_tracker.schema_registry().get(type_name) {
                     schema.id
                 } else if let Some(alias_base) = alias_target.as_deref()
-                    && let Some(base_schema) =
-                        self.type_tracker.schema_registry().get(alias_base)
+                    && let Some(base_schema) = self.type_tracker.schema_registry().get(alias_base)
                 {
                     // Type-alias indirection at the `runtime_type_name == type_name` branch:
                     // `let origin = P { ... }` where `type P = Point` — `runtime_type_name`
@@ -1216,8 +1531,8 @@ impl BytecodeCompiler {
                         .iter()
                         .map(|f| (f.name.clone(), f.field_type.clone()))
                         .collect::<Vec<_>>();
-                    let schema = TypeSchema::new(runtime_type_name.clone(), fields);
-                    let schema_id = schema.id;
+                    let schema_id = self.type_tracker.schema_registry().allocate_id();
+                    let schema = TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
                     self.type_tracker.schema_registry_mut().register(schema);
                     schema_id
                 } else {
@@ -1248,7 +1563,25 @@ impl BytecodeCompiler {
                         .find(|(name, _)| name == expected_name)
                         .expect("field existence validated above");
                     self.plan_flexible_binding_escape_from_expr(value);
-                    self.compile_expr_as_value_or_placeholder(value)?;
+                    let empty_array_field_annotation = match value {
+                        Expr::Array(elements, _) if elements.is_empty() => self
+                            .struct_generic_info
+                            .get(type_name)
+                            .and_then(|info| info.runtime_field_types.get(expected_name))
+                            .cloned(),
+                        _ => None,
+                    };
+                    let saved_pending_typed_array_kind = self.pending_variable_typed_array_kind;
+                    let saved_pending_trait_object_array_trait =
+                        self.pending_trait_object_array_trait.clone();
+                    if let Some(annotation) = empty_array_field_annotation.as_ref() {
+                        self.pending_variable_typed_array_kind =
+                            self.resolve_typed_array_kind_and_record_trait(annotation);
+                    }
+                    let compile_result = self.compile_expr_as_value_or_placeholder(value);
+                    self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
+                    self.pending_trait_object_array_trait = saved_pending_trait_object_array_trait;
+                    compile_result?;
                 }
 
                 // Emit NewTypedObject — no WrapTypeAnnotation needed,
@@ -1262,7 +1595,6 @@ impl BytecodeCompiler {
                 ));
 
                 self.last_expr_schema = Some(schema_id);
-                self.last_expr_numeric_type = None;
                 self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
                     schema_id,
                     runtime_type_name.clone(),
@@ -1387,7 +1719,6 @@ impl BytecodeCompiler {
         // (e.g. `Status::Ok(1)` would leave NumericType::Int from the `1`),
         // causing typed opcodes like EqInt to be emitted for enum comparisons.
         self.last_expr_schema = Some(schema_id);
-        self.last_expr_numeric_type = None;
 
         Ok(())
     }
@@ -1510,9 +1841,7 @@ impl BytecodeCompiler {
         // migration); a `Number` constant produces a `Float64` slot kind
         // that `int_operand` rejects.
         let total_args = 3 + row_count * field_count;
-        let ac_const = self
-            .program
-            .add_constant(Constant::Int(total_args as i64));
+        let ac_const = self.program.add_constant(Constant::Int(total_args as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(ac_const)),
@@ -1527,7 +1856,6 @@ impl BytecodeCompiler {
             "Table<{}>",
             inner_type_name
         )));
-        self.last_expr_numeric_type = None;
 
         Ok(())
     }
@@ -1556,6 +1884,18 @@ impl BytecodeCompiler {
         elem: &Expr,
     ) -> Result<()> {
         use super::super::v2_typed_emission::TypedArrayKind;
+        if kind == TypedArrayKind::Callable
+            && !self.array_elements_all_callable(std::slice::from_ref(elem))
+        {
+            return Err(ShapeError::SemanticError {
+                message: "type mismatch: cannot push a non-callable value into an \
+                          array whose element type is `function`. Array<Function<...>> \
+                          elements must be closure literals, named functions, or \
+                          expressions statically typed as function/closure values."
+                    .to_string(),
+                location: Some(self.span_to_source_location(elem.span())),
+            });
+        }
         // WS-1b W16.2-C residual: a literal element whose own type FAMILY
         // disagrees with the array's proven element kind is a HETEROGENEOUS
         // push — a clean compile error, not a silent wrong result.
@@ -1599,10 +1939,33 @@ impl BytecodeCompiler {
                 TypedArrayKind::Bool => Some(Family::Bool),
                 TypedArrayKind::Decimal => Some(Family::Decimal),
                 TypedArrayKind::String => Some(Family::StringF),
-                TypedArrayKind::Char | TypedArrayKind::TypedObject => None,
+                TypedArrayKind::Char
+                | TypedArrayKind::TypedObject
+                // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+                | TypedArrayKind::TraitObject
+                | TypedArrayKind::TypedArray
+                | TypedArrayKind::Callable => None,
             };
-            if let (Some(lf), Some(af)) = (literal_family, array_family) {
-                if lf != af {
+            // R5a-literal lossless-context-adoption (numeric-conversion-spec
+            // §4, USER RULING 2026-06-01) — array-element position. A bare
+            // `Int`/`UInt` literal in a FLOAT-family array context (`let x:
+            // Array<number> = [1, 2.5, 3]`) adopts the float element type IFF
+            // the value is losslessly representable in it — exactly the same
+            // mechanism that lets `let n: number = 1` adopt `number`. The int
+            // literal is NOT a cross-family mismatch in that case; the
+            // emission arm below re-lowers it to a `Constant::Number` so the
+            // monomorphic `TypedArrayPushF64`/`F32` handler decodes the
+            // correct f64/f32 bits (the handler does a raw `from_bits`
+            // decode, so the producer must already carry float bits — no
+            // runtime coercion opcode, ADR-006 §2.7.5 stamp-at-compile-time).
+            // Out-of-range int literals (and non-literal int elements) stay a
+            // genuine mismatch and fall through to the reject below.
+            let int_literal_adopts_float = matches!(
+                (literal_family.as_ref(), array_family.as_ref()),
+                (Some(Family::Integer), Some(Family::Float))
+            ) && int_literal_fits_float_array_kind(lit, kind);
+            if let (Some(lf), Some(af)) = (&literal_family, &array_family) {
+                if lf != af && !int_literal_adopts_float {
                     let lk = match lit {
                         Literal::Int(_) => TypedArrayKind::I64,
                         Literal::Number(_) => TypedArrayKind::F64,
@@ -1622,6 +1985,27 @@ impl BytecodeCompiler {
                         ),
                         location: Some(self.span_to_source_location(*lit_span)),
                     });
+                }
+            }
+        }
+        // R5a-literal lossless-context-adoption emission. A bare
+        // `Int`/`UInt` literal pushed into a FLOAT-family array re-lowers to
+        // a `Constant::Number` (f64 bits, `NativeKind::Float64`) so the
+        // monomorphic `TypedArrayPushF64`/`F32` handler — which raw-decodes
+        // the slot via `f64::from_bits` — reads the correct value rather than
+        // reinterpreting i64 bits as an f64 (`1` → `5e-324`). The
+        // lossless-fit gate at the family check above already proved the
+        // value is representable; this is the producer-side carrier stamp
+        // (ADR-006 §2.7.5), not a runtime coercion opcode.
+        if matches!(kind, TypedArrayKind::F64 | TypedArrayKind::F32) {
+            if let Expr::Literal(lit @ (Literal::Int(_) | Literal::UInt(_)), _) = elem {
+                if let Some(v) = int_literal_value_i128(lit) {
+                    let const_idx = self.program.add_constant(Constant::Number(v as f64));
+                    self.emit(Instruction::new(
+                        OpCode::PushConst,
+                        Some(Operand::Const(const_idx)),
+                    ));
+                    return Ok(());
                 }
             }
         }
@@ -1701,9 +2085,73 @@ impl BytecodeCompiler {
 
 #[cfg(test)]
 mod tests {
+    use super::field_type_is_strictly_proven;
     use crate::compiler::BytecodeCompiler;
     use shape_ast::parser::parse_program;
     use shape_runtime::type_schema::FieldType;
+
+    fn compile_object_spread_source(code: &str) -> crate::bytecode::BytecodeProgram {
+        let program = parse_program(code).expect("parse");
+        BytecodeCompiler::new()
+            .compile_with_source(&program, code)
+            .expect("compile")
+    }
+
+    fn merged_schema_field_type(
+        bytecode: &crate::bytecode::BytecodeProgram,
+        field_name: &str,
+    ) -> FieldType {
+        bytecode
+            .type_schema_registry
+            .type_names()
+            .filter(|name| name.starts_with("__merged_"))
+            .filter_map(|name| bytecode.type_schema_registry.get(name))
+            .find_map(|schema| {
+                schema
+                    .fields
+                    .iter()
+                    .find(|field| field.name == field_name)
+                    .map(|field| field.field_type.clone())
+            })
+            .unwrap_or_else(|| panic!("merged schema field `{}` must exist", field_name))
+    }
+
+    #[test]
+    fn object_spread_merged_schema_stamps_literal_field_type() {
+        let bytecode = compile_object_spread_source(
+            r#"
+            let base = { x: 1, y: 2 }
+            let extended = { ...base, z: 3 }
+            extended.z
+        "#,
+        );
+
+        let z_type = merged_schema_field_type(&bytecode, "z");
+        assert_eq!(z_type, FieldType::I64);
+        assert!(
+            field_type_is_strictly_proven(&z_type),
+            "merged spread field `z` must not contain FieldType::Any"
+        );
+    }
+
+    #[test]
+    fn object_spread_merged_schema_stamps_inferred_field_type() {
+        let bytecode = compile_object_spread_source(
+            r#"
+            let base = { x: 1, y: 2 }
+            let proven = 3
+            let extended = { ...base, z: proven }
+            extended.z
+        "#,
+        );
+
+        let z_type = merged_schema_field_type(&bytecode, "z");
+        assert_eq!(z_type, FieldType::I64);
+        assert!(
+            field_type_is_strictly_proven(&z_type),
+            "merged spread field `z` must be statically proven"
+        );
+    }
 
     #[test]
     fn test_struct_literal_type_mismatch_decimal_for_int() {
@@ -1782,6 +2230,88 @@ mod tests {
             "Int assigned to int field should compile: {:?}",
             result.err()
         );
+    }
+
+    /// S2 regression (generic-struct construction segfault, ec=139).
+    ///
+    /// `let b = Box{value: 9}; let v = b.value` where `type Box<T> { value: T }`
+    /// previously SEGFAULTED: the WS-6b GAP A inferred-type stamp
+    /// (`concrete_type_tracker_name` → base name `Box`) overwrote the
+    /// construction-site monomorphized schema (`Box<int>`, `value: I64`) with
+    /// the BASE `Box` schema (`value: Object("T")`). The downstream typed field
+    /// read then stamped `FIELD_TAG_OBJECT` on a slot holding the inline scalar
+    /// `9`, and `clone_with_kind` dereferenced the scalar bits as a
+    /// `*const TypedObjectStorage` (misaligned-pointer SIGSEGV per ADR-006
+    /// §2.7.5 producer-side stamp). The fix (`ws6b_name_would_downgrade`)
+    /// declines the base-name re-stamp when the slot already carries the
+    /// monomorphized schema.
+    ///
+    /// This asserts the producer-side invariant at compile time: NO field-read
+    /// operand may carry `FIELD_TAG_OBJECT` for the scalar generic field —
+    /// every read of `Box<int>.value` must stamp `FIELD_TAG_I64`.
+    #[test]
+    fn test_generic_struct_scalar_field_read_not_object_tagged() {
+        use crate::bytecode::Operand;
+        use crate::executor::typed_object_ops::{FIELD_TAG_I64, FIELD_TAG_OBJECT};
+
+        let code = r#"
+            type Box<T> { value: T }
+            let b = Box{value: 9}
+            let v = b.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let compiled = BytecodeCompiler::new()
+            .compile_with_source(&program, code)
+            .expect("generic-struct construction + field read must compile");
+
+        let mut saw_i64_field_read = false;
+        for instr in &compiled.instructions {
+            if let Some(Operand::TypedField { field_type_tag, .. }) = &instr.operand {
+                assert_ne!(
+                    *field_type_tag, FIELD_TAG_OBJECT,
+                    "S2 regression: a generic scalar field read is FIELD_TAG_OBJECT-tagged \
+                     — the read would deref an inline scalar as a heap pointer (SIGSEGV). \
+                     The slot must carry the monomorphized Box<int> schema (value: I64)."
+                );
+                if *field_type_tag == FIELD_TAG_I64 {
+                    saw_i64_field_read = true;
+                }
+            }
+        }
+        assert!(
+            saw_i64_field_read,
+            "expected at least one FIELD_TAG_I64 field read for Box<int>.value"
+        );
+    }
+
+    /// S2 sibling: the heap-typed instantiation `Box<string>` reads its
+    /// generic field as a String carrier, never as the unsound nested-Object
+    /// label. Guards against a regression that re-routes heap generic fields
+    /// through `FIELD_TAG_OBJECT` (which would mis-project the String Arc).
+    #[test]
+    fn test_generic_struct_string_field_read_not_object_tagged() {
+        use crate::bytecode::Operand;
+        use crate::executor::typed_object_ops::FIELD_TAG_OBJECT;
+
+        let code = r#"
+            type Box<T> { value: T }
+            let b = Box{value: "hi"}
+            let v = b.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let compiled = BytecodeCompiler::new()
+            .compile_with_source(&program, code)
+            .expect("Box<string> construction + field read must compile");
+
+        for instr in &compiled.instructions {
+            if let Some(Operand::TypedField { field_type_tag, .. }) = &instr.operand {
+                assert_ne!(
+                    *field_type_tag, FIELD_TAG_OBJECT,
+                    "S2 regression: Box<string>.value read is FIELD_TAG_OBJECT-tagged \
+                     instead of the String carrier tag."
+                );
+            }
+        }
     }
 
     #[test]
@@ -2038,14 +2568,11 @@ mod tests {
         // The all-defaults monomorphization must register a `Box<int>`
         // schema (the pre-fix `all_defaults` early-`None` skipped this and
         // left the bare `Box` schema's `Object("T")` field in play).
-        let schema = bytecode
-            .type_schema_registry
-            .get("Box<int>")
-            .expect(
-                "default-type-param generic literal must monomorphize to a \
+        let schema = bytecode.type_schema_registry.get("Box<int>").expect(
+            "default-type-param generic literal must monomorphize to a \
                  `Box<int>` schema (pre-fix the `all_defaults` early-return \
                  left the bare `Box` schema's `Object(\"T\")` field in play)",
-            );
+        );
         let value_field = schema
             .fields
             .iter()
@@ -2055,6 +2582,105 @@ mod tests {
             value_field.field_type,
             FieldType::I64,
             "default-type-param monomorphized field `value` must be concrete I64"
+        );
+    }
+
+    /// Function-body variant of the default-param regression. The schema-only
+    /// assertion above proves `Box<int>` exists; this pins the actual executed
+    /// producer path (`let b = ...; return b.value`) so the field read cannot
+    /// drift back to the base `Box` schema's `Object("T")` tag.
+    #[test]
+    fn test_r5c2bb_d_generic_struct_default_param_function_read_stamps_i64() {
+        let code = r#"
+            type Box<T = int> { value: T }
+            function test() {
+                let b = Box { value: 42 }
+                return b.value
+            }
+            test()
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+
+        let mut saw_box_int_i64_value = false;
+        let mut object_value_tags = Vec::new();
+        for instr in &bytecode.instructions {
+            let Some(crate::bytecode::Operand::TypedField {
+                type_id,
+                field_idx,
+                field_type_tag,
+            }) = instr.operand.as_ref()
+            else {
+                continue;
+            };
+            let Some(schema) = bytecode.type_schema_registry.get_by_id(u32::from(*type_id)) else {
+                continue;
+            };
+            let Some(field) = schema.field_by_index(*field_idx) else {
+                continue;
+            };
+            if field.name != "value" {
+                continue;
+            }
+            if schema.name == "Box<int>"
+                && *field_type_tag == crate::executor::typed_object_ops::FIELD_TAG_I64
+            {
+                saw_box_int_i64_value = true;
+            }
+            if *field_type_tag == crate::executor::typed_object_ops::FIELD_TAG_OBJECT {
+                object_value_tags.push(schema.name.clone());
+            }
+        }
+
+        assert!(
+            saw_box_int_i64_value,
+            "`b.value` in the function body must be stamped as `Box<int>.value` \
+             with FIELD_TAG_I64"
+        );
+        assert!(
+            object_value_tags.is_empty(),
+            "`value` field reads must not use FIELD_TAG_OBJECT schemas: {:?}",
+            object_value_tags
+        );
+    }
+
+    /// `a.type().to_string()` is a string-producing static type-name query,
+    /// not a runtime `TypeAnnotation` value. The default-param generic path
+    /// must render the monomorphized name (`MyType<int>`) as a supported string
+    /// constant and never emit `PushConst(Constant::TypeAnnotation)`, which the
+    /// strict VM stack deliberately rejects.
+    #[test]
+    fn test_w75_generic_default_type_name_to_string_lowers_to_string_constant() {
+        let code = r#"
+            type MyType<T = int> { x: T }
+            function test() {
+                let a = MyType { x: 1 }
+                return a.type().to_string()
+            }
+            test()
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+
+        assert!(
+            bytecode
+                .constants
+                .iter()
+                .any(|constant| matches!(constant, crate::bytecode::Constant::String(s) if s == "MyType<int>")),
+            "`a.type().to_string()` for a default generic struct must lower to \
+             the monomorphized type-name string"
+        );
+        assert!(
+            !bytecode
+                .constants
+                .iter()
+                .any(|constant| matches!(constant, crate::bytecode::Constant::TypeAnnotation(_))),
+            "`type().to_string()` must not leave a TypeAnnotation constant for \
+             runtime PushConst"
         );
     }
 

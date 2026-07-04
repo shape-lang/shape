@@ -52,10 +52,12 @@ fn test_array_map_to_bool() {
     .expect_bool(false);
 }
 
-/// Array map empty.
+/// Array map empty — bare `[]` receiver is correctly rejected at compile time
+/// (strict typing cannot infer the element type with no annotation / element).
 #[test]
 fn test_array_map_empty() {
-    ShapeTest::new(r#"[].map(|x| x * 2).length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].map(|x| x * 2).length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Array filter basic.
@@ -76,10 +78,11 @@ fn test_array_filter_keep_none() {
     ShapeTest::new(r#"[1, 2, 3].filter(|x| x > 10).length"#).expect_number(0.0);
 }
 
-/// Array filter empty.
+/// Array filter empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_array_filter_empty() {
-    ShapeTest::new(r#"[].filter(|x| x > 0).length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].filter(|x| x > 0).length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Array reduce sum.
@@ -94,10 +97,11 @@ fn test_array_reduce_product() {
     ShapeTest::new(r#"[1, 2, 3, 4].reduce(|acc, x| acc * x, 1)"#).expect_number(24.0);
 }
 
-/// Array reduce empty.
+/// Array reduce empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_array_reduce_empty() {
-    ShapeTest::new(r#"[].reduce(|acc, x| acc + x, 42)"#).expect_number(42.0);
+    ShapeTest::new(r#"[].reduce(|acc, x| acc + x, 42)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Array find found.
@@ -217,10 +221,11 @@ fn test_array_iter_to_array() {
     ShapeTest::new(r#"[10, 20, 30].iter().toArray().length"#).expect_number(3.0);
 }
 
-/// Empty array iter collect.
+/// Empty array iter collect — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_empty_array_iter_collect() {
-    ShapeTest::new(r#"[].iter().collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Single element array iter collect.
@@ -235,10 +240,11 @@ fn test_iter_count() {
     ShapeTest::new(r#"[1, 2, 3, 4, 5].iter().count()"#).expect_number(5.0);
 }
 
-/// Empty iter count.
+/// Empty iter count — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_empty_iter_count() {
-    ShapeTest::new(r#"[].iter().count()"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().count()"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 // =============================================================================
@@ -368,10 +374,11 @@ fn test_iter_map_identity() {
     ShapeTest::new(r#"[5, 10, 15].iter().map(|x| x).collect()[0]"#).expect_number(5.0);
 }
 
-/// Iter map empty.
+/// Iter map empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_map_empty() {
-    ShapeTest::new(r#"[].iter().map(|x| x * 2).collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().map(|x| x * 2).collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Iter filter collect.
@@ -400,10 +407,11 @@ fn test_iter_filter_keep_none() {
     ShapeTest::new(r#"[1, 2, 3].iter().filter(|x| x > 100).collect().length"#).expect_number(0.0);
 }
 
-/// Iter filter empty source.
+/// Iter filter empty source — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_filter_empty_source() {
-    ShapeTest::new(r#"[].iter().filter(|x| x > 0).collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().filter(|x| x > 0).collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Iter filter even numbers.

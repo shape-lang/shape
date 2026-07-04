@@ -1,0 +1,686 @@
+// ============================================================================
+// large.shape — control-flow slice acceptance program (~1000 LOC)
+//
+// A deterministic, non-interactive, machine-proofable application built ONLY
+// from constructs taught in fundamentals/control-flow.mdx:
+//   - if / else if / else as expressions
+//   - blocks return their last expression
+//   - for over exclusive (0..n) and inclusive (0..=n) ranges
+//   - destructuring loop bindings
+//   - while loops
+//   - break / continue
+//   - loop { } and break-with-value
+//
+// It implements three independent control-flow-heavy engines and proves each
+// against expected values DERIVED FROM SPEC BEFORE RUNNING (never back-filled):
+//   PART A: Collatz / hailstone analysis            (loop + break-with-value)
+//   PART B: 1-D cellular automaton (Rule 90 & 110)  (nested for + if-chains)
+//   PART C: a tiny stack-based RPN calculator        (while + if-chains)
+//   PART D: traffic-light finite state machine       (for + match-free if-chain)
+//   PART E: integer "histogram + classification"     (for/continue/break)
+//
+// Self-check protocol (book-only): each check compares against an expected
+// constant; mismatch prints CHECK_FAILED and clears `ok`. All-pass prints
+// ALL_CHECKS_PASSED.
+//
+// NOTE on identifiers: per a discovered parser defect, identifiers whose
+// prefix equals an enclosing control-flow keyword (e.g. `whileCount` inside a
+// `while` condition) derail parsing. This program therefore avoids
+// keyword-prefixed names in condition positions.
+// ============================================================================
+
+var ok = true
+
+fn checkInt(label: string, expected: int, got: int) {
+  if expected != got {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    ok = false
+  }
+}
+
+fn checkBool(label: string, expected: bool, got: bool) {
+  if expected != got {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    ok = false
+  }
+}
+
+fn checkStr(label: string, expected: string, got: string) {
+  if expected != got {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    ok = false
+  }
+}
+
+// ============================================================================
+// PART A — Collatz / hailstone sequences
+//
+// Spec (standard Collatz): start with n>0. While n != 1: if n even, n = n/2;
+// else n = 3n+1. Count steps to reach 1. We use loop + break-with-value to
+// return the step count, exercising break-with-value as the book describes.
+//
+// Hand-derived expected step counts (number of operations to reach 1):
+//   n=1  -> 0
+//   n=2  -> 1            (2 -> 1)
+//   n=3  -> 7            (3,10,5,16,8,4,2,1)
+//   n=6  -> 8            (6,3,10,5,16,8,4,2,1)
+//   n=7  -> 16
+//   n=27 -> 111          (classic long hailstone)
+//   max value reached for n=27 is 9232
+// ============================================================================
+
+fn collatzSteps(start: int) -> int {
+  var cur = start
+  let steps = loop {
+    if cur == 1 {
+      break 0
+    }
+    var count = 0
+    // inner while drives the chain; outer loop only used for break-with-value
+    while cur != 1 {
+      if cur % 2 == 0 {
+        cur = cur / 2
+      } else {
+        cur = 3 * cur + 1
+      }
+      count = count + 1
+    }
+    break count
+  }
+  steps
+}
+
+fn collatzMaxValue(start: int) -> int {
+  var cur = start
+  var peak = start
+  while cur != 1 {
+    if cur % 2 == 0 {
+      cur = cur / 2
+    } else {
+      cur = 3 * cur + 1
+    }
+    if cur > peak {
+      peak = cur
+    }
+  }
+  peak
+}
+
+fn partA() {
+  checkInt("collatz n=1", 0, collatzSteps(1))
+  checkInt("collatz n=2", 1, collatzSteps(2))
+  checkInt("collatz n=3", 7, collatzSteps(3))
+  checkInt("collatz n=6", 8, collatzSteps(6))
+  checkInt("collatz n=7", 16, collatzSteps(7))
+  checkInt("collatz n=27", 111, collatzSteps(27))
+  checkInt("collatz max n=27", 9232, collatzMaxValue(27))
+
+  // Sum of step counts for n in 1..=10 (inclusive range).
+  // Steps: 1->0,2->1,3->7,4->2,5->5,6->8,7->16,8->3,9->19,10->6  => sum = 67
+  var total = 0
+  for n in 1..=10 {
+    total = total + collatzSteps(n)
+  }
+  checkInt("collatz sum 1..=10", 67, total)
+
+  // Longest chain among 1..=20 and its argmax.
+  // Step counts 1..=20:
+  // 1:0 2:1 3:7 4:2 5:5 6:8 7:16 8:3 9:19 10:6 11:14 12:9 13:9 14:17
+  // 15:17 16:4 17:12 18:20 19:20 20:7  -> max = 20 at n=18 (first occurrence)
+  var best = 0
+  var bestN = 0
+  for n in 1..=20 {
+    let s = collatzSteps(n)
+    if s > best {
+      best = s
+      bestN = n
+    }
+  }
+  checkInt("collatz longest steps 1..=20", 20, best)
+  checkInt("collatz longest argmax 1..=20", 18, bestN)
+}
+
+// ============================================================================
+// PART B — 1-D elementary cellular automaton
+//
+// A row of W cells (0/1). Each step, every cell's next value is a function of
+// its left/self/right neighbours under an 8-bit "rule" number. Boundaries wrap
+// (toroidal). We compute the population (count of 1s) after N steps.
+//
+// We implement Rule 90 (XOR of neighbours) and Rule 110.
+//
+// Rule lookup: pattern p = left*4 + self*2 + right (0..7).
+//   next = (rule >> p) & 1
+//
+// Hand/spec-derived expected values:
+//   Rule 90, width=8, start = single 1 at index 4, after 1 step:
+//     left/right of the seed become 1, seed becomes 0 (XOR), pop=2.
+//   Rule 90 is XOR; from a single seed on an infinite line it makes a
+//     Sierpinski pattern. On width=8 toroidal we verify by independent
+//     hand-simulation encoded as expected constants below.
+// ============================================================================
+
+fn ruleBit(rule: int, pattern: int) -> int {
+  // (rule >> pattern) & 1  — implemented with division since we keep to ints.
+  var shifted = rule
+  var p = 0
+  while p < pattern {
+    shifted = shifted / 2
+    p = p + 1
+  }
+  shifted % 2
+}
+
+fn population(row: Array<int>) -> int {
+  var pop = 0
+  for c in row {
+    if c == 1 {
+      pop = pop + 1
+    }
+  }
+  pop
+}
+
+fn stepRule(row: Array<int>, rule: int) -> Array<int> {
+  let width = row.len()
+  // width is fixed at 8 throughout this program; build a fresh 8-cell row.
+  var next = [0, 0, 0, 0, 0, 0, 0, 0]
+  for i in 0..width {
+    // wrap indices
+    let leftIdx = if i == 0 { width - 1 } else { i - 1 }
+    let rightIdx = if i == width - 1 { 0 } else { i + 1 }
+    let l = row[leftIdx]
+    let s = row[i]
+    let r = row[rightIdx]
+    let pattern = l * 4 + s * 2 + r
+    next[i] = ruleBit(rule, pattern)
+  }
+  next
+}
+
+fn runRule(width: int, seedIndex: int, rule: int, generations: int) -> Array<int> {
+  // width is fixed at 8 by every caller in this program.
+  var row = [0, 0, 0, 0, 0, 0, 0, 0]
+  row[seedIndex] = 1
+  var g = 0
+  while g < generations {
+    row = stepRule(row, rule)
+    g = g + 1
+  }
+  row
+}
+
+fn partB() {
+  // ruleBit sanity: rule=90 binary 01011010.
+  // bit positions: p0=0,p1=1,p2=0,p3=1,p4=1,p5=0,p6=1,p7=0
+  checkInt("rule90 bit0", 0, ruleBit(90, 0))
+  checkInt("rule90 bit1", 1, ruleBit(90, 1))
+  checkInt("rule90 bit2", 0, ruleBit(90, 2))
+  checkInt("rule90 bit3", 1, ruleBit(90, 3))
+  checkInt("rule90 bit4", 1, ruleBit(90, 4))
+  checkInt("rule90 bit5", 0, ruleBit(90, 5))
+  checkInt("rule90 bit6", 1, ruleBit(90, 6))
+  checkInt("rule90 bit7", 0, ruleBit(90, 7))
+
+  // Rule 90, width 8, seed at idx 4, after 1 step.
+  // Only patterns with exactly one neighbour set produce 1 (XOR of neighbours;
+  // self ignored because rule90 = left XOR right).
+  // Seed at 4 affects cells 3 and 5 (each sees exactly one '1' neighbour) -> 1.
+  // Cell 4 sees neighbours 3=0,5=0 -> 0. pop=2.
+  let r1 = runRule(8, 4, 90, 1)
+  checkInt("rule90 w8 seed4 step1 pop", 2, population(r1))
+  checkInt("rule90 w8 seed4 step1 cell3", 1, r1[3])
+  checkInt("rule90 w8 seed4 step1 cell4", 0, r1[4])
+  checkInt("rule90 w8 seed4 step1 cell5", 1, r1[5])
+
+  // After 2 steps: from {3,5} each spawns to its non-overlapping neighbours.
+  // step2: cell c is 1 iff exactly one of {c-1,c+1} is in {3,5}.
+  //   c=2: nbrs 1,3 -> 3 in set -> 1
+  //   c=3: nbrs 2,4 -> none -> 0
+  //   c=4: nbrs 3,5 -> both -> XOR=0
+  //   c=5: nbrs 4,6 -> none -> 0
+  //   c=6: nbrs 5,7 -> 5 in set -> 1
+  // pop = 2 (cells 2 and 6).
+  let r2 = runRule(8, 4, 90, 2)
+  checkInt("rule90 w8 seed4 step2 pop", 2, population(r2))
+  checkInt("rule90 w8 seed4 step2 cell2", 1, r2[2])
+  checkInt("rule90 w8 seed4 step2 cell4", 0, r2[4])
+  checkInt("rule90 w8 seed4 step2 cell6", 1, r2[6])
+
+  // Rule 110 sanity bits: 110 binary = 01101110
+  // p0=0 p1=1 p2=1 p3=1 p4=0 p5=1 p6=1 p7=0
+  checkInt("rule110 bit0", 0, ruleBit(110, 0))
+  checkInt("rule110 bit1", 1, ruleBit(110, 1))
+  checkInt("rule110 bit2", 1, ruleBit(110, 2))
+  checkInt("rule110 bit3", 1, ruleBit(110, 3))
+  checkInt("rule110 bit4", 0, ruleBit(110, 4))
+  checkInt("rule110 bit5", 1, ruleBit(110, 5))
+  checkInt("rule110 bit6", 1, ruleBit(110, 6))
+  checkInt("rule110 bit7", 0, ruleBit(110, 7))
+
+  // Rule 110, width 8, single seed at idx 7 (rightmost), after 1 step.
+  // Toroidal: cell i's pattern = (left*4 + self*2 + right).
+  // seed at 7. compute each cell pattern:
+  //  i=0: l=row[7]=1,s=0,r=row[1]=0 -> pattern=4 -> bit4=0
+  //  i=6: l=0,s=0,r=row[7]=1 -> pattern=1 -> bit1=1
+  //  i=7: l=row[6]=0,s=1,r=row[0]=0 -> pattern=2 -> bit2=1
+  //  all other cells pattern 0 -> 0
+  // result 1s at indices 6 and 7 -> pop=2
+  let r110 = runRule(8, 7, 110, 1)
+  checkInt("rule110 w8 seed7 step1 pop", 2, population(r110))
+  checkInt("rule110 w8 seed7 step1 cell6", 1, r110[6])
+  checkInt("rule110 w8 seed7 step1 cell7", 1, r110[7])
+  checkInt("rule110 w8 seed7 step1 cell0", 0, r110[0])
+}
+
+// ============================================================================
+// PART C — RPN (Reverse Polish Notation) calculator
+//
+// To keep this part pure control-flow (the control-flow chapter teaches no
+// string parsing — `.chars()` is unavailable, see REPORT.md book_gap), the
+// token stream is an Array<int> where:
+//   - any value >= 0 is a literal operand
+//   - -1 = '+'  -2 = '-'  -3 = '*'  -4 = '/'
+// A while loop walks the tokens; an if-chain dispatches operators; a
+// fixed-capacity int array + explicit `top` index is the evaluation stack.
+// Result = final stack top.
+//
+// Spec-derived expected values (operators spelled in the comment):
+//   [3,4,+]              -> 7
+//   [5,1,2,+,4,*,+,3,-]  -> 14   (classic example)
+//   [2,3,4,*,+]          -> 14
+//   [10,2,/]             -> 5
+//   [7,2,-,3,*]          -> 15
+// ============================================================================
+
+fn isOperator(t: int) -> bool {
+  if t < 0 { true } else { false }
+}
+
+fn evalRpn(tokens: Array<int>) -> int {
+  // Fixed-capacity stack with an explicit integer top index. Reading an
+  // element of an int-literal array yields `int`, sidestepping the empty-array
+  // pop()-element-type inference gap (see REPORT.md, book_gap). The test inputs
+  // never exceed depth 16.
+  var stack = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  var top = 0
+  var idx = 0
+  let n = tokens.len()
+  while idx < n {
+    let t = tokens[idx]
+    if isOperator(t) {
+      let b = stack[top - 1]
+      let a = stack[top - 2]
+      top = top - 2
+      let res = if t == -1 { a + b }
+        else if t == -2 { a - b }
+        else if t == -3 { a * b }
+        else { a / b }
+      stack[top] = res
+      top = top + 1
+    } else {
+      stack[top] = t
+      top = top + 1
+    }
+    idx = idx + 1
+  }
+  stack[top - 1]
+}
+
+fn partC() {
+  // operator encoding: + = -1, - = -2, * = -3, / = -4
+  checkInt("rpn 3 4 +", 7, evalRpn([3, 4, -1]))
+  checkInt("rpn classic", 14, evalRpn([5, 1, 2, -1, 4, -3, -1, 3, -2]))
+  checkInt("rpn 2 3 4 * +", 14, evalRpn([2, 3, 4, -3, -1]))
+  checkInt("rpn 10 2 /", 5, evalRpn([10, 2, -4]))
+  checkInt("rpn 7 2 - 3 *", 15, evalRpn([7, 2, -2, 3, -3]))
+
+  // isOperator
+  checkBool("isop + (-1)", true, isOperator(-1))
+  checkBool("isop 5", false, isOperator(5))
+}
+
+// ============================================================================
+// PART D — Traffic-light finite state machine
+//
+// States cycle: Green(3 ticks) -> Yellow(1 tick) -> Red(2 ticks) -> Green...
+// We run T ticks and count how many ticks were spent in each state, plus how
+// many full Green->Yellow->Red cycles completed.
+//
+// State encoded as int: 0=Green,1=Yellow,2=Red. Durations: green=3,yellow=1,
+// red=2 => full cycle length = 6 ticks.
+//
+// Spec-derived expected for T=12 ticks starting at Green tick 0:
+//   ticks: G G G Y R R | G G G Y R R   (two full cycles)
+//   green=6, yellow=2, red=4, cycles=2
+//
+// For T=7 ticks:  G G G Y R R G  -> green=4, yellow=1, red=2, cycles=1
+// ============================================================================
+
+fn greenDuration() -> int { 3 }
+fn yellowDuration() -> int { 1 }
+fn redDuration() -> int { 2 }
+
+fn nextState(state: int) -> int {
+  if state == 0 { 1 }
+  else if state == 1 { 2 }
+  else { 0 }
+}
+
+fn stateDuration(state: int) -> int {
+  if state == 0 { greenDuration() }
+  else if state == 1 { yellowDuration() }
+  else { redDuration() }
+}
+
+// Returns [greenTicks, yellowTicks, redTicks, fullCycles].
+fn runLights(ticks: int) -> Array<int> {
+  var state = 0
+  var remaining = stateDuration(0)
+  var green = 0
+  var yellow = 0
+  var red = 0
+  var cycles = 0
+  var t = 0
+  while t < ticks {
+    if state == 0 { green = green + 1 }
+    else if state == 1 { yellow = yellow + 1 }
+    else { red = red + 1 }
+
+    remaining = remaining - 1
+    if remaining == 0 {
+      // a full cycle completes when we leave Red (state 2 -> 0)
+      if state == 2 {
+        cycles = cycles + 1
+      }
+      state = nextState(state)
+      remaining = stateDuration(state)
+    }
+    t = t + 1
+  }
+  [green, yellow, red, cycles]
+}
+
+fn partD() {
+  let r12 = runLights(12)
+  checkInt("lights12 green", 6, r12[0])
+  checkInt("lights12 yellow", 2, r12[1])
+  checkInt("lights12 red", 4, r12[2])
+  checkInt("lights12 cycles", 2, r12[3])
+
+  let r7 = runLights(7)
+  checkInt("lights7 green", 4, r7[0])
+  checkInt("lights7 yellow", 1, r7[1])
+  checkInt("lights7 red", 2, r7[2])
+  checkInt("lights7 cycles", 1, r7[3])
+
+  // nextState cycle
+  checkInt("next G", 1, nextState(0))
+  checkInt("next Y", 2, nextState(1))
+  checkInt("next R", 0, nextState(2))
+
+  // total ticks conservation for T=12
+  let total = r12[0] + r12[1] + r12[2]
+  checkInt("lights12 total ticks", 12, total)
+}
+
+// ============================================================================
+// PART E — histogram + classification with continue/break
+//
+// Given a list of integers, build a histogram of value -> count using a
+// frequency array of size BUCKETS; skip negatives (continue); stop scanning at
+// the first sentinel value -1 ... wait, negatives are skipped, so use a
+// distinct sentinel 999 to stop (break). Classify the sum of processed values.
+//
+// data = [1,3,3,7,2,3,1, -5(skip), 7, 999(stop), 100(never)]
+//   processed values: 1,3,3,7,2,3,1,7  (the -5 is skipped, 999 breaks)
+//   sum = 1+3+3+7+2+3+1+7 = 27
+//   counts: value1=2, value2=1, value3=3, value7=2
+//   classification of sum 27: 27 is odd and 27 > 20 -> "odd-large"
+// ============================================================================
+
+fn classify(sum: int) -> string {
+  let parity = if sum % 2 == 0 { "even" } else { "odd" }
+  let size = if sum > 20 { "large" } else if sum > 5 { "medium" } else { "small" }
+  f"{parity}-{size}"
+}
+
+fn partE() {
+  let data = [1, 3, 3, 7, 2, 3, 1, -5, 7, 999, 100]
+  let buckets = 10
+  // fixed 10-bucket frequency array (book teaches only array literals).
+  var counts = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  var sum = 0
+  for v in data {
+    if v == 999 {
+      break
+    }
+    if v < 0 {
+      continue
+    }
+    sum = sum + v
+    if v < buckets {
+      counts[v] = counts[v] + 1
+    }
+  }
+  checkInt("histE sum", 27, sum)
+  checkInt("histE count1", 2, counts[1])
+  checkInt("histE count2", 1, counts[2])
+  checkInt("histE count3", 3, counts[3])
+  checkInt("histE count7", 2, counts[7])
+  checkInt("histE count0", 0, counts[0])
+  checkStr("histE classify", "odd-large", classify(sum))
+
+  // classify variety (spec-derived):
+  //   4  -> even, 4<=5 -> small  => "even-small"
+  //   10 -> even, 10>5 medium    => "even-medium"
+  //   21 -> odd,  21>20 large    => "odd-large"
+  //   7  -> odd,  7>5 medium     => "odd-medium"
+  checkStr("classify 4", "even-small", classify(4))
+  checkStr("classify 10", "even-medium", classify(10))
+  checkStr("classify 21", "odd-large", classify(21))
+  checkStr("classify 7", "odd-medium", classify(7))
+
+  // Nested loop: count pairs (i,j) with i in 0..5, j in 0..5, i<j and i+j even.
+  // pairs i<j over 0..5 (i,j in {0,1,2,3,4}):
+  //   (0,2)(0,4)(1,3)(2,4) have even sum -> 4 pairs
+  var pairs = 0
+  for i in 0..5 {
+    for j in 0..5 {
+      if j <= i {
+        continue
+      }
+      if (i + j) % 2 == 0 {
+        pairs = pairs + 1
+      }
+    }
+  }
+  checkInt("nested even-sum pairs", 4, pairs)
+
+  // loop + break-with-value: find smallest k where k*k >= 50 -> k=8 (64)
+  var k = 0
+  let firstK = loop {
+    k = k + 1
+    if k * k >= 50 {
+      break k
+    }
+  }
+  checkInt("first k where k*k>=50", 8, firstK)
+}
+
+// ============================================================================
+// PART F — deterministic LCG (linear congruential generator) statistics
+//
+// Recurrence (the spec): x_{n+1} = (a*x_n + c) mod m, with a=5, c=3, m=16,
+// seed=7. These small constants give a full-period generator whose first 16
+// outputs are a permutation of 0..15:
+//   6,1,8,11,10,5,12,15,14,9,0,3,2,13,4,7
+// Hand-derived expected statistics over those 16 outputs:
+//   sum            = 0+1+...+15 = 120
+//   even count     = 8   (6,8,10,12,14,0,2,4)
+//   buckets x % 4  = [4,4,4,4]   (each residue appears 4 times)
+//   max            = 15
+//   min            = 0
+//   count > 9      = 6   (11,10,12,15,14,13)
+// We use while/for, if-chains, continue, and a 4-element int bucket array.
+// ============================================================================
+
+fn lcgNext(x: int) -> int {
+  (5 * x + 3) % 16
+}
+
+fn partF() {
+  var x = 7
+  var sum = 0
+  var evens = 0
+  var maxV = 0
+  var minV = 99
+  var aboveNine = 0
+  var b0 = 0
+  var b1 = 0
+  var b2 = 0
+  var b3 = 0
+  var i = 0
+  while i < 16 {
+    x = lcgNext(x)
+    sum = sum + x
+    if x % 2 == 0 {
+      evens = evens + 1
+    }
+    if x > maxV {
+      maxV = x
+    }
+    if x < minV {
+      minV = x
+    }
+    if x > 9 {
+      aboveNine = aboveNine + 1
+    }
+    let r = x % 4
+    if r == 0 { b0 = b0 + 1 }
+    else if r == 1 { b1 = b1 + 1 }
+    else if r == 2 { b2 = b2 + 1 }
+    else { b3 = b3 + 1 }
+    i = i + 1
+  }
+  checkInt("lcg sum", 120, sum)
+  checkInt("lcg evens", 8, evens)
+  checkInt("lcg max", 15, maxV)
+  checkInt("lcg min", 0, minV)
+  checkInt("lcg above9", 6, aboveNine)
+  checkInt("lcg bucket0", 4, b0)
+  checkInt("lcg bucket1", 4, b1)
+  checkInt("lcg bucket2", 4, b2)
+  checkInt("lcg bucket3", 4, b3)
+
+  // The generator has full period 16: the 16th output returns to the seed.
+  // Re-running the recurrence from output 16 (=7) reproduces output 1 (=6).
+  let wrap = lcgNext(7)
+  checkInt("lcg period wrap", 6, wrap)
+
+  // Skip-and-collect with continue: sum only the LCG outputs that are odd.
+  // odds among the 16 outputs: 1,11,5,15,9,3,13,7 -> sum = 64
+  var y = 7
+  var oddSum = 0
+  var j = 0
+  while j < 16 {
+    y = lcgNext(y)
+    if y % 2 == 0 {
+      j = j + 1
+      continue
+    }
+    oddSum = oddSum + y
+    j = j + 1
+  }
+  checkInt("lcg oddSum", 64, oddSum)
+}
+
+// ============================================================================
+// PART G — Rule 90 population trajectory (toroidal width 8, seed idx 4)
+//
+// Hand-derived (spec: rule90 next[i] = row[i-1] XOR row[i+1], wrap width 8):
+//   gen0 row=00001000 pop=1
+//   gen1 row=00010100 pop=2
+//   gen2 row=00100010 pop=2
+//   gen3 row=01010101 pop=4
+//   gen4 row=00000000 pop=0   (XOR cancellation collapses the pattern)
+//   gen5..gen8 stay 0
+//   sum of pops gen0..gen8 = 1+2+2+4+0+0+0+0+0 = 9
+//   first generation with pop 0 = gen4
+// Also exercises break (stop at first all-zero generation).
+// ============================================================================
+
+fn partG() {
+  var popSum = 1   // gen0 pop is 1 (seed)
+  var firstDead = -1
+  var row = [0, 0, 0, 0, 0, 0, 0, 0]
+  row[4] = 1
+  var g = 1
+  while g <= 8 {
+    row = stepRule(row, 90)
+    let p = population(row)
+    popSum = popSum + p
+    if p == 0 {
+      if firstDead == -1 {
+        firstDead = g
+      }
+      break
+    }
+    g = g + 1
+  }
+  checkInt("rule90 traj popSum", 9, popSum)
+  checkInt("rule90 first dead gen", 4, firstDead)
+
+  // Verify the specific generation-3 row 01010101 cell-by-cell.
+  var r3 = [0, 0, 0, 0, 0, 0, 0, 0]
+  r3[4] = 1
+  var h = 0
+  while h < 3 {
+    r3 = stepRule(r3, 90)
+    h = h + 1
+  }
+  checkInt("rule90 gen3 pop", 4, population(r3))
+  checkInt("rule90 gen3 cell1", 1, r3[1])
+  checkInt("rule90 gen3 cell3", 1, r3[3])
+  checkInt("rule90 gen3 cell5", 1, r3[5])
+  checkInt("rule90 gen3 cell7", 1, r3[7])
+  checkInt("rule90 gen3 cell0", 0, r3[0])
+
+  // Nested-loop spiral-order fill sanity: fill a 3x3 grid (row-major) with
+  // running counter, then sum the diagonal. Grid filled with values 1..9
+  // row-major; diagonal = positions (0,0),(1,1),(2,2) = 1,5,9 -> sum 15.
+  var grid = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  var counter = 1
+  for rr in 0..3 {
+    for cc in 0..3 {
+      grid[rr * 3 + cc] = counter
+      counter = counter + 1
+    }
+  }
+  var diag = 0
+  for d in 0..3 {
+    diag = diag + grid[d * 3 + d]
+  }
+  checkInt("grid diagonal sum", 15, diag)
+  // anti-diagonal = (0,2),(1,1),(2,0) = 3,5,7 -> 15 as well
+  var anti = 0
+  for d in 0..3 {
+    anti = anti + grid[d * 3 + (2 - d)]
+  }
+  checkInt("grid anti-diagonal sum", 15, anti)
+}
+
+// ============================================================================
+// Driver
+// ============================================================================
+partA()
+partB()
+partC()
+partD()
+partE()
+partF()
+partG()
+
+if ok {
+  print("ALL_CHECKS_PASSED")
+}

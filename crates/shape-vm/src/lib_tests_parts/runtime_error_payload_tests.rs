@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod runtime_error_payload_tests {
-    use super::*;
     use crate::BytecodeExecutor;
     use shape_runtime::engine::ShapeEngine;
     use shape_wire::WireValue;
@@ -30,4 +29,3 @@ mod runtime_error_payload_tests {
         }
     }
 }
-

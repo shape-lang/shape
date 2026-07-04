@@ -1,0 +1,6 @@
+let x = 5
+if x == None {
+  print("a")
+} else {
+  print("b")
+}

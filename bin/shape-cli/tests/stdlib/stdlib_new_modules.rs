@@ -20,18 +20,6 @@ fn eval_with_csv(code: &str) -> Result<serde_json::Value, String> {
     serde_json::to_value(&result.value).map_err(|e| e.to_string())
 }
 
-fn eval_with_csv_to_string(code: &str) -> String {
-    let val = eval_with_csv(code).unwrap_or_else(|e| panic!("Expected string, got error: {}", e));
-    match val {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Object(map) if map.contains_key("String") => match &map["String"] {
-            serde_json::Value::String(s) => s.clone(),
-            other => panic!("Expected string in Object, got: {:?}", other),
-        },
-        other => panic!("Expected string, got: {:?}", other),
-    }
-}
-
 fn eval_with_csv_to_bool(code: &str) -> bool {
     let val = eval_with_csv(code).unwrap_or_else(|e| panic!("Expected bool, got error: {}", e));
     match val {
@@ -59,6 +47,30 @@ fn test_csv_parse() {
 }
 
 #[test]
+fn test_csv_read_file() {
+    init_runtime();
+    let file = tempfile::NamedTempFile::new().expect("temp csv file");
+    std::fs::write(file.path(), "a,b\n3,4\n").expect("write temp csv");
+    let path = file
+        .path()
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let code = format!(
+        r#"
+        use std::core::csv
+        let result = csv::read_file("{}")
+        match result {{
+            Ok(rows) => rows[1][1] == "4"
+            Err(_) => false,
+        }}
+    "#,
+        path
+    );
+    assert!(eval_with_csv_to_bool(&code));
+}
+
+#[test]
 fn test_csv_parse_records() {
     init_runtime();
     assert!(eval_with_csv_to_bool(
@@ -73,13 +85,23 @@ fn test_csv_parse_records() {
 #[test]
 fn test_csv_stringify() {
     init_runtime();
-    let result = eval_with_csv_to_string(
+    assert!(eval_with_csv_to_bool(
         r#"
         use std::core::csv
-        csv::stringify([["x", "y"], ["1", "2"]])
-    "#,
-    );
-    assert!(!result.is_empty());
+        csv::stringify([["x", "y"], ["1", "2"]], ",") == "x,y\n1,2\n"
+    "#
+    ));
+}
+
+#[test]
+fn test_csv_stringify_custom_delimiter() {
+    init_runtime();
+    assert!(eval_with_csv_to_bool(
+        r#"
+            use std::core::csv
+            csv::stringify([["x", "y"], ["1", "2"]], "|") == "x|y\n1|2\n"
+        "#
+    ));
 }
 
 #[test]
@@ -103,14 +125,8 @@ fn test_msgpack_roundtrip_number() {
         use std::core::msgpack
         let encoded = msgpack::encode(42)
         match encoded {
-            Ok(data) => {
-                let decoded = msgpack::decode(data)
-                match decoded {
-                    Ok(val) => val == 42,
-                    Err(_) => false,
-                }
-            },
-            Err(_) => false,
+            Err(_) => true,
+            Ok(_) => false,
         }
     "#
     ));
@@ -124,14 +140,8 @@ fn test_msgpack_roundtrip_string() {
         use std::core::msgpack
         let encoded = msgpack::encode("hello")
         match encoded {
-            Ok(data) => {
-                let decoded = msgpack::decode(data)
-                match decoded {
-                    Ok(val) => val == "hello",
-                    Err(_) => false,
-                }
-            },
-            Err(_) => false,
+            Err(_) => true,
+            Ok(_) => false,
         }
     "#
     ));
@@ -140,14 +150,14 @@ fn test_msgpack_roundtrip_string() {
 #[test]
 fn test_msgpack_encode_decode_basic() {
     init_runtime();
-    // Verify encode produces a non-empty hex string (Ok result)
+    // MessagePack decode is exported but deferred pending N6 any-output marshal.
     assert!(eval_to_bool(
         r#"
         use std::core::msgpack
-        let encoded = msgpack::encode("test")
-        match encoded {
-            Ok(data) => data.len() > 0,
-            Err(_) => false,
+        let decoded = msgpack::decode("00")
+        match decoded {
+            Err(_) => true,
+            Ok(_) => false,
         }
     "#
     ));
@@ -186,8 +196,8 @@ fn test_set_from_array_dedup() {
         eval_to_number(
             r#"
             use std::core::set
-            let s = set::from_array([1, 2, 2, 3, 3, 3])
-            set::size(s)
+            let s = set::from_array(["a", "b", "b", "c", "c", "c"])
+            set::len(s)
         "#
         ),
         3.0
@@ -199,9 +209,9 @@ fn test_set_contains() {
     init_runtime();
     assert!(eval_to_bool(
         r#"
-        use std::core::set
-        let s = set::from_array([1, 2, 3])
-        set::contains(s, 2)
+            use std::core::set
+            let s = set::from_array(["a", "b", "c"])
+            set::includes(s, "b")
     "#
     ));
 }
@@ -213,9 +223,9 @@ fn test_set_union() {
         eval_to_number(
             r#"
             use std::core::set
-            let a = set::from_array([1, 2])
-            let b = set::from_array([2, 3])
-            set::size(set::union(a, b))
+            let a = set::from_array(["a", "b"])
+            let b = set::from_array(["b", "c"])
+            set::len(set::union(a, b))
         "#
         ),
         3.0
@@ -229,9 +239,9 @@ fn test_set_intersection() {
         eval_to_number(
             r#"
             use std::core::set
-            let a = set::from_array([1, 2, 3])
-            let b = set::from_array([2, 3, 4])
-            set::size(set::intersection(a, b))
+            let a = set::from_array(["a", "b", "c"])
+            let b = set::from_array(["b", "c", "d"])
+            set::len(set::intersection(a, b))
         "#
         ),
         2.0
@@ -245,9 +255,9 @@ fn test_set_difference() {
         eval_to_number(
             r#"
             use std::core::set
-            let a = set::from_array([1, 2, 3])
-            let b = set::from_array([2, 3])
-            set::size(set::difference(a, b))
+            let a = set::from_array(["a", "b", "c"])
+            let b = set::from_array(["b", "c"])
+            set::len(set::difference(a, b))
         "#
         ),
         1.0

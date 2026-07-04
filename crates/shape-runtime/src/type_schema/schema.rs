@@ -657,7 +657,10 @@ mod tests {
                         value: Box::new(FieldType::I64),
                     },
                 ),
-                ("tags".to_string(), FieldType::Set(Box::new(FieldType::String))),
+                (
+                    "tags".to_string(),
+                    FieldType::Set(Box::new(FieldType::String)),
+                ),
             ],
         );
         // Both containers are 8-byte heap pointers; total layout = 16 bytes.

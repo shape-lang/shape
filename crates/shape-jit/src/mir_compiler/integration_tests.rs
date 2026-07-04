@@ -94,14 +94,34 @@ fn jit_expect_bool(source: &str, expected: bool) {
 /// regression tests where a method call surfaces a VM `Err`.
 fn jit_run_result(
     source: &str,
-) -> Result<
-    shape_runtime::engine::ProgramExecutorResult,
-    shape_runtime::error::ShapeError,
-> {
+) -> Result<shape_runtime::engine::ProgramExecutorResult, shape_runtime::error::ShapeError> {
     let _ = initialize_shared_runtime();
     let mut engine = ShapeEngine::new().expect("engine creation failed");
     let program = shape_ast::parse_program(source).expect("parse failed");
     JITExecutor::new().execute_program(&mut engine, &program)
+}
+
+fn jit_expect_compile_error(source: &str, predicate: impl FnOnce(&str) -> bool) {
+    let result = jit_run_result(source);
+    match result {
+        Err(err @ shape_runtime::error::ShapeError::SemanticError { .. })
+        | Err(err @ shape_runtime::error::ShapeError::TypeError(_))
+        | Err(err @ shape_runtime::error::ShapeError::MultiError(_)) => {
+            let message = err.to_string();
+            assert!(predicate(&message), "unexpected compile error: {message}");
+        }
+        Err(shape_runtime::error::ShapeError::RuntimeError {
+            message,
+            location: _,
+        }) if message.contains("Bytecode compilation failed: Semantic error") => {
+            assert!(predicate(&message), "unexpected compile error: {message}");
+        }
+        Err(other) => panic!("expected a compile-time type error, got: {other:?}"),
+        Ok(res) => panic!(
+            "expected a compile-time type error, JIT produced Ok({:?})",
+            res.wire_value,
+        ),
+    }
 }
 
 // ===========================================================================
@@ -120,35 +140,26 @@ fn jit_run_result(
 // the VM's clean error. These tests assert the program returns a clean `Err`
 // — i.e. it neither crashes nor silently succeeds with a wrong value.
 
-/// `let mut s = Set(); s.add(1); print(s.size())` — the canonical reproducer.
-/// `Set.add` with an `Int64` key fails on the VM side. Under JIT this must
-/// surface a clean error (not SIGSEGV).
+/// `let mut s = Set(); s.add(1); print(s.size())` was the canonical
+/// reproducer before strict typing. The source is now strict-invalid and
+/// rejected by type analysis (`Set<int>` cannot have fields) before a JIT VM
+/// error path exists; keep the no-crash intent by pinning the clean
+/// compile-time error.
 #[test]
 fn jit_err_path_set_add_non_string_key_surfaces_clean_error() {
-    let result = jit_run_result(
+    jit_expect_compile_error(
         r#"
 let mut s = Set()
 s.add(1)
 print(s.size())
 "#,
+        |message| {
+            message.contains("Bytecode compilation failed")
+                && message.contains("Set")
+                && message.contains("int")
+                && message.contains("cannot have fields")
+        },
     );
-    match result {
-        Err(shape_runtime::error::ShapeError::RuntimeError { message, .. }) => {
-            assert!(
-                message.contains("must be a string"),
-                "expected the VM's `Set.add` key-type error, got: {message}",
-            );
-        }
-        Err(other) => {
-            // Any clean `Err` is acceptable (no crash); a non-RuntimeError
-            // shape is unexpected but still proves the no-SIGSEGV property.
-            panic!("expected a RuntimeError, got: {other:?}");
-        }
-        Ok(res) => panic!(
-            "expected an Err from `Set.add(1)`, JIT produced Ok({:?})",
-            res.wire_value, // WireValue is Debug; ProgramExecutorResult is not
-        ),
-    }
 }
 
 /// HashMap mirror: `HashMap` insert with a non-string key also fails VM-side
@@ -1233,6 +1244,18 @@ s.length
     );
 }
 
+#[test]
+fn string_length_property_unicode_binding_deopts_cleanly() {
+    jit_expect_int(
+        r#"
+let text = "Hello 世界 👋";
+let len = text.length;
+len
+"#,
+        10,
+    );
+}
+
 // ===========================================================================
 // 13. Nested closures (Phase 3)
 // ===========================================================================
@@ -1459,7 +1482,7 @@ y
 fn parity_null_coalescing_non_null() {
     jit_expect_number(
         r#"
-let x: number? = 10.0
+let x: number? = Some(10.0)
 let y = x ?? 42.0
 y
 "#,
@@ -1471,10 +1494,12 @@ y
 
 #[test]
 fn parity_string_interpolation() {
-    match jit_eval(r#"
+    match jit_eval(
+        r#"
 let name = "world"
 f"hello {name}"
-"#) {
+"#,
+    ) {
         WireValue::String(s) => assert_eq!(s, "hello world"),
         other => panic!("Expected String(\"hello world\"), got {:?}", other),
     }
@@ -1530,7 +1555,7 @@ fn parity_array_reduce() {
     jit_expect_number(
         r#"
 let arr = [1, 2, 3, 4, 5]
-arr.reduce(0, |acc, x| acc + x)
+arr.reduce(|acc, x| acc + x, 0)
 "#,
         15.0,
     );
@@ -1544,7 +1569,7 @@ fn parity_pipe_operator() {
         r#"
 fn double(x) { return x * 2 }
 fn add_one(x) { return x + 1 }
-5 |> double |> add_one
+5.0 |> double |> add_one
 "#,
         11.0,
     );
@@ -1579,7 +1604,7 @@ fn parity_option_return() {
 fn find_positive(arr: Array<number>) -> number? {
     for i in 0..arr.length {
         if arr[i] > 0 {
-            return arr[i]
+            return Some(arr[i])
         }
     }
     return None
@@ -1724,11 +1749,11 @@ fn phase_e_escaping_closure_still_correct() {
     // be correct, just via the legacy jit_make_closure FFI.
     jit_expect_int(
         r#"
-fn make_adder() {
-    let n = 10
-    return |x| x + n
+fn make_adder() -> (int) -> int {
+    let n: int = 10
+    return function(x: int) -> int { return x + n }
 }
-let f = make_adder()
+let f: (int) -> int = make_adder()
 f(5)
 "#,
         15,
@@ -1774,7 +1799,7 @@ fn phase_e_higher_order_map_pipeline() {
         r#"
 let n = 10
 let arr = [1, 2, 3, 4]
-arr.map(|x| x + n).reduce(0, |a, b| a + b)
+arr.map(|x| x + n).reduce(|a, b| a + b, 0)
 "#,
         50.0, // 11 + 12 + 13 + 14
     );
@@ -2115,6 +2140,27 @@ let b = 10
 (a & b) | (a ^ b)
 "#,
         14,
+    );
+}
+
+/// W32 bitwise book-snippet regression. Mirrors
+/// `fundamentals/operators.mdx:195`: `&`, `|`, `^`, `~`, `<<`, and `>>`
+/// must execute as one JIT-compiled program instead of hanging or surfacing.
+#[test]
+fn aggregate_book_bitwise_operator_cluster_baseline() {
+    jit_expect_int(
+        r#"
+let a = 0b1100
+let b = 0b1010
+let bit_and = a & b
+let bit_or = a | b
+let bit_xor = a ^ b
+let bit_not = ~a
+let shift_left = a << 2
+let shift_right = a >> 1
+bit_and + (bit_or * 10) + (bit_xor * 100) + (bit_not * 1000) + (shift_left * 10000) + (shift_right * 100000)
+"#,
+        1_067_748,
     );
 }
 

@@ -145,7 +145,9 @@ fn classify_rvalue(
         Rvalue::Use(operand) => classify_operand(operand, mir, callee_modes),
         // Binary/unary ops produce primitives (int/bool/float) — treat as NewlyOwned:
         // no Arc wrap is needed for primitives, so the caller can consume directly.
-        Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        Rvalue::BinaryOp(_, _, _) | Rvalue::FuzzyComparison { .. } | Rvalue::UnaryOp(_, _) => {
+            ReturnOwnershipMode::NewlyOwned
+        }
         // EnumTest produces a fresh native Bool — NewlyOwned by construction.
         // EnumPayload extracts an owned share from the wrapped Result/Option
         // payload per §2.7.17 receiver-recovery soundness; also NewlyOwned.
@@ -156,7 +158,8 @@ fn classify_rvalue(
         Rvalue::EnumTest { .. }
         | Rvalue::EnumPayload { .. }
         | Rvalue::TypePatternTest { .. }
-        | Rvalue::EnumDiscriminantTest { .. } => ReturnOwnershipMode::NewlyOwned,
+        | Rvalue::EnumDiscriminantTest { .. }
+        | Rvalue::PrimitiveCast { .. } => ReturnOwnershipMode::NewlyOwned,
     }
 }
 
@@ -281,9 +284,7 @@ fn trace_local_defining_mode(
         }
 
         if let TerminatorKind::Call {
-            destination,
-            func,
-            ..
+            destination, func, ..
         } = &block.terminator.kind
         {
             if destination.root_local() == slot {
@@ -317,14 +318,17 @@ fn classify_defining_rvalue(
 ) -> ReturnOwnershipMode {
     match rvalue {
         Rvalue::Aggregate(_) | Rvalue::Clone(_) => ReturnOwnershipMode::NewlyOwned,
-        Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        Rvalue::BinaryOp(_, _, _) | Rvalue::FuzzyComparison { .. } | Rvalue::UnaryOp(_, _) => {
+            ReturnOwnershipMode::NewlyOwned
+        }
         // EnumTest emits a Bool; EnumPayload emits an owned-share payload.
         // TypePatternTest emits a fresh native Bool (W15.2-LANG-5).
         // EnumDiscriminantTest emits a fresh native Bool (W15.2-LANG-1).
         Rvalue::EnumTest { .. }
         | Rvalue::EnumPayload { .. }
         | Rvalue::TypePatternTest { .. }
-        | Rvalue::EnumDiscriminantTest { .. } => ReturnOwnershipMode::NewlyOwned,
+        | Rvalue::EnumDiscriminantTest { .. }
+        | Rvalue::PrimitiveCast { .. } => ReturnOwnershipMode::NewlyOwned,
         Rvalue::Borrow(kind, p) => classify_borrow_rvalue(*kind, p, mir),
         Rvalue::Use(op) => match op {
             Operand::Constant(c) => classify_constant(c),
@@ -363,6 +367,8 @@ mod tests {
             local_struct_type_names: StdHashMap::new(),
             local_typed_array_element_types: StdHashMap::new(),
             local_declared_scalar_types: StdHashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         }
     }
 
@@ -495,7 +501,11 @@ mod tests {
         mir.num_locals = 3;
         mir.param_slots = vec![SlotId(1), SlotId(2)];
         mir.param_reference_kinds = vec![None, None];
-        mir.local_types = vec![LocalTypeInfo::Copy, LocalTypeInfo::Copy, LocalTypeInfo::Copy];
+        mir.local_types = vec![
+            LocalTypeInfo::Copy,
+            LocalTypeInfo::Copy,
+            LocalTypeInfo::Copy,
+        ];
         let mut bb0 = BasicBlock {
             id: BasicBlockId(0),
             statements: Vec::new(),
@@ -614,7 +624,11 @@ mod tests {
         // One branch returns param 1, the other returns param 2 — meet is Unknown.
         let mut mir = empty_mir("route");
         mir.num_locals = 3;
-        mir.param_slots = vec![SlotId(0) /* unused placeholder */, SlotId(1), SlotId(2)];
+        mir.param_slots = vec![
+            SlotId(0), /* unused placeholder */
+            SlotId(1),
+            SlotId(2),
+        ];
         // Actually, let's not mess with SlotId(0) — use distinct param slots.
         mir.param_slots = vec![SlotId(1), SlotId(2)];
         mir.param_reference_kinds = vec![None, None];
@@ -781,7 +795,8 @@ mod tests {
             ReturnOwnershipMode::NewlyOwned
         );
         assert_eq!(
-            ReturnOwnershipMode::BorrowedFromParam(1).meet(ReturnOwnershipMode::BorrowedFromParam(1)),
+            ReturnOwnershipMode::BorrowedFromParam(1)
+                .meet(ReturnOwnershipMode::BorrowedFromParam(1)),
             ReturnOwnershipMode::BorrowedFromParam(1)
         );
     }
@@ -793,7 +808,8 @@ mod tests {
             ReturnOwnershipMode::Unknown
         );
         assert_eq!(
-            ReturnOwnershipMode::BorrowedFromParam(0).meet(ReturnOwnershipMode::BorrowedFromParam(1)),
+            ReturnOwnershipMode::BorrowedFromParam(0)
+                .meet(ReturnOwnershipMode::BorrowedFromParam(1)),
             ReturnOwnershipMode::Unknown
         );
     }
@@ -1008,10 +1024,7 @@ mod tests {
         mir.blocks = vec![bb0, bb1];
 
         let mut callee_modes = HashMap::new();
-        callee_modes.insert(
-            "get_singleton".to_string(),
-            ReturnOwnershipMode::Static,
-        );
+        callee_modes.insert("get_singleton".to_string(), ReturnOwnershipMode::Static);
 
         assert_eq!(
             infer_return_ownership_mode(&mir, &callee_modes),
@@ -1271,9 +1284,7 @@ mod tests {
     // etc.) rather than hand-built MIR.
     // ---------------------------------------------------------------------
 
-    fn infer_from_source(
-        code: &str,
-    ) -> std::collections::HashMap<String, ReturnOwnershipMode> {
+    fn infer_from_source(code: &str) -> std::collections::HashMap<String, ReturnOwnershipMode> {
         use shape_ast::ast::Item;
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
         let mut modes = std::collections::HashMap::new();
@@ -1296,7 +1307,10 @@ mod tests {
         modes: &std::collections::HashMap<String, ReturnOwnershipMode>,
         name: &str,
     ) -> ReturnOwnershipMode {
-        modes.get(name).copied().unwrap_or(ReturnOwnershipMode::Unknown)
+        modes
+            .get(name)
+            .copied()
+            .unwrap_or(ReturnOwnershipMode::Unknown)
     }
 
     #[test]

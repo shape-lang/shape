@@ -11,7 +11,7 @@ fn http_get_basic() {
     ShapeTest::new(
         r#"
         use std::core::http
-        let response = http::get("https://httpbin.org/get")
+        let response = http::get("https://httpbin.org/get", HashMap())
         print(response)
     "#,
     )
@@ -25,7 +25,7 @@ fn http_post_basic() {
     ShapeTest::new(
         r#"
         use std::core::http
-        let response = http::post("https://httpbin.org/post", "hello")
+        let response = http::post_text("https://httpbin.org/post", "hello", HashMap())
         print(response)
     "#,
     )
@@ -39,7 +39,7 @@ fn http_put_basic() {
     ShapeTest::new(
         r#"
         use std::core::http
-        let response = http::put("https://httpbin.org/put", "data")
+        let response = http::put_text("https://httpbin.org/put", "data", HashMap())
         print(response)
     "#,
     )
@@ -53,7 +53,7 @@ fn http_delete_basic() {
     ShapeTest::new(
         r#"
         use std::core::http
-        let response = http::delete("https://httpbin.org/delete")
+        let response = http::delete("https://httpbin.org/delete", HashMap())
         print(response)
     "#,
     )
@@ -67,8 +67,8 @@ fn http_post_with_json_body() {
     ShapeTest::new(
         r#"
         use std::core::http
-        let body = "{\"key\": \"value\"}"
-        let response = http::post("https://httpbin.org/post", body)
+        let body = { key: "value" }
+        let response = http::post_json("https://httpbin.org/post", body, HashMap())
         print(response)
     "#,
     )
@@ -82,7 +82,7 @@ fn http_get_with_invalid_url() {
     ShapeTest::new(
         r#"
         use std::core::http
-        let response = http::get("not-a-valid-url")
+        let response = http::get("not-a-valid-url", HashMap())
         print(response)
     "#,
     )

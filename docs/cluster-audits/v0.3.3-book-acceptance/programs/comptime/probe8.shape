@@ -1,0 +1,11 @@
+comptime fn factorial(n: int) -> int {
+  let mut acc = 1
+  let mut i = 1
+  while i <= n {
+    acc = acc * i
+    i = i + 1
+  }
+  acc
+}
+let F = comptime { factorial(5) }
+print(F)

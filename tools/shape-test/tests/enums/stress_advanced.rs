@@ -152,11 +152,11 @@ fn test_enum_is_typed_object_internally() {
 // SECTION 45: Enum Equality Between Different Enums
 // =============================================================================
 
-/// Verifies different enum types comparison does not crash.
+/// Strict structural unification rejects equality between distinct enum types.
 #[test]
 fn test_enum_different_types_not_equal() {
     ShapeTest::new("enum A { X }\nenum B { X }\nlet a = A::X\nlet b = B::X\na == b")
-        .expect_bool(false);
+        .expect_run_err_contains("A is not compatible with B");
 }
 
 // =============================================================================

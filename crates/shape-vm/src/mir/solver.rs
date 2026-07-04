@@ -60,6 +60,25 @@ use std::collections::{HashMap, HashSet};
 /// Callee return-reference summaries, keyed by function name.
 pub type CalleeSummaries = HashMap<String, ReturnReferenceSummary>;
 
+/// Static controls supplied by the compiler when MIR is analyzed in a context
+/// with extra type-contract knowledge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowAnalysisOptions {
+    /// Permit the ADR-006 §2.7.30 ReturnSlot floor only when the enclosing
+    /// function has a declared `-> &T` / `-> &mut T` return contract. Without
+    /// that contract, a local-rooted reference flowing into SlotId(0) is a
+    /// statically proven B0003 reference escape.
+    pub allow_return_slot_local_escape_promotion: bool,
+}
+
+impl Default for BorrowAnalysisOptions {
+    fn default() -> Self {
+        Self {
+            allow_return_slot_local_escape_promotion: false,
+        }
+    }
+}
+
 /// Input facts extracted from MIR for the Datafrog solver.
 #[derive(Debug, Default)]
 pub struct BorrowFacts {
@@ -119,21 +138,21 @@ pub fn extract_facts(
     let mut facts = BorrowFacts::default();
     let mut next_loan = 0u32;
     let mut slot_loans: HashMap<SlotId, Vec<u32>> = HashMap::new();
-    let mut slot_reference_origins: HashMap<SlotId, (BorrowKind, ReferenceOrigin)> =
-        HashMap::new();
+    let mut slot_reference_origins: HashMap<SlotId, (BorrowKind, ReferenceOrigin)> = HashMap::new();
 
     // Track slots that are targets of ClosureCapture with mutable captures
     // (proxy for non-sendable closures).
-    let (all_captures, mutable_captures) =
-        super::storage_planning::collect_closure_captures(mir);
+    let (all_captures, mutable_captures) = super::storage_planning::collect_closure_captures(mir);
     let closure_capture_slots: HashSet<SlotId> = mutable_captures;
-    facts.slot_escape_status.extend((0..mir.num_locals).map(|raw_slot| {
-        let slot = SlotId(raw_slot);
-        (
-            slot,
-            super::storage_planning::detect_escape_status(slot, mir, &all_captures),
-        )
-    }));
+    facts
+        .slot_escape_status
+        .extend((0..mir.num_locals).map(|raw_slot| {
+            let slot = SlotId(raw_slot);
+            (
+                slot,
+                super::storage_planning::detect_escape_status(slot, mir, &all_captures),
+            )
+        }));
     let param_reference_summaries: HashMap<SlotId, ReturnReferenceSummary> = mir
         .param_slots
         .iter()
@@ -485,13 +504,21 @@ pub fn extract_facts(
         }
 
         // Process Call terminators for borrow facts
-        if let TerminatorKind::Call { func, args, destination, .. } = &block.terminator.kind {
+        if let TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } = &block.terminator.kind
+        {
             let call_point = block.statements.last().map(|s| s.point.0).unwrap_or(0);
             // Track reads from func and args operands
             let mut all_operands = vec![func];
             all_operands.extend(args.iter());
             for op in &all_operands {
-                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = op {
+                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) =
+                    op
+                {
                     if let Some(loans) = slot_loans.get(&place.root_local()) {
                         for &loan_id in loans {
                             facts.use_of_loan.push((loan_id, call_point));
@@ -526,10 +553,8 @@ pub fn extract_facts(
                             if let Some(arg_summary) =
                                 slot_reference_summaries.get(&arg_slot).cloned()
                             {
-                                let composed = compose_return_reference_summary(
-                                    &arg_summary,
-                                    callee_summary,
-                                );
+                                let composed =
+                                    compose_return_reference_summary(&arg_summary, callee_summary);
 
                                 // Only compose origin when projection precision is preserved.
                                 // Origin is always-precise (Vec, not Option<Vec>); if projection
@@ -624,6 +649,10 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
                 operand_read_places(lhs, &mut reads);
                 operand_read_places(rhs, &mut reads);
             }
+            Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+                operand_read_places(lhs, &mut reads);
+                operand_read_places(rhs, &mut reads);
+            }
             Rvalue::UnaryOp(_, operand) => operand_read_places(operand, &mut reads),
             Rvalue::Aggregate(operands) => {
                 for operand in operands {
@@ -633,7 +662,8 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             Rvalue::EnumTest { operand, .. }
             | Rvalue::EnumPayload { operand, .. }
             | Rvalue::TypePatternTest { operand, .. }
-            | Rvalue::EnumDiscriminantTest { operand, .. } => {
+            | Rvalue::EnumDiscriminantTest { operand, .. }
+            | Rvalue::PrimitiveCast { operand, .. } => {
                 operand_read_places(operand, &mut reads);
             }
         },
@@ -803,10 +833,7 @@ fn reference_origin_from_rvalue(
     rvalue: &Rvalue,
 ) -> Option<(BorrowKind, ReferenceOrigin)> {
     match rvalue {
-        Rvalue::Borrow(kind, place) => Some((
-            *kind,
-            reference_origin_for_place(place, &[]),
-        )),
+        Rvalue::Borrow(kind, place) => Some((*kind, reference_origin_for_place(place, &[]))),
         Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
         | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
@@ -976,6 +1003,10 @@ fn find_matching_loan_for_return_candidate(
 
 /// Run the Datafrog solver to compute loan liveness and detect errors.
 pub fn solve(facts: &BorrowFacts) -> SolverResult {
+    solve_with_options(facts, BorrowAnalysisOptions::default())
+}
+
+pub fn solve_with_options(facts: &BorrowFacts, options: BorrowAnalysisOptions) -> SolverResult {
     let mut iteration = Iteration::new();
 
     // Input relations (static — known before iteration)
@@ -1143,9 +1174,91 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         }
     }
 
+    // ADR-006 §2.7.30 (R2/GAP-1): promoted floor-sink escapes request
+    // escape→RC promotion instead of rejecting. ModuleBindingStore remains a
+    // floor sink. ReturnSlot is a floor sink ONLY when the compiler supplied
+    // the static `-> &T` / `-> &mut T` return contract through
+    // `BorrowAnalysisOptions`; otherwise a local-rooted returned reference is
+    // a proven B0003 escape.
+    //
+    // The parallel `escaped_loans` B0003 reject loop below would otherwise
+    // re-reject promoted loans, so we suppress its B0003 emit for the
+    // `(loan_id, span)` pairs that originate from a promoted floor sink — BUT
+    // ONLY when that loan escapes EXCLUSIVELY through floor sinks.
+    //
+    // Scope proof (CLAUDE.md §Forbidden + §2.7.30.7 — the HARD BINDER): a
+    // loan that ALSO escapes via a non-floor sink (closure-env / container /
+    // task) is a UAF and MUST still reject. The `&x` loan in
+    // `let f = || { &x }; return f` flows BOTH into a `ClosureEnv` sink (the
+    // capture) AND — via the closure-value alias — into a `ReturnSlot` sink
+    // (the `return f`). Matching the ReturnSlot `(loan_id, span)` alone would
+    // wrongly suppress that loan's B0003. So we additionally require that NO
+    // `loan_sinks` entry for the same `loan_id` is a non-floor sink. A loan
+    // with any ClosureEnv / ArrayStore / ObjectStore / EnumStore /
+    // ArrayAssignment / ObjectAssignment / Detached- / StructuredTaskBoundary
+    // sink is NEVER suppressed — it rejects through its own arm in the
+    // `loan_sinks` loop below. This makes the suppression predicate provably
+    // unable to match a non-floor escape.
+    //
+    // Referent-must-be-a-genuine-LOCAL (CLAUDE.md §Forbidden, the floor is
+    // `return &local` only): a borrow whose root is a PARAM is NOT promotable
+    // — its storage lives in the caller's / frame's param area, not a
+    // promotable local def-site. The canonical offender is a closure body
+    // `|| { &x }`: the captured `x` is lowered as a by-value PARAM of the
+    // closure function, and `return &x` would otherwise look like a ReturnSlot
+    // floor sink. Returning a reference to a by-value param past the call is a
+    // UAF, so a param-rooted referent is NEVER suppressed; it keeps its B0003.
+    // (Genuine `&param`-of-a-REFERENCE-param returns are handled upstream as
+    // safe reborrows via `param_reference_summaries` and never reach
+    // `escaped_loans`.)
+    //
+    // `LoanInfo::region_depth` is the param/local discriminator: it is stamped
+    // `0` for a borrow whose root is in `mir.param_slots` and `1` for a
+    // genuine local (see the `region_depth` assignment at the fact-extraction
+    // site). Only `region_depth >= 1` (a local def-site) is promotable.
+    let referent_is_promotable_local =
+        |loan_id: u32| -> bool { facts.loan_info[&loan_id].region_depth >= 1 };
+    let sink_is_promoted_floor = |sink: &LoanSink| -> bool {
+        match sink.kind {
+            LoanSinkKind::ModuleBindingStore => true,
+            LoanSinkKind::ReturnSlot => options.allow_return_slot_local_escape_promotion,
+            _ => false,
+        }
+    };
+    let mut floor_only_loans: std::collections::HashMap<u32, bool> =
+        std::collections::HashMap::new();
+    for sink in &facts.loan_sinks {
+        let is_floor = matches!(
+            sink.kind,
+            LoanSinkKind::ReturnSlot | LoanSinkKind::ModuleBindingStore
+        );
+        let entry = floor_only_loans.entry(sink.loan_id).or_insert(true);
+        *entry = *entry && is_floor;
+    }
+    let promoted_floor_escapes: std::collections::HashSet<(u32, usize, usize)> = facts
+        .loan_sinks
+        .iter()
+        .filter(|sink| sink_is_promoted_floor(sink))
+        .map(|sink| (sink.loan_id, sink.span.start, sink.span.end))
+        .collect();
+    let escape_is_effectively_promoted = |loan_id: u32, span: shape_ast::ast::Span| -> bool {
+        floor_only_loans.get(&loan_id).copied().unwrap_or(false)
+            && referent_is_promotable_local(loan_id)
+            && promoted_floor_escapes.contains(&(loan_id, span.start, span.end))
+    };
+    let sink_is_effectively_promoted = |sink: &LoanSink| -> bool {
+        sink_is_promoted_floor(sink) && escape_is_effectively_promoted(sink.loan_id, sink.span)
+    };
+
     let mut seen_escapes = std::collections::HashSet::new();
     for (loan_id, span) in &facts.escaped_loans {
         if !seen_escapes.insert((*loan_id, span.start, span.end)) {
+            continue;
+        }
+        // GAP-1: suppress B0003 for the floor-sink escape that R2 promotes.
+        // ReturnSlot reaches this set only under the explicit borrow-return
+        // contract option; unannotated local-return references remain B0003.
+        if escape_is_effectively_promoted(*loan_id, *span) {
             continue;
         }
         let info = &facts.loan_info[loan_id];
@@ -1159,6 +1272,10 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         });
     }
 
+    // ADR-006 §2.7.30 (R2): sink-discriminated reference-escape promotions.
+    // Accumulated ONLY for promoted floor sinks; every other sink keeps
+    // emitting its B0003/B0004/B0006/B0012 reject.
+    let mut reference_escape_promotions: Vec<PromotionTrigger> = Vec::new();
     let mut seen_sinks = std::collections::HashSet::new();
     for sink in &facts.loan_sinks {
         let key = (
@@ -1177,6 +1294,18 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
             .sink_slot
             .and_then(|slot| facts.slot_escape_status.get(&slot).copied())
             == Some(EscapeStatus::Local);
+
+        // ADR-006 §2.7.30 (R2): promoted floor sinks request escape→RC
+        // promotion of the borrowed referent. ReturnSlot is admitted only when
+        // the enclosing function's declared borrow-return contract was passed
+        // in through `BorrowAnalysisOptions`.
+        if sink_is_effectively_promoted(sink) {
+            reference_escape_promotions.push(PromotionTrigger {
+                referent_local: info.borrowed_place.root_local(),
+                sink_kind: sink.kind,
+            });
+            continue;
+        }
 
         let kind = match sink.kind {
             LoanSinkKind::ReturnSlot => continue,
@@ -1200,18 +1329,14 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
             }
             LoanSinkKind::EnumStore if sink_is_local => continue,
             LoanSinkKind::EnumStore => BorrowErrorKind::ReferenceStoredInEnum,
-            LoanSinkKind::StructuredTaskBoundary => {
-                BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
-            }
+            LoanSinkKind::StructuredTaskBoundary => BorrowErrorKind::ExclusiveRefAcrossTaskBoundary,
             LoanSinkKind::DetachedTaskBoundary if info.kind == BorrowKind::Exclusive => {
                 BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
             }
             LoanSinkKind::DetachedTaskBoundary => BorrowErrorKind::SharedRefAcrossDetachedTask,
             // v0.3.3 c6 (Wave 1): module bindings outlive every frame; no
             // `sink_is_local` exemption applies. Always emit B0003.
-            LoanSinkKind::ModuleBindingStore => {
-                BorrowErrorKind::ReferenceEscapeIntoModuleBinding
-            }
+            LoanSinkKind::ModuleBindingStore => BorrowErrorKind::ReferenceEscapeIntoModuleBinding,
         };
 
         errors.push(BorrowError {
@@ -1248,6 +1373,7 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         errors,
         loan_info: facts.loan_info.clone(),
         return_reference_summary,
+        reference_escape_promotions,
     }
 }
 
@@ -1322,6 +1448,8 @@ pub struct SolverResult {
     pub errors: Vec<BorrowError>,
     pub loan_info: HashMap<u32, LoanInfo>,
     pub return_reference_summary: Option<ReturnReferenceSummary>,
+    /// ADR-006 §2.7.30 (R2): referent slots to promote to RC'd cells.
+    pub reference_escape_promotions: Vec<PromotionTrigger>,
 }
 
 /// Run the complete borrow analysis pipeline for a MIR function.
@@ -1334,11 +1462,8 @@ pub fn extract_borrow_summary(
     return_summary: Option<ReturnReferenceSummary>,
 ) -> FunctionBorrowSummary {
     let num_params = mir.param_slots.len();
-    let mut param_borrows: Vec<Option<BorrowKind>> = mir
-        .param_reference_kinds
-        .iter()
-        .cloned()
-        .collect();
+    let mut param_borrows: Vec<Option<BorrowKind>> =
+        mir.param_reference_kinds.iter().cloned().collect();
     // Pad to num_params if param_reference_kinds is shorter
     while param_borrows.len() < num_params {
         param_borrows.push(None);
@@ -1542,18 +1667,20 @@ fn param_slot_escapes(param_slot: SlotId, mir: &MirFunction) -> bool {
 
 fn rvalue_uses_any(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
     match rvalue {
-        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
-            operand_uses_any(op, slots)
-        }
+        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => operand_uses_any(op, slots),
         Rvalue::Borrow(_, place) => slots.contains(&place.root_local()),
         Rvalue::BinaryOp(_, lhs, rhs) => {
+            operand_uses_any(lhs, slots) || operand_uses_any(rhs, slots)
+        }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
             operand_uses_any(lhs, slots) || operand_uses_any(rhs, slots)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any(op, slots)),
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
-        | Rvalue::EnumDiscriminantTest { operand, .. } => operand_uses_any(operand, slots),
+        | Rvalue::EnumDiscriminantTest { operand, .. }
+        | Rvalue::PrimitiveCast { operand, .. } => operand_uses_any(operand, slots),
     }
 }
 
@@ -1588,11 +1715,15 @@ fn rvalue_uses_param(rvalue: &Rvalue, param_slot: SlotId) -> bool {
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_uses_param(lhs, param_slot) || operand_uses_param(rhs, param_slot)
         }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+            operand_uses_param(lhs, param_slot) || operand_uses_param(rhs, param_slot)
+        }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_param(op, param_slot)),
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
-        | Rvalue::EnumDiscriminantTest { operand, .. } => operand_uses_param(operand, param_slot),
+        | Rvalue::EnumDiscriminantTest { operand, .. }
+        | Rvalue::PrimitiveCast { operand, .. } => operand_uses_param(operand, param_slot),
     }
 }
 
@@ -1606,6 +1737,14 @@ fn operand_uses_param(op: &Operand, param_slot: SlotId) -> bool {
 }
 
 pub fn analyze(mir: &MirFunction, callee_summaries: &CalleeSummaries) -> BorrowAnalysis {
+    analyze_with_options(mir, callee_summaries, BorrowAnalysisOptions::default())
+}
+
+pub fn analyze_with_options(
+    mir: &MirFunction,
+    callee_summaries: &CalleeSummaries,
+    options: BorrowAnalysisOptions,
+) -> BorrowAnalysis {
     let cfg = ControlFlowGraph::build(mir);
 
     // 1. Compute liveness (for move/clone inference)
@@ -1615,7 +1754,7 @@ pub fn analyze(mir: &MirFunction, callee_summaries: &CalleeSummaries) -> BorrowA
     let facts = extract_facts(mir, &cfg, callee_summaries);
 
     // 3. Run the Datafrog solver
-    let solver_result = solve(&facts);
+    let solver_result = solve_with_options(&facts, options);
 
     // 4. Compute ownership decisions (move/clone) based on liveness
     let ownership_decisions = compute_ownership_decisions(mir, &liveness);
@@ -1638,6 +1777,7 @@ pub fn analyze(mir: &MirFunction, callee_summaries: &CalleeSummaries) -> BorrowA
         ownership_decisions,
         mutability_errors: Vec::new(), // filled by binding resolver (Phase 1)
         return_reference_summary: solver_result.return_reference_summary,
+        reference_escape_promotions: solver_result.reference_escape_promotions,
     }
 }
 
@@ -1652,11 +1792,24 @@ fn compute_ownership_decisions(
         for (stmt_idx, stmt) in block.statements.iter().enumerate() {
             // Match both Move and Copy operands — identifier loads use Copy in MIR,
             // but the ownership decision (Move vs Clone) depends on liveness analysis.
-            let src_slot = match &stmt.kind {
-                StatementKind::Assign(_, Rvalue::Use(Operand::Move(Place::Local(s)))) => s,
-                StatementKind::Assign(_, Rvalue::Use(Operand::Copy(Place::Local(s)))) => s,
+            let (dest_place, src_slot) = match &stmt.kind {
+                StatementKind::Assign(dest, Rvalue::Use(Operand::Move(Place::Local(s)))) => {
+                    (dest, s)
+                }
+                StatementKind::Assign(dest, Rvalue::Use(Operand::Copy(Place::Local(s)))) => {
+                    (dest, s)
+                }
                 _ => continue,
             };
+            // Binding-move reconcile (user 2026-06-21): `var copy = data` is the
+            // ergonomic smart-default — it AUTO-CLONES on a still-live source
+            // (clone-on-still-live / CoW) so BOTH `copy` and `data` stay valid.
+            // `let q = p` / `let mut q = p` are explicit MOVE bindings (the
+            // moved-from source's later read is B0005). The discriminator is the
+            // DESTINATION binding slot: a `var` destination keeps the
+            // conservative non-consuming Clone on a still-live source; a `let` /
+            // `let mut` destination gets the REAL-MOVE flip.
+            let dest_is_var = mir.var_binding_slots.contains(&dest_place.root_local());
             {
                 // Check if the source is a non-Copy type
                 let src_type = mir
@@ -1667,16 +1820,71 @@ fn compute_ownership_decisions(
 
                 let decision = match src_type {
                     LocalTypeInfo::Copy => OwnershipDecision::Copy,
-                    LocalTypeInfo::NonCopy => {
-                        // Smart inference: check if source is live after this point
+                    LocalTypeInfo::NonCopy if slot_is_reference_param(mir, *src_slot) => {
+                        // A `&x` / `&mut x` reference PARAMETER is classified
+                        // `NonCopy` ("references are always tracked", lowering
+                        // mod.rs:708) but it is a BORROW, not an owned heap
+                        // value. Reading through it (`let old = x` inside
+                        // `fn f(&x)`) is a deref-read that does NOT consume the
+                        // referent; moving it would spuriously fire B0005 on the
+                        // next read of the reference (e.g. `x = x + 1`). Keep the
+                        // conservative still-live Clone for reference params.
                         if liveness.is_live_after(block.id, stmt_idx, *src_slot, mir) {
                             OwnershipDecision::Clone
                         } else {
                             OwnershipDecision::Move
                         }
                     }
+                    LocalTypeInfo::NonCopy => {
+                        // Strict REAL-MOVE model (user 2026-06-21): HEAP values
+                        // (Array/struct/string/HashMap/...) MOVE on `let q = p`
+                        // even when the source `p` is still live afterward. The
+                        // still-live read of the moved-from source is then a
+                        // compile-time use-after-move (B0005), raised by
+                        // `compute_use_after_move_errors` once the moved-from
+                        // source is entered into the moved-set (see
+                        // `actual_move_places`). Scalars (int/number/bool) are
+                        // `LocalTypeInfo::Copy` and never reach this arm — they
+                        // stay Copy by construction.
+                        //
+                        // EXCEPTION — `var` smart-default (user 2026-06-21
+                        // reconcile): a `var copy = data` destination AUTO-CLONES
+                        // on a still-live source (clone-on-still-live / CoW), so
+                        // BOTH bindings stay valid and no B0005 fires. Only when
+                        // the source is dead after this point does `var` move
+                        // (the move-when-dead half of the smart default). `let` /
+                        // `let mut` destinations always move regardless.
+                        //
+                        // S1b independence (user 2026-06-21): the auto-clone of a
+                        // PROVEN heap source (`NonCopy`) is a DEEP clone, not a
+                        // shallow refcount share. A shallow share would alias the
+                        // backing buffer — `copy.push(99)` would mutate the
+                        // source's TypedArray in place. `DeepClone` routes the
+                        // bind through the same per-kind deep-clone primitives as
+                        // an explicit `.clone()`, giving the copy a fresh
+                        // refcount=1 backing so mutation is independent.
+                        if dest_is_var && liveness.is_live_after(block.id, stmt_idx, *src_slot, mir)
+                        {
+                            OwnershipDecision::DeepClone
+                        } else {
+                            OwnershipDecision::Move
+                        }
+                    }
                     LocalTypeInfo::Unknown => {
-                        // Conservative: assume Clone if live, Move if dead
+                        // CRITICAL scalar-safety (user 2026-06-21): `Unknown` is
+                        // NOT proven heap. `infer_local_type_from_expr` returns
+                        // `Unknown` for any identifier-sourced bind (`let x = i`),
+                        // which includes SCALARS (e.g. a loop variable `i: int`).
+                        // The REAL-MOVE flip must NOT move scalars — moving them
+                        // both breaks Copy semantics (a later read becomes a
+                        // spurious B0005) AND explodes cost ~10x. Only PROVEN heap
+                        // (`NonCopy`) moves; `Unknown` keeps the conservative
+                        // non-consuming still-live Clone (Copy-cheap for scalars,
+                        // refcount-balanced share for any heap value that slips
+                        // through unproven). The genuine HEAP `let q = p` rebind is
+                        // already proven `NonCopy` for struct/array/string sources
+                        // via the binding-slot type inference, so heap moves are
+                        // unaffected.
                         if liveness.is_live_after(block.id, stmt_idx, *src_slot, mir) {
                             OwnershipDecision::Clone
                         } else {
@@ -1711,17 +1919,26 @@ fn compute_use_after_move_errors(
     while changed {
         changed = false;
         for &block_id in &cfg.reverse_postorder() {
-            let mut block_in: Option<HashMap<Place, shape_ast::ast::Span>> = None;
+            // MAY-MOVE merge (strict REAL-MOVE close H2, 2026-06-21): a value
+            // moved on ANY incoming path is moved at the join. `let p=[1,2,3];
+            // if c { let q=p } print(p)` moves `p` on the then-path; the join
+            // before `print(p)` must keep `p` in the moved-set even though the
+            // fallthrough path did not move it — reading a MAYBE-moved value is
+            // a use-after-move (mirrors Rust's borrow-check direction).
+            //
+            // This is the UNION of predecessor out-states (not the previous
+            // intersection / must-move, which silently dropped a value moved on
+            // only one branch and let the later read run — the H2 false-green).
+            // Earliest move span wins so the diagnostic points at the first
+            // consuming move. `if true` still folds to a real branch+join in
+            // MIR, so the union is what makes the nested-block move propagate
+            // out to the outer read.
+            let mut block_in: HashMap<Place, shape_ast::ast::Span> = HashMap::new();
             for &pred in cfg.predecessors(block_id) {
                 if let Some(pred_out) = out_states.get(&pred) {
-                    if let Some(current) = block_in.as_mut() {
-                        intersect_moved_places(current, pred_out);
-                    } else {
-                        block_in = Some(pred_out.clone());
-                    }
+                    union_moved_places(&mut block_in, pred_out);
                 }
             }
-            let block_in = block_in.unwrap_or_default();
 
             let mut block_out = block_in.clone();
             let block = mir.block(block_id);
@@ -1809,11 +2026,20 @@ fn compute_use_after_move_errors(
         }
 
         // Check Call terminator for reads of moved places, then apply its transfer
-        if let TerminatorKind::Call { func, args, destination, .. } = &block.terminator.kind {
+        if let TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } = &block.terminator.kind
+        {
             let term_key_point = block.terminator.span.start as u32;
             // Check func operand
-            if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = func {
-                if let Some((moved_place, move_span)) = find_moved_place_conflict(&moved_places, place) {
+            if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = func
+            {
+                if let Some((moved_place, move_span)) =
+                    find_moved_place_conflict(&moved_places, place)
+                {
                     let key = (term_key_point, format!("{}", moved_place));
                     if seen.insert(key) {
                         errors.push(BorrowError {
@@ -1829,8 +2055,12 @@ fn compute_use_after_move_errors(
             }
             // Check each arg
             for arg in args {
-                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = arg {
-                    if let Some((moved_place, move_span)) = find_moved_place_conflict(&moved_places, place) {
+                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) =
+                    arg
+                {
+                    if let Some((moved_place, move_span)) =
+                        find_moved_place_conflict(&moved_places, place)
+                    {
                         let key = (term_key_point, format!("{}", moved_place));
                         if seen.insert(key) {
                             errors.push(BorrowError {
@@ -1846,27 +2076,34 @@ fn compute_use_after_move_errors(
                 }
             }
             // Destination write clears moved status
-            moved_places.retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
+            moved_places
+                .retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
         }
     }
 
     errors
 }
 
-fn intersect_moved_places(
+/// MAY-MOVE merge (strict REAL-MOVE close H2, 2026-06-21): union the incoming
+/// moved-set into `dest`. A place moved on EITHER path is moved at the join; a
+/// later read of it is a use-after-move. When a place is moved on both paths,
+/// the earliest move span wins so the diagnostic points at the first consuming
+/// move. This replaces the prior must-move intersection, which dropped a place
+/// moved on only one branch and let the outer read run (the H2 false-green:
+/// `let p=[1,2,3]; if c { let q=p } print(p)`).
+fn union_moved_places(
     dest: &mut HashMap<Place, shape_ast::ast::Span>,
     incoming: &HashMap<Place, shape_ast::ast::Span>,
 ) {
-    dest.retain(|place, span| {
-        if let Some(incoming_span) = incoming.get(place) {
-            if incoming_span.start < span.start {
-                *span = *incoming_span;
-            }
-            true
-        } else {
-            false
-        }
-    });
+    for (place, incoming_span) in incoming {
+        dest.entry(place.clone())
+            .and_modify(|span| {
+                if incoming_span.start < span.start {
+                    *span = *incoming_span;
+                }
+            })
+            .or_insert(*incoming_span);
+    }
 }
 
 fn apply_move_transfer(
@@ -1930,6 +2167,28 @@ fn actual_move_places(
         {
             vec![place.clone()]
         }
+        // KEY HAZARD (strict REAL-MOVE flip): identifier loads lower to
+        // `Operand::Copy`, not `Operand::Move`. Without this arm, a HEAP bind
+        // whose ownership decision is `Move` would never enter the moved-set,
+        // so the still-live read of the moved-from source would silently NOT
+        // raise B0005 (false-green). When the liveness-driven decision at this
+        // point is `Move`, the Copy-operand source is genuinely consumed —
+        // enter it into the moved-set so use-after-move fires.
+        //
+        // BUT: only when the bind DESTINATION is a real user binding
+        // (`MirFunction::binding_slots`). A Copy read into a synthesized temp
+        // (`__mir_tmp*`) — the `f"{s}"` concatenation accumulator, expression
+        // operand staging, etc. — is a NON-consuming derived-value read, never
+        // the binding's semantic last-use; consuming the source there would
+        // spuriously fire B0005 on a later legitimate read of `s` and would
+        // break the f-string suppression (helpers_binding.rs:280) at the MIR
+        // layer. The temp-destination filter is the discriminator.
+        StatementKind::Assign(dest, Rvalue::Use(Operand::Copy(place)))
+            if ownership_decisions.get(&stmt.point) == Some(&OwnershipDecision::Move)
+                && mir.binding_slots.contains(&dest.root_local()) =>
+        {
+            vec![place.clone()]
+        }
         StatementKind::Assign(_, Rvalue::Use(Operand::MoveExplicit(place)))
             if place_root_local_type(place, mir) != Some(LocalTypeInfo::Copy) =>
         {
@@ -1941,6 +2200,18 @@ fn actual_move_places(
 
 fn place_root_local_type(place: &Place, mir: &MirFunction) -> Option<LocalTypeInfo> {
     mir.local_types.get(place.root_local().0 as usize).cloned()
+}
+
+/// True when `slot` is a `&x` / `&mut x` reference PARAMETER. Such params are
+/// `LocalTypeInfo::NonCopy` ("references are always tracked") but are BORROWS,
+/// not owned heap values — the strict REAL-MOVE flip must not consume them.
+fn slot_is_reference_param(mir: &MirFunction, slot: SlotId) -> bool {
+    mir.param_slots
+        .iter()
+        .position(|p| *p == slot)
+        .and_then(|idx| mir.param_reference_kinds.get(idx))
+        .map(|k| k.is_some())
+        .unwrap_or(false)
 }
 
 fn reinitializes_moved_place(dest_place: &Place, moved_place: &Place) -> bool {
@@ -1987,6 +2258,41 @@ mod tests {
         Terminator { kind, span: span() }
     }
 
+    fn single_block_mir(
+        name: &str,
+        statements: Vec<MirStatement>,
+        num_locals: u16,
+        param_slots: Vec<SlotId>,
+        param_reference_kinds: Vec<Option<BorrowKind>>,
+        local_types: Vec<LocalTypeInfo>,
+    ) -> MirFunction {
+        MirFunction {
+            name: name.to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements,
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals,
+            param_slots,
+            param_reference_kinds,
+            local_types,
+            span: span(),
+            field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
+        }
+    }
+
+    fn borrow_return_options() -> BorrowAnalysisOptions {
+        BorrowAnalysisOptions {
+            allow_return_slot_local_escape_promotion: true,
+        }
+    }
+
     #[test]
     fn test_single_shared_borrow_no_error() {
         let mir = MirFunction {
@@ -2022,6 +2328,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2075,6 +2383,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2140,6 +2450,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2194,6 +2506,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2207,8 +2521,13 @@ mod tests {
         );
     }
 
+    /// A `&local` flowing through aliases into the return slot
+    /// (`_1 = 42; _2 = &_1; _3 = _2; _0 = _3`) is statically visible to MIR as
+    /// a ReturnSlot reference escape. Default analysis has no declared
+    /// borrow-return contract, so it emits B0003. Suppression/promotion is
+    /// admitted only when the compiler passes the explicit `-> &T` option.
     #[test]
-    fn test_reference_escape_error_for_returned_ref_alias() {
+    fn returned_local_ref_alias_requires_borrow_return_contract() {
         let mir = MirFunction {
             name: "test".to_string(),
             blocks: vec![BasicBlock {
@@ -2259,6 +2578,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2267,8 +2588,301 @@ mod tests {
                 .errors
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
-            "expected reference-escape error, got {:?}",
+            "unannotated returned LOCAL-ref alias must emit B0003 ReferenceEscape, got {:?}",
             analysis.errors
+        );
+        assert!(
+            analysis.reference_escape_promotions.is_empty(),
+            "unannotated returned LOCAL-ref alias must not derive promotion, got {:?}",
+            analysis.reference_escape_promotions
+        );
+
+        let promoted = analyze_with_options(&mir, &Default::default(), borrow_return_options());
+        assert!(
+            !promoted
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
+            "borrow-return contract should suppress B0003 for promoted ReturnSlot, got {:?}",
+            promoted.errors
+        );
+        assert_eq!(
+            promoted.reference_escape_promotions.len(),
+            1,
+            "expected exactly one ReturnSlot promotion for the returned local ref, got {:?}",
+            promoted.reference_escape_promotions
+        );
+        assert_eq!(
+            promoted.reference_escape_promotions[0].sink_kind,
+            LoanSinkKind::ReturnSlot
+        );
+    }
+
+    /// ADR-006 §2.7.30 (R2): with a declared borrow-return contract, a
+    /// `return &local` borrow flowing directly into the return slot (SlotId(0))
+    /// derives exactly ONE `PromotionTrigger`.
+    #[test]
+    fn r2_return_ref_derives_exactly_one_returnslot_promotion() {
+        let mir = MirFunction {
+            name: "make".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    // _1 = 5
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(5))),
+                        ),
+                        0,
+                    ),
+                    // _0 = &_1   (borrow flows straight into the return slot)
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 2,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
+            span: span(),
+            field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
+        };
+
+        let analysis = analyze_with_options(&mir, &Default::default(), borrow_return_options());
+
+        // Exactly one promotion, naming the borrowed local (_1) via the
+        // ReturnSlot floor sink. Prove promoted set == exactly the floor sink.
+        assert_eq!(
+            analysis.reference_escape_promotions.len(),
+            1,
+            "expected exactly one ReturnSlot promotion, got {:?}",
+            analysis.reference_escape_promotions
+        );
+        let trigger = analysis.reference_escape_promotions[0];
+        assert_eq!(trigger.referent_local, SlotId(1));
+        assert_eq!(trigger.sink_kind, LoanSinkKind::ReturnSlot);
+    }
+
+    /// ADR-006 §2.7.30 (FlipLive GAP-1): with a declared borrow-return
+    /// contract, `return &local` (ReturnSlot floor sink) no longer emits the
+    /// parallel `escaped_loans` B0003 `ReferenceEscape` error.
+    #[test]
+    fn flip_return_ref_suppresses_b0003_reference_escape() {
+        let mir = MirFunction {
+            name: "make".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(5))),
+                        ),
+                        0,
+                    ),
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 2,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
+            span: span(),
+            field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
+        };
+
+        let analysis = analyze_with_options(&mir, &Default::default(), borrow_return_options());
+        assert!(
+            !analysis
+                .errors
+                .iter()
+                .any(|e| e.kind == BorrowErrorKind::ReferenceEscape),
+            "ReturnSlot floor sink must NOT emit B0003 ReferenceEscape after the \
+             FlipLive GAP-1 suppression, got {:?}",
+            analysis.errors
+        );
+        // The promotion is still derived for the consumer.
+        assert_eq!(analysis.reference_escape_promotions.len(), 1);
+    }
+
+    /// A ReturnSlot escape rooted in a by-value parameter is never promotable.
+    /// Even when the caller enables the borrow-return floor, the solver must
+    /// keep B0003 and leave storage-planning promotion triggers empty.
+    #[test]
+    fn returnslot_param_root_rejects_without_promotion() {
+        let mir = single_block_mir(
+            "param_ref_escape",
+            vec![make_stmt(
+                StatementKind::Assign(
+                    Place::Local(SlotId(0)),
+                    Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                ),
+                0,
+            )],
+            2,
+            vec![SlotId(1)],
+            vec![None],
+            vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
+        );
+
+        let analysis = analyze_with_options(&mir, &Default::default(), borrow_return_options());
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
+            "param-rooted ReturnSlot escape must keep B0003, got {:?}",
+            analysis.errors
+        );
+        assert!(
+            analysis.reference_escape_promotions.is_empty(),
+            "rejected param-rooted ReturnSlot escape must not promote, got {:?}",
+            analysis.reference_escape_promotions
+        );
+    }
+
+    /// ModuleBindingStore remains a promoted floor sink when the loan is
+    /// floor-only and rooted in a promotable local.
+    #[test]
+    fn module_binding_local_ref_floor_derives_promotion() {
+        let mir = single_block_mir(
+            "module_ref_escape",
+            vec![
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(1)),
+                        Rvalue::Use(Operand::Constant(MirConstant::Int(5))),
+                    ),
+                    0,
+                ),
+                make_stmt(
+                    StatementKind::Assign(
+                        Place::Local(SlotId(2)),
+                        Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                    ),
+                    1,
+                ),
+                make_stmt(
+                    StatementKind::ModuleBindingStore {
+                        binding_name: "g".to_string(),
+                        operands: vec![Operand::Move(Place::Local(SlotId(2)))],
+                    },
+                    2,
+                ),
+            ],
+            3,
+            vec![],
+            vec![],
+            vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+        );
+
+        let analysis = analyze(&mir, &Default::default());
+        assert!(
+            !analysis.errors.iter().any(|error| matches!(
+                &error.kind,
+                BorrowErrorKind::ReferenceEscape
+                    | BorrowErrorKind::ReferenceEscapeIntoModuleBinding
+            )),
+            "floor-only local ModuleBindingStore escape should not reject, got {:?}",
+            analysis.errors
+        );
+        assert_eq!(
+            analysis.reference_escape_promotions.len(),
+            1,
+            "expected one ModuleBindingStore promotion, got {:?}",
+            analysis.reference_escape_promotions
+        );
+        let trigger = analysis.reference_escape_promotions[0];
+        assert_eq!(trigger.referent_local, SlotId(1));
+        assert_eq!(trigger.sink_kind, LoanSinkKind::ModuleBindingStore);
+    }
+
+    /// ADR-006 §2.7.30 (R2): a B0004 container-store escape (`[&x]`) must NOT
+    /// derive a promotion — the flip set is EXACTLY {ReturnSlot,
+    /// ModuleBindingStore}. Every other sink keeps rejecting.
+    #[test]
+    fn r2_container_store_escape_derives_no_promotion() {
+        let mir = MirFunction {
+            name: "make_arr".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(5))),
+                        ),
+                        0,
+                    ),
+                    // _2 = &_1
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                        ),
+                        1,
+                    ),
+                    // _0 = [_2]   (reference stored into an array aggregate)
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Aggregate(vec![Operand::Move(Place::Local(SlotId(2)))]),
+                        ),
+                        2,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 3,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+            field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
+        };
+
+        let analysis = analyze(&mir, &Default::default());
+        assert!(
+            analysis.reference_escape_promotions.is_empty(),
+            "container-store escape must NOT promote (flip set excludes it), got {:?}",
+            analysis.reference_escape_promotions
         );
     }
 
@@ -2316,6 +2930,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2364,6 +2980,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2441,6 +3059,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2454,9 +3074,13 @@ mod tests {
     }
 
     #[test]
-    fn test_clone_decision_when_source_live_after() {
+    fn test_move_decision_for_noncopy_source_even_when_live_after() {
+        // Strict REAL-MOVE rebaseline (user 2026-06-21): a NonCopy (heap)
+        // source MOVES on bind even when it is still live afterward — the
+        // pre-flip "still-live → Clone" policy is gone. The still-live read of
+        // the moved-from source is now a compile-time use-after-move (B0005).
         // _0 = value (NonCopy)
-        // _1 = move _0 (point 1 — _0 IS live after because _2 uses it)
+        // _1 = move _0 (point 1 — _0 IS live after; under REAL-MOVE → Move)
         // _2 = move _0 (point 2 — _0 NOT live after → Move)
         let mir = MirFunction {
             name: "test".to_string(),
@@ -2500,16 +3124,19 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
-        // At point 1, _0 is still used at point 2, so it's live → Clone
+        // At point 1, _0 is still used at point 2 (live), but under REAL-MOVE a
+        // NonCopy source moves regardless of liveness → Move.
         assert_eq!(
             analysis.ownership_at(Point(1)),
-            OwnershipDecision::Clone,
-            "source live after → should be Clone"
+            OwnershipDecision::Move,
+            "NonCopy source → Move even when live after (REAL-MOVE flip)"
         );
-        // At point 2, _0 is not used after → Move
+        // At point 2, _0 is not used after → Move (unchanged).
         assert_eq!(
             analysis.ownership_at(Point(2)),
             OwnershipDecision::Move,
@@ -2552,6 +3179,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2684,21 +3313,17 @@ mod tests {
             blocks: vec![
                 BasicBlock {
                     id: BasicBlockId(0),
-                    statements: vec![
-                        MirStatement {
-                            kind: StatementKind::Assign(
-                                Place::Local(SlotId(2)),
-                                Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
-                            ),
-                            span: span(),
-                            point: Point(0),
-                        },
-                    ],
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                        ),
+                        span: span(),
+                        point: Point(0),
+                    }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Function(
-                                "identity".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Function("identity".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(1)))],
                             destination: Place::Local(SlotId(3)),
                             next: BasicBlockId(1),
@@ -2736,6 +3361,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -2816,6 +3443,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2844,9 +3473,7 @@ mod tests {
                     }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                "identity".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method("identity".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(1)))],
                             destination: Place::Local(SlotId(3)),
                             next: BasicBlockId(1),
@@ -2884,6 +3511,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -2925,9 +3554,7 @@ mod tests {
                     }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Function(
-                                "inner".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Function("inner".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(1)))],
                             destination: Place::Local(SlotId(3)),
                             next: BasicBlockId(1),
@@ -2944,9 +3571,7 @@ mod tests {
                     }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Function(
-                                "outer".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Function("outer".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(3)))],
                             destination: Place::Local(SlotId(4)),
                             next: BasicBlockId(2),
@@ -2985,6 +3610,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -3046,6 +3673,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         }
     }
 

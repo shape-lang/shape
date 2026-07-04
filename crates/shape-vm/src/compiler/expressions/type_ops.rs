@@ -3,7 +3,8 @@
 use crate::bytecode::{Constant, Instruction, NumericWidth, OpCode, Operand};
 use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
-use shape_runtime::type_system::{Type, annotation_to_string};
+use shape_runtime::type_system::unification::annotations_equal;
+use shape_runtime::type_system::{BuiltinTypes, Type, annotation_to_string};
 use std::collections::HashSet;
 
 use super::super::BytecodeCompiler;
@@ -59,6 +60,9 @@ impl BytecodeCompiler {
         match ann {
             TypeAnnotation::Basic(name) => type_params.contains(name),
             TypeAnnotation::Reference(name) => type_params.contains(name.as_str()),
+            TypeAnnotation::Borrow { inner, .. } => {
+                Self::annotation_contains_type_param(inner, type_params)
+            }
             TypeAnnotation::Array(inner) => {
                 Self::annotation_contains_type_param(inner, type_params)
             }
@@ -167,6 +171,60 @@ impl BytecodeCompiler {
         }
     }
 
+    fn annotation_matches_union_member(source: &TypeAnnotation, member: &TypeAnnotation) -> bool {
+        if annotations_equal(source, member) {
+            return true;
+        }
+
+        match (source, member) {
+            (TypeAnnotation::Basic(source), TypeAnnotation::Reference(member))
+            | (TypeAnnotation::Reference(member), TypeAnnotation::Basic(source)) => {
+                Self::canonical_try_into_name(source)
+                    == Self::canonical_try_into_name(member.as_str())
+            }
+            (
+                TypeAnnotation::Generic {
+                    name: source_name,
+                    args: source_args,
+                },
+                TypeAnnotation::Generic {
+                    name: member_name,
+                    args: member_args,
+                },
+            ) => {
+                Self::canonical_try_into_name(source_name)
+                    == Self::canonical_try_into_name(member_name)
+                    && source_args.len() == member_args.len()
+                    && source_args
+                        .iter()
+                        .zip(member_args.iter())
+                        .all(|(source_arg, member_arg)| {
+                            Self::annotation_matches_union_member(source_arg, member_arg)
+                        })
+            }
+            (TypeAnnotation::Array(source_inner), TypeAnnotation::Array(member_inner)) => {
+                Self::annotation_matches_union_member(source_inner, member_inner)
+            }
+            _ => false,
+        }
+    }
+
+    fn source_annotation_fits_union(
+        source: &TypeAnnotation,
+        union_members: &[TypeAnnotation],
+    ) -> bool {
+        match source {
+            TypeAnnotation::Union(source_members) => source_members.iter().all(|source_member| {
+                union_members.iter().any(|union_member| {
+                    Self::annotation_matches_union_member(source_member, union_member)
+                })
+            }),
+            _ => union_members
+                .iter()
+                .any(|member| Self::annotation_matches_union_member(source, member)),
+        }
+    }
+
     /// Extract the inner type `T` from an `Option<T>` annotation.
     fn unwrap_option_inner(ann: &TypeAnnotation) -> Option<&TypeAnnotation> {
         match ann {
@@ -180,9 +238,7 @@ impl BytecodeCompiler {
     /// Extract the inner type `T` from a `Result<T, E>` annotation.
     fn unwrap_result_inner(ann: &TypeAnnotation) -> Option<&TypeAnnotation> {
         match ann {
-            TypeAnnotation::Generic { name, args }
-                if name == "Result" && !args.is_empty() =>
-            {
+            TypeAnnotation::Generic { name, args } if name == "Result" && !args.is_empty() => {
                 Some(&args[0])
             }
             _ => None,
@@ -367,6 +423,26 @@ impl BytecodeCompiler {
             return Ok(Some(CastLiftKind::Direct));
         }
 
+        // D1 (numeric-conversion GREEN Stage 1) — primitive numeric cast.
+        // A cast between two primitive numeric types (`int`/`i64`, the width
+        // names, `number`/`f32`, `decimal`) is a BUILT-IN cast governed by
+        // the numeric lattice (spec §3 / §8), lowering to the already-existing
+        // typed `ConvertToInt`/`ConvertToNumber`/`ConvertToDecimal` opcodes via
+        // `convert_opcode_for_primitive` at the caller. It must NOT require a
+        // user `Into<Target>` impl: the prelude declares no `Into` for
+        // width-typed sources (`i32 as number`) nor for the lossy
+        // `number as int` direction. This mirrors the inference-side gate
+        // (`type_system/inference/expressions.rs` `Expr::TypeAssertion`) and
+        // the `CastWidth` width-cast bypass above. Direct (non-lift) so the
+        // result kind is re-stamped via `record_cast_result_kind`. No runtime
+        // coercion is introduced — the implicit-conversion paths are governed
+        // separately; this only accepts the EXPLICIT `as` cast.
+        if BuiltinTypes::is_numeric_type_name(&source_name)
+            && BuiltinTypes::is_numeric_type_name(target_name)
+        {
+            return Ok(Some(CastLiftKind::Direct));
+        }
+
         // Direct impl check
         if self.has_into_impl(&source_name, target_name) {
             return Ok(Some(CastLiftKind::Direct));
@@ -375,7 +451,10 @@ impl BytecodeCompiler {
         // Option<T> as M → lift if T has Into<M>
         if let Some(inner_ann) = Self::unwrap_option_inner(&source_ann) {
             if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
-                if inner_name == target_name || self.has_into_impl(&inner_name, target_name) {
+                if inner_name == target_name
+                    || Self::is_builtin_primitive_numeric_cast(&inner_name, target_name)
+                    || self.has_into_impl(&inner_name, target_name)
+                {
                     return Ok(Some(CastLiftKind::LiftOption));
                 }
             }
@@ -394,7 +473,10 @@ impl BytecodeCompiler {
         // Result<T, E> as M → lift if T has Into<M>
         if let Some(inner_ann) = Self::unwrap_result_inner(&source_ann) {
             if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
-                if inner_name == target_name || self.has_into_impl(&inner_name, target_name) {
+                if inner_name == target_name
+                    || Self::is_builtin_primitive_numeric_cast(&inner_name, target_name)
+                    || self.has_into_impl(&inner_name, target_name)
+                {
                     return Ok(Some(CastLiftKind::LiftResult));
                 }
             }
@@ -533,10 +615,7 @@ impl BytecodeCompiler {
     /// and surface `"cannot convert kind Ptr(Option) to <T>"`, while the
     /// `None` arm (null sentinel, skipped by `IsNull`) succeeds — the
     /// asymmetric cast WS-12 fixes.
-    fn emit_option_lift_infallible(
-        &mut self,
-        convert_opcode: OpCode,
-    ) {
+    fn emit_option_lift_infallible(&mut self, convert_opcode: OpCode) {
         // Stack: [option_val]
         self.emit(Instruction::simple(OpCode::Dup));
         // Stack: [option_val, option_val]
@@ -564,11 +643,16 @@ impl BytecodeCompiler {
     /// its payload `t` and then try-converted. Same `UnwrapOption`
     /// requirement as `emit_option_lift_infallible` — see that method's
     /// doc comment.
-    fn emit_option_lift_fallible(
-        &mut self,
-        try_convert_opcode: OpCode,
-    ) {
-        // Same pattern as infallible but using TryConvertTo*.
+    fn emit_option_lift_fallible(&mut self, try_convert_opcode: OpCode) {
+        // `Option<T> as M?` lift. The Some arm unwraps T and runs the
+        // try-convert, which now produces a `Result<M, AnyError>`
+        // carrier directly (book §Fallible) — no re-wrap needed. The
+        // None arm leaves the null-coded None on the stack; for the `?`
+        // consumer that is the early-out None, identical to pre-fix.
+        // (The bare-None `match` edge — source statically Option — has
+        // no test coverage; the direct-primitive `as Type?` contract the
+        // book documents is the covered path and produces a real
+        // Result.)
         // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
         self.emit(Instruction::simple(OpCode::Dup));
         self.emit(Instruction::simple(OpCode::IsNull));
@@ -585,10 +669,7 @@ impl BytecodeCompiler {
     ///
     /// Stack effect: replaces top-of-stack Result<T, E> with Result<M, E>.
     /// Err values pass through; Ok(t) values are unwrapped, converted, and re-wrapped.
-    fn emit_result_lift_infallible(
-        &mut self,
-        convert_opcode: OpCode,
-    ) -> Result<()> {
+    fn emit_result_lift_infallible(&mut self, convert_opcode: OpCode) -> Result<()> {
         // Stack: [result_val]
         self.emit(Instruction::simple(OpCode::Dup));
         // Stack: [result_val, result_val]
@@ -613,17 +694,17 @@ impl BytecodeCompiler {
     }
 
     /// Emit bytecode for Result<T, E> lifting with a fallible conversion.
-    fn emit_result_lift_fallible(
-        &mut self,
-        try_convert_opcode: OpCode,
-    ) -> Result<()> {
+    fn emit_result_lift_fallible(&mut self, try_convert_opcode: OpCode) -> Result<()> {
         self.emit(Instruction::simple(OpCode::Dup));
         self.emit(Instruction::simple(OpCode::IsOk));
         let jump_skip = self.emit_jump(OpCode::JumpIfFalse, 0);
         self.emit(Instruction::simple(OpCode::UnwrapOk));
+        // `TryConvertTo*` now produces a `Result<M, AnyError>` carrier
+        // directly (book §Fallible), so the Ok payload is converted AND
+        // re-wrapped by the opcode itself — NO `emit_call_ok` here, else
+        // we'd double-wrap to `Ok(Ok(v))`. The Err arm (jump_skip) keeps
+        // the original Err carrier as the early-out value.
         self.emit(Instruction::new(try_convert_opcode, None));
-        // Re-wrap in Ok()
-        self.emit_call_ok()?;
         let jump_end = self.emit_jump(OpCode::Jump, 0);
         self.patch_jump(jump_skip);
         self.patch_jump(jump_end);
@@ -696,6 +777,26 @@ impl BytecodeCompiler {
         })
     }
 
+    /// True when a cast from `source_name` to `target_name` is a BUILT-IN
+    /// primitive numeric conversion (both endpoints are primitive numeric
+    /// types per the numeric lattice — `int`/`i64`, the width names,
+    /// `number`/`f32`, `decimal`).
+    ///
+    /// Such a cast lowers to the typed `ConvertToInt` / `ConvertToNumber` /
+    /// `ConvertToDecimal` opcode — which BOTH converts the value (`2` → `2.0`,
+    /// NOT a bit reinterpret) AND re-stamps the result slot's `NativeKind` /
+    /// `last_expr_numeric_type` via `record_cast_result_kind`. It must NOT be
+    /// intercepted by the user-`Into`-impl routing below: a stdlib
+    /// `Into<number> for int` (or sibling) would emit a `Call` that leaves the
+    /// compiler's last-expr numeric tracker on the SOURCE type (`int`), so a
+    /// downstream `a / b` selects `DivInt` and divides the f64 BIT PATTERNS as
+    /// i64 — the `(2 as number) / (8 as number) == 0` soundness hole. The
+    /// built-in primitive path is the only correct lowering for these pairs.
+    fn is_builtin_primitive_numeric_cast(source_name: &str, target_name: &str) -> bool {
+        BuiltinTypes::is_numeric_type_name(source_name)
+            && BuiltinTypes::is_numeric_type_name(target_name)
+    }
+
     /// Return the typed ConvertTo* opcode for a primitive target type name,
     /// or None for non-primitive types (which fall through to Convert + trait dispatch).
     fn convert_opcode_for_primitive(target: &str) -> Option<OpCode> {
@@ -721,25 +822,18 @@ impl BytecodeCompiler {
     /// sentinel or the scalar, so a bare scalar kind must NOT be
     /// stamped for the lift paths.
     fn record_cast_result_kind(&mut self, target_selector: &str) {
-        use crate::type_tracking::NumericType;
+        // U4-4: the deleted `last_expr_numeric_type` register stamp for the
+        // cast TARGET kind is replaced by a `last_expr_type_info` name stamp.
+        // A downstream `(x as number) / (y as number)` derives `Number` for
+        // both operands from the cast expressions' one resolved Type
+        // (`numeric_type_of` → `infer_expr_type`), so `DivNumber` is selected
+        // — closing the `(2 as number) / (8 as number) == 0` soundness hole
+        // without a competing register.
         match target_selector {
-            "int" => {
-                self.last_expr_numeric_type = Some(NumericType::Int);
-                self.last_expr_type_info = None;
-            }
-            "number" => {
-                self.last_expr_numeric_type = Some(NumericType::Number);
-                self.last_expr_type_info = None;
-            }
-            "decimal" => {
-                self.last_expr_numeric_type = Some(NumericType::Decimal);
-                self.last_expr_type_info = None;
-            }
-            "bool" | "string" | "char" => {
-                self.last_expr_numeric_type = None;
-                self.last_expr_type_info = Some(
-                    crate::type_tracking::VariableTypeInfo::named(target_selector.to_string()),
-                );
+            "int" | "number" | "decimal" | "bool" | "string" | "char" => {
+                self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                    target_selector.to_string(),
+                ));
             }
             // Non-primitive targets do not reach this helper (the caller
             // gates on `convert_opcode_for_primitive` being `Some`).
@@ -802,14 +896,17 @@ impl BytecodeCompiler {
             // Option/Result lift paths preserve current behaviour.
             if matches!(cast_kind, Some(CastLiftKind::Direct)) {
                 if let Some(source_name) = self.cast_source_name(expr) {
-                    if let Some(func_idx) = self.user_impl_method_for_cast(
-                        &source_name,
-                        &target_selector,
-                        true,
-                    ) {
-                        self.compile_expr(expr)?;
-                        self.emit_user_impl_cast_call(func_idx);
-                        return Ok(());
+                    // Built-in primitive numeric cast → primitive
+                    // `TryConvertTo*` path below, never a user `Into`-impl
+                    // `Call`. See `is_builtin_primitive_numeric_cast`.
+                    if !Self::is_builtin_primitive_numeric_cast(&source_name, &target_selector) {
+                        if let Some(func_idx) =
+                            self.user_impl_method_for_cast(&source_name, &target_selector, true)
+                        {
+                            self.compile_expr(expr)?;
+                            self.emit_user_impl_cast_call(func_idx);
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -873,6 +970,42 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
+        // ── Static union widening: `expr as A | B` ──
+        //
+        // Union annotations are compile-time metadata. The runtime carrier stays
+        // the source expression's kinded slot, and downstream typed patterns
+        // (`n: int`, `s: string`) use TypeCheck against that slot kind. Emitting
+        // WrapTypeAnnotation here would re-enter the deleted ValueWord wrapper
+        // path; emitting Convert would require trait dispatch. Accept only when
+        // the compiler can prove the source annotation is a member/subset of the
+        // target union.
+        if let TypeAnnotation::Union(union_members) = type_annotation {
+            let source_annotation = self.resolve_source_annotation(expr).ok_or_else(|| {
+                ShapeError::SemanticError {
+                    message: format!(
+                        "Cannot widen expression to union `{}`: source type is not statically known",
+                        annotation_to_string(type_annotation)
+                    ),
+                    location: Some(self.span_to_source_location(expr.span())),
+                }
+            })?;
+
+            if !Self::source_annotation_fits_union(&source_annotation, union_members) {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Cannot widen `{}` to union `{}`: source type is not a union member",
+                        annotation_to_string(&source_annotation),
+                        annotation_to_string(type_annotation)
+                    ),
+                    location: Some(self.span_to_source_location(expr.span())),
+                });
+            }
+
+            self.compile_expr(expr)?;
+            self.last_expr_type_info = None;
+            return Ok(());
+        }
+
         // ── Width integer cast: `expr as i8`, `expr as u16`, etc. ──
         // Emits CastWidth which does bit-truncation (Rust-style). Not Into-based.
         if let TypeAnnotation::Basic(name) = type_annotation {
@@ -882,7 +1015,6 @@ impl BytecodeCompiler {
                     OpCode::CastWidth,
                     Some(Operand::Width(NumericWidth::from_int_width(w))),
                 ));
-                self.last_expr_numeric_type = Some(crate::type_tracking::NumericType::IntWidth(w));
                 return Ok(());
             }
         }
@@ -898,14 +1030,20 @@ impl BytecodeCompiler {
             // and stdlib-redeclare semantics.
             if matches!(cast_kind, Some(CastLiftKind::Direct)) {
                 if let Some(source_name) = self.cast_source_name(expr) {
-                    if let Some(func_idx) = self.user_impl_method_for_cast(
-                        &source_name,
-                        &target_selector,
-                        false,
-                    ) {
-                        self.compile_expr(expr)?;
-                        self.emit_user_impl_cast_call(func_idx);
-                        return Ok(());
+                    // A built-in primitive numeric cast (`int as number`,
+                    // `number as int`, width↔number, …) MUST take the
+                    // primitive `ConvertTo*` path below — never a user
+                    // `Into`-impl `Call` — so the value is converted AND the
+                    // result kind is re-stamped. See
+                    // `is_builtin_primitive_numeric_cast`.
+                    if !Self::is_builtin_primitive_numeric_cast(&source_name, &target_selector) {
+                        if let Some(func_idx) =
+                            self.user_impl_method_for_cast(&source_name, &target_selector, false)
+                        {
+                            self.compile_expr(expr)?;
+                            self.emit_user_impl_cast_call(func_idx);
+                            return Ok(());
+                        }
                     }
                 }
             }

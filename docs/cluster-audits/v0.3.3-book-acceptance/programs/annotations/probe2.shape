@@ -1,0 +1,21 @@
+// Probe: cookbook Recipe 13 (runnable=true) - comptime guardrail on function target
+comptime fn require_const_host(target) {
+  if target.params.length == 0 || target.params[0].const != true {
+    error("First parameter must be const for host policy")
+  }
+}
+
+annotation host_typed() {
+  targets: [function]
+
+  comptime pre(target, ctx) {
+    require_const_host(target)
+  }
+}
+
+@host_typed()
+fn handler(const region: string) -> int {
+  42
+}
+
+print("PROBE2_OK")

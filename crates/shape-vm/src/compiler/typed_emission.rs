@@ -135,24 +135,6 @@ pub fn should_use_typed_array_from_slot_kind(
     }
 }
 
-/// Map a tracked type name like `"Vec<int>"` / `"Array<number>"` to a [`TypedArrayKind`].
-#[inline]
-#[allow(dead_code)]
-pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind> {
-    let trimmed = type_name.trim();
-    let inner = trimmed
-        .strip_prefix("Vec<")
-        .or_else(|| trimmed.strip_prefix("Array<"))?
-        .strip_suffix('>')?;
-    match inner.trim() {
-        "number" | "f64" => Some(TypedArrayKind::F64),
-        "int" | "i64" => Some(TypedArrayKind::I64),
-        "i32" => Some(TypedArrayKind::I32),
-        "bool" => Some(TypedArrayKind::Bool),
-        _ => None,
-    }
-}
-
 impl super::BytecodeCompiler {
     /// Resolve an array receiver expression (`Identifier(name)`) to a
     /// [`TypedArrayKind`], if the receiver is a tracked array whose element
@@ -372,59 +354,6 @@ mod tests {
         // Sized ints we don't have typed opcodes for fall back to legacy.
         use crate::type_tracking::NativeKind;
         assert_eq!(should_use_typed_array_from_slot_kind(NativeKind::Int8), None);
-    }
-
-    // ---- typed_array_kind_from_type_name ----
-
-    #[test]
-    fn test_type_name_vec_int_maps_to_i64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<int>"),
-            Some(TypedArrayKind::I64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_number_maps_to_f64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<number>"),
-            Some(TypedArrayKind::F64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_bool_maps_to_bool() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<bool>"),
-            Some(TypedArrayKind::Bool)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_i32_maps_to_i32() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<i32>"),
-            Some(TypedArrayKind::I32)
-        );
-    }
-
-    #[test]
-    fn test_type_name_array_int_maps_to_i64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Array<int>"),
-            Some(TypedArrayKind::I64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_string_falls_back() {
-        assert_eq!(typed_array_kind_from_type_name("Vec<string>"), None);
-    }
-
-    #[test]
-    fn test_type_name_non_array_falls_back() {
-        assert_eq!(typed_array_kind_from_type_name("HashMap<int, int>"), None);
-        assert_eq!(typed_array_kind_from_type_name("int"), None);
     }
 
     // ---- Compiler integration: typed opcode emission for array literals ----

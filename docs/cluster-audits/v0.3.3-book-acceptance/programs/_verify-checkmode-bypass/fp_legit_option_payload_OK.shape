@@ -1,0 +1,3 @@
+fn g() -> Result<Option<int>,string> { Ok(Some(7)) }
+fn use_it() -> int { match g() { Ok(Some(n)) => n + 100, Ok(None) => 0, Err(e) => -1 } }
+print(use_it())

@@ -1,0 +1,10 @@
+fn main() {
+    let roster: Array<int> = [50, 60, 90];
+    let sals = roster.map(|e| e);
+    let mut mx = 0;
+    for v in sals {
+        if v > mx { mx = v; }
+    }
+    print(mx + 110);
+}
+main();

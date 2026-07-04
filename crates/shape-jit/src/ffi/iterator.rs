@@ -16,6 +16,22 @@ use super::jit_kinds::*;
 use super::value_ffi::*;
 use std::collections::HashMap;
 
+#[cold]
+#[track_caller]
+fn unsupported_legacy_heap_kind(func_name: &str, kind: Option<u16>) -> ! {
+    match kind {
+        Some(kind) => panic!(
+            "SURFACE: {func_name} received unsupported legacy JIT heap kind {kind}; \
+             ADR-006 section 2.7.5/2.7.10 requires a kinded iterator entry or an explicit HK arm."
+        ),
+        None => panic!(
+            "SURFACE: {func_name} received non-heap bits where a legacy JIT iterator carrier \
+             was required; ADR-006 section 2.7.5 requires the caller to pass a NativeKind \
+             companion instead of probing raw bits."
+        ),
+    }
+}
+
 // ============================================================================
 // Iterator Operations
 // ============================================================================
@@ -35,7 +51,8 @@ pub extern "C" fn jit_iter_done(iter_bits: u64, idx_bits: u64) -> u64 {
             return TAG_BOOL_TRUE;
         }
 
-        let done = match heap_kind(iter_bits) {
+        let kind = heap_kind(iter_bits);
+        let done = match kind {
             Some(HK_ARRAY) => {
                 // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
                 // length read decoded the deleted JitArray layout.
@@ -76,7 +93,7 @@ pub extern "C" fn jit_iter_done(iter_bits: u64, idx_bits: u64) -> u64 {
                     true
                 }
             }
-            _ => true, // Unknown type = done
+            other => unsupported_legacy_heap_kind("jit_iter_done", other),
         };
 
         if done { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE }
@@ -98,7 +115,8 @@ pub extern "C" fn jit_iter_next(iter_bits: u64, idx_bits: u64) -> u64 {
             return TAG_NULL;
         }
 
-        match heap_kind(iter_bits) {
+        let kind = heap_kind(iter_bits);
+        match kind {
             Some(HK_ARRAY) => {
                 // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
                 // index read decoded the deleted JitArray layout.
@@ -151,7 +169,7 @@ pub extern "C" fn jit_iter_next(iter_bits: u64, idx_bits: u64) -> u64 {
                     TAG_NULL
                 }
             }
-            _ => TAG_NULL,
+            other => unsupported_legacy_heap_kind("jit_iter_next", other),
         }
     }
 }

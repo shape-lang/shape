@@ -12,10 +12,13 @@
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
-    executor::vm_impl::stack::{clone_with_kind, drop_with_kind},
     executor::VirtualMachine,
+    executor::vm_impl::stack::{clone_with_kind, drop_with_kind},
 };
-use shape_value::{NativeKind, VMError, heap_value::{HeapKind, TemporalData}};
+use shape_value::{
+    NativeKind, VMError,
+    heap_value::{HeapKind, TemporalData},
+};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -147,8 +150,7 @@ impl VirtualMachine {
                 crate::bytecode::Constant::Decimal(d) => {
                     let arc: Arc<rust_decimal::Decimal> = Arc::new(*d);
                     let bits = Arc::into_raw(arc) as u64;
-                    return self
-                        .push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal));
+                    return self.push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal));
                 }
                 // C1-temporal-lowering (Phase 2d Wave 2): Duration literals
                 // (e.g. `3d`, `10s`) lower to `TemporalData::TimeSpan` via
@@ -163,11 +165,9 @@ impl VirtualMachine {
                 crate::bytecode::Constant::Duration(d) => {
                     let chrono_dur =
                         crate::executor::builtins::datetime_builtins::ast_duration_to_chrono(d);
-                    let arc: Arc<TemporalData> =
-                        Arc::new(TemporalData::TimeSpan(chrono_dur));
+                    let arc: Arc<TemporalData> = Arc::new(TemporalData::TimeSpan(chrono_dur));
                     let bits = Arc::into_raw(arc) as u64;
-                    return self
-                        .push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal));
+                    return self.push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal));
                 }
                 // C1-temporal-lowering: DateTimeExpr literals (e.g.
                 // `@"2026-01-01"`, `@now`, `@today`) evaluate to
@@ -182,11 +182,9 @@ impl VirtualMachine {
                 crate::bytecode::Constant::DateTimeExpr(expr) => {
                     let expr_clone = expr.clone();
                     let dt = self.eval_datetime_expr_recursive(&expr_clone)?;
-                    let arc: Arc<TemporalData> =
-                        Arc::new(TemporalData::DateTime(dt));
+                    let arc: Arc<TemporalData> = Arc::new(TemporalData::DateTime(dt));
                     let bits = Arc::into_raw(arc) as u64;
-                    return self
-                        .push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal));
+                    return self.push_kinded(bits, NativeKind::Ptr(HeapKind::Temporal));
                 }
                 // R8 W3 W17-typed-module-exports-followup-constant-pool
                 // (ADR-006 §2.7.4 / §2.7.7 / Q9, 2026-05-24): kinded

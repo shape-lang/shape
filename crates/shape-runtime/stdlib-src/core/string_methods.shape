@@ -20,8 +20,8 @@ extend string {
     method toNumber() -> number { self.toNumber() }
     method toBool() -> bool { self.toBool() }
     method chars() -> Vec<string> { self.chars() }
-    method padStart(width: int) -> string { self.padStart(width) }
-    method padEnd(width: int) -> string { self.padEnd(width) }
+    method padStart(width: int, fill: string) -> string { self.padStart(width, fill) }
+    method padEnd(width: int, fill: string) -> string { self.padEnd(width, fill) }
     method repeat(count: int) -> string { self.repeat(count) }
     method charAt(index: int) -> string { self.charAt(index) }
     method reverse() -> string { self.reverse() }
@@ -29,7 +29,7 @@ extend string {
     method isDigit() -> bool { self.isDigit() }
     method isAlpha() -> bool { self.isAlpha() }
     method codePointAt(index: int) -> int { self.codePointAt(index) }
-    method substring(start: int) -> string { self.substring(start) }
+    method substring(start: int, end: int) -> string { self.substring(start, end) }
     method normalize(form: string) -> string { self.normalize(form) }
     method graphemes() -> Vec<string> { self.graphemes() }
     method graphemeLen() -> int { self.graphemeLen() }

@@ -1,0 +1,51 @@
+// ledger/rules.shape  -> importable as "ledger::rules"
+//
+// Validation + classification. Demonstrates a module that imports the model
+// (cross-module import) and uses Result<T,E> + `?` propagation for error
+// recovery, exactly the "keep module APIs typed and small" guidance.
+
+from ledger::model use { Category, Txn }
+
+// A transaction is well-formed iff:
+//   * id is positive
+//   * memo is non-empty
+//   * Income entries are non-negative; all other categories are non-positive
+//     (spending). Zero is allowed for any category (e.g. a corrected entry).
+pub fn validate(t: Txn) -> Result<int, string> {
+    if t.id <= 0 {
+        Err(f"txn {t.id}: non-positive id")
+    } else if t.memo.length == 0 {
+        Err(f"txn {t.id}: empty memo")
+    } else {
+        let sign_ok = match t.cat {
+            Category::Income => t.cents >= 0,
+            _ => t.cents <= 0,
+        }
+        if sign_ok {
+            Ok(t.id)
+        } else {
+            Err(f"txn {t.id}: sign violates category")
+        }
+    }
+}
+
+// True if a transaction is a credit (money in).
+pub fn is_credit(t: Txn) -> bool {
+    t.cents > 0
+}
+
+// True if a transaction is a debit (money out).
+pub fn is_debit(t: Txn) -> bool {
+    t.cents < 0
+}
+
+// Validate a batch, returning Ok(count) if all pass, or the FIRST error.
+// Uses `?` so the first failing validate short-circuits the fold.
+pub fn validate_all(txns: Array<Txn>) -> Result<int, string> {
+    let mut n = 0
+    for t in txns {
+        let _ = validate(t)?
+        n = n + 1
+    }
+    Ok(n)
+}

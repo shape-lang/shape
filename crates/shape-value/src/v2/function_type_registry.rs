@@ -126,9 +126,18 @@ mod tests {
     #[test]
     fn test_intern_different_signatures_distinct_ids() {
         let mut r = FunctionTypeRegistry::new();
-        let a = r.intern(FunctionSignature::new(vec![ConcreteType::I64], ConcreteType::I64));
-        let b = r.intern(FunctionSignature::new(vec![ConcreteType::F64], ConcreteType::F64));
-        let c = r.intern(FunctionSignature::new(vec![ConcreteType::I64], ConcreteType::F64));
+        let a = r.intern(FunctionSignature::new(
+            vec![ConcreteType::I64],
+            ConcreteType::I64,
+        ));
+        let b = r.intern(FunctionSignature::new(
+            vec![ConcreteType::F64],
+            ConcreteType::F64,
+        ));
+        let c = r.intern(FunctionSignature::new(
+            vec![ConcreteType::I64],
+            ConcreteType::F64,
+        ));
         let d = r.intern(FunctionSignature::new(
             vec![ConcreteType::I64, ConcreteType::I64],
             ConcreteType::I64,
@@ -173,8 +182,14 @@ mod tests {
     fn test_ids_sequential_from_zero() {
         let mut r = FunctionTypeRegistry::new();
         let a = r.intern(FunctionSignature::new(vec![], ConcreteType::Void));
-        let b = r.intern(FunctionSignature::new(vec![ConcreteType::I64], ConcreteType::I64));
-        let c = r.intern(FunctionSignature::new(vec![ConcreteType::F64], ConcreteType::F64));
+        let b = r.intern(FunctionSignature::new(
+            vec![ConcreteType::I64],
+            ConcreteType::I64,
+        ));
+        let c = r.intern(FunctionSignature::new(
+            vec![ConcreteType::F64],
+            ConcreteType::F64,
+        ));
         assert_eq!(a, FunctionTypeId(0));
         assert_eq!(b, FunctionTypeId(1));
         assert_eq!(c, FunctionTypeId(2));
@@ -184,7 +199,10 @@ mod tests {
     fn test_iter_order() {
         let mut r = FunctionTypeRegistry::new();
         r.intern(FunctionSignature::new(vec![], ConcreteType::Void));
-        r.intern(FunctionSignature::new(vec![ConcreteType::I64], ConcreteType::I64));
+        r.intern(FunctionSignature::new(
+            vec![ConcreteType::I64],
+            ConcreteType::I64,
+        ));
         let collected: Vec<_> = r.iter().collect();
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0].0, FunctionTypeId(0));

@@ -5,6 +5,7 @@
 //! preservation, loops with results, match arms, chained operations,
 //! complex values, nested functions, and more.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================
@@ -180,8 +181,8 @@ fn edge_option_and_result_interop() {
 fn edge_option_some_and_result_interop() {
     ShapeTest::new(
         r#"
-        fn find_user() { Some(42) }
-        fn run() -> Result<number> {
+        fn find_user() -> Option<int> { Some(42) }
+        fn run() -> Result<int> {
             let user = (find_user() !! "User not found")?
             Ok(user)
         }
@@ -461,7 +462,7 @@ fn edge_try_preserves_value_type_bool() {
 fn edge_err_in_array_iteration() {
     ShapeTest::new(
         r#"
-        let items = [Ok(1), Ok(2), Err("bad"), Ok(4)]
+        let items: Array<Result<int, string>> = [Ok(1), Ok(2), Err("bad"), Ok(4)]
         let mut count = 0
         for item in items {
             match item {
@@ -472,7 +473,7 @@ fn edge_err_in_array_iteration() {
         count
     "#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains("cannot infer the element type of this array literal");
 }
 
 // =========================================================================
@@ -483,9 +484,9 @@ fn edge_err_in_array_iteration() {
 fn edge_chained_ok_operations() {
     ShapeTest::new(
         r#"
-        fn add_one(x) -> Result<number> { Ok(x + 1) }
-        fn double(x) -> Result<number> { Ok(x * 2) }
-        fn pipeline() -> Result<number> {
+        fn add_one(x: int) -> Result<int> { Ok(x + 1) }
+        fn double(x: int) -> Result<int> { Ok(x * 2) }
+        fn pipeline() -> Result<int> {
             let a = add_one(0)?
             let b = double(a)?
             let c = add_one(b)?

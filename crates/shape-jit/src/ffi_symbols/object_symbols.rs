@@ -10,13 +10,11 @@ use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
 use super::super::ffi::conversion::{
-    jit_print_atomic, jit_print_bool, jit_print_channel, jit_print_char,
-    jit_print_deque, jit_print_f64, jit_print_hashmap, jit_print_hashset,
-    jit_print_i64, jit_print_iterator, jit_print_lazy, jit_print_mutex,
-    jit_print_option, jit_print_priority_queue, jit_print_range,
-    jit_print_result, jit_print_str, jit_print_typed_array,
-    jit_print_typed_object, jit_print_u64, jit_string_concat, jit_to_number,
-    jit_to_string, jit_type_check, jit_typeof,
+    jit_print_atomic, jit_print_bool, jit_print_channel, jit_print_char, jit_print_deque,
+    jit_print_f64, jit_print_hashmap, jit_print_hashset, jit_print_i64, jit_print_iterator,
+    jit_print_lazy, jit_print_mutex, jit_print_option, jit_print_priority_queue, jit_print_range,
+    jit_print_result, jit_print_str, jit_print_typed_array, jit_print_typed_object, jit_print_u64,
+    jit_string_concat, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -34,15 +32,15 @@ use super::super::ffi::object::{
     jit_read_shared_cell_f64, jit_read_shared_cell_i8, jit_read_shared_cell_i16,
     jit_read_shared_cell_i32, jit_read_shared_cell_i64, jit_read_shared_cell_ptr,
     jit_read_shared_cell_u8, jit_read_shared_cell_u16, jit_read_shared_cell_u32,
-    jit_read_shared_cell_u64, jit_set_prop, jit_shared_lock_contended,
-    jit_shared_unlock_contended, jit_write_owned_mut_cell_bool, jit_write_owned_mut_cell_f64,
-    jit_write_owned_mut_cell_i8, jit_write_owned_mut_cell_i16, jit_write_owned_mut_cell_i32,
-    jit_write_owned_mut_cell_i64, jit_write_owned_mut_cell_ptr, jit_write_owned_mut_cell_u8,
-    jit_write_owned_mut_cell_u16, jit_write_owned_mut_cell_u32, jit_write_owned_mut_cell_u64,
-    jit_write_shared_cell_bool, jit_write_shared_cell_f64, jit_write_shared_cell_i8,
-    jit_write_shared_cell_i16, jit_write_shared_cell_i32, jit_write_shared_cell_i64,
-    jit_write_shared_cell_ptr, jit_write_shared_cell_u8, jit_write_shared_cell_u16,
-    jit_write_shared_cell_u32, jit_write_shared_cell_u64,
+    jit_read_shared_cell_u64, jit_set_prop, jit_shared_lock_contended, jit_shared_unlock_contended,
+    jit_write_owned_mut_cell_bool, jit_write_owned_mut_cell_f64, jit_write_owned_mut_cell_i8,
+    jit_write_owned_mut_cell_i16, jit_write_owned_mut_cell_i32, jit_write_owned_mut_cell_i64,
+    jit_write_owned_mut_cell_ptr, jit_write_owned_mut_cell_u8, jit_write_owned_mut_cell_u16,
+    jit_write_owned_mut_cell_u32, jit_write_owned_mut_cell_u64, jit_write_shared_cell_bool,
+    jit_write_shared_cell_f64, jit_write_shared_cell_i8, jit_write_shared_cell_i16,
+    jit_write_shared_cell_i32, jit_write_shared_cell_i64, jit_write_shared_cell_ptr,
+    jit_write_shared_cell_u8, jit_write_shared_cell_u16, jit_write_shared_cell_u32,
+    jit_write_shared_cell_u64,
 };
 use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
 use super::helpers::jit_format_error;
@@ -60,28 +58,15 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
-    // ADR-006 §2.7.5 — kinded EnumStore producers (W12-jit-aggregate-non-array)
-    builder.symbol(
-        "jit_make_ok",
-        super::super::ffi::result::jit_make_ok as *const u8,
-    );
-    builder.symbol(
-        "jit_make_err",
-        super::super::ffi::result::jit_make_err as *const u8,
-    );
-    builder.symbol(
-        "jit_make_some",
-        super::super::ffi::result::jit_make_some as *const u8,
-    );
-    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers + accessors
-    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12).
-    // Match the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` /
-    // `NoneCtor` output shape — `Arc::into_raw(Arc<ResultData>) as u64` /
-    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
-    // `NativeKind::Ptr(HeapKind::Result)` / `NativeKind::Ptr(HeapKind::Option)`.
-    // Replaces the legacy `jit_make_ok` etc. NaN-box producer family at the
-    // JIT EnumStore consumer (the production-code consumer migration gap the
-    // pre-trinity result.rs:178-200 deletion comment documented).
+    // W88A containment: these four producer symbols stay registered only as
+    // fail-closed backstops for stale FFIFuncRefs. Normal MIR EnumStore
+    // lowering deopts before emitting them because the old bodies would
+    // allocate `Arc<ResultData>` / `Arc<OptionData>` instead of schema-backed
+    // `__Result` / `__Option` TypedObjectStorage.
+    // The legacy `jit_make_ok` / `_err` / `_some` UnifiedValue<u64> producer
+    // family is intentionally NOT registered with Cranelift. Keeping those
+    // symbols importable would allow new native code to produce retired
+    // HK_OK/HK_ERR/HK_SOME carriers.
     builder.symbol(
         "jit_v2_make_result_ok",
         super::super::ffi::result::jit_v2_make_result_ok as *const u8,
@@ -212,10 +197,7 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     // (NOT `Arc<TypedArrayData>` — that enum was retired across V3-S5
     // ckpt-1..ckpt-4). Body delegates to the canonical VM-side
     // `ValueFormatter::format_kinded` via the UInt64 carrier label.
-    builder.symbol(
-        "jit_print_typed_array",
-        jit_print_typed_array as *const u8,
-    );
+    builder.symbol("jit_print_typed_array", jit_print_typed_array as *const u8);
     builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
@@ -243,10 +225,7 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     //                                    inline CAS lock (0→1) fails.
     //   `jit_shared_unlock_contended`  — release store fallback when the
     //                                    inline CAS unlock fails.
-    builder.symbol(
-        "jit_arc_shared_retain",
-        jit_arc_shared_retain as *const u8,
-    );
+    builder.symbol("jit_arc_shared_retain", jit_arc_shared_retain as *const u8);
     builder.symbol(
         "jit_shared_lock_contended",
         jit_shared_lock_contended as *const u8,
@@ -261,10 +240,7 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     //                                   SharedCow local slot.
     //   `jit_arc_shared_release`     — consumes one strong share when a
     //                                   SharedCow slot is dropped.
-    builder.symbol(
-        "jit_alloc_shared_cell",
-        jit_alloc_shared_cell as *const u8,
-    );
+    builder.symbol("jit_alloc_shared_cell", jit_alloc_shared_cell as *const u8);
     builder.symbol(
         "jit_arc_shared_release",
         jit_arc_shared_release as *const u8,
@@ -647,35 +623,12 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
     }
 
-    // ADR-006 §2.7.5 — kinded EnumStore producers
-    // (W12-jit-aggregate-non-array, 2026-05-12). Signature:
-    // `(inner_bits: u64) -> u64`. The JIT EnumStore consumer widens
-    // every operand to I64 bits (via `widen_to_i64`) per the §2.7.5
-    // stable-FFI carrier convention before calling. Return is the
-    // heap-pointer bits with HK_OK / HK_ERR / HK_SOME prefix tag —
-    // `jit_bits_to_nanboxed` at the JIT↔VM boundary converts to
-    // `Arc<ResultData>` / `Arc<OptionData>` (`crates/shape-jit/src/
-    // ffi/conversion.rs:246-258`).
-    for name in ["jit_make_ok", "jit_make_err", "jit_make_some"] {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // inner_bits
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = module
-            .declare_function(name, Linkage::Import, &sig)
-            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
-        ffi_funcs.insert(name.to_string(), func_id);
-    }
-
-    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
-    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A,
-    // 2026-05-12). Signature:
+    // W88A fail-closed Result/Option producer ABI backstops. Signature:
     // `(payload_bits: u64, payload_kind_code: i8) -> u64`.
-    // The payload_kind_code is the §2.7.7 / Q9 parallel-track byte encoding
-    // (`crates/shape-jit/src/ffi/stack_kind_code.rs`) stamped at JIT-compile
-    // time from the EnumStore operand's MIR-inferred kind per §2.7.5.
-    // Return is `Arc::into_raw(Arc<ResultData>) as u64` /
-    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
-    // `Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`.
+    // These imports intentionally no longer allocate; `ffi/result.rs` panics
+    // before constructing old `Arc<ResultData>` / `Arc<OptionData>` carriers.
+    // Normal JIT lowering should not call them: `EnumStore` deopts until a
+    // schema-backed `__Result` / `__Option` TypedObject ABI exists.
     for name in [
         "jit_v2_make_result_ok",
         "jit_v2_make_result_err",
@@ -683,14 +636,15 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // payload_bits
-        sig.params.push(AbiParam::new(types::I8));  // payload_kind_code
+        sig.params.push(AbiParam::new(types::I8)); // payload_kind_code
         sig.returns.push(AbiParam::new(types::I64));
         let func_id = module
             .declare_function(name, Linkage::Import, &sig)
             .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
         ffi_funcs.insert(name.to_string(), func_id);
     }
-    // jit_v2_make_option_none takes no payload (None has no payload).
+    // jit_v2_make_option_none takes no payload and is the same fail-closed
+    // backstop as the payload-bearing producer imports above.
     {
         let mut sig = module.make_signature();
         sig.returns.push(AbiParam::new(types::I64));
@@ -751,7 +705,6 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
     // W12-jit-print-heap-arm-classification reopen (2026-05-13). See
     // `ffi/conversion.rs` header comment + the MIR-side Call-terminator
     // dispatch's `_`-arm surface-and-stop.
-
 
     // W11-jit-new-array kinded print entries (ADR-006 §2.7.5).
     // jit_print_i64(value: i64) -> void
@@ -1164,17 +1117,62 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
     }
 
     // OwnedMutable allocators
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i64", types::I64);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u64", types::I64);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_f64", types::F64);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i32", types::I32);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u32", types::I32);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i16", types::I32);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u16", types::I32);
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_i64",
+        types::I64,
+    );
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_u64",
+        types::I64,
+    );
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_f64",
+        types::F64,
+    );
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_i32",
+        types::I32,
+    );
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_u32",
+        types::I32,
+    );
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_i16",
+        types::I32,
+    );
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_u16",
+        types::I32,
+    );
     declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_i8", types::I32);
     declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_u8", types::I32);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_bool", types::I32);
-    declare_owned_alloc(module, ffi_funcs, "jit_alloc_owned_mut_cell_ptr", types::I64);
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_bool",
+        types::I32,
+    );
+    declare_owned_alloc(
+        module,
+        ffi_funcs,
+        "jit_alloc_owned_mut_cell_ptr",
+        types::I64,
+    );
     // OwnedMutable readers
     declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_i64", types::I64);
     declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_u64", types::I64);
@@ -1185,20 +1183,70 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
     declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_u16", types::I32);
     declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_i8", types::I32);
     declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_u8", types::I32);
-    declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_bool", types::I32);
+    declare_cell_read(
+        module,
+        ffi_funcs,
+        "jit_read_owned_mut_cell_bool",
+        types::I32,
+    );
     declare_cell_read(module, ffi_funcs, "jit_read_owned_mut_cell_ptr", types::I64);
     // OwnedMutable writers
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i64", types::I64);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u64", types::I64);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_f64", types::F64);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i32", types::I32);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u32", types::I32);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i16", types::I32);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u16", types::I32);
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_i64",
+        types::I64,
+    );
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_u64",
+        types::I64,
+    );
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_f64",
+        types::F64,
+    );
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_i32",
+        types::I32,
+    );
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_u32",
+        types::I32,
+    );
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_i16",
+        types::I32,
+    );
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_u16",
+        types::I32,
+    );
     declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_i8", types::I32);
     declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_u8", types::I32);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_bool", types::I32);
-    declare_cell_write(module, ffi_funcs, "jit_write_owned_mut_cell_ptr", types::I64);
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_bool",
+        types::I32,
+    );
+    declare_cell_write(
+        module,
+        ffi_funcs,
+        "jit_write_owned_mut_cell_ptr",
+        types::I64,
+    );
     // Shared readers (alloc/release reuse the existing generic helpers
     // `jit_alloc_shared_cell` / `jit_arc_shared_release`).
     declare_cell_read(module, ffi_funcs, "jit_read_shared_cell_i64", types::I64);

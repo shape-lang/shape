@@ -29,10 +29,38 @@ impl JITCompiler {
         name: &str,
         program: &BytecodeProgram,
     ) -> Result<JittedStrategyFn, String> {
+        // v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14):
+        // the borrow-solver `top_level_mir` re-lowers a `comptime { ... }`
+        // body's statements (for borrow analysis) instead of carrying the
+        // compile-time-baked literal the bytecode interpreter executes. The
+        // JIT consumes that MIR as the top-level program, so it re-runs the
+        // comptime body at runtime and the body's trailing value leaks into
+        // the program-return slot — `let X = comptime { 2 + 3 }` makes
+        // `--mode jit` dump `{ "Integer": 5 }` as stdout and skip the
+        // program's prints (VM correctly returns Null). Whole-program deopt
+        // to the bytecode interpreter (this structured `Err` routes through
+        // the `[jit-fallback]` path) preserves VM == JIT. Root-cause fix (a
+        // JIT-consumable top-level MIR carrying the baked literal) is v0.4.
+        if program.top_level_has_comptime {
+            return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
+                 contains a `comptime { ... }` block. The borrow-solver \
+                 top-level MIR re-lowers the comptime body's statements rather \
+                 than the compile-time-baked literal; the JIT would re-run the \
+                 body at runtime and leak its trailing value into the \
+                 program-return slot (e.g. `let X = comptime { 2 + 3 }` dumps \
+                 `{ \"Integer\": 5 }` and skips the program's prints). \
+                 Whole-program deopting to the bytecode interpreter (which runs \
+                 the baked bytecode) preserves VM == JIT. Root-cause fix (a \
+                 JIT-consumable top-level MIR carrying the baked comptime \
+                 literal) is v0.4."
+                .to_string());
+        }
+
         // MirToIR is the ONLY compilation path.
-        let mir_data = program.top_level_mir.as_ref().ok_or_else(|| {
-            "MirToIR: top-level code has no MIR data".to_string()
-        })?;
+        let mir_data = program
+            .top_level_mir
+            .as_ref()
+            .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
         let preflight = crate::mir_compiler::preflight(mir_data);
         if !preflight.can_compile {
             return Err(format!(
@@ -134,8 +162,7 @@ impl JITCompiler {
                 // accesses and install the plan before compile_body. The
                 // analyzer is conservative; an empty plan preserves the
                 // bounds-checked path for every access.
-                let elision_plan =
-                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                let elision_plan = crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
                 // W14.2-E-followup SURFACE-A2 fix (2026-05-19): same as
                 // the per-user-function path at `program.rs` — pre-
@@ -176,6 +203,7 @@ impl JITCompiler {
         program: &BytecodeProgram,
         user_func_ids: &HashMap<u16, cranelift_module::FuncId>,
         user_func_arities: &HashMap<u16, u16>,
+        user_func_return_kinds: &HashMap<u16, shape_vm::type_tracking::NativeKind>,
     ) -> Result<cranelift_module::FuncId, String> {
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
@@ -189,10 +217,26 @@ impl JITCompiler {
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
 
+        // v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14) —
+        // see the matching guard in `compile_strategy`. Deopt the whole
+        // top-level program to the bytecode interpreter when top-level code
+        // contains a `comptime { ... }` block, so VM == JIT.
+        if program.top_level_has_comptime {
+            return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
+                 contains a `comptime { ... }` block; the borrow-solver \
+                 top-level MIR re-lowers the comptime body rather than the \
+                 baked literal, so the JIT would leak the body's trailing value \
+                 into the program-return slot. Whole-program deopting to the \
+                 bytecode interpreter preserves VM == JIT. Root-cause fix is \
+                 v0.4."
+                .to_string());
+        }
+
         // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
-        let mir_data = program.top_level_mir.as_ref().ok_or_else(|| {
-            "MirToIR: top-level code has no MIR data".to_string()
-        })?;
+        let mir_data = program
+            .top_level_mir
+            .as_ref()
+            .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
         let preflight = crate::mir_compiler::preflight(mir_data);
         if !preflight.can_compile {
             return Err(format!(
@@ -248,20 +292,22 @@ impl JITCompiler {
                     .enumerate()
                     .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_closure_layouts(
-                    &mut builder,
-                    ctx_ptr,
-                    ffi,
-                    mir_data,
-                    slot_kinds,
-                    concrete_types,
-                    &program.strings,
-                    entry_block,
-                    &function_indices,
-                    user_func_refs.clone(),
-                    user_func_arities.clone(),
-                    closure_function_layouts,
-                );
+                let mut mir_compiler =
+                    crate::mir_compiler::MirToIR::new_with_closure_layouts_and_function_returns(
+                        &mut builder,
+                        ctx_ptr,
+                        ffi,
+                        mir_data,
+                        slot_kinds,
+                        concrete_types,
+                        &program.strings,
+                        entry_block,
+                        &function_indices,
+                        user_func_refs.clone(),
+                        user_func_arities.clone(),
+                        user_func_return_kinds.clone(),
+                        closure_function_layouts,
+                    );
                 // V3-S6c-jit-method-monomorph-routing: top-level path with
                 // user-funcs visible. Caller id = None per the same
                 // convention as the no-user-funcs path above.
@@ -274,8 +320,7 @@ impl JITCompiler {
                 mir_compiler.set_operator_trait_dispatch_sites(
                     program.operator_trait_dispatch_sites.clone(),
                 );
-                let elision_plan =
-                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                let elision_plan = crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
                 // W14.2-E-followup SURFACE-A2 fix (2026-05-19): top-level
                 // with user-funcs path — same schema pre-population as
@@ -441,22 +486,24 @@ impl JITCompiler {
         Ok(unsafe { std::mem::transmute(code_ptr) })
     }
 
-    /// Build kernel IR using BytecodeToIR in kernel mode.
-    ///
-    /// This compiles bytecode to kernel ABI IR with direct memory access:
-    /// - GetFieldTyped → state_ptr + offset
-    /// - GetDataField → series_ptrs[col][cursor]
-    /// - All locals as Cranelift variables
+    /// Build kernel ABI IR for the statically supported v2 subset.
     fn build_kernel_ir(
         &mut self,
-        _builder: &mut FunctionBuilder,
-        _program: &BytecodeProgram,
-        _config: &SimulationKernelConfig,
-        _cursor_index: Value,
-        _series_ptrs: Value,
-        _state_ptr: Value,
+        builder: &mut FunctionBuilder,
+        program: &BytecodeProgram,
+        config: &SimulationKernelConfig,
+        cursor_index: Value,
+        series_ptrs: Value,
+        state_ptr: Value,
     ) -> Result<Value, String> {
-        Err("Simulation kernel compilation requires v2 runtime migration".to_string())
+        super::kernel_ir::build_simulation_kernel_ir(
+            builder,
+            program,
+            config,
+            cursor_index,
+            series_ptrs,
+            state_ptr,
+        )
     }
 
     // ========================================================================
@@ -596,6 +643,13 @@ impl JITCompiler {
         series_ptrs: Value,
         state_ptr: Value,
     ) -> Result<Value, String> {
-        Err("Correlated kernel compilation requires v2 runtime migration".to_string())
+        super::kernel_ir::build_correlated_kernel_ir(
+            builder,
+            program,
+            config,
+            cursor_index,
+            series_ptrs,
+            state_ptr,
+        )
     }
 }

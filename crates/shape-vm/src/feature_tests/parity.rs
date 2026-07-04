@@ -1,13 +1,17 @@
-//! Three-way parity testing infrastructure
+//! Legacy feature-test parity infrastructure
 //!
-//! This module provides types and utilities for testing parity
-//! between the Interpreter, VM, and JIT backends.
+//! This module compares results produced by the legacy in-process feature-test
+//! backends. The real JIT is not linked into `shape-vm`; VM-vs-JIT parity is
+//! exercised by `scripts/differential-gate.sh`.
 
 // ============================================================================
-// Three-Way Parity Testing
+// Feature-test Parity Reporting
 // ============================================================================
 
-/// Result of running a test across all three backends
+/// Result of running a test across the legacy feature-test backends.
+///
+/// The `jit` field is retained for report compatibility, but the default
+/// runner records it as skipped instead of delegating to the VM.
 #[derive(Debug, Clone)]
 pub struct ParityResult {
     pub test_name: &'static str,
@@ -60,7 +64,11 @@ pub enum ParityStatus {
     InterpreterVmMismatch { interpreter: String, vm: String },
     /// Interpreter and JIT produced different results
     InterpreterJitMismatch { interpreter: String, jit: String },
-    /// VM and JIT produced different results
+    /// VM and JIT produced different results.
+    ///
+    /// Only meaningful for callers that inject a real JIT backend. The default
+    /// feature-test runner skips the JIT lane and points to the differential
+    /// subprocess gate.
     VmJitMismatch { vm: String, jit: String },
     /// Some backends were skipped or didn't support the feature
     PartialSkipped { reason: String },

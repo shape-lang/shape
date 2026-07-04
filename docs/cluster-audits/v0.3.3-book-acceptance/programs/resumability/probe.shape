@@ -1,0 +1,12 @@
+from std::core::snapshot use { Snapshot }
+
+print("before snapshot")
+match snapshot() {
+  Snapshot::Hash(id) => {
+    print("snapshot saved: " + id)
+  }
+  Snapshot::Resumed => {
+    print("resumed from snapshot")
+  }
+}
+print("after snapshot")

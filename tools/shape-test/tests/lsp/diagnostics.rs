@@ -136,16 +136,35 @@ fn semantic_diagnostic_combines_same_line_and_keeps_next_line() {
 fn function_param_numeric_constraint_rejects_object_callsites() {
     let code = "fn afunc(c) {\n  c = c + 1\n  return c\n}\nlet x = { x: 1 }\nprint(afunc(x))\nprint(afunc(1))\n";
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(1, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            1,
+            "Cannot infer types for binary operation `Add`",
+        );
 }
 
 #[test]
 fn function_param_numeric_constraint_with_print_reports_on_numeric_line() {
     let code = "fn afunc(c) {\n  print(\"func called with \" + c)\n  c = c + 1\n  return c\n}\nlet x = { x: 1 }\nprint(afunc(x))\nprint(afunc(1))\n";
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(2, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(1, "Cannot apply `+` to a `string`")
+        .expect_semantic_diagnostic_at_line_contains(
+            2,
+            "Cannot infer types for binary operation `Add`",
+        );
 }
 
 #[test]
@@ -166,8 +185,18 @@ print(afunc(1))
 "#;
 
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(7, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(2, "Cannot apply `+` to a `string`")
+        .expect_semantic_diagnostic_at_line_contains(
+            7,
+            "Cannot infer types for binary operation `Add`",
+        );
 }
 
 #[test]
@@ -187,8 +216,15 @@ print(afunc(1))
 "#;
 
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(6, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(2, "Cannot apply `+` to a `string`")
+        .expect_semantic_diagnostic_at_line_contains(0, "Non-exhaustive match on 'object | int'");
 }
 
 #[test]
@@ -218,13 +254,21 @@ fn semantic_diagnostic_reports_unknown_property_access() {
 
 #[test]
 fn semantic_diagnostic_reports_unconstrained_result_generic_from_err_only() {
+    // TP-rebaseline (A-final STAGE-3, let-gen): under the ratified HM
+    // let-generalization feature (project_let_generalization.md; user 2026-05-31,
+    // the `fn get_none() { None } => fn get_none<T>() -> Option<T>` rule), an
+    // `Err`-only function body is NO LONGER an "unconstrained generic" error — the
+    // unconstrained success type generalizes to a fresh return generic param, so
+    // `fn test() { Err("some error") }` becomes `fn test<T>() -> Result<T, AnyError>`
+    // and is instantiable at any success type (verified: usable at both
+    // `Result<int, string>` and `Result<string, string>`). The pre-let-gen
+    // "Could not infer generic type arguments for 'Result'" diagnostic no longer
+    // fires; asserting it would assert a non-occurring diagnostic. The function is
+    // well-typed, so we assert there is NO such diagnostic.
     let code = "fn test() {\n  Err(\"some error\")\n}\n";
-    ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not infer generic type arguments for 'Result'")
-        .expect_semantic_diagnostic_at_line_contains(
-            1,
-            "Could not infer generic type arguments for 'Result'",
-        );
+    ShapeTest::new(code).expect_no_semantic_diagnostic_contains(
+        "Could not infer generic type arguments for 'Result'",
+    );
 }
 
 // == Comptime diagnostics (from lsp_comptime) ================================
@@ -279,5 +323,9 @@ fn test_lsp_diagnostic_non_exhaustive_enum_match() {
 #[test]
 fn test_lsp_diagnostic_type_constraint_error() {
     let code = "fn add_one(c) {\n  c = c + 1\n  return c\n}\nlet obj = { x: 1 }\nprint(add_one(obj))\nprint(add_one(1))\n";
-    ShapeTest::new(code).expect_semantic_diagnostic_contains("Could not solve type constraints");
+    ShapeTest::new(code)
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'add_one' must be numeric",
+        )
+        .expect_semantic_diagnostic_contains("Cannot infer types for binary operation `Add`");
 }

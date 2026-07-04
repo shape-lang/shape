@@ -16,7 +16,8 @@
 //!  20       4   cap (allocated capacity)
 //! ```
 
-use super::heap_header::{HeapHeader, HEAP_KIND_V2_TYPED_ARRAY};
+use super::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
+use crate::{HeapKind, HeapValue, NativeKind};
 use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ptr;
 
@@ -265,6 +266,17 @@ impl<T: Copy> TypedArray<T> {
             };
             let new_layout = Layout::array::<T>(new_cap as usize).expect("invalid array layout");
 
+            // Enforce the per-execution per-buffer heap ceiling, if installed.
+            // A doubling realloc can jump several GB in a single instruction,
+            // so a memory ceiling — not the instruction cap — is what bounds
+            // the RSS of an allocation-heavy runaway loop (the canonical case:
+            // one buffer growing without bound). Over the ceiling => fail
+            // in-process here rather than letting RSS climb until the host
+            // OOM-killer reaps the process. No ceiling (CLI default) => no-op.
+            if let Err(e) = crate::v2::alloc_budget::check_size(new_layout.size() as u64) {
+                panic!("{e}");
+            }
+
             let new_data = if arr.cap == 0 || arr.data.is_null() {
                 alloc(new_layout) as *mut T
             } else {
@@ -312,8 +324,8 @@ impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
                     T::release_elem(elem_ptr);
                 }
                 // Free the data buffer.
-                let data_layout = Layout::array::<*const T>(arr.cap as usize)
-                    .expect("invalid array layout");
+                let data_layout =
+                    Layout::array::<*const T>(arr.cap as usize).expect("invalid array layout");
                 dealloc(arr.data as *mut u8, data_layout);
             }
             // Free the TypedArray struct itself.
@@ -372,6 +384,33 @@ pub const ELEM_TYPE_STRING: u8 = 13;
 pub const ELEM_TYPE_DECIMAL: u8 = 14;
 /// `_pad`-byte discriminant for `TypedArray<*const TypedObjectStorage>`.
 pub const ELEM_TYPE_TYPED_OBJECT: u8 = 15;
+/// `_pad`-byte discriminant for `TypedArray<*const TypedArrayElem>` — a
+/// nested array whose elements are themselves v2-raw `TypedArray<U>` pointers
+/// (any inner element monomorphization). Construction strict-typing close
+/// (USER RULING 2026-06-05): `[[1,2],[3,4]]` lowers the outer literal to this
+/// carrier. The element pointer is a `*const TypedArrayElem` (HeapHeader at
+/// offset 0), and per-element release dispatches through the kind-erased
+/// [`release_v2_typed_array`], which reads the INNER array's own `_pad`
+/// element-type discriminant to pick the inner monomorphized drop. No
+/// runtime NativeKind probe at the outer layer; the inner discriminant is the
+/// inner array's own producer-side stamp (ADR-006 §2.7.5).
+pub const ELEM_TYPE_TYPED_ARRAY: u8 = 16;
+/// `_pad`-byte discriminant for `TypedArray<*const TraitObjectStorage>` —
+/// the backing carrier for `Array<dyn Trait>` literals (Phase 4b W16.2-B
+/// op_new_array-trait-object-element, 2026-06-05). Per ADR-006 §2.7.5
+/// stamp-at-compile-time + §2.7.24 Q25.C, the stored element is a
+/// `*const TraitObjectStorage` (HeapHeader at offset 0); per-element release
+/// dispatches through `TraitObjectStorage::release_elem` (heap_value.rs:3092)
+/// which calls `v2_release` on the on-header refcount and, at refcount=0,
+/// `_drop`s the inner TypedObject share + the vtable Arc. Mirror of
+/// `ELEM_TYPE_TYPED_OBJECT`.
+pub const ELEM_TYPE_TRAIT_OBJECT: u8 = 17;
+/// `_pad`-byte discriminant for `TypedArray<CallableArrayElem>` — the backing
+/// carrier for compile-time-proven `Array<Function<...>>` literals. Elements are
+/// small descriptors, not `HeapHeader` pointers: closures own one
+/// `Arc<HeapValue>` share, named functions carry an inline `UInt64` function id,
+/// and module functions carry an inline `Ptr(HeapKind::ModuleFn)` id.
+pub const ELEM_TYPE_CALLABLE: u8 = 18;
 
 /// Read the element-type discriminant stamped in the `_pad` byte (offset 7).
 ///
@@ -380,6 +419,160 @@ pub const ELEM_TYPE_TYPED_OBJECT: u8 = 15;
 #[inline]
 pub unsafe fn read_elem_type(ptr: *const u8) -> u8 {
     unsafe { *ptr.add(7) }
+}
+
+/// Stamp the element-type discriminant into the `_pad` byte (offset 7) of a
+/// freshly-allocated `TypedArray<T>` header.
+///
+/// This is the write-side sibling of [`read_elem_type`] and the canonical
+/// home of the stamp (alongside the `ELEM_TYPE_*` constants). `shape-vm`'s
+/// `v2_handlers::v2_array_detect::stamp_elem_type` is the VM-side allocation
+/// helper (with a null guard for the producer opcodes); this `shape-value`
+/// entry lets cross-crate carrier producers that cannot reach the `shape-vm`
+/// crate (the marshal-layer `ToSlot<Vec<Arc<HeapValue>>>` in `shape-runtime`,
+/// STAGE K2) stamp the discriminant without duplicating the offset constant.
+///
+/// # Safety
+/// `ptr` must point to a live `TypedArray<T>` (HeapHeader at offset 0) and be
+/// non-null. `elem_type` must be the discriminant matching the array's
+/// element monomorphization `T`.
+#[inline]
+pub unsafe fn stamp_elem_type(ptr: *mut u8, elem_type: u8) {
+    unsafe { *ptr.add(7) = elem_type };
+}
+
+/// HeapHeader-view newtype for a NESTED `TypedArray` element.
+///
+/// `[[1,2],[3,4]]` lowers to `TypedArray<*const TypedArrayElem>`. Each stored
+/// element is a `*const TypedArrayElem` — really a `*mut TypedArray<U>` for
+/// some inner element monomorphization `U`, viewed only through its
+/// `HeapHeader` at offset 0. The outer array never needs to know `U`: retain
+/// touches only the refcount at offset 0; release dispatches through the
+/// kind-erased [`release_v2_typed_array`], which reads the inner array's own
+/// `_pad` discriminant. This keeps the per-T monomorphization discipline —
+/// the outer carrier is a single concrete `TypedArray<*const TypedArrayElem>`
+/// instantiation, NOT an `Arc<TypedArrayData>` / `TypedBuffer<T>` parallel
+/// carrier (CLAUDE.md §Forbidden) — while the inner drop stays exact.
+#[repr(C)]
+pub struct TypedArrayElem {
+    /// 8-byte v2 heap header (refcount at offset 0, element-type `_pad` at
+    /// offset 7). This is the only field the outer array ever touches.
+    pub header: HeapHeader,
+}
+
+// HeapElement impl per ADR-006 §2.7.24 Q25.A SUPERSEDED + §4.1.B decision.
+// `release_elem` retires one share of the inner array via the kind-erased
+// `release_v2_typed_array`, which reads the inner `_pad` discriminant and
+// runs the matching inner monomorphized `drop_array` / `drop_array_heap`.
+// No runtime NativeKind probe at this (outer) layer; the inner discriminant
+// is the inner array's own producer-side stamp.
+unsafe impl super::heap_element::HeapElement for TypedArrayElem {
+    unsafe fn release_elem(ptr: *const Self) {
+        unsafe { release_v2_typed_array(ptr as *mut u8) };
+    }
+}
+
+/// Exact callable carrier shape stored in `TypedArray<CallableArrayElem>`.
+///
+/// This is intentionally not a `*const HeapHeader` element. Only closure values
+/// are `Arc<HeapValue>` shares; named functions and module functions are inline
+/// IDs. The `kind` byte records which callable shape the bits represent so array
+/// reads can push the same `(bits, NativeKind)` shape consumed by call dispatch.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallableArrayElemKind {
+    Closure = 1,
+    FunctionId = 2,
+    ModuleFn = 3,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallableArrayElem {
+    pub bits: u64,
+    pub kind: CallableArrayElemKind,
+}
+
+impl CallableArrayElem {
+    #[inline]
+    pub fn from_native_kind(bits: u64, kind: NativeKind) -> Option<Self> {
+        let kind = match kind {
+            NativeKind::Ptr(HeapKind::Closure) => CallableArrayElemKind::Closure,
+            NativeKind::UInt64 => CallableArrayElemKind::FunctionId,
+            NativeKind::Ptr(HeapKind::ModuleFn) => CallableArrayElemKind::ModuleFn,
+            _ => return None,
+        };
+        Some(Self { bits, kind })
+    }
+
+    #[inline]
+    pub fn native_kind(self) -> NativeKind {
+        match self.kind {
+            CallableArrayElemKind::Closure => NativeKind::Ptr(HeapKind::Closure),
+            CallableArrayElemKind::FunctionId => NativeKind::UInt64,
+            CallableArrayElemKind::ModuleFn => NativeKind::Ptr(HeapKind::ModuleFn),
+        }
+    }
+
+    /// Retain one read/clone share for this callable element.
+    ///
+    /// # Safety
+    /// For `Closure`, `bits` must be a live `Arc::into_raw(Arc<HeapValue>)`
+    /// pointer. Inline function ids perform no refcount operation.
+    #[inline]
+    pub unsafe fn retain(self) {
+        if self.bits == 0 {
+            return;
+        }
+        if self.kind == CallableArrayElemKind::Closure {
+            unsafe {
+                std::sync::Arc::increment_strong_count(self.bits as *const HeapValue);
+            }
+        }
+    }
+
+    /// Release one owned share for this callable element.
+    ///
+    /// # Safety
+    /// For `Closure`, `bits` must be a live `Arc::into_raw(Arc<HeapValue>)`
+    /// pointer owned by the caller. Inline function ids perform no refcount
+    /// operation.
+    #[inline]
+    pub unsafe fn release(self) {
+        if self.bits == 0 {
+            return;
+        }
+        if self.kind == CallableArrayElemKind::Closure {
+            unsafe {
+                std::sync::Arc::decrement_strong_count(self.bits as *const HeapValue);
+            }
+        }
+    }
+}
+
+impl TypedArray<CallableArrayElem> {
+    /// Deallocate a callable array, releasing each stored closure share exactly
+    /// once and freeing the element buffer + typed-array header.
+    ///
+    /// # Safety
+    /// `ptr` must point to a live `TypedArray<CallableArrayElem>` allocated by
+    /// this module. Each closure element must own one `Arc<HeapValue>` share.
+    pub unsafe fn drop_array_callable(ptr: *mut Self) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                for i in 0..arr.len {
+                    let elem = ptr::read(arr.data.add(i as usize));
+                    elem.release();
+                }
+                let data_layout = Layout::array::<CallableArrayElem>(arr.cap as usize)
+                    .expect("invalid array layout");
+                dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = Layout::new::<Self>();
+            dealloc(ptr as *mut u8, layout);
+        }
+    }
 }
 
 /// Retain (bump the refcount of) a v2-raw `*mut TypedArray<T>` carrier.
@@ -432,11 +625,9 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
             ELEM_TYPE_U32 => TypedArray::<u32>::drop_array(ptr as *mut TypedArray<u32>),
             ELEM_TYPE_F32 => TypedArray::<f32>::drop_array(ptr as *mut TypedArray<f32>),
             ELEM_TYPE_CHAR => TypedArray::<char>::drop_array(ptr as *mut TypedArray<char>),
-            ELEM_TYPE_STRING => {
-                TypedArray::<*const super::string_obj::StringObj>::drop_array_heap(
-                    ptr as *mut TypedArray<*const super::string_obj::StringObj>,
-                )
-            }
+            ELEM_TYPE_STRING => TypedArray::<*const super::string_obj::StringObj>::drop_array_heap(
+                ptr as *mut TypedArray<*const super::string_obj::StringObj>,
+            ),
             ELEM_TYPE_DECIMAL => {
                 TypedArray::<*const super::decimal_obj::DecimalObj>::drop_array_heap(
                     ptr as *mut TypedArray<*const super::decimal_obj::DecimalObj>,
@@ -447,6 +638,28 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
                     ptr as *mut TypedArray<*const crate::heap_value::TypedObjectStorage>,
                 )
             }
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // `Array<dyn Trait>` carrier. Each element is a `*const
+            // TraitObjectStorage`; `TraitObjectStorage::release_elem`
+            // (heap_value.rs:3092) retires one share via the on-header
+            // refcount, `_drop`-ing the inner TypedObject + vtable at 0.
+            ELEM_TYPE_TRAIT_OBJECT => {
+                TypedArray::<*const crate::heap_value::TraitObjectStorage>::drop_array_heap(
+                    ptr as *mut TypedArray<*const crate::heap_value::TraitObjectStorage>,
+                )
+            }
+            ELEM_TYPE_TYPED_ARRAY => {
+                // Nested array. Each element is a `*const TypedArrayElem`
+                // (inner `TypedArray<U>` viewed through its HeapHeader);
+                // `TypedArrayElem::release_elem` re-enters this function for
+                // the inner array, reading the inner `_pad` discriminant.
+                TypedArray::<*const TypedArrayElem>::drop_array_heap(
+                    ptr as *mut TypedArray<*const TypedArrayElem>,
+                )
+            }
+            ELEM_TYPE_CALLABLE => TypedArray::<CallableArrayElem>::drop_array_callable(
+                ptr as *mut TypedArray<CallableArrayElem>,
+            ),
             // An unstamped (`ELEM_TYPE_UNKNOWN`) or unrecognised discriminant
             // at refcount-0 means the producer-side stamp contract was
             // violated. The element-buffer monomorphization is unknown so a
@@ -572,6 +785,8 @@ impl<T> TypedArray<T> {
 }
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 
@@ -880,7 +1095,7 @@ mod tests {
 
     #[test]
     fn test_refcount_with_typed_array() {
-        use crate::v2::refcount::{v2_get_refcount, v2_retain, v2_release};
+        use crate::v2::refcount::{v2_get_refcount, v2_release, v2_retain};
 
         let arr = TypedArray::<f64>::from_slice(&[1.0, 2.0]);
         unsafe {

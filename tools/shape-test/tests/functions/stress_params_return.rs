@@ -1,5 +1,6 @@
 //! Stress tests for parameter passing and return values.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 /// Verifies function local vars isolated.
@@ -146,7 +147,7 @@ fn test_early_return_in_loop() {
     .expect_number(5.0);
 }
 
-/// Verifies void function returns unit or none. R5b-2-bool-null-sentinel-cluster
+/// Verifies void function returns unit or None. R5b-2-bool-null-sentinel-cluster
 /// CLOSE: the W14.2-G6 SURFACE-G6-LET-ONLY-BODY pin previously asserted
 /// `expect_bool(false)` documenting the producer-side bug where the
 /// bytecode compiler's implicit-return path emitted `(0u64,
@@ -155,7 +156,7 @@ fn test_early_return_in_loop() {
 /// Per ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9 (2026-05-19) `PushNull` now
 /// pushes `NativeKind::Null` and `slot_to_wire` projects Null to
 /// `WireValue::Null` directly. Test updated to assert correct empirical
-/// behavior: `do_nothing()` returns None/null.
+/// behavior: `do_nothing()` returns Shape `None` (`WireValue::Null`).
 #[test]
 fn test_void_function_returns_unit_or_none() {
     ShapeTest::new(
@@ -249,16 +250,7 @@ fn test_function_as_argument_lambda_add() {
     .expect_number(30.0);
 }
 
-/// Verifies higher order compose. W14.2-G6 e2e-functions triage
-/// SURFACE-AND-STOP: closure-returning-closure pattern via `compose`
-/// hits the same Q12 value-call ABI restriction surfaced in
-/// `closures_as_params::closure_composition`
-/// (`call_value_immediate_nb: ... got Ptr(NativeView)`) and ALSO
-/// SIGSEGV under release-binary when the returned closure is invoked
-/// (empirically verified). Routed to W14.2-H1 exception registry as
-/// `v0.4-closure-as-param-nativeview-kind` (closure_composition entry
-/// covers both tests). Cannot fix test-side — closure-from-fn return
-/// surface is the architectural gap.
+/// Verifies higher order compose.
 #[test]
 fn test_higher_order_compose() {
     ShapeTest::new(
@@ -268,7 +260,7 @@ fn test_higher_order_compose() {
         double_then_add1(10)
     "#,
     )
-    .expect_run_err_contains("call_value_immediate_nb");
+    .expect_number(21.0);
 }
 
 /// Verifies higher order twice.

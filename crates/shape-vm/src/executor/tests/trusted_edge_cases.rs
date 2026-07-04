@@ -3,9 +3,7 @@
 //! Tests boundary conditions: integer overflow, division by zero, large
 //! numbers, and type transitions that the trusted fast path must handle.
 
-use super::*;
 use super::test_utils::eval_result as eval;
-use shape_value::{VMError, ValueWord, ValueWordExt};
 
 // ── Integer overflow → f64 promotion ────────────────────────────────
 
@@ -31,18 +29,18 @@ fn trusted_int_overflow_add_promotes_to_float() {
 }
 
 #[test]
-fn trusted_int_overflow_mul_promotes_to_float() {
+fn trusted_int_overflow_mul_requires_explicit_widening() {
     let source = r#"
         let x = 4503599627370496
         let y = 4503599627370496
         x * y
     "#;
-    let result = eval(source).expect("should not error");
-    // The product overflows i64, should promote to f64
-    let val = result
-        .as_f64()
-        .or_else(|| result.as_i64().map(|i| i as f64));
-    assert!(val.is_some(), "overflow should produce a numeric result");
+    let err = eval(source).expect_err("overflowing int multiplication should require widening");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("integer multiplication overflow") && msg.contains("widen explicitly"),
+        "expected explicit-widening overflow error, got {msg}"
+    );
 }
 
 #[test]

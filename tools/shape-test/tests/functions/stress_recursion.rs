@@ -163,8 +163,8 @@ fn test_closure_captures_multiple() {
         fn make_linear(a, b) {
             |x| a * x + b
         }
-        let f = make_linear(2, 3)
-        f(10)
+        let f = make_linear(2.0, 3.0)
+        f(10.0)
     "#,
     )
     .expect_number(23.0);
@@ -178,8 +178,8 @@ fn test_fn_returns_lambda() {
         fn make_multiplier(factor) {
             |x| x * factor
         }
-        let times3 = make_multiplier(3)
-        times3(7)
+        let times3 = make_multiplier(3.0)
+        times3(7.0)
     "#,
     )
     .expect_number(21.0);
@@ -376,7 +376,7 @@ fn test_function_negative_return() {
     .expect_number(-42.0);
 }
 
-/// Verifies function returns none explicitly. W14.2-G6 e2e-functions
+/// Verifies function returns `None` explicitly. W14.2-G6 e2e-functions
 /// R5b-2-bool-null-sentinel-cluster CLOSE: the W14.2-G6
 /// SURFACE-G6-NONE-OUTPUT-ADAPTER pin previously asserted
 /// `expect_bool(false)` documenting the consumer-side bug where the
@@ -385,7 +385,7 @@ fn test_function_negative_return() {
 /// §2.7.7/Q9 (2026-05-19) `Constant::Null` / `Constant::Unit` /
 /// `PushNull` now emit `NativeKind::Null` and `slot_to_wire` projects
 /// it to `WireValue::Null` directly. Test updated to assert correct
-/// empirical behavior: `get_none()` returns None/null.
+/// empirical behavior: `get_none()` returns Shape `None` (`WireValue::Null`).
 #[test]
 fn test_function_returns_none_explicitly() {
     ShapeTest::new(
@@ -398,11 +398,11 @@ fn test_function_returns_none_explicitly() {
 }
 
 /// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
-/// §2.7.5 + §2.7.7/Q9, 2026-05-19): top-level `None` literal renders
-/// as `WireValue::Null` not `{"Bool": false}`. Pre-disposition
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): top-level `None` literal projects
+/// as Shape `None` at the test boundary, not `{"Bool": false}`. Pre-disposition
 /// SURFACE-G6-NONE-OUTPUT-ADAPTER reproducer.
 #[test]
-fn test_top_level_none_literal_renders_as_null() {
+fn test_top_level_none_literal_returns_none() {
     ShapeTest::new(r#"None"#).expect_none();
 }
 

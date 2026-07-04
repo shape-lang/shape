@@ -294,21 +294,9 @@ mod tests {
             0,
             "refcount at offset 0"
         );
-        assert_eq!(
-            &obj.kind as *const _ as usize - base,
-            4,
-            "kind at offset 4"
-        );
-        assert_eq!(
-            &obj.data as *const _ as usize - base,
-            8,
-            "data at offset 8"
-        );
-        assert_eq!(
-            &obj.len as *const _ as usize - base,
-            16,
-            "len at offset 16"
-        );
+        assert_eq!(&obj.kind as *const _ as usize - base, 4, "kind at offset 4");
+        assert_eq!(&obj.data as *const _ as usize - base, 8, "data at offset 8");
+        assert_eq!(&obj.len as *const _ as usize - base, 16, "len at offset 16");
     }
 
     #[test]
@@ -420,7 +408,10 @@ mod tests {
         let a = jit_v2_string_alloc(b"x".as_ptr(), 1);
         assert_eq!(jit_v2_string_eq(a, std::ptr::null_mut()), 0);
         assert_eq!(jit_v2_string_eq(std::ptr::null_mut(), a), 0);
-        assert_eq!(jit_v2_string_eq(std::ptr::null_mut(), std::ptr::null_mut()), 1);
+        assert_eq!(
+            jit_v2_string_eq(std::ptr::null_mut(), std::ptr::null_mut()),
+            1
+        );
         jit_v2_string_release(a);
     }
 

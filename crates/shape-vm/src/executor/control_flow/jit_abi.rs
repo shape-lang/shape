@@ -16,6 +16,7 @@
 //! deleted alongside the strict-typing bulldozer (see
 //! `crates/shape-value/src/native_kind.rs` §2.7.7 #6 for the deletion note).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 #[cfg(any(test, feature = "jit"))]
 use crate::type_tracking::NativeKind;
 
@@ -264,9 +265,9 @@ mod tests {
         // Simulate a function with signature: fn(int, float, bool)
         let kinds = [NativeKind::Int64, NativeKind::Float64, NativeKind::Bool];
         let arg_bits = [
-            10u64,             // int arg
-            2.5f64.to_bits(),  // float arg
-            1u64,              // bool arg (true)
+            10u64,            // int arg
+            2.5f64.to_bits(), // float arg
+            1u64,             // bool arg (true)
         ];
 
         let marshaled: Vec<u64> = arg_bits

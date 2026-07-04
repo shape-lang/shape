@@ -35,7 +35,10 @@ fn csv_parse_basic() {
     let module = create_csv_module();
     let ctx = test_ctx();
     let input = ValueWord::from_string(Arc::new("name,age\nAlice,30\nBob,25".to_string()));
-    let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
+    let result = module
+        .invoke_export("parse", &[input], &ctx)
+        .unwrap()
+        .unwrap();
     let rows = result.as_any_array().expect("should be array").to_generic();
     assert_eq!(rows.len(), 3);
 }
@@ -45,7 +48,10 @@ fn csv_parse_field_access() {
     let module = create_csv_module();
     let ctx = test_ctx();
     let input = ValueWord::from_string(Arc::new("a,b,c\n1,2,3".to_string()));
-    let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
+    let result = module
+        .invoke_export("parse", &[input], &ctx)
+        .unwrap()
+        .unwrap();
     let rows = result.as_any_array().expect("should be array").to_generic();
     let header = rows[0]
         .as_any_array()
@@ -61,7 +67,10 @@ fn csv_parse_empty() {
     let module = create_csv_module();
     let ctx = test_ctx();
     let input = ValueWord::from_string(Arc::new("".to_string()));
-    let result = module.invoke_export("parse", &[input], &ctx).unwrap().unwrap();
+    let result = module
+        .invoke_export("parse", &[input], &ctx)
+        .unwrap()
+        .unwrap();
     let rows = result.as_any_array().expect("should be array").to_generic();
     assert_eq!(rows.len(), 0);
 }
@@ -71,7 +80,10 @@ fn csv_parse_records_basic() {
     let module = create_csv_module();
     let ctx = test_ctx();
     let input = ValueWord::from_string(Arc::new("name,age\nAlice,30\nBob,25".to_string()));
-    let result = module.invoke_export("parse_records", &[input], &ctx).unwrap().unwrap();
+    let result = module
+        .invoke_export("parse_records", &[input], &ctx)
+        .unwrap()
+        .unwrap();
     let records = result.as_any_array().expect("should be array").to_generic();
     assert_eq!(records.len(), 2);
 }
@@ -82,12 +94,18 @@ fn csv_stringify_roundtrip() {
     let ctx = test_ctx();
 
     let original = "x,y\n1,2\n";
-    let parsed = module.invoke_export("parse", 
-        &[ValueWord::from_string(Arc::new(original.to_string()))],
-        &ctx,
-    ).unwrap()
-    .unwrap();
-    let back = module.invoke_export("stringify", &[parsed], &ctx).unwrap().unwrap();
+    let parsed = module
+        .invoke_export(
+            "parse",
+            &[ValueWord::from_string(Arc::new(original.to_string()))],
+            &ctx,
+        )
+        .unwrap()
+        .unwrap();
+    let back = module
+        .invoke_export("stringify", &[parsed], &ctx)
+        .unwrap()
+        .unwrap();
     assert_eq!(back.as_str(), Some(original));
 }
 
@@ -96,7 +114,10 @@ fn csv_is_valid_true() {
     let module = create_csv_module();
     let ctx = test_ctx();
     let input = ValueWord::from_string(Arc::new("a,b,c\n1,2,3".to_string()));
-    let result = module.invoke_export("is_valid", &[input], &ctx).unwrap().unwrap();
+    let result = module
+        .invoke_export("is_valid", &[input], &ctx)
+        .unwrap()
+        .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -105,7 +126,10 @@ fn csv_is_valid_empty() {
     let module = create_csv_module();
     let ctx = test_ctx();
     let input = ValueWord::from_string(Arc::new("".to_string()));
-    let result = module.invoke_export("is_valid", &[input], &ctx).unwrap().unwrap();
+    let result = module
+        .invoke_export("is_valid", &[input], &ctx)
+        .unwrap()
+        .unwrap();
     assert_eq!(result.as_bool(), Some(true));
 }
 
@@ -115,17 +139,23 @@ fn csv_stringify_records_roundtrip() {
     let ctx = test_ctx();
 
     let csv_text = "name,age\nAlice,30\nBob,25\n";
-    let parsed = module.invoke_export("parse_records", 
-        &[ValueWord::from_string(Arc::new(csv_text.to_string()))],
-        &ctx,
-    ).unwrap()
-    .unwrap();
+    let parsed = module
+        .invoke_export(
+            "parse_records",
+            &[ValueWord::from_string(Arc::new(csv_text.to_string()))],
+            &ctx,
+        )
+        .unwrap()
+        .unwrap();
 
     let headers = ValueWord::from_array(shape_value::vmarray_from_vec(vec![
         ValueWord::from_string(Arc::new("name".to_string())),
         ValueWord::from_string(Arc::new("age".to_string())),
     ]));
-    let back = module.invoke_export("stringify_records", &[parsed, headers], &ctx).unwrap().unwrap();
+    let back = module
+        .invoke_export("stringify_records", &[parsed, headers], &ctx)
+        .unwrap()
+        .unwrap();
     assert_eq!(back.as_str(), Some(csv_text));
 }
 
@@ -143,6 +173,9 @@ fn csv_stringify_basic() {
             ValueWord::from_string(Arc::new("2".to_string())),
         ])),
     ]));
-    let result = module.invoke_export("stringify", &[data], &ctx).unwrap().unwrap();
+    let result = module
+        .invoke_export("stringify", &[data], &ctx)
+        .unwrap()
+        .unwrap();
     assert_eq!(result.as_str(), Some("a,b\n1,2\n"));
 }

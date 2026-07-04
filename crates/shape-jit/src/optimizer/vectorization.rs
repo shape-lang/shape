@@ -386,9 +386,7 @@ pub fn analyze_vectorization(
 mod tests {
     use super::*;
     use cranelift::prelude::IntCC;
-    use shape_vm::bytecode::{
-        BytecodeProgram, Constant, DebugInfo, Instruction, Operand,
-    };
+    use shape_vm::bytecode::{BytecodeProgram, Constant, DebugInfo, Instruction, Operand};
 
     use crate::loop_analysis::{InductionVar, LoopInfo};
 
@@ -479,28 +477,28 @@ mod tests {
         // Loop pattern: for i in 0..n { dst[i] = a[i] + b[i] }
         // Locals: 0=i (IV), 1=n (bound), 2=a, 3=b, 4=dst_ref
         let instrs = vec![
-            make_instr(OpCode::LoopStart, None),                        // 0: header
+            make_instr(OpCode::LoopStart, None), // 0: header
             // Condition: i < n
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),     // 1
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),     // 2
-            make_instr(OpCode::LtInt, None),                            // 3
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 1
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))), // 2
+            make_instr(OpCode::LtInt, None),                        // 3
             make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(12))), // 4
             // Body: dst[i] = a[i] + b[i]
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),     // 5: load a
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),     // 6: load i
-            make_instr(OpCode::GetProp, None),                          // 7: a[i]
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(3))),     // 8: load b
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),     // 9: load i
-            make_instr(OpCode::GetProp, None),                          // 10: b[i]
-            make_instr(OpCode::AddNumber, None),                        // 11: a[i] + b[i]
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),     // 12: load i
-            make_instr(OpCode::SetIndexRef, Some(Operand::Local(4))),   // 13: dst[i] = result
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))), // 5: load a
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 6: load i
+            make_instr(OpCode::GetProp, None),                      // 7: a[i]
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(3))), // 8: load b
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 9: load i
+            make_instr(OpCode::GetProp, None),                      // 10: b[i]
+            make_instr(OpCode::AddNumber, None),                    // 11: a[i] + b[i]
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 12: load i
+            make_instr(OpCode::SetIndexRef, Some(Operand::Local(4))), // 13: dst[i] = result
             // Increment: i = i + 1
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),     // 14
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),     // 15
-            make_instr(OpCode::AddInt, None),                           // 16
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),    // 17
-            make_instr(OpCode::LoopEnd, None),                          // 18
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 14
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))), // 15
+            make_instr(OpCode::AddInt, None),                       // 16
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))), // 17
+            make_instr(OpCode::LoopEnd, None),                      // 18
         ];
 
         let program = make_program(instrs, vec![Constant::Int(1)]);
@@ -561,7 +559,10 @@ mod tests {
         loop_plans.insert(0usize, plan);
 
         let simd = analyze_simd(&program, &loops, &loop_plans);
-        assert!(simd.is_empty(), "Loop with CallMethod should not be SIMD eligible");
+        assert!(
+            simd.is_empty(),
+            "Loop with CallMethod should not be SIMD eligible"
+        );
     }
 
     #[test]
@@ -593,7 +594,10 @@ mod tests {
         loop_plans.insert(0usize, plan);
 
         let simd = analyze_simd(&program, &loops, &loop_plans);
-        assert!(simd.is_empty(), "Loop with step=2 should not be SIMD eligible");
+        assert!(
+            simd.is_empty(),
+            "Loop with step=2 should not be SIMD eligible"
+        );
     }
 
     #[test]

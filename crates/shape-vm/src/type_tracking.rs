@@ -41,6 +41,8 @@ use serde::{Deserialize, Serialize};
 use shape_ast::ast::TypeAnnotation;
 use shape_runtime::type_schema::{FieldType, SchemaId, TypeSchema, TypeSchemaRegistry};
 use shape_runtime::type_system::{BuiltinTypes, StorageType};
+use shape_value::v2::ConcreteType;
+use shape_value::v2::closure_layout::native_kind_from_concrete_type;
 use shape_value::v2::struct_layout::{FieldKind, StructLayout};
 
 /// Numeric type known at compile time for typed opcode emission.
@@ -59,7 +61,6 @@ pub enum NumericType {
     /// Exact decimal (rust_decimal::Decimal)
     Decimal,
 }
-
 
 // `NativeKind` (formerly `SlotKind`) is the single discriminator used at
 // every typed-ABI boundary. Moved to `shape-value::native_kind` so that
@@ -108,6 +109,28 @@ pub fn native_kind_from_storage_type(st: &StorageType) -> Option<NativeKind> {
     }
 }
 
+/// Fallible-wrapper semantics for a frame's return value.
+///
+/// This is deliberately separate from [`FrameDescriptor::return_kind`]:
+/// `return_kind` is the ABI carrier kind for the value on the stack,
+/// while `return_wrapper` tells the `?` operator whether a `None`
+/// early-return should be propagated as `None` or lifted into
+/// `Err(AnyError { code: "OPTION_NONE", ... })`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FrameReturnWrapper {
+    /// Missing metadata. New compiler producers should stamp `Plain`,
+    /// `Option`, or `Result`; this variant exists for old serialized
+    /// descriptors and partially migrated producers.
+    #[default]
+    Unknown,
+    /// The frame does not return a fallible wrapper.
+    Plain,
+    /// The frame returns `Option<T>`.
+    Option,
+    /// The frame returns `Result<T, E>`.
+    Result,
+}
+
 /// Typed frame layout metadata.
 ///
 /// A `FrameDescriptor` describes the storage layout for every local slot
@@ -129,13 +152,18 @@ pub fn native_kind_from_storage_type(st: &StorageType) -> Option<NativeKind> {
 /// proven; an unproven slot is a compile error per CLAUDE.md type-system
 /// rules.
 ///
-/// `return_kind: Option<NativeKind>` is the single-slot field carrying
-/// the function's return-value kind, or `None` for "no return value /
-/// kind not yet stamped". The single-slot `Option<NativeKind>` shape is
-/// the §2.7.8 / Q10 cell-storage pattern (single-slot fields take
-/// `Option<NativeKind>`); §2.7.5.1's "no `Option<NativeKind>` wrapping"
-/// rule targets the bulk `slots` Vec, not single-slot fields where
-/// `None` distinguishes "no return value" from "return value of kind X".
+/// `return_kind: Option<NativeKind>` is the ABI kind for the value a
+/// function returns, or `None` for "no return value / kind not yet
+/// stamped". It must not encode source-level wrapper semantics:
+/// `Option<T>` and `Result<T, E>` both use the canonical ABI carrier
+/// `NativeKind::Ptr(HeapKind::TypedObject)` and record the wrapper in
+/// `return_wrapper`.
+///
+/// The single-slot `Option<NativeKind>` shape is the §2.7.8 / Q10
+/// cell-storage pattern (single-slot fields take `Option<NativeKind>`);
+/// §2.7.5.1's "no `Option<NativeKind>` wrapping" rule targets the bulk
+/// `slots` Vec, not single-slot fields where `None` distinguishes "no
+/// return value" from "return value of kind X".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameDescriptor {
     /// One entry per local slot (index 0 = first param or local).
@@ -151,6 +179,11 @@ pub struct FrameDescriptor {
     /// unmarshal (e.g. top-level program with no terminal expression).
     #[serde(default)]
     pub return_kind: Option<NativeKind>,
+
+    /// Source-level fallible wrapper semantics for the returned value.
+    /// Defaults to `Unknown` for old serialized descriptors.
+    #[serde(default)]
+    pub return_wrapper: FrameReturnWrapper,
 }
 
 impl FrameDescriptor {
@@ -161,6 +194,7 @@ impl FrameDescriptor {
         Self {
             slots: Vec::new(),
             return_kind: None,
+            return_wrapper: FrameReturnWrapper::Unknown,
         }
     }
 
@@ -170,6 +204,7 @@ impl FrameDescriptor {
         Self {
             slots,
             return_kind: None,
+            return_wrapper: FrameReturnWrapper::Unknown,
         }
     }
 
@@ -191,6 +226,40 @@ impl FrameDescriptor {
     #[inline]
     pub fn slot(&self, index: usize) -> Option<NativeKind> {
         self.slots.get(index).copied()
+    }
+
+    /// Return wrapper semantics, with compatibility for descriptors
+    /// written before the metadata split. New descriptors should stamp
+    /// `return_wrapper` directly; legacy descriptors overloaded
+    /// `return_kind = Ptr(HeapKind::Option/Result)` for this purpose.
+    #[inline]
+    pub fn effective_return_wrapper(&self) -> FrameReturnWrapper {
+        match self.return_wrapper {
+            FrameReturnWrapper::Unknown => match self.return_kind {
+                Some(NativeKind::Ptr(shape_value::HeapKind::Option)) => FrameReturnWrapper::Option,
+                Some(NativeKind::Ptr(shape_value::HeapKind::Result)) => FrameReturnWrapper::Result,
+                _ => FrameReturnWrapper::Unknown,
+            },
+            wrapper => wrapper,
+        }
+    }
+
+    /// Return the ABI carrier kind for this frame's return value. New
+    /// descriptors store this directly in `return_kind`. Old descriptors
+    /// could overload `return_kind = Ptr(Option/Result)` as wrapper
+    /// semantics; normalize those to the canonical typed-object carrier
+    /// for ABI consumers.
+    #[inline]
+    pub fn abi_return_kind(&self) -> Option<NativeKind> {
+        match (self.return_wrapper, self.return_kind) {
+            (
+                FrameReturnWrapper::Unknown,
+                Some(NativeKind::Ptr(
+                    shape_value::HeapKind::Option | shape_value::HeapKind::Result,
+                )),
+            ) => Some(NativeKind::Ptr(shape_value::HeapKind::TypedObject)),
+            _ => self.return_kind,
+        }
     }
 }
 
@@ -349,9 +418,6 @@ pub struct VariableTypeInfo {
     /// is constructed for `FunctionBlob`, the kind is proven and stored
     /// flat in `FrameDescriptor.slots: Vec<NativeKind>` (no Option).
     pub storage_hint: Option<StorageHint>,
-    /// Preserved concrete numeric runtime type (e.g. "i16", "u8", "f32", "i64")
-    /// derived from source annotations.
-    pub concrete_numeric_type: Option<String>,
     /// What kind of variable this is (value, table, row view, column)
     pub kind: VariableKind,
     /// v2: For typed arrays, the element's FieldKind (enables typed array codegen)
@@ -363,13 +429,11 @@ pub struct VariableTypeInfo {
 impl VariableTypeInfo {
     /// Create type info for a known type
     pub fn known(schema_id: SchemaId, type_name: String) -> Self {
-        let concrete_numeric_type = Self::infer_numeric_runtime_name(&type_name);
         Self {
             schema_id: Some(schema_id),
             type_name: Some(type_name),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -383,7 +447,6 @@ impl VariableTypeInfo {
             type_name: None,
             is_definite: false,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -394,13 +457,11 @@ impl VariableTypeInfo {
     pub fn named(type_name: String) -> Self {
         // Infer storage hint from common type names
         let storage_hint = Self::infer_storage_hint(&type_name);
-        let concrete_numeric_type = Self::infer_numeric_runtime_name(&type_name);
         Self {
             schema_id: None,
             type_name: Some(type_name),
             is_definite: false,
             storage_hint,
-            concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -409,13 +470,11 @@ impl VariableTypeInfo {
 
     /// Create type info with explicit storage hint
     pub fn with_storage(type_name: String, storage_hint: StorageHint) -> Self {
-        let concrete_numeric_type = Self::infer_numeric_runtime_name(&type_name);
         Self {
             schema_id: None,
             type_name: Some(type_name),
             is_definite: true,
             storage_hint: Some(storage_hint),
-            concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -429,7 +488,6 @@ impl VariableTypeInfo {
             type_name: Some("Option<Number>".to_string()),
             is_definite: true,
             storage_hint: Some(StorageHint::NullableFloat64),
-            concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -443,7 +501,6 @@ impl VariableTypeInfo {
             type_name: Some("Number".to_string()),
             is_definite: true,
             storage_hint: Some(StorageHint::Float64),
-            concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -457,7 +514,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::RowView {
                 element_type: type_name,
             },
@@ -473,7 +529,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Table {
                 element_type: type_name,
             },
@@ -489,7 +544,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Column {
                 element_type,
                 column_type: type_name,
@@ -506,7 +560,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Indexed {
                 element_type: type_name,
                 index_column,
@@ -607,15 +660,6 @@ impl VariableTypeInfo {
         };
         Some(base.with_nullability(nullable))
     }
-
-    fn infer_numeric_runtime_name(type_name: &str) -> Option<String> {
-        let inner = if type_name.starts_with("Option<") && type_name.ends_with('>') {
-            &type_name["Option<".len()..type_name.len() - 1]
-        } else {
-            type_name
-        };
-        BuiltinTypes::canonical_numeric_runtime_name(inner).map(ToString::to_string)
-    }
 }
 
 /// Sweep phase 3c.1: snapshot of the type-tracker's local-types state
@@ -663,8 +707,15 @@ pub struct TypeTracker {
     /// Scoped local binding metadata mappings (for scope push/pop).
     local_binding_semantic_scopes: Vec<HashMap<u16, BindingSemantics>>,
 
-    /// Function return types (function name -> type name)
-    function_return_types: HashMap<String, String>,
+    /// U4-5b: function return types (function name -> structural
+    /// `ConcreteType`). Replaces the deleted stringly `function_return_types:
+    /// HashMap<String, String>` parallel source. Populated from the
+    /// type-checker-inferred `Type::Function { returns }` (declared returns are
+    /// served structurally upstream from `function_defs`/`find_function`). Every
+    /// consumer that previously parsed the return NAME string now reads the
+    /// `ConcreteType` directly (numeric source, struct-name key, Result/Option
+    /// kind, Copy/NonCopy move-class). The ConcreteType IS the proof.
+    function_return_concrete_types: HashMap<String, shape_value::v2::ConcreteType>,
     /// Compile-time object schema contracts: schema id -> field type annotation.
     ///
     /// Used for callable typed-object fields where runtime schema stores only slot layout.
@@ -692,7 +743,7 @@ impl TypeTracker {
             binding_semantics: HashMap::new(),
             local_type_scopes: vec![HashMap::new()],
             local_binding_semantic_scopes: vec![HashMap::new()],
-            function_return_types: HashMap::new(),
+            function_return_concrete_types: HashMap::new(),
             object_field_contracts: HashMap::new(),
             v2_layouts: HashMap::new(),
             inline_object_counter: 0,
@@ -823,15 +874,22 @@ impl TypeTracker {
         self.binding_semantics.get(&slot)
     }
 
-    /// Register a function's return type
-    pub fn register_function_return_type(&mut self, func_name: &str, return_type: &str) {
-        self.function_return_types
-            .insert(func_name.to_string(), return_type.to_string());
+    /// U4-5b: register a function's inferred return `ConcreteType`.
+    pub fn register_function_return_concrete_type(
+        &mut self,
+        func_name: &str,
+        return_type: shape_value::v2::ConcreteType,
+    ) {
+        self.function_return_concrete_types
+            .insert(func_name.to_string(), return_type);
     }
 
-    /// Get a function's return type
-    pub fn get_function_return_type(&self, func_name: &str) -> Option<&String> {
-        self.function_return_types.get(func_name)
+    /// U4-5b: get a function's inferred return `ConcreteType`.
+    pub fn get_function_return_concrete_type(
+        &self,
+        func_name: &str,
+    ) -> Option<&shape_value::v2::ConcreteType> {
+        self.function_return_concrete_types.get(func_name)
     }
 
     /// Register compile-time field type contracts for an object schema id.
@@ -1066,7 +1124,18 @@ impl TypeTracker {
         &mut self,
         fields: &[(&str, FieldType)],
     ) -> SchemaId {
+        // Reuse only an existing INLINE schema (`__inline_obj_N`). An untyped
+        // object literal must NEVER adopt a structurally-matching NAMED struct
+        // schema: doing so let `{ x: 1, y: 2 }` inherit `Vec2`'s schema name,
+        // which then made `{x:1,y:2} + {y:20,z:30}` resolve `Vec2`'s `impl Add`
+        // (positional field add, `z` dropped) instead of the object-literal
+        // merge builtin. The object-literal-merge builtin takes precedence for
+        // untyped object literals; a user `impl Add` applies only to its NAMED
+        // type. MERGE-HIJACK fix (operators slice).
         if let Some(existing) = self.schema_registry.type_names().find_map(|name| {
+            if !name.starts_with("__inline_obj_") {
+                return None;
+            }
             self.schema_registry.get(name).and_then(|schema| {
                 if schema.fields.len() != fields.len() {
                     return None;
@@ -1089,10 +1158,8 @@ impl TypeTracker {
             .iter()
             .map(|(name, ft)| (name.to_string(), ft.clone()))
             .collect();
-        let schema = TypeSchema::new(&type_name, field_defs);
-        let schema_id = schema.id;
-        self.schema_registry.register(schema);
-        schema_id
+        self.schema_registry
+            .register_type_scoped(type_name, field_defs)
     }
 
     /// Register a named struct schema (e.g. `Point { x, y }`)
@@ -1219,33 +1286,69 @@ impl std::fmt::Display for ProofGap {
 
 impl std::error::Error for ProofGap {}
 
-/// Prove that the given slot's content is a specific [`NativeKind`] at
-/// emission time, or surface a [`ProofGap`].
+/// Prove that a claimed [`NativeKind`] at an emission site is a faithful
+/// projection of the **proven static type** at that site, or surface a
+/// [`ProofGap`].
 ///
-/// # Phase 2 contract (current)
+/// # Real check (SB-8b / U2 — no pass-through)
 ///
-/// Phase 2 wires call sites to call this predicate. Until Phase 3, the
-/// predicate is a no-op that returns the supplied `claimed_kind` —
-/// callers can run end-to-end. Phase 3 hardens to debug-panic; Phase 5
-/// hardens to release compile-error.
+/// This is NOT a stub. The predicate projects `proven` through the single
+/// canonical, total `ConcreteType → NativeKind` map
+/// ([`native_kind_from_concrete_type`]) and requires the `claimed_kind` to
+/// EXACTLY equal that projection. A carrier that stamps a kind which does
+/// not match the proven static type is a hard surface-and-stop — the caller
+/// converts the returned `ProofGap` into a clean compile error
+/// (`E_TYPED_OPCODE_WITHOUT_PROOF`) per CLAUDE.md §Type System Rules ("if the
+/// type can't be proven, it is a compile error").
 ///
-/// # Future strict mode (Phases 3-5)
+/// There is deliberately NO relaxation:
+/// - no `int`↔`number` unification (CLAUDE.md: "int and number are separate"),
+/// - no width-narrowing,
+/// - no `Bool`-default on the unknown path (forbidden #9 per ADR-006 §2.7.7),
+/// - no `UInt64`-for-`Ptr(..)` allowance (that is exactly the SB-10 lie),
+/// - no pass-through "fallback" (that was the old theatrical stub).
 ///
-/// The body will inspect the compiler's slot-kind tracker for the
-/// declared kind at the source location and compare against
-/// `claimed_kind`. Mismatch or unknown → `ProofGap`.
+/// The only accepted relationship is exact equality of the claimed kind with
+/// the canonical projection of the proven type. `ProofGap`'s constructor is
+/// module-private (`ProofGapSeal`), so emit code cannot fabricate a pass —
+/// only this body can mint one.
 #[inline]
 pub fn prove_native_kind(
     site: &'static str,
+    proven: &ConcreteType,
     claimed_kind: NativeKind,
 ) -> Result<NativeKind, ProofGap> {
-    // Phase 2 stub: pass-through. Phase 3+ replaces with real proof check.
-    Ok(claimed_kind)
+    let expected = native_kind_from_concrete_type(proven);
+    if kinds_consistent(expected, claimed_kind) {
+        Ok(claimed_kind)
+    } else {
+        Err(proof_gap(
+            site,
+            format!(
+                "claimed {claimed_kind:?} but proven static type {proven:?} \
+                 projects to {expected:?} (no relaxation: int≠number, no \
+                 width-narrow, no Bool-default, no UInt64-for-Ptr)"
+            ),
+        ))
+    }
 }
 
-/// Construct a `ProofGap` from inside this module only. Used by the
-/// predicate (Phase 3+) when proof fails.
-#[allow(dead_code)]
+/// Exact-equality consistency check between the canonical projection of the
+/// proven static type (`expected`) and the `claimed` carrier kind.
+///
+/// This is intentionally *exact*. The whole point of SB-8b is to make carrier
+/// lies visible, so any relaxation here would re-open the silent-corruption
+/// path. `int`/`number` do not unify; `UInt64` does not stand in for any
+/// `Ptr(..)`; there is no Bool-default. The ONE allowance is `expected ==
+/// claimed`.
+#[inline]
+fn kinds_consistent(expected: NativeKind, claimed: NativeKind) -> bool {
+    expected == claimed
+}
+
+/// Construct a `ProofGap` from inside this module only. Used by
+/// [`prove_native_kind`] (the real carrier-projection check) and by
+/// [`proof_gap_unresolved_operand`] when proof fails.
 fn proof_gap(site: &'static str, detail: impl Into<String>) -> ProofGap {
     ProofGap {
         site,
@@ -1273,6 +1376,169 @@ pub fn proof_gap_unresolved_operand(site: &'static str, detail: impl Into<String
 mod tests {
     use super::*;
     use shape_runtime::type_schema::TypeSchemaBuilder;
+    use shape_value::HeapKind;
+
+    // ── SB-8b: prove_native_kind is a REAL check, not a pass-through ──────
+
+    #[test]
+    fn prove_native_kind_accepts_faithful_scalar_projection() {
+        // I64 proven type with an Int64 claim: the canonical projection
+        // matches exactly, so the gate passes.
+        assert_eq!(
+            prove_native_kind("test_scalar_ok", &ConcreteType::I64, NativeKind::Int64).unwrap(),
+            NativeKind::Int64
+        );
+        assert_eq!(
+            prove_native_kind("test_f64_ok", &ConcreteType::F64, NativeKind::Float64).unwrap(),
+            NativeKind::Float64
+        );
+        assert_eq!(
+            prove_native_kind("test_str_ok", &ConcreteType::String, NativeKind::String).unwrap(),
+            NativeKind::String
+        );
+    }
+
+    #[test]
+    fn prove_native_kind_accepts_faithful_heap_projection() {
+        // HashMap proven type with the canonical Ptr(HeapKind::HashMap) claim.
+        let map_ty =
+            ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64));
+        assert_eq!(
+            prove_native_kind("test_map_ok", &map_ty, NativeKind::Ptr(HeapKind::HashMap)).unwrap(),
+            NativeKind::Ptr(HeapKind::HashMap)
+        );
+    }
+
+    #[test]
+    fn prove_native_kind_rejects_sb10_uint64_for_hashmap() {
+        // SB-10: a HashMap alloc stamped UInt64 (no refcount) is the lie.
+        // The real gate refuses it — silent corruption becomes a ProofGap.
+        let map_ty =
+            ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64));
+        let err = prove_native_kind("test_sb10", &map_ty, NativeKind::UInt64)
+            .expect_err("UInt64 claim on a HashMap proven type must be refused");
+        assert_eq!(err.site(), "test_sb10");
+        assert!(err.detail().contains("UInt64"));
+        assert!(err.detail().contains("HashMap"));
+    }
+
+    #[test]
+    fn prove_native_kind_rejects_sb12_bool_for_null() {
+        // SB-12: a None-arm stamped (0, Bool) instead of Null. A Bool claim
+        // against an Option proven type (which projects to a heap Ptr, never
+        // Bool) is refused — the (0,Bool)⇔false sentinel collision is gone.
+        let opt_ty = ConcreteType::Option(Box::new(ConcreteType::I64));
+        prove_native_kind("test_sb12", &opt_ty, NativeKind::Bool)
+            .expect_err("Bool claim on an Option proven type must be refused");
+    }
+
+    #[test]
+    fn prove_native_kind_rejects_old_jit_option_result_carriers() {
+        let opt_ty = ConcreteType::Option(Box::new(ConcreteType::I64));
+        let res_ty =
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String));
+
+        assert_eq!(
+            prove_native_kind(
+                "test_option_typed_object",
+                &opt_ty,
+                NativeKind::Ptr(HeapKind::TypedObject)
+            )
+            .unwrap(),
+            NativeKind::Ptr(HeapKind::TypedObject)
+        );
+        assert_eq!(
+            prove_native_kind(
+                "test_result_typed_object",
+                &res_ty,
+                NativeKind::Ptr(HeapKind::TypedObject)
+            )
+            .unwrap(),
+            NativeKind::Ptr(HeapKind::TypedObject)
+        );
+
+        prove_native_kind(
+            "test_old_option_heapkind",
+            &opt_ty,
+            NativeKind::Ptr(HeapKind::Option),
+        )
+        .expect_err("old JIT Option carrier must not pass the shared projection");
+        prove_native_kind(
+            "test_old_result_heapkind",
+            &res_ty,
+            NativeKind::Ptr(HeapKind::Result),
+        )
+        .expect_err("old JIT Result carrier must not pass the shared projection");
+    }
+
+    #[test]
+    fn frame_descriptor_default_return_wrapper_is_unknown() {
+        let fd = FrameDescriptor::new();
+        assert_eq!(fd.return_kind, None);
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Unknown);
+        assert_eq!(fd.abi_return_kind(), None);
+    }
+
+    #[test]
+    fn frame_descriptor_legacy_result_kind_implies_wrapper_only() {
+        let mut fd = FrameDescriptor::new();
+        fd.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
+
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Result);
+        assert_eq!(
+            fd.abi_return_kind(),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+    }
+
+    #[test]
+    fn frame_descriptor_explicit_wrapper_keeps_abi_kind_authoritative() {
+        let mut fd = FrameDescriptor::new();
+        fd.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
+        fd.return_wrapper = FrameReturnWrapper::Option;
+
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Option);
+        assert_eq!(
+            fd.abi_return_kind(),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+    }
+
+    #[test]
+    fn frame_descriptor_deserializes_old_shape_with_unknown_wrapper() {
+        let json = r#"{"slots":[],"return_kind":{"Ptr":"Result"}}"#;
+        let fd: FrameDescriptor =
+            serde_json::from_str(json).expect("old descriptor should deserialize");
+
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Result);
+        assert_eq!(
+            fd.abi_return_kind(),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+    }
+
+    #[test]
+    fn prove_native_kind_does_not_unify_int_and_number() {
+        // CLAUDE.md: int and number are separate. A Float64 claim on a proven
+        // I64 (and vice versa) is a hard reject — no implicit numeric coercion.
+        prove_native_kind("test_int_num", &ConcreteType::I64, NativeKind::Float64)
+            .expect_err("Float64 claim on a proven I64 must be refused (int≠number)");
+        prove_native_kind("test_num_int", &ConcreteType::F64, NativeKind::Int64)
+            .expect_err("Int64 claim on a proven F64 must be refused (number≠int)");
+    }
+
+    #[test]
+    fn prove_native_kind_rejects_width_narrowing() {
+        prove_native_kind("test_i32_not_i64", &ConcreteType::I32, NativeKind::Int64)
+            .expect_err("I32 proven type must not pass against an Int64 producer");
+        prove_native_kind("test_u8_not_i64", &ConcreteType::U8, NativeKind::Int64)
+            .expect_err("U8 proven type must not pass against an Int64 producer");
+        prove_native_kind("test_i64_not_i32", &ConcreteType::I64, NativeKind::Int32)
+            .expect_err("I64 proven type must not pass against an Int32 producer");
+    }
 
     #[test]
     fn test_basic_type_tracking() {
@@ -1391,16 +1657,23 @@ mod tests {
     }
 
     #[test]
-    fn test_function_return_types() {
+    fn test_function_return_concrete_types() {
         let mut tracker = TypeTracker::empty();
 
-        tracker.register_function_return_type("get_point", "Point");
+        tracker.register_function_return_concrete_type(
+            "get_count",
+            shape_value::v2::ConcreteType::I64,
+        );
 
         assert_eq!(
-            tracker.get_function_return_type("get_point"),
-            Some(&"Point".to_string())
+            tracker.get_function_return_concrete_type("get_count"),
+            Some(&shape_value::v2::ConcreteType::I64)
         );
-        assert!(tracker.get_function_return_type("unknown").is_none());
+        assert!(
+            tracker
+                .get_function_return_concrete_type("unknown")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1494,10 +1767,7 @@ mod tests {
 
         // Unknown types — analysis-tier "not yet proven" is `None`
         // per ADR-006 §2.7.5.1 (no `NativeKind::Unknown` sentinel).
-        assert_eq!(
-            VariableTypeInfo::infer_storage_hint("SomeCustomType"),
-            None
-        );
+        assert_eq!(VariableTypeInfo::infer_storage_hint("SomeCustomType"), None);
     }
 
     #[test]
@@ -1537,30 +1807,6 @@ mod tests {
     }
 
     #[test]
-    fn test_concrete_numeric_type_inference() {
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("int"),
-            Some("i64".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("i16"),
-            Some("i16".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("byte"),
-            Some("u8".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("Option<f32>"),
-            Some("f32".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("SomeCustomType"),
-            None
-        );
-    }
-
-    #[test]
     fn test_native_kind_from_storage_type() {
         assert_eq!(
             native_kind_from_storage_type(&StorageType::Float64),
@@ -1571,10 +1817,7 @@ mod tests {
             Some(NativeKind::NullableFloat64)
         );
         // Bulldozer deleted the Unknown sink — complex types now return None.
-        assert_eq!(
-            native_kind_from_storage_type(&StorageType::Dynamic),
-            None
-        );
+        assert_eq!(native_kind_from_storage_type(&StorageType::Dynamic), None);
     }
 
     #[test]

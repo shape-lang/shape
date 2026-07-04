@@ -2,7 +2,7 @@
 
 use crate::bytecode::{Instruction, OpCode};
 use crate::type_tracking::NumericType;
-use shape_ast::ast::{BinaryOp, TypeAnnotation};
+use shape_ast::ast::{BinaryOp, Expr, TypeAnnotation};
 use shape_runtime::type_system::{BuiltinTypes, Type};
 
 use super::super::BytecodeCompiler;
@@ -32,11 +32,7 @@ pub(super) fn is_strict_arithmetic(op: &BinaryOp) -> bool {
 pub(super) fn is_strict_bitwise(op: &BinaryOp) -> bool {
     matches!(
         op,
-        BinaryOp::BitAnd
-            | BinaryOp::BitOr
-            | BinaryOp::BitXor
-            | BinaryOp::BitShl
-            | BinaryOp::BitShr
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::BitShl | BinaryOp::BitShr
     )
 }
 
@@ -78,6 +74,31 @@ pub(super) fn is_function_type(ty: &Type) -> bool {
     matches!(ty, Type::Function { .. })
 }
 
+/// U4-4: a numeric LITERAL's `NumericType`, read directly from its AST node.
+/// A literal's kind is statically known with no inference; this is the kind the
+/// deleted `last_expr_numeric_type` register stamped at `compile_expr_literal`
+/// time. Used by `numeric_type_of` as the first derivation step so a literal in
+/// a body the engine span-table did not walk (extend-method bodies,
+/// comprehension element exprs) still types its operand.
+///
+/// A bare `Int` literal returns `Int` (its context-free kind); the binop arm's
+/// sibling-adoption / coercion logic still promotes it to `number` when its
+/// partner proves float — exactly as it did when the register seeded `Int`.
+pub(super) fn literal_numeric_type(expr: &shape_ast::ast::Expr) -> Option<NumericType> {
+    use shape_ast::ast::Literal;
+    let Expr::Literal(lit, _) = expr else {
+        return None;
+    };
+    match lit {
+        Literal::Int(_) => Some(NumericType::Int),
+        Literal::UInt(_) => Some(NumericType::IntWidth(shape_ast::IntWidth::U64)),
+        Literal::TypedInt(_, w) => Some(NumericType::IntWidth(*w)),
+        Literal::Number(_) => Some(NumericType::Number),
+        Literal::Decimal(_) => Some(NumericType::Decimal),
+        _ => None,
+    }
+}
+
 /// Map an inferred Type to a NumericType for typed opcode emission.
 pub(super) fn inferred_type_to_numeric(ty: &Type) -> Option<NumericType> {
     let name = match ty {
@@ -106,6 +127,15 @@ pub(super) fn inferred_type_to_numeric(ty: &Type) -> Option<NumericType> {
 pub(super) fn type_display_name(ty: &Type) -> String {
     match ty {
         Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+        // A named-type reference (`Money`, `foo::MyType`) — e.g. the inferred
+        // type of an inline struct literal `Money { .. }`. Must render the bare
+        // type NAME, not the `Debug` repr: this string is fed to
+        // `type_implements_trait` for operator-trait dispatch
+        // (`binary_ops.rs` Sub/Mul early gate). Without this arm a struct
+        // literal as the LEFT operand of `-`/`*` fell into the `Debug` arm
+        // below, so the trait lookup keyed on `Concrete(Reference(TypePath...))`
+        // missed the registered `impl Sub for Money` and rejected the op.
+        Type::Concrete(TypeAnnotation::Reference(path)) => path.as_str().to_string(),
         Type::Concrete(TypeAnnotation::Object(fields)) => {
             let field_strs: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
             format!("{{{}}}", field_strs.join(", "))
@@ -114,6 +144,17 @@ pub(super) fn type_display_name(ty: &Type) -> String {
             format!("{}[]", type_display_name(&Type::Concrete(*inner.clone())))
         }
         Type::Concrete(TypeAnnotation::Generic { name, .. }) => name.to_string(),
+        // U1: the canonical parametric carrier is `Type::Generic { base:
+        // Reference(name), args }` (e.g. the canonical `Array<T>`). Render the
+        // bare base NAME so downstream string checks (`is_arrayish` Some("Array"),
+        // operator-trait dispatch) see the same name they got from the legacy
+        // `Concrete(Generic{name})` / `Concrete(Array)` spellings instead of the
+        // `Debug` repr.
+        Type::Generic { base, .. } => match base.as_ref() {
+            Type::Concrete(TypeAnnotation::Reference(path)) => path.as_str().to_string(),
+            Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+            _ => format!("{:?}", ty),
+        },
         Type::Variable(v) => format!("?T{}", v.0),
         _ => format!("{:?}", ty),
     }

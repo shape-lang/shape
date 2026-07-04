@@ -109,7 +109,11 @@ struct Xorshift64 {
 impl Xorshift64 {
     fn new(seed: u64) -> Self {
         // Guard against the all-zero state which xorshift cannot escape.
-        let state = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        let state = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        };
         Self { state }
     }
 
@@ -123,7 +127,11 @@ impl Xorshift64 {
     }
 
     fn next_in_range(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next_u64() as usize) % n }
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() as usize) % n
+        }
     }
 }
 
@@ -173,10 +181,7 @@ pub fn mutate_seed_to_dir(
 ) -> io::Result<Vec<PathBuf>> {
     let source = fs::read_to_string(base)?;
     fs::create_dir_all(out_dir)?;
-    let stem = base
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("seed");
+    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("seed");
 
     let derived = mutate_seed(&source, cfg);
     let mut paths = Vec::with_capacity(derived.len());
@@ -246,7 +251,13 @@ fn find_integer_literal_spans(source: &str) -> Vec<(usize, usize)> {
         // already matched the 0 only — skip this run), or alpha/_ (identifier).
         if end < bytes.len() {
             let b = bytes[end];
-            if b == b'.' || b == b'b' || b == b'x' || b == b'o' || b.is_ascii_alphabetic() || b == b'_' {
+            if b == b'.'
+                || b == b'b'
+                || b == b'x'
+                || b == b'o'
+                || b.is_ascii_alphabetic()
+                || b == b'_'
+            {
                 continue;
             }
         }
@@ -257,11 +268,7 @@ fn find_integer_literal_spans(source: &str) -> Vec<(usize, usize)> {
 
 // ---- Strategy 2: CollectionSizeShift ---------------------------------------
 
-const COLLECTION_REPLACEMENTS: &[&str] = &[
-    "[]",
-    "[1]",
-    "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]",
-];
+const COLLECTION_REPLACEMENTS: &[&str] = &["[]", "[1]", "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]"];
 
 fn apply_collection_size_shift(source: &str, prng: &mut Xorshift64) -> Option<String> {
     let spans = find_array_literal_spans(source);
@@ -291,7 +298,10 @@ fn find_array_literal_spans(source: &str) -> Vec<(usize, usize)> {
             continue;
         }
         let prev = if i == 0 { b' ' } else { bytes[i - 1] };
-        let is_array_literal = matches!(prev, b'=' | b'(' | b',' | b' ' | b'\n' | b'\t' | b'>' | b'{');
+        let is_array_literal = matches!(
+            prev,
+            b'=' | b'(' | b',' | b' ' | b'\n' | b'\t' | b'>' | b'{'
+        );
         if !is_array_literal {
             i += 1;
             continue;
@@ -325,10 +335,14 @@ const CMP_OPS: &[&str] = &["<", "<=", ">", ">=", "==", "!="];
 fn apply_operator_swap(source: &str, prng: &mut Xorshift64) -> Option<String> {
     let mut candidates: Vec<(usize, usize, &'static [&'static str])> = Vec::new();
     candidates.extend(
-        find_operator_spans(source, ARITH_OPS).into_iter().map(|(s, e)| (s, e, ARITH_OPS)),
+        find_operator_spans(source, ARITH_OPS)
+            .into_iter()
+            .map(|(s, e)| (s, e, ARITH_OPS)),
     );
     candidates.extend(
-        find_operator_spans(source, CMP_OPS).into_iter().map(|(s, e)| (s, e, CMP_OPS)),
+        find_operator_spans(source, CMP_OPS)
+            .into_iter()
+            .map(|(s, e)| (s, e, CMP_OPS)),
     );
     if candidates.is_empty() {
         return None;
@@ -439,8 +453,8 @@ fn apply_tier_up_wrap(source: &str, prng: &mut Xorshift64) -> Option<String> {
     // / `extend` / `extern` / `async fn` declarations — wrapping declarations
     // in a for-loop is illegal Shape.
     let head_keywords = [
-        "fn ", "enum ", "type ", "trait ", "impl ", "extend ", "extern ",
-        "async ", "var ", "use ", "import ", "mod ", "pub ",
+        "fn ", "enum ", "type ", "trait ", "impl ", "extend ", "extern ", "async ", "var ", "use ",
+        "import ", "mod ", "pub ",
     ];
     for line in source.lines() {
         let trimmed = line.trim_start();
@@ -456,7 +470,13 @@ fn apply_tier_up_wrap(source: &str, prng: &mut Xorshift64) -> Option<String> {
     // indentation but it makes the derived source readable in triage.
     let indented = source
         .lines()
-        .map(|l| if l.is_empty() { String::new() } else { format!("  {l}") })
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("  {l}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!("for _ in 0..{n} {{\n{indented}\n}}\n"))
@@ -467,7 +487,10 @@ mod tests {
     use super::*;
 
     fn cfg(seed: u64, max: usize) -> MutationConfig {
-        MutationConfig { max_mutations: max, prng_seed: seed }
+        MutationConfig {
+            max_mutations: max,
+            prng_seed: seed,
+        }
     }
 
     #[test]
@@ -515,7 +538,10 @@ mod tests {
         let src = "print(2 + 3)\n";
         let c = cfg(1, 5);
         let derived = mutate_seed(src, &c);
-        assert!(!derived.is_empty(), "should produce at least one derived seed");
+        assert!(
+            !derived.is_empty(),
+            "should produce at least one derived seed"
+        );
         for d in &derived {
             assert_ne!(d.source, src);
         }
@@ -552,13 +578,20 @@ mod tests {
         // so TierUpWrap declines.
         let src = "fn main() {}\n";
         let derived = mutate_seed(src, &cfg(42, 5));
-        assert!(derived.is_empty(), "got unexpected mutations: {:?}", derived);
+        assert!(
+            derived.is_empty(),
+            "got unexpected mutations: {:?}",
+            derived
+        );
     }
 
     #[test]
     fn operator_swap_swaps_arith_only_when_flanked_by_whitespace() {
         let src = "print(2 + 3)\n";
-        let c = MutationConfig { max_mutations: 20, prng_seed: 7 };
+        let c = MutationConfig {
+            max_mutations: 20,
+            prng_seed: 7,
+        };
         let derived = mutate_seed(src, &c);
         // At least one mutation should be an operator swap; verify by finding
         // a derived form whose `+` is replaced by `-`/`*`/`/`.
@@ -571,7 +604,10 @@ mod tests {
     #[test]
     fn capture_mutation_underscore_prefixes_a_closure_param() {
         let src = "let v: Vec<int> = [1,2,3]\nprint(v.map(|x| x * 2).sum())\n";
-        let c = MutationConfig { max_mutations: 20, prng_seed: 11 };
+        let c = MutationConfig {
+            max_mutations: 20,
+            prng_seed: 11,
+        };
         let derived = mutate_seed(src, &c);
         let any_capture = derived.iter().any(|d| d.source.contains("|_x|"));
         assert!(any_capture, "no CaptureMutation fired: {:?}", derived);
@@ -590,18 +626,30 @@ mod tests {
         let src = "let x = 5\nprint(x)\n";
         let mut prng = Xorshift64::new(0);
         let out = apply_tier_up_wrap(src, &mut prng).expect("should wrap");
-        assert!(out.starts_with("for _ in 0..") || out.starts_with("for _ in 0.."), "{out}");
-        assert!(out.contains("  let x = 5"), "body should be indented; got: {out}");
+        assert!(
+            out.starts_with("for _ in 0..") || out.starts_with("for _ in 0.."),
+            "{out}"
+        );
+        assert!(
+            out.contains("  let x = 5"),
+            "body should be indented; got: {out}"
+        );
         assert!(out.contains("  print(x)"));
     }
 
     #[test]
     fn collection_size_shift_replaces_one_array_literal() {
         let src = "let v: Vec<int> = [1, 2, 3, 4, 5]\nprint(v.len())\n";
-        let c = MutationConfig { max_mutations: 20, prng_seed: 3 };
+        let c = MutationConfig {
+            max_mutations: 20,
+            prng_seed: 3,
+        };
         let derived = mutate_seed(src, &c);
         let any_size = derived.iter().any(|d| {
-            d.source.contains("= []") || d.source.contains("= [1]") || d.source.contains("[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]")
+            d.source.contains("= []")
+                || d.source.contains("= [1]")
+                || d.source
+                    .contains("[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]")
         });
         assert!(any_size, "no CollectionSizeShift fired: {:?}", derived);
     }

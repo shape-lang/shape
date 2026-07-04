@@ -233,6 +233,8 @@ impl JITCompiler {
             v2_array_new_decimal: r!("jit_new_typed_array_decimal"),
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             v2_array_new_typed_object: r!("jit_new_typed_array_typed_object"),
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            v2_array_new_trait_object: r!("jit_new_typed_array_trait_object"),
 
             // v2 typed-array push (generic dispatcher — see ffi_refs.rs)
             v2_array_push: r!("jit_v2_array_push"),
@@ -286,22 +288,12 @@ impl JITCompiler {
             exp_f64: r!("jit_exp_f64"),
             ln_f64: r!("jit_ln_f64"),
 
-            // ADR-006 §2.7.5 — kinded EnumStore producers
-            // (W12-jit-aggregate-non-array, 2026-05-12). Dispatched from
-            // the EnumStore consumer based on the MIR statement's
-            // `variant_name` field.
-            make_ok: r!("jit_make_ok"),
-            make_err: r!("jit_make_err"),
-            make_some: r!("jit_make_some"),
-
-            // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers +
-            // accessors (W12-jit-result-option-trinity, Phase 3 cluster-0
-            // Round 7A, 2026-05-12). These are the trinity's strict-typed
-            // EnumStore producers + match-codegen consumers — the legacy
-            // `make_ok` / `make_err` / `make_some` NaN-box family is NOT
-            // referenced by the new trinity codegen path (those FuncRefs
-            // remain for the JIT↔VM trampoline conversion in
-            // ffi/conversion.rs only).
+            // W88A: Result/Option producer refs remain as fail-closed
+            // backstops only; MIR EnumStore deopts before emitting them until
+            // a schema-backed `__Result` / `__Option` TypedObject ABI exists.
+            // The match-codegen consumers below still read legacy carriers
+            // for compatibility. The legacy `make_ok` / `make_err` /
+            // `make_some` NaN-box family is not imported into `FFIFuncRefs`.
             v2_make_result_ok: r!("jit_v2_make_result_ok"),
             v2_make_result_err: r!("jit_v2_make_result_err"),
             v2_make_option_some: r!("jit_v2_make_option_some"),
@@ -380,7 +372,6 @@ impl JITCompiler {
             // `release_func_for_place` Closure arm.
             arc_closure_retain: r!("jit_arc_closure_retain"),
             arc_closure_release: r!("jit_arc_closure_release"),
-
             // v2 typed HashMap<string, ...>
             //
             // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion):

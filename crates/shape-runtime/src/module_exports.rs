@@ -397,9 +397,7 @@ impl ModuleExports {
     /// Mutable access to the typed-return registry. Used by
     /// [`crate::typed_module_exports::register_typed_function`] to record
     /// the typed-body entry.
-    pub fn typed_exports_mut(
-        &mut self,
-    ) -> &mut crate::typed_module_exports::TypedModuleExports {
+    pub fn typed_exports_mut(&mut self) -> &mut crate::typed_module_exports::TypedModuleExports {
         &mut self.typed_exports
     }
 

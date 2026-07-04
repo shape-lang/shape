@@ -48,7 +48,7 @@ fn trait_definition_shows_lens() {
     // TDD: trait code lens (implementations count) may not be implemented
     let code = "\
 trait Renderable {
-    render(): string
+    method render() -> string
 }
 impl Renderable for Widget {
     method render() { \"widget\" }

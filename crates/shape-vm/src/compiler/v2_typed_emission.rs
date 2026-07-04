@@ -13,10 +13,10 @@
 //! - `i32`
 //! - `bool`
 //!
-//! Anything else (heap types like `string`, structs, arrays of arrays, sized
-//! ints we don't yet have opcodes for, etc.) returns `None`. The compiler is
-//! expected to fail soft and emit the legacy NaN-boxed `NewArray` opcode for
-//! those cases — Phase 3.1 is intentionally narrow on the typed-fast-path.
+//! Anything else returns `None`. Under the strict-typing policy, callers must
+//! either route to a statically specified carrier or surface a compile-time
+//! diagnostic; `None` is not permission to resurrect a dynamic `NewArray`
+//! fallback.
 //!
 //! As more typed array opcodes land (`u8`, `i16`, etc.) this helper will grow
 //! more `Some(...)` arms; callers don't need to change.
@@ -24,6 +24,14 @@
 use shape_value::v2::ConcreteType;
 
 use crate::bytecode::OpCode;
+
+#[derive(Debug, Clone, Copy)]
+enum EmptyArrayAccumulatorAccess {
+    Binding(super::EmptyArrayAccumulatorKey),
+    SharedCapture(u16),
+    OwnedMutableCapture(u16),
+    LegacyCapture(u16),
+}
 
 /// The kind of typed array the compiler should emit for a known element type.
 ///
@@ -98,6 +106,34 @@ pub enum TypedArrayKind {
     /// `*mut Self` with `HeapHeader` + `:4058` `unsafe impl HeapElement for
     /// TypedObjectStorage`).
     TypedObject,
+    /// `TypedArray<*const TraitObjectStorage>` — backing for `Array<dyn Trait>`
+    /// (Phase 4b W16.2-B op_new_array-trait-object-element, 2026-06-05). Per
+    /// ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.C (TraitObject
+    /// re-introduction, all-traits-dyn-able), the v2-raw TraitObject element
+    /// carrier. Element-read pushes `NativeKind::Ptr(HeapKind::TraitObject)`
+    /// (the kind `DynMethodCall` dispatches on for vtable method calls).
+    /// Distinct from `TypedObject`: each element literal is BOXED via
+    /// `OpCode::BoxTraitObject` (with the trait-name operand) at the producer
+    /// site before push, converting the concrete `Ptr(HeapKind::TypedObject)`
+    /// struct value to a fat-pointer `Ptr(HeapKind::TraitObject)`. The
+    /// `HeapElement` impl + `_new`/`_drop` allocators are RESOLVED at HEAD
+    /// (heap_value.rs:2948 `_new` / :3092 `impl HeapElement`).
+    TraitObject,
+    /// `TypedArray<*const TypedArrayElem>` — backing for a NESTED array
+    /// (`[[1,2],[3,4]]`, Construction strict-typing close, USER RULING
+    /// 2026-06-05). Each element is itself a v2-raw `*mut TypedArray<U>`
+    /// viewed through its HeapHeader. Element carrier kind is
+    /// `NativeKind::Ptr(HeapKind::TypedArray)`; per-element release dispatches
+    /// through the kind-erased `release_v2_typed_array`. Producer-side proof:
+    /// the element is an `Expr::Array` literal (structurally an inner typed
+    /// array) per ADR-006 §2.7.5.
+    TypedArray,
+    /// `TypedArray<CallableArrayElem>` — backing for compile-time-proven
+    /// `Array<Function<...>>`. The element descriptor stores the exact callable
+    /// carrier shape (`Ptr(Closure)`, `UInt64` function id, or
+    /// `Ptr(ModuleFn)`) so reads can call through existing `CallValue`
+    /// dispatch without probing runtime bits.
+    Callable,
 }
 
 impl TypedArrayKind {
@@ -121,6 +157,11 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::NewTypedArrayDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::NewTypedArrayTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::NewTypedArrayTraitObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::NewTypedArrayNested,
+            TypedArrayKind::Callable => OpCode::NewTypedArrayCallable,
         }
     }
 
@@ -144,6 +185,11 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArrayGetDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArrayGetTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::TypedArrayGetTraitObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::TypedArrayGetNested,
+            TypedArrayKind::Callable => OpCode::TypedArrayGetCallable,
         }
     }
 
@@ -167,6 +213,11 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArrayPushDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArrayPushTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::TypedArrayPushTraitObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::TypedArrayPushNested,
+            TypedArrayKind::Callable => OpCode::TypedArrayPushCallable,
         }
     }
 
@@ -190,6 +241,11 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArraySetDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArraySetTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::TypedArraySetTraitObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::TypedArraySetNested,
+            TypedArrayKind::Callable => OpCode::TypedArraySetCallable,
         }
     }
 }
@@ -197,10 +253,10 @@ impl TypedArrayKind {
 /// Map a `ConcreteType` element type to a `TypedArrayKind`, if a typed-array
 /// fast path exists for that element type.
 ///
-/// Returns `None` for element types that have no typed array opcode yet
-/// (heap types like `string`/`struct`/nested arrays, sized integer widths
-/// like `i8`/`u16`/etc.). Callers must fall back to the legacy NaN-boxed
-/// `NewArray` opcode in that case.
+/// Returns `None` for element types that have no direct scalar/heap typed-array
+/// opcode in this mapper. Strict callers must either prove a separate
+/// structural carrier (for example the nested-array literal path) or reject at
+/// compile time; this is not a runtime fallback signal.
 ///
 /// **Important**: this function is the *single source of truth* for the
 /// "do we have a typed-array opcode for this element type?"
@@ -253,6 +309,20 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         // HeapKind dispatch (clone_with_kind / drop_with_kind / ...) handles
         // the carrier uniformly without per-instantiation discriminator.
         ConcreteType::Struct(_) => Some(TypedArrayKind::TypedObject),
+        // STAGE C2 (2026-06-17): enum-element arrays reuse the W16.2-A
+        // TypedObject carrier. Enum values are TypedObjects at runtime
+        // (`compile_expr_enum_constructor` emits `NewTypedObject` carrying
+        // `NativeKind::Ptr(HeapKind::TypedObject)` for unit / tuple-payload /
+        // struct-payload variants alike), so an enum element's slot-bits kind
+        // is identical to a struct's. The 4-table HeapKind dispatch handles the
+        // carrier uniformly; no new HeapKind / ELEM_TYPE discriminant. This arm
+        // is what lets the `Vec.filter` body's `result.push(item)` accumulator
+        // resolve its element kind when `item: SomeEnum` (the R3-subcase shape
+        // for enum-element arrays). Per ADR-006 §2.7.5 the producer-side proof
+        // is `ConcreteType::Enum`; the enum-vs-struct distinction is irrelevant
+        // to the runtime carrier.
+        ConcreteType::Enum(_) => Some(TypedArrayKind::TypedObject),
+        ConcreteType::Closure(_) | ConcreteType::Function(_) => Some(TypedArrayKind::Callable),
         _ => None,
     }
 }
@@ -263,17 +333,14 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
 /// Mirror of [`should_use_typed_array`]: every variant produced by that
 /// function round-trips back to its source `ConcreteType` here.
 ///
-/// LANG-9 fix (Phase 4b round 2, 2026-05-18): inline array literals
-/// (`[1,2,3].map(...)`) failed to monomorphize the method call because
-/// `concrete_type_for_expr(Expr::Array)` reads
-/// `compiler.array_element_types[span]`, which `compile_expr_array` did
-/// not populate at typed-literal lowering time. Per ADR-006 §2.7.5
-/// stamp-at-compile-time, the literal's chosen `TypedArrayKind` IS the
-/// proof of element-type at construction time; this helper lets the
-/// producer record that proof in the side-table so subsequent
-/// `Expr::MethodCall` monomorphization on the inline receiver succeeds
-/// — same code path the bound form (`let xs = [1,2,3]; xs.map(...)`)
-/// reaches via the `identifier_concrete_type` side-table arm.
+/// LANG-9 (Phase 4b round 2, 2026-05-18): inline array literals
+/// (`[1,2,3].map(...)`) monomorphize the method call via
+/// `concrete_type_for_expr(Expr::Array)`. U4-6a (2026-06-24) deleted the
+/// per-span `array_element_types` cache this helper used to feed; the element
+/// `ConcreteType` is now derived STRUCTURALLY by `concrete_type_for_expr`'s
+/// element recursion. Per ADR-006 §2.7.5 stamp-at-compile-time, the literal's
+/// chosen `TypedArrayKind` IS the proof of element-type at construction time —
+/// this helper round-trips that proof for the scalar/primitive kinds.
 #[inline]
 pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType {
     match kind {
@@ -295,16 +362,41 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // every typed-object struct schema collapses to the same TypedArrayKind
         // (the slot-bits kind is uniformly `Ptr(HeapKind::TypedObject)`), so
         // the kind→ConcreteType round-trip cannot recover the specific
-        // StructLayoutId without an additional side-table lookup. This mirrors
+        // StructLayoutId without an additional structural lookup. This mirrors
         // the `helpers.rs:719` shape `ConcreteType::placeholder_struct(StructLayoutId(0))`
         // used by `StatementKind::ObjectStore` slot-stamping. Downstream
-        // consumers that need the precise schema must read from the bytecode
-        // compiler's `array_element_types[span]` side-table populated at the
-        // literal site (which records the resolved struct schema, NOT this
-        // round-trip placeholder).
-        TypedArrayKind::TypedObject => ConcreteType::placeholder_struct(
-            shape_value::v2::concrete_type::StructLayoutId(0),
-        ),
+        // consumers that need the precise schema recover it STRUCTURALLY via
+        // `concrete_type_for_expr` over the literal's named-struct elements
+        // (U4-6a: the former `array_element_types[span]` cache is deleted).
+        TypedArrayKind::TypedObject => {
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
+        }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        // ConcreteType has no `dyn Trait` variant; the kind→ConcreteType
+        // round-trip cannot recover the trait identity (every `Array<dyn T>`
+        // collapses to the same TraitObject carrier, slot-bits kind uniformly
+        // `Ptr(HeapKind::TraitObject)`). Return a placeholder_struct mirroring
+        // the TypedObject arm; the precise trait identity is recovered
+        // structurally by `concrete_type_for_expr` over the literal's elements
+        // (U4-6a: the former `array_element_types` cache is deleted).
+        TypedArrayKind::TraitObject => {
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
+        }
+        // Construction strict-typing close (2026-06-05) — nested array. The
+        // kind→ConcreteType round-trip cannot recover the inner element type
+        // (every nested-array monomorphization collapses to this one kind, the
+        // carrier kind being uniformly `Ptr(HeapKind::TypedArray)`). Return a
+        // `Array<Array<?>>` placeholder mirroring the TypedObject placeholder
+        // shape; downstream consumers that need the precise inner element type
+        // recover it structurally via `concrete_type_for_expr` over the
+        // literal's inner-array elements (U4-6a: the former
+        // `array_element_types[span]` cache is deleted).
+        TypedArrayKind::TypedArray => ConcreteType::Array(Box::new(ConcreteType::Array(Box::new(
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0)),
+        )))),
+        TypedArrayKind::Callable => {
+            ConcreteType::Function(shape_value::v2::concrete_type::FunctionTypeId(0))
+        }
     }
 }
 
@@ -316,11 +408,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
 /// `NativeKind`, so `compile_expr_array` calls this variant to look up a
 /// typed array kind directly.
 ///
-/// The mapping mirrors [`should_use_typed_array`]: only the four element
-/// types backed by typed array opcodes today (`Float64`/`Int64`/`Int32`/
-/// `Bool`) return `Some`. Anything else (`String`, sized ints other than
-/// i32/i64, nullable variants, `Dynamic`/`Unknown`) falls back to the
-/// legacy NaN-boxed `NewArray` path.
+/// The mapping mirrors [`should_use_typed_array`]. A `None` result means this
+/// slot kind has no typed-array carrier in this mapper; callers must use an
+/// explicit static policy, not a dynamic array fallback.
 #[inline]
 pub fn should_use_typed_array_from_slot_kind(
     slot: crate::type_tracking::NativeKind,
@@ -386,35 +476,7 @@ pub fn should_use_typed_array_from_slot_kind(
         // statically proven at the producer site, never decoded from runtime
         // bits.
         NativeKind::Ptr(shape_value::HeapKind::TypedObject) => Some(TypedArrayKind::TypedObject),
-        _ => None,
-    }
-}
-
-/// Map a tracked type name like `"Vec<int>"` / `"Array<number>"` to a [`TypedArrayKind`].
-#[inline]
-#[allow(dead_code)]
-pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind> {
-    let trimmed = type_name.trim();
-    let inner = trimmed
-        .strip_prefix("Vec<")
-        .or_else(|| trimmed.strip_prefix("Array<"))?
-        .strip_suffix('>')?;
-    match inner.trim() {
-        "number" | "f64" => Some(TypedArrayKind::F64),
-        "int" | "i64" => Some(TypedArrayKind::I64),
-        "i32" => Some(TypedArrayKind::I32),
-        "bool" => Some(TypedArrayKind::Bool),
-        // W12 S1 (2026-05-13) — sized integer monomorphizations.
-        "i8" => Some(TypedArrayKind::I8),
-        "u8" => Some(TypedArrayKind::U8),
-        "i16" => Some(TypedArrayKind::I16),
-        "u16" => Some(TypedArrayKind::U16),
-        "u32" => Some(TypedArrayKind::U32),
-        // "u64" intentionally falls through — `Array<u64>` migration
-        // deferred to S1.5 per the supervisor's S1 reopen.
-        // Wave 2 Agent A1 (2026-05-14) — F32 + Char.
-        "f32" => Some(TypedArrayKind::F32),
-        "char" => Some(TypedArrayKind::Char),
+        NativeKind::Ptr(shape_value::HeapKind::Closure) => Some(TypedArrayKind::Callable),
         _ => None,
     }
 }
@@ -444,6 +506,10 @@ pub fn vec_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str 
         TypedArrayKind::String => "Vec<string>",
         TypedArrayKind::Decimal => "Vec<decimal>",
         TypedArrayKind::TypedObject => "Vec<object>",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        TypedArrayKind::TraitObject => "Vec<dyn>",
+        TypedArrayKind::TypedArray => "Vec<array>",
+        TypedArrayKind::Callable => "Vec<function>",
     }
 }
 
@@ -468,6 +534,10 @@ pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'sta
         TypedArrayKind::String => "string",
         TypedArrayKind::Decimal => "decimal",
         TypedArrayKind::TypedObject => "object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        TypedArrayKind::TraitObject => "dyn",
+        TypedArrayKind::TypedArray => "array",
+        TypedArrayKind::Callable => "function",
     }
 }
 
@@ -482,9 +552,7 @@ pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'sta
 /// proven at the producer site (the compiled element expression) — never
 /// decoded from runtime bits, never Bool-defaulted.
 #[inline]
-pub fn typed_array_kind_from_numeric_type(
-    nt: crate::type_tracking::NumericType,
-) -> TypedArrayKind {
+pub fn typed_array_kind_from_numeric_type(nt: crate::type_tracking::NumericType) -> TypedArrayKind {
     use crate::type_tracking::NumericType;
     use shape_ast::IntWidth;
     match nt {
@@ -527,8 +595,37 @@ impl super::BytecodeCompiler {
     /// return a struct (`type AABB { ... }` + `fn aabb(...) -> AABB`), so
     /// the literal's element kind is proven at compile time without runtime
     /// inference. NO fabrication, NO Bool-default.
-    pub(crate) fn array_elements_all_typed_object(
+    /// U4-5b: the `ConcreteType` a free-function call returns, resolved
+    /// STRUCTURALLY. Prefers the declared `-> T` annotation resolved
+    /// SCHEMA-AWARELY (`declared_annotation_concrete_type` — struct/enum names
+    /// resolve to `ConcreteType::Struct`/`Enum` because the struct registry is
+    /// fully populated by bytecode-emission time, even though the function was
+    /// registered before its struct schema). Falls back to the inferred return
+    /// `ConcreteType` recorded for unannotated functions
+    /// (`function_return_concrete_types`). Replaces the deleted return-NAME
+    /// string lookup + `struct_types.contains_key` round-trip.
+    fn function_call_return_concrete_type(
         &self,
+        name: &str,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        if let Some(def) = self.function_defs.get(name) {
+            if let Some(ann) = def.return_type.as_ref() {
+                if let Some(ct) =
+                    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                        self, ann,
+                    )
+                {
+                    return Some(ct);
+                }
+            }
+        }
+        self.type_tracker
+            .get_function_return_concrete_type(name)
+            .cloned()
+    }
+
+    pub(crate) fn array_elements_all_typed_object(
+        &mut self,
         elements: &[shape_ast::ast::Expr],
     ) -> bool {
         use shape_ast::ast::Expr;
@@ -536,35 +633,127 @@ impl super::BytecodeCompiler {
             return false;
         }
         for elem in elements {
-            let returned_type_name: Option<String> = match elem {
+            // U4-5b: the element is a named-struct array slot iff the called
+            // function's return type is a `Struct`. Resolved STRUCTURALLY — no
+            // return-NAME string round-trip through `struct_types`/`type_aliases`.
+            let returned_ct: Option<shape_value::v2::ConcreteType> = match elem {
                 Expr::FunctionCall { name, .. } => {
-                    self.type_tracker.get_function_return_type(name).cloned()
+                    // Construction strict-typing close (2026-06-05): a
+                    // function with an INFERRED anonymous-object return
+                    // (`fn aabb(lo, hi) { {min: lo, max: hi} }`) has no named
+                    // return type but DOES have an inferred structural object
+                    // return. That return is a TypedObject, so the literal is
+                    // `Array<TypedObject>` and routes to the same v2-raw
+                    // `TypedArray<*const TypedObjectStorage>` carrier.
+                    if self.inferred_return_object_schema_id(name).is_some() {
+                        continue;
+                    }
+                    self.function_call_return_concrete_type(name)
                 }
                 Expr::QualifiedFunctionCall {
-                    namespace, function, ..
+                    namespace,
+                    function,
+                    ..
                 } => {
                     let qualified = format!("{}::{}", namespace, function);
-                    self.type_tracker
-                        .get_function_return_type(&qualified)
-                        .cloned()
+                    if self.inferred_return_object_schema_id(&qualified).is_some() {
+                        continue;
+                    }
+                    self.function_call_return_concrete_type(&qualified)
                 }
                 _ => return false,
             };
-            let Some(name) = returned_type_name else {
-                return false;
-            };
-            let resolved = self
-                .type_aliases
-                .get(&name)
-                .map(|s| s.as_str())
-                .unwrap_or(name.as_str());
-            if !self.struct_types.contains_key(resolved)
-                && !self.struct_types.contains_key(&name)
-            {
+            if !matches!(returned_ct, Some(shape_value::v2::ConcreteType::Struct(_))) {
                 return false;
             }
         }
         true
+    }
+
+    /// Construction strict-typing close (USER RULING 2026-06-05): infer a
+    /// homogeneous element [`TypedArrayKind`] for an array literal whose
+    /// elements are NON-literal expressions (function calls, identifiers,
+    /// loop counters, …), via `concrete_type_for_expr`.
+    ///
+    /// Returns `Some(kind)` only when EVERY element resolves through the type
+    /// tracker to the SAME scalar `ConcreteType` that has a typed-array
+    /// carrier (`should_use_typed_array`). Any element that does not resolve,
+    /// or that resolves to a different kind, yields `None` — the caller then
+    /// surface-and-stops with a clean "cannot infer array element type"
+    /// compile error (no untyped runtime array carrier exists).
+    ///
+    /// Nested-array elements (`Expr::Array`) are intentionally NOT handled
+    /// here — they are resolved by the dedicated `all_nested_array_elem`
+    /// branch upstream. Per ADR-006 §2.7.5 the element kind is the type
+    /// tracker's producer-side proof, never a runtime decode.
+    pub(crate) fn infer_array_element_kind_from_concrete_types(
+        &self,
+        elements: &[shape_ast::ast::Expr],
+    ) -> Option<TypedArrayKind> {
+        use shape_ast::ast::Expr;
+        if elements.is_empty() {
+            return None;
+        }
+        // Nested-array elements are handled by the upstream nested branch.
+        if elements.iter().any(|e| matches!(e, Expr::Array(..))) {
+            return None;
+        }
+        let mut acc: Option<TypedArrayKind> = None;
+        for elem in elements {
+            let ct = super::monomorphization::type_resolution::concrete_type_for_expr(self, elem)?;
+            // An array-typed element (`[source]` where `source: Array<int>`)
+            // makes the outer a nested array — the inner array carrier is a
+            // v2-raw `*mut TypedArray<U>` regardless of `U`, so it maps to the
+            // single `TypedArrayKind::TypedArray` nested carrier (same as the
+            // literal `[[..],[..]]` shape, just reached via an identifier /
+            // expression element instead of an inline `Expr::Array`).
+            let kind = match ct {
+                shape_value::v2::ConcreteType::Array(_) => TypedArrayKind::TypedArray,
+                other => should_use_typed_array(&other)?,
+            };
+            match acc {
+                Some(prev) if prev != kind => return None,
+                _ => acc = Some(kind),
+            }
+        }
+        acc
+    }
+
+    /// Structural producer-side proof for function-value array literals.
+    ///
+    /// Bare closure literals do not always have a resolved `ConcreteType` before
+    /// their expression body is compiled, while named function identifiers can
+    /// resolve either through inference facts or the function registry. This
+    /// helper accepts only all-callable element lists and never inspects runtime
+    /// values.
+    pub(crate) fn array_elements_all_callable(&self, elements: &[shape_ast::ast::Expr]) -> bool {
+        use shape_ast::ast::Expr;
+        if elements.is_empty() {
+            return false;
+        }
+        elements.iter().all(|elem| match elem {
+            Expr::FunctionExpr { .. } => true,
+            Expr::Identifier(name, _) => {
+                self.function_defs.contains_key(name)
+                    || self.foreign_function_defs.contains_key(name)
+                    || matches!(
+                        super::monomorphization::type_resolution::concrete_type_for_expr(
+                            self, elem
+                        ),
+                        Some(
+                            shape_value::v2::ConcreteType::Function(_)
+                                | shape_value::v2::ConcreteType::Closure(_)
+                        )
+                    )
+            }
+            _ => matches!(
+                super::monomorphization::type_resolution::concrete_type_for_expr(self, elem),
+                Some(
+                    shape_value::v2::ConcreteType::Function(_)
+                        | shape_value::v2::ConcreteType::Closure(_)
+                )
+            ),
+        })
     }
 
     /// Compiler-aware resolution of a `let arr: Array<T> = [...]` binding's
@@ -593,9 +782,38 @@ impl super::BytecodeCompiler {
                 return Some(kind);
             }
         }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // `Array<dyn Trait>` annotation. The inner type is `TypeAnnotation::Dyn`,
+        // NOT a struct, so this MUST be checked before the struct branch below
+        // (the struct branch's `inner_name?` would early-return None on a Dyn
+        // inner). Per ADR-006 §2.7.5 + §2.7.24 Q25.C (all-traits-dyn-able): the
+        // producer-side proof is the explicit `dyn Trait` annotation. Maps to
+        // `TypedArrayKind::TraitObject`; each element literal is boxed via
+        // `BoxTraitObject` at the emission site (the trait name is recovered
+        // there from the same annotation).
+        use shape_ast::ast::TypeAnnotation;
+        let dyn_inner: Option<&TypeAnnotation> = match annotation {
+            TypeAnnotation::Generic { name, args }
+                if name.as_str() == "Array" && args.len() == 1 =>
+            {
+                Some(&args[0])
+            }
+            TypeAnnotation::Array(inner) => Some(inner.as_ref()),
+            _ => None,
+        };
+        if let Some(inner) = dyn_inner {
+            if matches!(inner, TypeAnnotation::Function { .. })
+                || matches!(inner, TypeAnnotation::Basic(name) if name == "function")
+                || matches!(inner, TypeAnnotation::Generic { name, .. } if name.as_str() == "Function")
+            {
+                return Some(TypedArrayKind::Callable);
+            }
+            if crate::compiler::trait_object_emission::trait_name_from_annotation(inner).is_some() {
+                return Some(TypedArrayKind::TraitObject);
+            }
+        }
         // User-struct annotation: `Array<B>` / `B[]` where B is a registered
         // struct type. Map to TypedArrayKind::TypedObject per §2.1 + §3.A row 1.
-        use shape_ast::ast::TypeAnnotation;
         let inner_name = match annotation {
             TypeAnnotation::Generic { name, args }
                 if name.as_str() == "Array" && args.len() == 1 =>
@@ -617,12 +835,160 @@ impl super::BytecodeCompiler {
             .get(inner_name)
             .map(|s| s.as_str())
             .unwrap_or(inner_name);
-        if self.struct_types.contains_key(resolved)
-            || self.struct_types.contains_key(inner_name)
-        {
+        if self.struct_types.contains_key(resolved) || self.struct_types.contains_key(inner_name) {
+            return Some(TypedArrayKind::TypedObject);
+        }
+        // STAGE C2 (2026-06-17): `Array<Color>` where `Color` is a registered
+        // enum. Enum values are TypedObjects at runtime — `compile_expr_enum_constructor`
+        // emits `NewTypedObject` (collections.rs:1569) carrying
+        // `NativeKind::Ptr(HeapKind::TypedObject)` for unit / tuple-payload /
+        // struct-payload variants alike. So an enum-element array reuses the
+        // W16.2-A `TypedArray<*const TypedObjectStorage>` carrier — no new
+        // HeapKind, no new ELEM_TYPE discriminant. The producer-side proof is
+        // the explicit annotation + the registered enum schema (ADR-006
+        // §2.7.5 stamp-at-compile-time); the enum-vs-struct distinction is
+        // irrelevant to the runtime carrier (both are TypedObject pointers).
+        let is_enum = self
+            .type_tracker
+            .schema_registry()
+            .get(resolved)
+            .or_else(|| self.type_tracker.schema_registry().get(inner_name))
+            .and_then(|s| s.get_enum_info())
+            .is_some();
+        if is_enum {
             Some(TypedArrayKind::TypedObject)
         } else {
             None
+        }
+    }
+
+    /// Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    ///
+    /// Wrapper over [`resolve_typed_array_kind_from_annotation`] that ALSO, as
+    /// a side effect, stashes the trait name into
+    /// `self.pending_trait_object_array_trait` when the annotation resolves to
+    /// [`TypedArrayKind::TraitObject`] (`Array<dyn Trait>`). The element-loop in
+    /// `compile_expr_array` reads that field to emit the per-element
+    /// `BoxTraitObject`. For all non-dyn kinds the trait field is cleared.
+    /// Per ADR-006 §2.7.5 the trait name is the producer-side proof (explicit
+    /// annotation), never runtime-derived.
+    pub(crate) fn resolve_typed_array_kind_and_record_trait(
+        &mut self,
+        annotation: &shape_ast::ast::TypeAnnotation,
+    ) -> Option<TypedArrayKind> {
+        let kind = self.resolve_typed_array_kind_from_annotation(annotation);
+        if kind == Some(TypedArrayKind::TraitObject) {
+            // Recover the trait name from `Array<dyn Trait>` / `(dyn Trait)[]`.
+            use shape_ast::ast::TypeAnnotation;
+            let inner: Option<&TypeAnnotation> = match annotation {
+                TypeAnnotation::Generic { name, args }
+                    if name.as_str() == "Array" && args.len() == 1 =>
+                {
+                    Some(&args[0])
+                }
+                TypeAnnotation::Array(inner) => Some(inner.as_ref()),
+                _ => None,
+            };
+            self.pending_trait_object_array_trait = inner
+                .and_then(crate::compiler::trait_object_emission::trait_name_from_annotation)
+                .map(|s| s.to_string());
+        } else {
+            self.pending_trait_object_array_trait = None;
+        }
+        kind
+    }
+
+    /// Kind-changing-map carrier reconciliation (2026-06-15).
+    ///
+    /// When a `let r = <init>` binding's initializer is a value whose PROVEN
+    /// element type (via the inference engine) is an `Array<C>`/`Vec<C>`, the
+    /// binding's typed-array carrier stamp MUST match C — NOT a
+    /// `pending_variable_typed_array_kind` value that leaked from compiling a
+    /// SUB-expression of the initializer.
+    ///
+    /// The canonical defect this closes: `let r = [1,2,3].map(|x| x as number)`.
+    /// Compiling the receiver array literal `[1,2,3]` sets
+    /// `pending_variable_typed_array_kind = Some(I64)` (the INPUT element kind),
+    /// which then leaks onto the outer binding `r`. The map RESULT carrier is
+    /// `TypedArray<f64>` (the closure-return kind, correctly built by
+    /// `run_select_builder`), so a `TypedArrayGetI64` index read on `r`
+    /// reinterprets the f64 bits as i64 (a forbidden bit-reinterpret — `int`
+    /// and `number` do not unify, CLAUDE.md §Type-System-Rules).
+    ///
+    /// Returns a reconciliation DIRECTIVE keyed off the binding's proven type:
+    /// - `Some(Some(kind))` — the binding IS an array whose element C maps to a
+    ///   scalar typed-array carrier `kind`; stamp `kind` (authoritative).
+    /// - `Some(None)` — the binding IS an array but C has NO scalar typed-array
+    ///   carrier (heap element, or a kind the carrier set doesn't cover). The
+    ///   stale scalar stamp MUST be suppressed so index access falls to the
+    ///   carrier-reading `GetProp` (`read_element`) path. SOUNDNESS FLOOR — never
+    ///   keep a mismatched scalar stamp that would bit-reinterpret.
+    /// - `None` — the binding is not a provable array; leave the existing
+    ///   capture untouched (no array-index opcode keys off it).
+    ///
+    /// Per ADR-006 §2.7.5 the proof is the inference engine's element type — no
+    /// runtime bit inspection, no fabricated default.
+    pub(crate) fn reconcile_binding_typed_array_kind(
+        &mut self,
+        init_expr: &shape_ast::ast::Expr,
+    ) -> Option<Option<TypedArrayKind>> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        let inferred = self.infer_expr_type(init_expr).ok()?;
+        // Extract the element annotation when the inferred type is a homogeneous
+        // array carrier (`Array<C>` / `Vec<C>` / `C[]`). Anything else is not a
+        // typed-array binding and yields `None` (leave capture untouched).
+        //
+        // The inference engine carries an instantiated array either as a
+        // `Type::Concrete(TypeAnnotation::Array/Generic)` OR as a
+        // `Type::Generic { base: Vec/Array, args: [elem] }` (the shape the
+        // method-call return inference produces, e.g. `<arr>.map(...)`).
+        let elem_ann: TypeAnnotation = match &inferred {
+            Type::Concrete(TypeAnnotation::Array(inner)) => (**inner).clone(),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 =>
+            {
+                args[0].clone()
+            }
+            Type::Generic { base, args } if args.len() == 1 => {
+                let base_name: Option<&str> = match base.as_ref() {
+                    Type::Concrete(TypeAnnotation::Basic(n)) => Some(n.as_str()),
+                    Type::Concrete(TypeAnnotation::Reference(p)) => Some(p.as_str()),
+                    _ => None,
+                };
+                let base_is_array = matches!(base_name, Some(n) if n == "Array" || n == "Vec");
+                if !base_is_array {
+                    return None;
+                }
+                Self::inferred_type_to_annotation(&args[0])?
+            }
+            _ => return None,
+        };
+        // The binding IS an array. Resolve C's carrier kind through the same
+        // annotation→kind path the annotated `let r: Array<C> = ...` binding
+        // uses. `Some(kind)` => authoritative scalar/heap carrier; `None` =>
+        // no carrier monomorphization (suppress stale stamp, fall to GetProp).
+        let array_ann = TypeAnnotation::Generic {
+            name: shape_ast::ast::TypePath::simple("Array"),
+            args: vec![elem_ann],
+        };
+        Some(self.resolve_typed_array_kind_from_annotation(&array_ann))
+    }
+
+    /// Project an inferred element [`Type`] down to a [`TypeAnnotation`] for the
+    /// array-carrier-kind resolution in [`Self::reconcile_binding_typed_array_kind`].
+    /// Only the shapes that have (or could have) a typed-array carrier are
+    /// projected; an unresolved type variable / function / nested generic yields
+    /// `None` (the caller then leaves the binding's capture untouched — no
+    /// fabricated annotation, no Bool-default).
+    fn inferred_type_to_annotation(
+        elem: &shape_runtime::type_system::Type,
+    ) -> Option<shape_ast::ast::TypeAnnotation> {
+        use shape_runtime::type_system::Type;
+        match elem {
+            Type::Concrete(ann) => Some(ann.clone()),
+            _ => None,
         }
     }
 
@@ -636,9 +1002,8 @@ impl super::BytecodeCompiler {
     ///
     /// Returns `None` for non-identifier receivers, for unresolved names, for
     /// receivers tracked as something other than a homogeneous typed array,
-    /// and for element types that have no typed opcode kind today (`string`,
-    /// sized ints other than `i32`/`i64`, etc). The caller is expected to
-    /// fall back to the legacy NaN-boxed path in those cases.
+    /// and for element types that have no typed opcode kind. Callers must not
+    /// infer a carrier from runtime bits in those cases.
     ///
     /// Phase 3.1 Agent 3 entry point — used by `compile_expr_method_call`,
     /// `compile_expr_index_access`, and `compile_expr_assign` to gate typed
@@ -686,22 +1051,67 @@ impl super::BytecodeCompiler {
     ///
     /// Mirrors the local-then-module-binding lookup order of
     /// [`resolve_receiver_typed_array_kind`].
-    fn empty_array_accumulator_key(
+    fn empty_array_accumulator_resolution(
         &self,
         recv_name: &str,
-    ) -> Option<super::EmptyArrayAccumulatorKey> {
+    ) -> Option<(super::EmptyArrayAccumulatorKey, EmptyArrayAccumulatorAccess)> {
         if let Some(local_idx) = self.resolve_local(recv_name) {
             let key = super::EmptyArrayAccumulatorKey::Local(local_idx);
-            return self.empty_array_accumulators.contains_key(&key).then_some(key);
+            if self.empty_array_accumulators.contains_key(&key) {
+                return Some((key, EmptyArrayAccumulatorAccess::Binding(key)));
+            }
+            // Closure bodies synthesize leading capture params, so a captured
+            // module binding can resolve as a local even though the pending
+            // empty-array accumulator belongs to the original module binding.
+            // Only fall through in that captured-name case; an ordinary local
+            // shadow must not consume a module accumulator with the same name.
+            if !self.mutable_closure_captures.contains_key(recv_name) {
+                return None;
+            }
         }
         let scoped_name = self
             .resolve_scoped_module_binding_name(recv_name)
             .unwrap_or_else(|| recv_name.to_string());
         if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
             let key = super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx);
-            return self.empty_array_accumulators.contains_key(&key).then_some(key);
+            if self.empty_array_accumulators.contains_key(&key) {
+                let access = self.capture_or_binding_access(recv_name, key);
+                return Some((key, access));
+            }
         }
         None
+    }
+
+    fn capture_or_binding_access(
+        &self,
+        recv_name: &str,
+        key: super::EmptyArrayAccumulatorKey,
+    ) -> EmptyArrayAccumulatorAccess {
+        if let Some(&shared_idx) = self.shared_closure_captures.get(recv_name) {
+            EmptyArrayAccumulatorAccess::SharedCapture(shared_idx)
+        } else if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(recv_name) {
+            EmptyArrayAccumulatorAccess::OwnedMutableCapture(owned_idx)
+        } else if let Some(&capture_idx) = self.mutable_closure_captures.get(recv_name) {
+            EmptyArrayAccumulatorAccess::LegacyCapture(capture_idx)
+        } else {
+            EmptyArrayAccumulatorAccess::Binding(key)
+        }
+    }
+
+    fn captured_typed_array_receiver_resolution(
+        &self,
+        recv_name: &str,
+    ) -> Option<(TypedArrayKind, EmptyArrayAccumulatorAccess)> {
+        if !self.mutable_closure_captures.contains_key(recv_name) {
+            return None;
+        }
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(recv_name)
+            .unwrap_or_else(|| recv_name.to_string());
+        let binding_idx = *self.module_bindings.get(&scoped_name)?;
+        let kind = *self.v2_typed_array_module_bindings.get(&binding_idx)?;
+        let key = super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx);
+        Some((kind, self.capture_or_binding_access(recv_name, key)))
     }
 
     /// Resolve the `TypedArrayKind` an `arr.push(arg)` argument contributes
@@ -734,16 +1144,19 @@ impl super::BytecodeCompiler {
             .and_then(|ct| should_use_typed_array(&ct))
     }
 
-    /// Resolve the `TypedArrayKind` from the `last_expr_*` proof stamped by
-    /// the bytecode compiler immediately after a push argument compiled.
+    /// Resolve the `TypedArrayKind` for a just-compiled push argument `arg`.
     ///
-    /// `last_expr_numeric_type` covers numeric literals / operations
-    /// (`j * 2`, `x + 1`); `last_expr_type_info`'s `storage_hint == Bool`
-    /// covers comparison results. Per ADR-006 §2.7.5 each is a producer-side
-    /// proof set when the element compiled — never fabricated. Returns
-    /// `None` when no scalar kind is proven.
-    fn push_element_kind_from_compiled_arg(&self) -> Option<TypedArrayKind> {
-        if let Some(nt) = self.last_expr_numeric_type {
+    /// U4-4: the numeric kind is derived from the one resolved Type
+    /// (`numeric_type_of(arg)` → `infer_expr_type`), not the deleted
+    /// `last_expr_numeric_type` register — covering numeric literals /
+    /// operations (`j * 2`, `x + 1`). `last_expr_type_info`'s
+    /// `storage_hint == Bool` still covers comparison results (a separate
+    /// non-numeric carrier). Returns `None` when no scalar kind is proven.
+    fn push_element_kind_from_compiled_arg(
+        &mut self,
+        arg: &shape_ast::ast::Expr,
+    ) -> Option<TypedArrayKind> {
+        if let Some(nt) = self.numeric_type_of(arg) {
             return Some(typed_array_kind_from_numeric_type(nt));
         }
         if let Some(info) = &self.last_expr_type_info {
@@ -772,35 +1185,39 @@ impl super::BytecodeCompiler {
             .empty_array_accumulators
             .remove(&key)
             .expect("caller verified key presence");
-        self.program.instructions[acc.alloc_instr_idx] =
-            crate::bytecode::Instruction::new(
-                kind.new_opcode(),
-                Some(crate::bytecode::Operand::Count(0)),
-            );
+        self.program.instructions[acc.alloc_instr_idx] = crate::bytecode::Instruction::new(
+            kind.new_opcode(),
+            Some(crate::bytecode::Operand::Count(0)),
+        );
         // The resolved element type and the `Array<elem>` carrier type — the
         // same stamps the annotated `let mut xs: Array<T> = []` path records,
         // so a downstream `xs[i]` index access / `.method()` dispatch on the
         // promoted accumulator resolves through the type tracker exactly as
         // it would for an annotated binding (ADR-006 §2.7.5).
         let elem_ct = concrete_type_for_typed_array_kind(kind);
-        let array_ct =
-            shape_value::v2::ConcreteType::Array(Box::new(elem_ct.clone()));
+        let array_ct = shape_value::v2::ConcreteType::Array(Box::new(elem_ct.clone()));
         let array_type_name = vec_type_name_for_typed_array_kind(kind);
         match key {
             super::EmptyArrayAccumulatorKey::Local(local_idx) => {
                 self.v2_typed_array_locals.insert(local_idx, kind);
                 self.set_local_type_info(local_idx, array_type_name);
-                self.current_function_local_concrete_types
-                    .insert(local_idx, array_ct);
-                self.local_array_element_types.insert(local_idx, elem_ct);
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                    array_ct,
+                    crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator,
+                );
             }
             super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx) => {
-                self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                self.v2_typed_array_module_bindings
+                    .insert(binding_idx, kind);
                 self.set_module_binding_type_info(binding_idx, array_type_name);
-                self.module_binding_concrete_types
-                    .insert(binding_idx, array_ct);
-                self.module_binding_array_element_types
-                    .insert(binding_idx, elem_ct);
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                    array_ct,
+                    crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator,
+                );
             }
         }
     }
@@ -834,7 +1251,17 @@ impl super::BytecodeCompiler {
         arg: &shape_ast::ast::Expr,
         receiver_loc: Option<shape_ast::error::SourceLocation>,
     ) -> shape_ast::error::Result<bool> {
-        let Some(key) = self.empty_array_accumulator_key(recv_name) else {
+        let Some((key, access)) = self.empty_array_accumulator_resolution(recv_name) else {
+            if let Some((kind, access)) = self.captured_typed_array_receiver_resolution(recv_name) {
+                self.check_named_binding_write_allowed(recv_name, receiver_loc)?;
+                self.stamp_empty_array_capture_access_as_ptr(recv_name, access);
+                self.record_pushed_element_concrete_type(recv_name, arg);
+                self.emit_load_accumulator_access(access);
+                self.compile_typed_array_element_value(kind, arg)?;
+                self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
+                self.emit_load_accumulator_access(access);
+                return Ok(true);
+            }
             return Ok(false);
         };
         // Immutability check — `let out = []` (no `mut`) cannot be pushed
@@ -850,10 +1277,12 @@ impl super::BytecodeCompiler {
         // Tier 1: structural resolution (literal / type-tracked identifier).
         if let Some(kind) = self.structural_push_argument_typed_array_kind(arg) {
             self.finalize_empty_array_accumulator_kind(key, kind);
-            self.emit_load_accumulator_binding(key);
+            self.stamp_empty_array_capture_access_as_ptr(recv_name, access);
+            self.record_pushed_element_concrete_type(recv_name, arg);
+            self.emit_load_accumulator_access(access);
             self.compile_typed_array_element_value(kind, arg)?;
             self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
-            self.emit_load_accumulator_binding(key);
+            self.emit_load_accumulator_access(access);
             return Ok(true);
         }
 
@@ -862,7 +1291,7 @@ impl super::BytecodeCompiler {
         // numeric / bool expressions (`j * 2`, `x + 1`, `a < b`) — never a
         // string / decimal that would need the `NewStringV2` carrier.
         self.compile_expr(arg)?;
-        let Some(kind) = self.push_element_kind_from_compiled_arg() else {
+        let Some(kind) = self.push_element_kind_from_compiled_arg(arg) else {
             let acc = &self.empty_array_accumulators[&key];
             return Err(shape_ast::error::ShapeError::SemanticError {
                 message: format!(
@@ -880,32 +1309,164 @@ impl super::BytecodeCompiler {
             });
         };
         self.finalize_empty_array_accumulator_kind(key, kind);
+        self.stamp_empty_array_capture_access_as_ptr(recv_name, access);
+        self.record_pushed_element_concrete_type(recv_name, arg);
         // Stack: [value]. The typed push needs [arr, value] — load the
         // array and swap it under the already-compiled value.
-        self.emit_load_accumulator_binding(key);
-        self.emit(crate::bytecode::Instruction::simple(crate::bytecode::OpCode::Swap));
+        self.emit_load_accumulator_access(access);
+        self.emit(crate::bytecode::Instruction::simple(
+            crate::bytecode::OpCode::Swap,
+        ));
         self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
-        self.emit_load_accumulator_binding(key);
+        self.emit_load_accumulator_access(access);
         Ok(true)
     }
 
-    /// Emit a `LoadLocal` / `LoadModuleBinding` for an empty-array
-    /// accumulator's binding slot.
-    fn emit_load_accumulator_binding(&mut self, key: super::EmptyArrayAccumulatorKey) {
-        match key {
-            super::EmptyArrayAccumulatorKey::Local(local_idx) => {
+    /// A captured empty accumulator stores the array pointer in the capture
+    /// cell. Once the first push proves `Array<T>`, the capture's cell payload
+    /// kind is statically `Ptr`; update the closure-body load/store maps so
+    /// generated bytecode reads the typed-array pointer from the cell instead
+    /// of falling back to a stale unresolved scalar kind.
+    fn stamp_empty_array_capture_access_as_ptr(
+        &mut self,
+        recv_name: &str,
+        access: EmptyArrayAccumulatorAccess,
+    ) {
+        use shape_value::v2::struct_layout::FieldKind;
+        match access {
+            EmptyArrayAccumulatorAccess::SharedCapture(_) => {
+                self.shared_capture_inner_kinds
+                    .insert(recv_name.to_string(), FieldKind::Ptr);
+            }
+            EmptyArrayAccumulatorAccess::OwnedMutableCapture(_) => {
+                self.owned_mutable_capture_inner_kinds
+                    .insert(recv_name.to_string(), FieldKind::Ptr);
+            }
+            EmptyArrayAccumulatorAccess::Binding(_)
+            | EmptyArrayAccumulatorAccess::LegacyCapture(_) => {}
+        }
+    }
+
+    /// Emit a load for the accumulator storage selected by
+    /// [`Self::empty_array_accumulator_resolution`].
+    fn emit_load_accumulator_access(&mut self, access: EmptyArrayAccumulatorAccess) {
+        use shape_value::v2::struct_layout::FieldKind;
+        match access {
+            EmptyArrayAccumulatorAccess::Binding(super::EmptyArrayAccumulatorKey::Local(
+                local_idx,
+            )) => {
                 self.emit(crate::bytecode::Instruction::new(
                     crate::bytecode::OpCode::LoadLocal,
                     Some(crate::bytecode::Operand::Local(local_idx)),
                 ));
             }
-            super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx) => {
+            EmptyArrayAccumulatorAccess::Binding(
+                super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx),
+            ) => {
                 self.emit(crate::bytecode::Instruction::new(
                     crate::bytecode::OpCode::LoadModuleBinding,
                     Some(crate::bytecode::Operand::ModuleBinding(binding_idx)),
                 ));
             }
+            EmptyArrayAccumulatorAccess::SharedCapture(capture_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::compiler::helpers::shared_typed_load_opcode(FieldKind::Ptr),
+                    Some(crate::bytecode::Operand::Local(capture_idx)),
+                ));
+            }
+            EmptyArrayAccumulatorAccess::OwnedMutableCapture(capture_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::compiler::helpers::owned_mutable_typed_load_opcode(FieldKind::Ptr),
+                    Some(crate::bytecode::Operand::Local(capture_idx)),
+                ));
+            }
+            EmptyArrayAccumulatorAccess::LegacyCapture(capture_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::bytecode::OpCode::LoadClosure,
+                    Some(crate::bytecode::Operand::Local(capture_idx)),
+                ));
+            }
         }
+    }
+
+    /// Function compilation must isolate function-local empty-array
+    /// accumulators because local slot indices are reused per function.
+    /// Module-binding accumulators are different: they name top-level storage
+    /// and may be resolved by a nested function such as
+    /// `fn push(v) { stack = stack.push(v) }`. Keep those visible while
+    /// compiling functions, but save caller-local entries here.
+    pub(crate) fn take_local_empty_array_accumulators(
+        &mut self,
+    ) -> std::collections::HashMap<super::EmptyArrayAccumulatorKey, super::EmptyArrayAccumulator>
+    {
+        let mut saved = std::collections::HashMap::new();
+        let mut retained = std::collections::HashMap::new();
+        for (key, acc) in std::mem::take(&mut self.empty_array_accumulators) {
+            match key {
+                super::EmptyArrayAccumulatorKey::Local(_) => {
+                    saved.insert(key, acc);
+                }
+                super::EmptyArrayAccumulatorKey::ModuleBinding(_) => {
+                    retained.insert(key, acc);
+                }
+            }
+        }
+        self.empty_array_accumulators = retained;
+        saved
+    }
+
+    /// Restore caller-local empty-array accumulators after a nested function
+    /// compile. Any local accumulators created by the nested function are
+    /// discarded here after its local-only finalizer has run; module-binding
+    /// accumulators stay in the live map so a function body can promote them.
+    pub(crate) fn restore_local_empty_array_accumulators(
+        &mut self,
+        saved: std::collections::HashMap<
+            super::EmptyArrayAccumulatorKey,
+            super::EmptyArrayAccumulator,
+        >,
+    ) {
+        self.empty_array_accumulators
+            .retain(|key, _| !matches!(key, super::EmptyArrayAccumulatorKey::Local(_)));
+        self.empty_array_accumulators.extend(saved);
+    }
+
+    /// Surface unresolved function-local `let mut out = []` accumulators while
+    /// leaving module-binding accumulators for the top-level finalizer. This
+    /// mirrors [`Self::finalize_unresolved_empty_array_accumulators`] but is
+    /// scoped to local-slot entries so nested function compilation can still
+    /// consume top-level grow-pattern proofs.
+    pub(crate) fn finalize_unresolved_local_empty_array_accumulators(
+        &mut self,
+    ) -> shape_ast::error::Result<()> {
+        let unresolved_key = self
+            .empty_array_accumulators
+            .keys()
+            .find(|key| matches!(key, super::EmptyArrayAccumulatorKey::Local(_)))
+            .copied();
+        if let Some(key) = unresolved_key {
+            let acc = self
+                .empty_array_accumulators
+                .get(&key)
+                .expect("key came from the accumulator map")
+                .clone();
+            self.empty_array_accumulators
+                .retain(|key, _| !matches!(key, super::EmptyArrayAccumulatorKey::Local(_)));
+            return Err(shape_ast::error::ShapeError::SemanticError {
+                message: format!(
+                    "empty array `{}` has an un-resolvable element type. \
+                     It is created empty (`[]`) with no `Array<T>` \
+                     annotation and is never pushed to, so the compiler \
+                     cannot prove what element type it holds. Strict typing \
+                     requires a known concrete element type: add an \
+                     annotation (`let {}: Array<T> = []`) or remove the \
+                     unused binding.",
+                    acc.var_name, acc.var_name,
+                ),
+                location: acc.literal_loc.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): surface-and-stop
@@ -1013,17 +1574,27 @@ mod tests {
     }
 
     #[test]
-    fn test_enum_falls_back_to_legacy() {
+    fn test_enum_maps_to_typed_object() {
+        // STAGE C2 (2026-06-17): enum elements reuse the W16.2-A TypedObject
+        // carrier — enum values are TypedObjects at runtime (the enum
+        // constructor emits `NewTypedObject` carrying
+        // `NativeKind::Ptr(HeapKind::TypedObject)`). Pre-C2 this returned
+        // `None`, which surfaced "cannot infer the element type of this array
+        // literal" for `let xs: Array<Color> = [...]`.
         assert_eq!(
             should_use_typed_array(&ConcreteType::placeholder_enum(EnumLayoutId(0))),
-            None
+            Some(TypedArrayKind::TypedObject)
+        );
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::placeholder_enum(EnumLayoutId(7))),
+            Some(TypedArrayKind::TypedObject)
         );
     }
 
     #[test]
-    fn test_nested_array_falls_back_to_legacy() {
-        // Array<Array<int>> — element type is Array<int>, not yet handled
-        // by typed opcodes (would need TypedArray<*const TypedArray<i64>>).
+    fn test_nested_array_is_not_direct_scalar_mapper_kind() {
+        // `Array<Array<int>>` is handled by the array-literal structural branch
+        // as `TypedArrayKind::TypedArray`, not by the scalar ConcreteType mapper.
         let nested = ConcreteType::Array(Box::new(ConcreteType::I64));
         assert_eq!(should_use_typed_array(&nested), None);
     }
@@ -1106,30 +1677,6 @@ mod tests {
     }
 
     #[test]
-    fn test_type_name_vec_f32_maps_to_f32() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<f32>"),
-            Some(TypedArrayKind::F32)
-        );
-        assert_eq!(
-            typed_array_kind_from_type_name("Array<f32>"),
-            Some(TypedArrayKind::F32)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_char_maps_to_char() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<char>"),
-            Some(TypedArrayKind::Char)
-        );
-        assert_eq!(
-            typed_array_kind_from_type_name("Array<char>"),
-            Some(TypedArrayKind::Char)
-        );
-    }
-
-    #[test]
     fn test_u64_falls_back_to_legacy() {
         // Per S1 reopen (2026-05-13), `Array<u64>` deliberately falls
         // back to the legacy NaN-boxed `NewArray` path: `NativeKind::UInt64`
@@ -1168,6 +1715,9 @@ mod tests {
             TypedArrayKind::String,
             TypedArrayKind::Decimal,
             TypedArrayKind::TypedObject,
+            TypedArrayKind::TraitObject,
+            TypedArrayKind::TypedArray,
+            TypedArrayKind::Callable,
         ] {
             let _ = kind.new_opcode();
             let _ = kind.get_opcode();
@@ -1315,59 +1865,6 @@ mod tests {
             None
         );
     }
-
-    // ---- typed_array_kind_from_type_name ----
-
-    #[test]
-    fn test_type_name_vec_int_maps_to_i64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<int>"),
-            Some(TypedArrayKind::I64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_number_maps_to_f64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<number>"),
-            Some(TypedArrayKind::F64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_bool_maps_to_bool() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<bool>"),
-            Some(TypedArrayKind::Bool)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_i32_maps_to_i32() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<i32>"),
-            Some(TypedArrayKind::I32)
-        );
-    }
-
-    #[test]
-    fn test_type_name_array_int_maps_to_i64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Array<int>"),
-            Some(TypedArrayKind::I64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_string_falls_back() {
-        assert_eq!(typed_array_kind_from_type_name("Vec<string>"), None);
-    }
-
-    #[test]
-    fn test_type_name_non_array_falls_back() {
-        assert_eq!(typed_array_kind_from_type_name("HashMap<int, int>"), None);
-        assert_eq!(typed_array_kind_from_type_name("int"), None);
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1378,7 +1875,6 @@ mod tests {
 
 #[cfg(test)]
 mod compile_integration_tests {
-    use super::*;
     use crate::bytecode::{BytecodeProgram, OpCode};
     use crate::compiler::BytecodeCompiler;
 
@@ -1387,6 +1883,14 @@ mod compile_integration_tests {
         BytecodeCompiler::new()
             .compile_with_source(&program, src)
             .expect("compile should succeed")
+    }
+
+    fn compile_error(src: &str) -> String {
+        let program = shape_ast::parser::parse_program(src).expect("parse should succeed");
+        let err = BytecodeCompiler::new()
+            .compile_with_source(&program, src)
+            .expect_err("compile should fail");
+        format!("{err:?}")
     }
 
     fn has_opcode(prog: &BytecodeProgram, op: OpCode) -> bool {
@@ -1455,7 +1959,8 @@ mod compile_integration_tests {
         );
         let msg = format!("{:?}", result.unwrap_err());
         assert!(
-            msg.contains("spread element types could not be reconciled"),
+            msg.contains("spread element types could not be reconciled")
+                || (msg.contains("int") && msg.contains("string")),
             "heterogeneous spread error must be the clean structured message, got: {msg}"
         );
     }
@@ -1536,6 +2041,93 @@ mod compile_integration_tests {
     }
 
     #[test]
+    fn ws1b_module_accumulator_promoted_from_nested_function_push() {
+        // W25 empty-grow proof: a top-level unannotated accumulator can be
+        // grown through a nested function. The module-binding placeholder must
+        // stay visible during function compilation so the `push(val)` body can
+        // patch it from the statically inferred type of `val`.
+        let prog = compile(
+            "let mut stack = []\nfn push(val) { stack = stack.push(val) }\npush(10)\npush(20)\nstack.len()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "module accumulator grown via nested function must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushI64),
+            "nested function push must use TypedArrayPushI64 after static proof"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "nested function promotion must not leave the generic NewArray placeholder"
+        );
+    }
+
+    #[test]
+    fn ws1b_captured_module_accumulator_push_uses_typed_capture_load() {
+        // W25 empty-grow proof: a mutable closure captures a top-level empty
+        // accumulator as a synthetic local. The push proof must still attach to
+        // the original module binding and emit a typed push through the capture
+        // cell, not the legacy ArrayPushLocal local-slot fast path.
+        let prog = compile(
+            "let mut items = []\nlet add = |item| { items = items.push(item) }\nadd(10)\nitems.len()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "captured accumulator grown through closure must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushI64),
+            "captured accumulator push must use TypedArrayPushI64 after static proof"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::ArrayPushLocal),
+            "captured accumulator push must not fall back to legacy ArrayPushLocal"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "captured accumulator promotion must not leave the generic NewArray placeholder"
+        );
+    }
+
+    #[test]
+    fn empty_array_reassign_to_typed_local_emits_typed_array() {
+        // STAGE T4 (V3-S5 empty-array reassign, 2026-06-20): reassigning a
+        // bare empty literal (`a = []`) to a binding whose proven element type
+        // is `Array<int>` must recover that element type from the type tracker
+        // and lower the empty literal to the typed `NewTypedArrayI64`
+        // allocator (count 0) — NOT the generic `NewArray(0)` that SURFACEd
+        // `op_new_array(0)` at runtime mid-program. Mirrors the var-decl
+        // annotation hand-off (statements.rs:967).
+        let prog = compile("let mut a: Array<int> = [1,2,3]\na = []\na.len()\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "empty-array reassign to Array<int> must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "empty-array reassign must NOT emit the generic NewArray op_new_array(0) placeholder"
+        );
+    }
+
+    #[test]
+    fn empty_array_reassign_to_module_string_binding_emits_typed_array() {
+        // Module-binding string variant (the resource-mgmt gate's
+        // `let mut LOG: Array<string> = []` cleared via `LOG = []`).
+        let prog = compile(
+            "let mut LOG: Array<string> = []\nfn clear() { LOG = [] }\nLOG.push(\"x\")\nclear()\nLOG.len()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayString),
+            "empty-array reassign to module Array<string> must allocate via NewTypedArrayString"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "module-binding empty-array reassign must NOT emit the generic NewArray placeholder"
+        );
+    }
+
+    #[test]
     fn ws1b_bare_accumulator_complex_push_arg_emits_typed_array() {
         // `out.push(i * i)` — a non-literal scalar push argument. The first
         // push resolves the kind via the post-compile numeric proof (Tier 2).
@@ -1580,7 +2172,10 @@ mod compile_integration_tests {
         );
         let msg = format!("{:?}", result.unwrap_err());
         assert!(
-            msg.contains("type mismatch") && msg.contains("element type"),
+            (msg.contains("type mismatch") && msg.contains("element type"))
+                || msg.contains(
+                    "cannot push a `string` value into an array whose element type is `int`"
+                ),
             "heterogeneous accumulator error must be the clean structured message, got: {msg}"
         );
     }
@@ -1665,25 +2260,14 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_heterogeneous_literal_falls_back_to_legacy_new_array() {
-        // `[1, "x", true]` is heterogeneous → no typed array fast path,
-        // falls back to legacy `NewArray` (NaN-boxed Vec<ValueWord>).
-        let prog = compile("[1, \"x\", true]");
+    fn test_heterogeneous_literal_is_clean_compile_error() {
+        // `[1, "x", true]` is heterogeneous and has no union/tuple/object
+        // carrier. Strict typing rejects it at compile time instead of
+        // falling back to a dynamic legacy array.
+        let msg = compile_error("[1, \"x\", true]");
         assert!(
-            has_opcode(&prog, OpCode::NewArray),
-            "heterogeneous literal must emit legacy NewArray"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayI64),
-            "heterogeneous literal must not emit NewTypedArrayI64"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayF64),
-            "heterogeneous literal must not emit NewTypedArrayF64"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayBool),
-            "heterogeneous literal must not emit NewTypedArrayBool"
+            msg.contains("int") && (msg.contains("string") || msg.contains("bool")),
+            "heterogeneous literal must be rejected with a static type diagnostic, got: {msg}"
         );
     }
 
@@ -1740,31 +2324,19 @@ mod compile_integration_tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // R5.4B: nested-array-literal guard.
+    // Nested-array literal policy.
     //
-    // The typed `NewTypedArrayF64/I64/I32/Bool` opcodes store scalars
-    // (raw f64/i64/i32/bool bits). An outer array whose rows are
-    // themselves arrays cannot use the typed fast path — it would store
-    // inner typed-array pointers as scalar bits, which downstream
-    // consumers (`intrinsic_matmul_mat`, `as_any_array()`) can't decode.
-    //
-    // The regression guard refuses typed emission at both:
-    //   - inference: `infer_array_element_type` returns None when any
-    //     element is `Expr::Array`.
-    //   - annotation override: `compile_expr_array` refuses the typed
-    //     path when any element is `Expr::Array`, regardless of
-    //     `pending_variable_typed_array_kind`.
-    //   - recursion: the inner rows compile with
-    //     `nested_array_literal_depth > 0`, which forces them back to
-    //     the legacy `NewArray` path so they round-trip as heap-ref
-    //     ValueWords, not as `NativeScalar::Ptr` words.
+    // Homogeneous nested arrays use the dedicated typed nested-array carrier:
+    // the outer array stores inner typed-array pointers as
+    // `TypedArray<*const TypedArrayElem>`, while each row keeps its own scalar
+    // typed carrier. A scalar annotation such as `Array<number>` is
+    // structurally wrong for `[[...]]` and must reject cleanly.
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_nested_array_literal_mat_number_emits_new_array_for_outer_and_inner() {
-        // `let m: Mat<number> = [[1.0, 2.0], [3.0, 4.0]]` — outer AND
-        // inner must fall back to the generic `NewArray` path (not the
-        // typed `NewTypedArrayF64` path).
+    fn test_nested_array_literal_mat_number_uses_nested_typed_carrier() {
+        // `Mat<number>` is structurally a numeric row matrix: the outer array
+        // uses the nested typed-array carrier, and inner rows use F64.
         let prog = compile(
             r#"
             let m: Mat<number> = [[1.0, 2.0], [3.0, 4.0]]
@@ -1772,18 +2344,24 @@ mod compile_integration_tests {
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::NewArray),
-            "nested `Mat<number>` literal must emit legacy NewArray, got opcodes: {:?}",
+            has_opcode(&prog, OpCode::NewTypedArrayNested),
+            "nested `Mat<number>` literal must emit NewTypedArrayNested, got opcodes: {:?}",
             prog.instructions
                 .iter()
                 .map(|i| i.opcode)
                 .collect::<Vec<_>>()
         );
         assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayF64),
-            "nested `Mat<number>` literal must NOT emit NewTypedArrayF64 \
-             (would splice inner typed-array pointers into f64 slots); \
-             got opcodes: {:?}",
+            has_opcode(&prog, OpCode::NewTypedArrayF64),
+            "nested `Mat<number>` rows must emit NewTypedArrayF64, got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "nested `Mat<number>` literal must not emit legacy NewArray, got opcodes: {:?}",
             prog.instructions
                 .iter()
                 .map(|i| i.opcode)
@@ -1792,34 +2370,22 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_nested_array_literal_array_number_annotation_refuses_typed() {
-        // Same nested shape but with an `Array<number>` annotation —
-        // without the R5.4B guard this path took the annotation-driven
-        // typed branch (`pending_variable_typed_array_kind = Some(F64)`)
-        // and emitted `NewTypedArrayF64` for BOTH outer and inner,
-        // splicing inner pointers into f64 slots of the outer.
-        let prog = compile(
+    fn test_nested_array_literal_array_number_annotation_rejects() {
+        // `Array<number>` promises scalar number elements; `[[...]]`
+        // contributes array elements. There is no dynamic fallback that can
+        // make that structurally correct.
+        let msg = compile_error(
             r#"
             let m: Array<number> = [[1.0, 2.0], [3.0, 4.0]]
             m
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::NewArray),
-            "nested `Array<number>` literal must emit legacy NewArray, got opcodes: {:?}",
-            prog.instructions
-                .iter()
-                .map(|i| i.opcode)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayF64),
-            "nested `Array<number>` annotation with nested rows must NOT \
-             emit NewTypedArrayF64; got opcodes: {:?}",
-            prog.instructions
-                .iter()
-                .map(|i| i.opcode)
-                .collect::<Vec<_>>()
+            msg.contains("type mismatch")
+                && msg.contains("Array<f64>")
+                && msg.contains("Array<array_f64>")
+                && msg.contains("nested arrays require"),
+            "nested `Array<number>` annotation must reject structurally, got: {msg}"
         );
     }
 
@@ -1925,25 +2491,17 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_index_access_untyped_falls_back_to_get_prop() {
-        // Empty / heterogeneous array → no typed kind → falls back.
-        let prog = compile(
+    fn test_index_access_heterogeneous_array_is_compile_error() {
+        // Heterogeneous arrays have no typed carrier and no runtime fallback.
+        let msg = compile_error(
             r#"
             let arr = [1, "x", true]
             arr[0]
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::GetProp),
-            "expected legacy GetProp for untyped array index access"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::TypedArrayGetI64),
-            "untyped array must not emit TypedArrayGetI64"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::TypedArrayGetF64),
-            "untyped array must not emit TypedArrayGetF64"
+            msg.contains("int") && (msg.contains("string") || msg.contains("bool")),
+            "heterogeneous array index source must reject before GetProp fallback, got: {msg}"
         );
     }
 
@@ -2055,20 +2613,16 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_length_untyped_array_falls_back_to_legacy_length() {
-        let prog = compile(
+    fn test_length_heterogeneous_array_is_compile_error() {
+        let msg = compile_error(
             r#"
             let arr = [1, "x", true]
             arr.length
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::Length),
-            "expected legacy Length for untyped array"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::TypedArrayLen),
-            "untyped array must not emit TypedArrayLen"
+            msg.contains("int") && (msg.contains("string") || msg.contains("bool")),
+            "heterogeneous array length source must reject before Length fallback, got: {msg}"
         );
     }
 
@@ -2190,12 +2744,14 @@ mod compile_integration_tests {
     }
 
     #[test]
-    #[ignore]  // diagnostic-only — enable to trace opcode emission for decimal
+    #[ignore] // diagnostic-only — enable to trace opcode emission for decimal
     fn debug_decimal_opcodes() {
-        let prog = compile(r#"
+        let prog = compile(
+            r#"
             let arr: Array<decimal> = [1.5D, 2.5D]
             arr
-            "#);
+            "#,
+        );
         for (i, instr) in prog.instructions.iter().enumerate() {
             eprintln!("[{i}] {:?} {:?}", instr.opcode, instr.operand);
         }

@@ -165,7 +165,9 @@ fn collect_extend_methods_from_stmt(
         Statement::Extend(extend, _) => {
             let resolved_type = match &extend.type_name {
                 TypeName::Simple(name) if name.as_str() == "target" => target_name.to_string(),
-                TypeName::Generic { name, .. } if name.as_str() == "target" => target_name.to_string(),
+                TypeName::Generic { name, .. } if name.as_str() == "target" => {
+                    target_name.to_string()
+                }
                 TypeName::Simple(name) => name.to_string(),
                 TypeName::Generic { name, .. } => name.to_string(),
             };

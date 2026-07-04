@@ -1,0 +1,297 @@
+// large_runnable.shape — precedence-climbing expression evaluator + config
+// front-end, wired through Shape's Result/Option error model.
+// Book: fundamentals/error-handling.mdx
+//
+// WHY A SECOND LARGE FILE: the idiomatic recursive-descent version
+// (large.shape) is blocked by a content-addressed-linker defect — ANY
+// mutual-recursion cycle of length >= 3 (the textbook expr->term->factor
+// shape) aborts with "Missing function blob" (see REPORT, classified
+// FN-REG-CORRECTNESS). This file expresses the SAME application with a single
+// 2-function cycle (parse_bin <-> parse_atom, precedence climbing), which the
+// linker handles, so the error-handling surface can be machine-proven.
+//
+// Error vocabulary (all from the book chapter):
+//   - Ok(v)/Err(payload), Some(v)/None  (Constructors)
+//   - `?`  early-return on failure       (? Try Operator)
+//   - `!!` attach higher-level context   (!! Error Context Operator)
+//   - `??` default for None on Option    (Related Operators)
+//   - match Ok/Err and Some/None         (recovery)
+//
+// MACHINE-PROOFABLE: every expected value is hand-derived from the grammar +
+// book semantics BEFORE the first run. ALL_CHECKS_PASSED on success.
+// Deterministic: no IO/clock/randomness; fixed in-source token fixtures.
+
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+// ---- Token model ------------------------------------------------------------
+// kinds: 0=number 1='+' 2='-' 3='*' 4='/' 5='(' 6=')'
+type Token { kind: int, value: int }
+fn tok(kind: int, value: int) -> Token { return Token { kind: kind, value: value }; }
+fn num(v: int) -> Token { return tok(0, v); }
+fn plus() -> Token { return tok(1, 0); }
+fn minus() -> Token { return tok(2, 0); }
+fn star() -> Token { return tok(3, 0); }
+fn slash() -> Token { return tok(4, 0); }
+fn lparen() -> Token { return tok(5, 0); }
+fn rparen() -> Token { return tok(6, 0); }
+
+// ---- Cursor -----------------------------------------------------------------
+type Cursor { pos: int }
+fn cur_make() -> Cursor { return Cursor { pos: 0 }; }
+fn peek_kind(toks: Array<Token>, c: Cursor) -> int {
+    if c.pos >= toks.length { return -1; }
+    return toks[c.pos].kind;
+}
+fn peek_value(toks: Array<Token>, c: Cursor) -> int { return toks[c.pos].value; }
+fn advance(c: Cursor) { c.pos = c.pos + 1; }
+
+// Binding power: '+'/'-' = 1, '*'/'/' = 2. Returns 0 for non-operators.
+fn binding_power(k: int) -> int {
+    if k == 1 { return 1; }
+    if k == 2 { return 1; }
+    if k == 3 { return 2; }
+    if k == 4 { return 2; }
+    return 0;
+}
+
+// ---- Precedence-climbing parser/evaluator (single 2-fn cycle) ---------------
+// parse_atom := NUMBER | '(' parse_bin(0) ')' | '-' parse_atom
+// parse_bin(min) := parse_atom ( OP[bp>=min] parse_bin(bp+1) )*  (left-assoc)
+
+fn parse_atom(toks: Array<Token>, c: Cursor) -> Result<int> {
+    let k = peek_kind(toks, c);
+    if k == 0 {
+        let v = peek_value(toks, c);
+        advance(c);
+        return Ok(v);
+    }
+    if k == 2 {
+        advance(c);                       // unary '-'
+        let inner = parse_atom(toks, c)?;
+        return Ok(0 - inner);
+    }
+    if k == 5 {
+        advance(c);                       // '('
+        let inner = parse_bin(toks, c, 0)?;
+        if peek_kind(toks, c) != 6 {
+            return Err("expected ')'");
+        }
+        advance(c);                       // ')'
+        return Ok(inner);
+    }
+    return Err("expected number, '(' or unary '-'");
+}
+
+fn parse_bin(toks: Array<Token>, c: Cursor, min_bp: int) -> Result<int> {
+    let mut acc = parse_atom(toks, c)?;
+    let mut go = true;
+    while go {
+        let k = peek_kind(toks, c);
+        let bp = binding_power(k);
+        if bp == 0 or bp < min_bp {
+            go = false;
+        } else {
+            advance(c);
+            // left-associative: right side parses operators strictly tighter.
+            let rhs = parse_bin(toks, c, bp + 1)?;
+            if k == 1 { acc = acc + rhs; }
+            else if k == 2 { acc = acc - rhs; }
+            else if k == 3 { acc = acc * rhs; }
+            else {
+                if rhs == 0 { return Err("division by zero"); }
+                acc = acc / rhs;
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+fn eval_tokens(toks: Array<Token>) -> Result<int> {
+    let c = cur_make();
+    let value = (parse_bin(toks, c, 0) !! "parse failed")?;
+    if c.pos != toks.length { return Err("trailing tokens after expression"); }
+    return Ok(value);
+}
+
+// ---- Config front-end -------------------------------------------------------
+type ConfigSrc { key: string, tokens: Array<Token> }
+type Entry { key: string, value: int }
+fn cfg_src(key: string, tokens: Array<Token>) -> ConfigSrc {
+    return ConfigSrc { key: key, tokens: tokens };
+}
+fn config_parse(srcs: Array<ConfigSrc>) -> Result<Array<Entry>> {
+    let mut store: Array<Entry> = [];
+    for s in srcs {
+        let v = (eval_tokens(s.tokens) !! "bad config value")?;
+        store.push(Entry { key: s.key, value: v });
+    }
+    return Ok(store);
+}
+fn config_get(store: Array<Entry>, key: string) -> Option<int> {
+    for e in store {
+        if e.key == key { return Some(e.value); }
+    }
+    return None;
+}
+
+// ---- Assertion harness ------------------------------------------------------
+type Counters { failed: int }
+fn fail(ctr: Counters, msg: string) { print(msg); ctr.failed = ctr.failed + 1; }
+fn expect_ok(ctr: Counters, label: string, toks: Array<Token>, expected: int) {
+    match eval_tokens(toks) {
+        Ok(v) => {
+            if v != expected {
+                fail(ctr, f"CHECK_FAILED: {label} expected={expected} got={v}");
+            }
+        }
+        Err(e) => fail(ctr, f"CHECK_FAILED: {label} expected={expected} got=Err"),
+    }
+}
+fn expect_err(ctr: Counters, label: string, toks: Array<Token>) {
+    match eval_tokens(toks) {
+        Ok(v) => fail(ctr, f"CHECK_FAILED: {label} expected=Err got={v}"),
+        Err(e) => { }
+    }
+}
+fn expect_cfg(ctr: Counters, store: Array<Entry>, key: string, dflt: int, expected: int) {
+    let got = config_get(store, key) ?? dflt;
+    if got != expected {
+        fail(ctr, f"CHECK_FAILED: cfg[{key}] expected={expected} got={got}");
+    }
+}
+
+// Sum a fixed batch via `?`; short-circuits on first failure.
+fn sum_batch() -> Result<int> {
+    let mut total = 0;
+    total = total + eval_tokens([num(3), star(), num(3)])?;                       // 9
+    total = total + eval_tokens([num(4), plus(), num(4)])?;                       // 8
+    total = total + eval_tokens([num(10), minus(), num(1)])?;                     // 9
+    total = total + eval_tokens(
+        [num(2), star(), lparen(), num(3), plus(), num(1), rparen()])?;          // 8
+    return Ok(total);
+}
+fn sum_batch_bad() -> Result<int> {
+    let mut total = 0;
+    total = total + eval_tokens([num(1), plus(), num(1)])?;
+    total = total + eval_tokens([num(5), slash(), num(0)])?;   // Err -> short-circuit
+    total = total + eval_tokens([num(9)])?;
+    return Ok(total);
+}
+
+// ---- Driver: every expected value hand-derived from the grammar -------------
+fn main() {
+    let ctr = Counters { failed: 0 };
+
+    // OK cases (standard precedence, left-assoc) -----------------------------
+    expect_ok(ctr, "add", [num(1), plus(), num(2)], 3);
+    expect_ok(ctr, "mul_then_add", [num(2), star(), num(3), plus(), num(4)], 10);
+    expect_ok(ctr, "add_then_mul", [num(2), plus(), num(3), star(), num(4)], 14);
+    expect_ok(ctr, "paren_mul",
+        [lparen(), num(2), plus(), num(3), rparen(), star(), num(4)], 20);
+    expect_ok(ctr, "sub_assoc", [num(10), minus(), num(2), minus(), num(3)], 5);
+    expect_ok(ctr, "div_assoc", [num(20), slash(), num(5), slash(), num(2)], 2);
+    expect_ok(ctr, "bare_number", [num(100)], 100);
+    expect_ok(ctr, "unary_neg", [minus(), num(5)], -5);
+    expect_ok(ctr, "unary_group",
+        [minus(), lparen(), num(2), plus(), num(3), rparen()], -5);
+    expect_ok(ctr, "mul_neg", [num(2), star(), minus(), num(3)], -6);
+    expect_ok(ctr, "nested_paren",
+        [lparen(), lparen(), num(1), rparen(), rparen()], 1);
+    expect_ok(ctr, "sum5",
+        [num(1), plus(), num(2), plus(), num(3), plus(), num(4), plus(), num(5)], 15);
+    expect_ok(ctr, "prod4",
+        [num(2), star(), num(3), star(), num(4), star(), num(5)], 120);
+    expect_ok(ctr, "div_groups",
+        [lparen(), num(10), minus(), num(4), rparen(), slash(),
+         lparen(), num(1), plus(), num(1), rparen()], 3);
+    expect_ok(ctr, "sub_add", [num(7), minus(), num(3), plus(), num(2)], 6);
+    expect_ok(ctr, "div_add_div",
+        [num(9), slash(), num(3), plus(), num(9), slash(), num(3)], 6);
+    expect_ok(ctr, "neg_mul_neg",
+        [minus(), num(2), star(), minus(), num(2)], 4);
+    expect_ok(ctr, "zero", [num(0), minus(), num(0)], 0);
+    expect_ok(ctr, "big", [num(1000000), plus(), num(1)], 1000001);
+    expect_ok(ctr, "deep",
+        [num(2), star(), lparen(), num(3), plus(), lparen(), num(4),
+         minus(), num(1), rparen(), rparen()], 12);   // 2*(3+(4-1)) = 2*6 = 12
+
+    // Error-recovery cases ---------------------------------------------------
+    expect_err(ctr, "trailing_plus", [num(1), plus()]);
+    expect_err(ctr, "unclosed", [lparen(), num(1), plus(), num(2)]);
+    expect_err(ctr, "trailing_rparen", [num(1), plus(), num(2), rparen()]);
+    expect_err(ctr, "leading_star", [star(), num(5)]);
+    expect_err(ctr, "div_zero", [num(1), slash(), num(0)]);
+    expect_err(ctr, "div_zero_computed",
+        [num(10), slash(), lparen(), num(5), minus(), num(5), rparen()]);
+    expect_err(ctr, "two_numbers", [num(1), num(2)]);
+    expect_err(ctr, "empty", []);
+    expect_err(ctr, "empty_parens", [lparen(), rparen()]);
+    expect_err(ctr, "double_op", [num(1), plus(), plus(), num(2)]);
+
+    // Config front-end -------------------------------------------------------
+    let srcs: Array<ConfigSrc> = [
+        cfg_src("width", [num(80)]),
+        cfg_src("height", [num(24)]),
+        cfg_src("area", [num(80), star(), num(24)]),                  // 1920
+        cfg_src("margin", [num(2), plus(), num(2)]),                  // 4
+        cfg_src("scale",
+            [lparen(), num(10), minus(), num(2), rparen(), slash(), num(4)]), // 2
+    ];
+    match config_parse(srcs) {
+        Ok(store) => {
+            expect_cfg(ctr, store, "width", -1, 80);
+            expect_cfg(ctr, store, "height", -1, 24);
+            expect_cfg(ctr, store, "area", -1, 1920);
+            expect_cfg(ctr, store, "margin", -1, 4);
+            expect_cfg(ctr, store, "scale", -1, 2);
+            expect_cfg(ctr, store, "depth", 7, 7);      // absent -> default
+            expect_cfg(ctr, store, "width", 999, 80);   // present -> ignore default
+        }
+        Err(e) => fail(ctr, "CHECK_FAILED: config_parse unexpected Err"),
+    }
+
+    let bad_srcs: Array<ConfigSrc> = [
+        cfg_src("ok", [num(1), plus(), num(1)]),
+        cfg_src("broken", [num(1), slash(), num(0)]),
+    ];
+    match config_parse(bad_srcs) {
+        Ok(store) => fail(ctr, "CHECK_FAILED: bad config unexpectedly Ok"),
+        Err(e) => { }
+    }
+
+    // Direct Option / `??` checks --------------------------------------------
+    let some_default = Some(42) ?? 0;
+    if some_default != 42 {
+        fail(ctr, f"CHECK_FAILED: some_default expected=42 got={some_default}");
+    }
+    let empty_store: Array<Entry> = [];   // typed empty: bare `[]` as a call arg
+                                          // fails to infer element type (book is
+                                          // silent on empty-literal inference;
+                                          // see REPORT book_gap)
+    let none_default = config_get(empty_store, "missing") ?? -9;
+    if none_default != -9 {
+        fail(ctr, f"CHECK_FAILED: none_default expected=-9 got={none_default}");
+    }
+
+    // Batch sums via `?` -----------------------------------------------------
+    match sum_batch() {
+        Ok(total) => {
+            if total != 34 {
+                fail(ctr, f"CHECK_FAILED: sum_batch expected=34 got={total}");
+            }
+        }
+        Err(e) => fail(ctr, "CHECK_FAILED: sum_batch unexpected Err"),
+    }
+    match sum_batch_bad() {
+        Ok(total) => fail(ctr, f"CHECK_FAILED: sum_batch_bad expected=Err got={total}"),
+        Err(e) => { }
+    }
+
+    if ctr.failed == 0 {
+        print("ALL_CHECKS_PASSED");
+    } else {
+        print(f"FAILURES: {ctr.failed}");
+    }
+}
+
+main();

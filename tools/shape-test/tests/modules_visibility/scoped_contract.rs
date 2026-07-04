@@ -20,9 +20,9 @@ fn scoped_contract_print_remains_available_without_imports() {
 fn scoped_contract_regular_named_import_alias_executes() {
     ShapeTest::new(
         r#"
-        from std::core::set use { new as new_set, size as set_size }
-        let s = new_set()
-        print(set_size(s))
+        from std::core::set use { new as new_set, len as set_len }
+        let s: Set<int> = new_set()
+        print(set_len(s))
     "#,
     )
     .with_stdlib()
@@ -53,8 +53,8 @@ fn scoped_contract_namespace_function_calls_use_double_colon() {
     ShapeTest::new(
         r#"
         use std::core::set as s
-        let values = s::from_array([1, 2, 2, 3])
-        print(s::size(values))
+        let values = s::from_array(["a", "b", "b", "c"])
+        print(s::len(values))
     "#,
     )
     .with_stdlib()
@@ -161,5 +161,7 @@ fn scoped_contract_snapshot_requires_explicit_import() {
 
 #[test]
 fn scoped_contract_global_stdlib_modules_require_imports() {
-    ShapeTest::new("set::new()").with_stdlib().expect_run_err_contains("set");
+    ShapeTest::new("set::new()")
+        .with_stdlib()
+        .expect_run_err_contains("set");
 }

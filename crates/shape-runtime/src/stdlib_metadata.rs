@@ -334,6 +334,13 @@ impl StdlibMetadata {
         match ty {
             TypeAnnotation::Basic(name) => name.clone(),
             TypeAnnotation::Reference(path) => path.to_string(),
+            TypeAnnotation::Borrow { mutable, inner } => {
+                if *mutable {
+                    format!("&mut {}", Self::format_type_annotation(inner))
+                } else {
+                    format!("&{}", Self::format_type_annotation(inner))
+                }
+            }
             TypeAnnotation::Array(inner) => format!("{}[]", Self::format_type_annotation(inner)),
             TypeAnnotation::Tuple(items) => format!(
                 "[{}]",
@@ -532,5 +539,4 @@ mod tests {
             "abs description should come from doc comments"
         );
     }
-
 }

@@ -35,14 +35,13 @@
 //! surface because `op_call_value` itself is at SURFACE per
 //! `executor/control_flow/mod.rs:372` (PHASE_2C_CALL_REBUILD_SURFACE).
 
+use arrow_array::Array;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{
-    AlignedVec, DataTable, KindedSlot, NativeKind, TableViewData,
-    TypedObjectStorage, ValueSlot, VMError,
+    AlignedVec, DataTable, KindedSlot, NativeKind, TableViewData, VMError, ValueSlot,
     heap_value::{HeapKind, MatrixData},
 };
 use std::sync::Arc;
-use arrow_array::Array;
 
 use crate::executor::VirtualMachine;
 
@@ -353,8 +352,7 @@ pub(crate) fn handle_rows(
     let col_names = dt_arc.column_names();
 
     // Auto-register the row schema. Field order = column order.
-    let schema_id =
-        shape_runtime::type_schema::register_predeclared_any_schema(&col_names);
+    let schema_id = shape_runtime::type_schema::register_predeclared_any_schema(&col_names);
 
     // Pre-derive per-column kind so each row's slots are typed
     // consistently. Build a per-column reader closure that produces a
@@ -420,14 +418,20 @@ pub(crate) fn handle_columns_ref(
 
     let fields = ["name".to_string(), "kind".to_string()];
     let schema_id = shape_runtime::type_schema::register_predeclared_any_schema(&fields);
-    let field_kinds: Arc<[NativeKind]> = Arc::from(
-        vec![NativeKind::String, NativeKind::String].into_boxed_slice(),
-    );
+    let field_kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::String, NativeKind::String].into_boxed_slice());
     let heap_mask: u64 = 0b11;
 
     // V3-S5 ckpt-5: same surface as `handle_rows` above; rebuild target
     // is the v2-raw `TypedArray<TypedObjectPtr>` direct-access carrier.
-    let _ = (col_count, col_names, schema_id, heap_mask, &field_kinds, &dt_arc);
+    let _ = (
+        col_count,
+        col_names,
+        schema_id,
+        heap_mask,
+        &field_kinds,
+        &dt_arc,
+    );
     Err(VMError::NotImplemented(
         "DataTable.columnsRef: SURFACE — V3-S5 ckpt-5 consumer-cascade \
          tier 3 surface. The deleted typed-array-data TypedObject result carrier \
@@ -441,15 +445,13 @@ pub(crate) fn handle_columns_ref(
 /// plus the column's `NativeKind` and whether the slot is heap-resident.
 /// Built once per `dt.rows()` call; reused across rows.
 struct ColumnReader {
+    #[allow(dead_code)]
     read: Box<dyn Fn(usize) -> ValueSlot>,
     kind: NativeKind,
     is_heap: bool,
 }
 
-fn build_column_readers(
-    dt: &Arc<DataTable>,
-    method: &str,
-) -> Result<Vec<ColumnReader>, VMError> {
+fn build_column_readers(dt: &Arc<DataTable>, method: &str) -> Result<Vec<ColumnReader>, VMError> {
     use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
     let col_count = dt.column_count();
     let mut readers: Vec<ColumnReader> = Vec::with_capacity(col_count);
@@ -491,9 +493,7 @@ fn build_column_readers(
                     .clone(),
             );
             readers.push(ColumnReader {
-                read: Box::new(move |i| {
-                    ValueSlot::from_raw(if arr.value(i) { 1 } else { 0 })
-                }),
+                read: Box::new(move |i| ValueSlot::from_raw(if arr.value(i) { 1 } else { 0 })),
                 kind: NativeKind::Bool,
                 is_heap: false,
             });
@@ -600,12 +600,7 @@ fn arg_str<'a>(
     })
 }
 
-fn arg_usize(
-    args: &[KindedSlot],
-    idx: usize,
-    method: &str,
-    name: &str,
-) -> Result<usize, VMError> {
+fn arg_usize(args: &[KindedSlot], idx: usize, method: &str, name: &str) -> Result<usize, VMError> {
     let slot = args.get(idx).ok_or_else(|| {
         VMError::RuntimeError(format!(
             "datatable.{}: missing arg {} ({})",

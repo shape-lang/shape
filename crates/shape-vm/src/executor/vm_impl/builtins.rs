@@ -43,7 +43,8 @@
 //! slot live on the stack while handing a share out).
 
 use super::super::*;
-use shape_value::{KindedSlot, VMError, ValueSlot};
+use crate::executor::result_option_carrier;
+use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
 impl VirtualMachine {
     /// Pop the builtin call's args off the typed VM stack into a
@@ -74,8 +75,8 @@ impl VirtualMachine {
         // call-site emit changes in `compiler/expressions/function_calls.rs`.
         let (count_bits, count_kind) = self.pop_kinded()?;
         let count_slot = KindedSlot::new(ValueSlot::from_raw(count_bits), count_kind);
-        let count = crate::executor::builtins::kind_coerce::int_operand(&count_slot)
-            .map_err(|_| {
+        let count =
+            crate::executor::builtins::kind_coerce::int_operand(&count_slot).map_err(|_| {
                 VMError::RuntimeError(format!(
                     "pop_builtin_args: arg-count slot must be integer-family, got kind {:?}",
                     count_kind
@@ -341,14 +342,11 @@ impl VirtualMachine {
                     self.builtin_print(&args, _ctx)?;
                     let null_slot = KindedSlot::new(
                         ValueSlot::from_raw(0),
-                        shape_value::NativeKind::Ptr(
-                            shape_value::HeapKind::String,
-                        ),
+                        shape_value::NativeKind::Ptr(shape_value::HeapKind::String),
                     );
                     self.push_kinded_slot(null_slot)?;
                 }
-                BuiltinFunction::Format
-                | BuiltinFunction::FormatValueWithMeta => {
+                BuiltinFunction::Format | BuiltinFunction::FormatValueWithMeta => {
                     // Universal value-to-string. `Format` joins multiple
                     // args without separator (Shape's `format("a", "b")`
                     // → `"ab"` legacy semantics); `FormatValueWithMeta`
@@ -369,11 +367,25 @@ impl VirtualMachine {
                 }
 
                 // ── Wave 5c: type-introspection + conversion + native-interop ──
+                BuiltinFunction::IsArray | BuiltinFunction::IsObject => {
+                    let args = self.pop_builtin_args()?;
+                    let value = args.first().ok_or_else(|| {
+                        VMError::RuntimeError(format!("{:?} expects 1 argument", builtin))
+                    })?;
+                    let result = match builtin {
+                        BuiltinFunction::IsArray => {
+                            matches!(value.kind, NativeKind::Ptr(HeapKind::TypedArray))
+                        }
+                        BuiltinFunction::IsObject => {
+                            matches!(value.kind, NativeKind::Ptr(HeapKind::TypedObject))
+                        }
+                        _ => unreachable!("outer match restricts builtin"),
+                    };
+                    self.push_kinded_slot(KindedSlot::from_bool(result))?;
+                }
                 BuiltinFunction::IsNumber
                 | BuiltinFunction::IsString
                 | BuiltinFunction::IsBool
-                | BuiltinFunction::IsArray
-                | BuiltinFunction::IsObject
                 | BuiltinFunction::IsDataRow => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
                     // is_* type-check body migration deferred. Drain args
@@ -390,9 +402,7 @@ impl VirtualMachine {
                         builtin
                     )));
                 }
-                BuiltinFunction::ToString
-                | BuiltinFunction::ToNumber
-                | BuiltinFunction::ToBool => {
+                BuiltinFunction::ToString | BuiltinFunction::ToNumber | BuiltinFunction::ToBool => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
                     // conversion body migration (`dispatch_conversion_builtin`)
                     // deferred. Drain args to balance the §2.7.7 parallel-
@@ -490,10 +500,14 @@ impl VirtualMachine {
                         builtin
                     )));
                 }
-                BuiltinFunction::IntrinsicMatMulVec
-                | BuiltinFunction::IntrinsicMatMulMat
-                | BuiltinFunction::IntrinsicMatAdd
-                | BuiltinFunction::IntrinsicMatSub => {
+                BuiltinFunction::IntrinsicMatAdd | BuiltinFunction::IntrinsicMatSub => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::matrix_intrinsics::builtin_matrix_arithmetic(
+                        builtin, &args,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicMatMulVec | BuiltinFunction::IntrinsicMatMulMat => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
                     // matrix intrinsic body migration
                     // (`handle_matrix_intrinsic`) deferred. See sibling
@@ -526,17 +540,58 @@ impl VirtualMachine {
                 // `pub fn sum(series) { series.sum() }` now routes through
                 // the PHF `.sum()` method dispatch — single discriminator
                 // per ADR-005 §1, `MethodFnV2` ABI per ADR-006 §2.7.10/Q11.
-                BuiltinFunction::IntrinsicBspline2_3dBatch
-                | BuiltinFunction::IntrinsicMean
-                | BuiltinFunction::IntrinsicMin
-                | BuiltinFunction::IntrinsicMax
-                | BuiltinFunction::IntrinsicStd
-                | BuiltinFunction::IntrinsicVariance
-                | BuiltinFunction::IntrinsicRandom
+                // ── MA1: aggregate statistics + scalar hyperbolic/atan2.
+                // Documented at stdlib/core/math (sum/mean/std/variance) and
+                // stdlib/native/math (atan2/sinh/cosh/tanh). Bodies read the
+                // numeric typed-array argument through the kind-generic v2
+                // view (ADR-005 §1 single discriminator; ADR-006 §2.7.6). ──
+                BuiltinFunction::IntrinsicMean => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_mean(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicStd => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_std(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicVariance => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_variance(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicAtan2 => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_atan2(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicSinh => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sinh(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicCosh => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_cosh(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicTanh => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_tanh(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicRandom
                 | BuiltinFunction::IntrinsicRandomInt
                 | BuiltinFunction::IntrinsicRandomSeed
                 | BuiltinFunction::IntrinsicRandomNormal
-                | BuiltinFunction::IntrinsicRandomArray
+                | BuiltinFunction::IntrinsicRandomArray => {
+                    let args = self.pop_builtin_args()?;
+                    let r = vm_random_intrinsic_slot(builtin, &args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicBspline2_3dBatch
+                | BuiltinFunction::IntrinsicMin
+                | BuiltinFunction::IntrinsicMax
                 | BuiltinFunction::IntrinsicDistUniform
                 | BuiltinFunction::IntrinsicDistLognormal
                 | BuiltinFunction::IntrinsicDistExponential
@@ -564,19 +619,15 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicCovariance
                 | BuiltinFunction::IntrinsicPercentile
                 | BuiltinFunction::IntrinsicMedian
-                | BuiltinFunction::IntrinsicAtan2
-                | BuiltinFunction::IntrinsicSinh
-                | BuiltinFunction::IntrinsicCosh
-                | BuiltinFunction::IntrinsicTanh
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
-                    // stats / random / stochastic / rolling / scalar-math /
+                    // stats / distribution / stochastic / rolling / scalar-math /
                     // series intrinsic body migration
                     // (`handle_intrinsic_builtin`) deferred. Covers the
                     // ~37-variant cluster (Bspline2_3dBatch, Mean, Min,
-                    // Max, Std, Variance, Random*, Dist*, BrownianMotion,
+                    // Max, Std, Variance, Dist*, BrownianMotion,
                     // Gbm, OuProcess, RandomWalk, Rolling*, Ema,
                     // LinearRecurrence, Shift, Diff, PctChange, Fillna,
                     // Cumsum, Cumprod, Clip, Correlation, Covariance,
@@ -599,14 +650,10 @@ impl VirtualMachine {
                 // rows, JSON navigation helpers, Window functions, Join,
                 // Reflect, MatFromFlat, MakeContent*. ─────────────────────
                 BuiltinFunction::SomeCtor => {
-                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-                    // 2026-05-10): `Some(x)` builds a fresh
-                    // `Arc<OptionData>` carrier with `is_some=true` and
-                    // the popped argument as the typed payload share.
-                    // The `pop_builtin_args` carrier owns one strong-
-                    // count share per heap-bearing kind; ownership
-                    // transfers into the `OptionData::payload` slot
-                    // verbatim (the carrier is moved, not cloned).
+                    // L5 canonical carrier: `Some(x)` is a `__Option`
+                    // TypedObject. The payload carrier's share moves into
+                    // field 1, and TypedObjectStorage releases it via the
+                    // field_kinds track.
                     let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     if args.len() != 1 {
                         return Err(VMError::RuntimeError(format!(
@@ -615,16 +662,14 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let opt = std::sync::Arc::new(
-                        shape_value::heap_value::OptionData::some(payload),
-                    );
-                    self.push_kinded_slot(KindedSlot::from_option(opt))?;
+                    self.push_kinded_slot(result_option_carrier::build_some(
+                        &self.builtin_schemas,
+                        payload,
+                    ))?;
                 }
                 BuiltinFunction::OkCtor => {
-                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-                    // 2026-05-10): `Ok(x)` builds a fresh
-                    // `Arc<ResultData>` carrier with `is_ok=true` and
-                    // the popped argument as the typed payload share.
+                    // L5 canonical carrier: `Ok(x)` is a `__Result`
+                    // TypedObject with the public enum tag for Ok.
                     let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     if args.len() != 1 {
                         return Err(VMError::RuntimeError(format!(
@@ -633,16 +678,14 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let res = std::sync::Arc::new(
-                        shape_value::heap_value::ResultData::ok(payload),
-                    );
-                    self.push_kinded_slot(KindedSlot::from_result(res))?;
+                    self.push_kinded_slot(result_option_carrier::build_ok(
+                        &self.builtin_schemas,
+                        payload,
+                    ))?;
                 }
                 BuiltinFunction::ErrCtor => {
-                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-                    // 2026-05-10): `Err(e)` builds a fresh
-                    // `Arc<ResultData>` carrier with `is_ok=false` and
-                    // the popped argument as the typed payload share.
+                    // L5 canonical carrier: `Err(e)` is a `__Result`
+                    // TypedObject with the public enum tag for Err.
                     let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     if args.len() != 1 {
                         return Err(VMError::RuntimeError(format!(
@@ -651,10 +694,10 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let res = std::sync::Arc::new(
-                        shape_value::heap_value::ResultData::err(payload),
-                    );
-                    self.push_kinded_slot(KindedSlot::from_result(res))?;
+                    self.push_kinded_slot(result_option_carrier::build_err(
+                        &self.builtin_schemas,
+                        payload,
+                    ))?;
                 }
                 BuiltinFunction::HashMapCtor => {
                     // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per
@@ -668,25 +711,33 @@ impl VirtualMachine {
                     // Arc::into_raw::<HashMapKindedRef>.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     let empty_kref = shape_value::heap_value::HashMapKindedRef::String(
-                        std::sync::Arc::new(
-                            shape_value::heap_value::HashMapData::<
-                                *const shape_value::v2::string_obj::StringObj,
-                            >::new(),
-                        ),
+                        std::sync::Arc::new(shape_value::heap_value::HashMapData::<
+                            *const shape_value::v2::string_obj::StringObj,
+                        >::new()),
                     );
                     let hm = std::sync::Arc::new(empty_kref);
                     self.push_kinded_slot(KindedSlot::from_hashmap(hm))?;
                 }
                 BuiltinFunction::SetCtor => {
-                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
-                    // 2026-05-10): empty Set ctor — `Set()` takes no
-                    // args at landing; `Set([elements])` initialization
-                    // is a follow-up. Build empty Arc<HashSetData> and
-                    // push via KindedSlot::from_hashset.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::HashSetData::new(),
-                    );
+                    return Err(VMError::RuntimeError(
+                        "Set(): missing static element kind; typed Set<T> construction must be stamped by the compiler".to_string(),
+                    ));
+                }
+                BuiltinFunction::SetCtorString | BuiltinFunction::SetCtorI64 => {
+                    // W74B redrive: empty Set constructors are statically
+                    // stamped by the compiler from `Set<T>` proof. The runtime
+                    // never chooses an arm from the first inserted element.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = match builtin {
+                        BuiltinFunction::SetCtorString => {
+                            std::sync::Arc::new(shape_value::heap_value::HashSetData::new_string())
+                        }
+                        BuiltinFunction::SetCtorI64 => {
+                            std::sync::Arc::new(shape_value::heap_value::HashSetData::new_i64())
+                        }
+                        _ => unreachable!(),
+                    };
                     let result = KindedSlot::from_hashset(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -699,9 +750,7 @@ impl VirtualMachine {
                     // Reader contract: kind == Ptr(HeapKind::Deque),
                     // bits = Arc::into_raw::<DequeData>.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::DequeData::new(),
-                    );
+                    let empty = std::sync::Arc::new(shape_value::heap_value::DequeData::new());
                     let result = KindedSlot::from_deque(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -715,9 +764,8 @@ impl VirtualMachine {
                     // `Arc::new(PriorityQueueData::new())` and push as
                     // a `KindedSlot::from_priority_queue(...)`.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::PriorityQueueData::new(),
-                    );
+                    let empty =
+                        std::sync::Arc::new(shape_value::heap_value::PriorityQueueData::new());
                     let result = KindedSlot::from_priority_queue(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -736,9 +784,7 @@ impl VirtualMachine {
                     // method body — see
                     // `executor/objects/channel_methods.rs`.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::ChannelData::new(),
-                    );
+                    let empty = std::sync::Arc::new(shape_value::heap_value::ChannelData::new());
                     let result = KindedSlot::from_channel(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -759,9 +805,7 @@ impl VirtualMachine {
                         )));
                     }
                     let initial = args.remove(0);
-                    let m = std::sync::Arc::new(
-                        shape_value::heap_value::MutexData::new(initial),
-                    );
+                    let m = std::sync::Arc::new(shape_value::heap_value::MutexData::new(initial));
                     let result = KindedSlot::from_mutex(m);
                     self.push_kinded_slot(result)?;
                 }
@@ -786,9 +830,7 @@ impl VirtualMachine {
                             args[0].kind
                         ))
                     })?;
-                    let a = std::sync::Arc::new(
-                        shape_value::heap_value::AtomicData::new(initial),
-                    );
+                    let a = std::sync::Arc::new(shape_value::heap_value::AtomicData::new(initial));
                     let result = KindedSlot::from_atomic(a);
                     self.push_kinded_slot(result)?;
                 }
@@ -814,9 +856,7 @@ impl VirtualMachine {
                     // requires Ptr(HeapKind::Closure) callee kind).
                     if !matches!(
                         initializer.kind,
-                        shape_value::NativeKind::Ptr(
-                            shape_value::heap_value::HeapKind::Closure
-                        )
+                        shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Closure)
                     ) {
                         return Err(VMError::RuntimeError(format!(
                             "Lazy() argument must be a closure (got \
@@ -824,9 +864,8 @@ impl VirtualMachine {
                             initializer.kind
                         )));
                     }
-                    let l = std::sync::Arc::new(
-                        shape_value::heap_value::LazyData::new(initializer),
-                    );
+                    let l =
+                        std::sync::Arc::new(shape_value::heap_value::LazyData::new(initializer));
                     let result = KindedSlot::from_lazy(l);
                     self.push_kinded_slot(result)?;
                 }
@@ -888,19 +927,50 @@ impl VirtualMachine {
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::ContentChart => {
-                    // Chart constructor is v0.4 scope per supervisor D4
-                    // (R8 W3, 2026-05-24) — ECharts integration is its own
-                    // workstream. W18.5 ships Table / Code / KeyValue only;
-                    // surfacing the Chart MVP keeps the dispatch arm honest
-                    // (no Bool-default kinded shim per playbook §4 #9).
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    return Err(VMError::NotImplemented(
-                        "Content.chart(...) is v0.4 scope per supervisor D4 \
-                         (R8 W3, 2026-05-24) — ECharts integration is its \
-                         own workstream. W18.5 ships Table / Code / KeyValue \
-                         builders only."
-                            .to_string(),
-                    ));
+                    // ChartBuilder (strict-flip SC, 2026-06): `Content.chart(t)
+                    // -> content` constructor. `t` is the string carrier of a
+                    // `ChartType` namespace member (`ChartType.line` lowers to
+                    // the canonical `"line"` string per SC1 property-access
+                    // path) or a plain string literal (`"line"`). Wraps an
+                    // empty-channel `ChartSpec` of the given type into a
+                    // `Ptr(HeapKind::Content)` slot — sibling to
+                    // `ContentTableCtor`. Channels / title / axis labels are
+                    // filled by the chart builder-method chain
+                    // (`content_methods.rs` `.add` / `.title` / `.x_label` /
+                    // `.y_label` / `.width` / `.height`). No Bool-default, no
+                    // dynamic fallback: the chart-type string is the only arg
+                    // and validates against the 9-variant `ChartType` enum.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Content.chart() requires exactly 1 argument \
+                             (chart type), got {}",
+                            args.len()
+                        )));
+                    }
+                    let type_str = args[0].as_str().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Content.chart() argument must be a chart-type \
+                             string (e.g. ChartType.line), got kind {:?}",
+                            args[0].kind
+                        ))
+                    })?;
+                    let chart_type = parse_chart_type(type_str)?;
+                    let spec = shape_value::content::ChartSpec {
+                        chart_type,
+                        channels: Vec::new(),
+                        x_categories: None,
+                        title: None,
+                        x_label: None,
+                        y_label: None,
+                        width: None,
+                        height: None,
+                        echarts_options: None,
+                        interactive: true,
+                    };
+                    let node = shape_value::content::ContentNode::Chart(spec);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::ContentTableCtor => {
                     // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
@@ -943,6 +1013,48 @@ impl VirtualMachine {
                     let parts = collect_content_nodes_from_array_arg(&args)?;
                     let node = shape_value::content::ContentNode::Fragment(parts);
                     let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::ColorRgbCtor => {
+                    // SC1 (R8 — supervisor): `Color.rgb(r, g, b) -> string`.
+                    // The runtime carrier for every style spec (Color /
+                    // Border / ChartType) is a `NativeKind::String` holding
+                    // the canonical spec text; this arm builds the explicit
+                    // `rgb(r,g,b)` form from three proven-int channel values.
+                    // The named members (`Color.red`, etc.) are emitted as
+                    // compile-time `Constant::String` by the property-access
+                    // path, so this is the only style-spec arm needing a
+                    // runtime builtin. Channels validate to 0–255; the
+                    // string is consumed by the existing string-typed
+                    // `.border(style)` method and the future `.fg`/`.bg`
+                    // parsers (no new HeapKind, no parallel discriminator).
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 3 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Color.rgb() requires exactly 3 arguments (r, g, b), got {}",
+                            args.len()
+                        )));
+                    }
+                    let channel = |idx: usize, name: &str| -> Result<u8, VMError> {
+                        let v = args[idx].as_i64().ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Color.rgb(): {} channel must be an int (got kind {:?})",
+                                name, args[idx].kind
+                            ))
+                        })?;
+                        if !(0..=255).contains(&v) {
+                            return Err(VMError::RuntimeError(format!(
+                                "Color.rgb(): {} channel {} out of range 0–255",
+                                name, v
+                            )));
+                        }
+                        Ok(v as u8)
+                    };
+                    let r = channel(0, "red")?;
+                    let g = channel(1, "green")?;
+                    let b = channel(2, "blue")?;
+                    let spec = format!("rgb({},{},{})", r, g, b);
+                    let result = KindedSlot::from_string_arc(std::sync::Arc::new(spec));
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::TableBuilderNew => {
@@ -1033,8 +1145,7 @@ impl VirtualMachine {
                         ))
                     })?;
                     let node = shape_value::content::ContentNode::plain(s);
-                    let result =
-                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::FStringContentStyledText => {
@@ -1060,43 +1171,44 @@ impl VirtualMachine {
                     })?;
                     let fg_kind = args[1].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText fg_kind must be int"
-                                .to_string(),
+                            "FStringContentStyledText fg_kind must be int".to_string(),
                         )
                     })?;
                     let fg_payload = args[2].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText fg_payload must be int"
-                                .to_string(),
+                            "FStringContentStyledText fg_payload must be int".to_string(),
                         )
                     })?;
                     let bg_kind = args[3].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText bg_kind must be int"
-                                .to_string(),
+                            "FStringContentStyledText bg_kind must be int".to_string(),
                         )
                     })?;
                     let bg_payload = args[4].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText bg_payload must be int"
-                                .to_string(),
+                            "FStringContentStyledText bg_payload must be int".to_string(),
                         )
                     })?;
                     let flags = args[5].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText flags must be int"
-                                .to_string(),
+                            "FStringContentStyledText flags must be int".to_string(),
                         )
                     })?;
 
-                    let style = decode_fstring_style(
-                        fg_kind, fg_payload, bg_kind, bg_payload, flags,
-                    )?;
-                    let node = shape_value::content::ContentNode::styled(
-                        value, style,
-                    );
-                    let result =
-                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    let style =
+                        decode_fstring_style(fg_kind, fg_payload, bg_kind, bg_payload, flags)?;
+                    let node = shape_value::content::ContentNode::styled(value, style);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
+                }
+                BuiltinFunction::FStringContentChart => {
+                    // R8 W6 host residuals: `{value: chart(...), x(...),
+                    // y(...)}` lowers here with the original typed value
+                    // still intact. The helper validates the carrier as a
+                    // schema-backed table or typed-object array, then builds
+                    // chart channels from numeric typed fields.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let result = build_fstring_content_chart(self, &args)?;
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::FStringContentFragment => {
@@ -1113,10 +1225,7 @@ impl VirtualMachine {
                     let mut nodes: Vec<shape_value::content::ContentNode> =
                         Vec::with_capacity(args.len());
                     for (i, arg) in args.iter().enumerate() {
-                        if arg.kind
-                            != shape_value::NativeKind::Ptr(
-                                shape_value::HeapKind::Content,
-                            )
+                        if arg.kind != shape_value::NativeKind::Ptr(shape_value::HeapKind::Content)
                         {
                             return Err(VMError::RuntimeError(format!(
                                 "FStringContentFragment arg #{} must be a \
@@ -1143,16 +1252,12 @@ impl VirtualMachine {
                         // node enum carries owned strings + Vecs) into the
                         // Fragment because the receiving Vec owns its
                         // elements.
-                        let node: &shape_value::content::ContentNode = unsafe {
-                            &*(bits as *const shape_value::content::ContentNode)
-                        };
+                        let node: &shape_value::content::ContentNode =
+                            unsafe { &*(bits as *const shape_value::content::ContentNode) };
                         nodes.push(node.clone());
                     }
-                    let node = shape_value::content::ContentNode::Fragment(
-                        nodes,
-                    );
-                    let result =
-                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    let node = shape_value::content::ContentNode::Fragment(nodes);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
                 // ── Wave 5e: DateTime constructor builtins ────────────────
@@ -1164,53 +1269,47 @@ impl VirtualMachine {
                 // `&[KindedSlot] -> Result<KindedSlot, VMError>` carrier ABI.
                 BuiltinFunction::DateTimeNow => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_datetime_now(
-                        &args,
-                    )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_now(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeUtc => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_datetime_utc(
-                        &args,
-                    )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_utc(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeParse => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_datetime_parse(
-                        &args,
-                    )?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_datetime_parse(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeFromEpoch => {
                     let args = self.pop_builtin_args()?;
-                    let r =
-                        super::super::builtins::datetime_builtins::builtin_datetime_from_epoch(
-                            &args,
-                        )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_from_epoch(
+                        &args,
+                    )?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeFromParts => {
                     let args = self.pop_builtin_args()?;
-                    let r =
-                        super::super::builtins::datetime_builtins::builtin_datetime_from_parts(
-                            &args,
-                        )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_from_parts(
+                        &args,
+                    )?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeFromUnixSecs => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins
-                        ::builtin_datetime_from_unix_secs(&args)?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_datetime_from_unix_secs(
+                            &args,
+                        )?;
                     self.push_kinded_slot(r)?;
                 }
                 // ── Wave 5e: mat() row-major matrix constructor ───────────
                 BuiltinFunction::MatFromFlat => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_mat_from_flat(
-                        &args,
-                    )?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_mat_from_flat(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 // ── Wave 5e: Table<T> from-rows constructor ───────────────
@@ -1251,60 +1350,46 @@ impl VirtualMachine {
                 | BuiltinFunction::WindowDenseRank
                 | BuiltinFunction::WindowNtile => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_row_number_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r =
+                        super::super::window_join::handle_window_row_number_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowLag | BuiltinFunction::WindowLead => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_lag_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_lag_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowFirstValue
                 | BuiltinFunction::WindowLastValue
                 | BuiltinFunction::WindowNthValue => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_first_value_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r =
+                        super::super::window_join::handle_window_first_value_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowSum => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_sum_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_sum_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowAvg => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_avg_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_avg_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowMin => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_min_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_min_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowMax => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_max_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_max_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowCount => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_count_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_count_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::JoinExecute => {
@@ -1360,8 +1445,7 @@ impl VirtualMachine {
                 | BuiltinFunction::EvalDataRelative
                 | BuiltinFunction::EvalDataRelativeRange => {
                     return Err(VMError::RuntimeError(
-                        "DataReference / DataRow type has been removed"
-                            .to_string(),
+                        "DataReference / DataRow type has been removed".to_string(),
                     ));
                 }
             }
@@ -1466,10 +1550,7 @@ impl VirtualMachine {
     /// did not pass it to nested calls; the Display body is expected to
     /// be pure / cheap (a single `Content.text(...)` wrap is the
     /// canonical pattern).
-    fn try_dispatch_display(
-        &mut self,
-        arg: &KindedSlot,
-    ) -> Result<Option<KindedSlot>, VMError> {
+    fn try_dispatch_display(&mut self, arg: &KindedSlot) -> Result<Option<KindedSlot>, VMError> {
         use shape_value::heap_value::HeapKind;
         // Only TypedObject receivers can have user-defined Display impls.
         let shape_value::NativeKind::Ptr(HeapKind::TypedObject) = arg.kind else {
@@ -1525,14 +1606,20 @@ impl VirtualMachine {
     /// a `String`-kinded `KindedSlot`. Used by `format(…)` (multi-arg
     /// concat) and by `FormatValueWithMeta` (single-arg
     /// `expr.to_string()` / interpolation).
-    pub(crate) fn builtin_format(
-        &mut self,
-        args: &[KindedSlot],
-    ) -> Result<KindedSlot, VMError> {
+    pub(crate) fn builtin_format(&mut self, args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+        let mut to_format: Vec<KindedSlot> = Vec::with_capacity(args.len());
+        for a in args {
+            if let Some(replaced) = self.try_dispatch_display(a)? {
+                to_format.push(replaced);
+            } else {
+                to_format.push(a.clone());
+            }
+        }
+
         let formatter =
             super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
         let mut out = String::new();
-        for a in args {
+        for a in &to_format {
             out.push_str(&formatter.format_kinded(a));
         }
         Ok(KindedSlot::from_string_arc(std::sync::Arc::new(out)))
@@ -1581,8 +1668,9 @@ impl VirtualMachine {
                 // Coerce numeric kinds; non-numeric fall back to default
                 // formatting so the spec is a no-op rather than an error.
                 let f = match v.kind {
-                    shape_value::NativeKind::Float64
-                    | shape_value::NativeKind::NullableFloat64 => Some(v.slot.as_f64()),
+                    shape_value::NativeKind::Float64 | shape_value::NativeKind::NullableFloat64 => {
+                        Some(v.slot.as_f64())
+                    }
                     shape_value::NativeKind::Int64
                     | shape_value::NativeKind::Int32
                     | shape_value::NativeKind::Int16
@@ -1599,20 +1687,22 @@ impl VirtualMachine {
                     (Some(f), Some(p)) if p >= 0 => {
                         format!("{:.*}", p as usize, f)
                     }
-                    _ => self.builtin_format(&args[..1])?.as_str().unwrap_or("").to_string(),
+                    _ => self
+                        .builtin_format(&args[..1])?
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
                 };
                 Ok(KindedSlot::from_string_arc(std::sync::Arc::new(rendered)))
             }
-            Some(tag) if tag == FORMAT_SPEC_TABLE => {
-                Err(VMError::NotImplemented(
-                    "FormatValueWithSpec: FORMAT_SPEC_TABLE rendering deferred — \
+            Some(tag) if tag == FORMAT_SPEC_TABLE => Err(VMError::NotImplemented(
+                "FormatValueWithSpec: FORMAT_SPEC_TABLE rendering deferred — \
                      W13-print-formatter scope is the FORMAT_SPEC_FIXED + \
                      no-spec path. Table rendering reuses the DataTable / \
                      TableView Display impls; surface-and-stop pending the \
                      next pass per W13 playbook §7.4."
-                        .to_string(),
-                ))
-            }
+                    .to_string(),
+            )),
             _ => self.builtin_format(&args[..1]),
         }
     }
@@ -1624,6 +1714,145 @@ impl VirtualMachine {
     // ===== Helper Methods =====
     // binary_arithmetic, eval_runtime_binary_op_value, binary_comparison
     // moved to arithmetic/mod.rs
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Wave 8 random intrinsic carriers.
+//
+// The RNG state itself stays in shape-runtime's thread-local `with_rng`
+// hook so VM intrinsics and typed runtime modules observe one deterministic
+// sequence. Carrier construction stays here and is statically known:
+// Float64, Null/void, or v2 `TypedArray<f64>`.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn random_intrinsic_arity(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+    expected: usize,
+) -> Result<(), VMError> {
+    if args.len() == expected {
+        Ok(())
+    } else {
+        Err(VMError::RuntimeError(format!(
+            "{:?} expects {} argument(s), got {}",
+            builtin,
+            expected,
+            args.len()
+        )))
+    }
+}
+
+fn random_number_arg(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+    idx: usize,
+    name: &str,
+) -> Result<f64, VMError> {
+    crate::executor::builtins::kind_coerce::number_operand(&args[idx]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "{:?}: argument '{}' must be number (got kind {:?})",
+            builtin, name, args[idx].kind
+        ))
+    })
+}
+
+fn random_int_arg(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+    idx: usize,
+    name: &str,
+) -> Result<i64, VMError> {
+    crate::executor::builtins::kind_coerce::int_operand(&args[idx]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "{:?}: argument '{}' must be int (got kind {:?})",
+            builtin, name, args[idx].kind
+        ))
+    })
+}
+
+fn random_array_number_slot(values: Vec<f64>) -> KindedSlot {
+    use shape_value::v2::typed_array::{ELEM_TYPE_F64, TypedArray, stamp_elem_type};
+
+    let ptr = TypedArray::<f64>::from_slice(&values);
+    unsafe {
+        stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F64);
+    }
+    KindedSlot::new(
+        ValueSlot::from_u64(ptr as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+fn vm_random_intrinsic_slot(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+) -> Result<KindedSlot, VMError> {
+    use rand::{Rng as _, SeedableRng as _};
+
+    match builtin {
+        crate::bytecode::BuiltinFunction::IntrinsicRandom => {
+            random_intrinsic_arity(builtin, args, 0)?;
+            let value = shape_runtime::intrinsics::random::with_rng(|rng| rng.r#gen::<f64>());
+            Ok(KindedSlot::from_number(value))
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomInt => {
+            random_intrinsic_arity(builtin, args, 2)?;
+            let lo = random_number_arg(builtin, args, 0, "lo")? as i64;
+            let hi = random_number_arg(builtin, args, 1, "hi")? as i64;
+            if lo > hi {
+                return Err(VMError::RuntimeError(format!(
+                    "__intrinsic_random_int: lo ({}) must be <= hi ({})",
+                    lo, hi
+                )));
+            }
+            let value = shape_runtime::intrinsics::random::with_rng(|rng| rng.gen_range(lo..=hi));
+            Ok(KindedSlot::from_number(value as f64))
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomSeed => {
+            random_intrinsic_arity(builtin, args, 1)?;
+            let seed = random_number_arg(builtin, args, 0, "seed")? as u64;
+            shape_runtime::intrinsics::random::with_rng(|rng| {
+                *rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            });
+            Ok(KindedSlot::none())
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomNormal => {
+            random_intrinsic_arity(builtin, args, 2)?;
+            let mean = random_number_arg(builtin, args, 0, "mean")?;
+            let std = random_number_arg(builtin, args, 1, "std")?;
+            if std < 0.0 {
+                return Err(VMError::RuntimeError(
+                    "__intrinsic_random_normal: std must be non-negative".to_string(),
+                ));
+            }
+            let value = shape_runtime::intrinsics::random::with_rng(|rng| {
+                let u1: f64 = rng.r#gen();
+                let u2: f64 = rng.r#gen();
+                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                mean + std * z
+            });
+            Ok(KindedSlot::from_number(value))
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomArray => {
+            random_intrinsic_arity(builtin, args, 1)?;
+            let n = random_int_arg(builtin, args, 0, "n")?;
+            if n < 0 {
+                return Err(VMError::RuntimeError(
+                    "__intrinsic_random_array: n must be non-negative".to_string(),
+                ));
+            }
+            let values = shape_runtime::intrinsics::random::with_rng(|rng| {
+                (0..n as usize)
+                    .map(|_| rng.r#gen::<f64>())
+                    .collect::<Vec<f64>>()
+            });
+            Ok(random_array_number_slot(values))
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "vm_random_intrinsic_slot called with non-random builtin {:?}",
+            other
+        ))),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1651,7 +1880,7 @@ impl VirtualMachine {
 /// contents — each element is copied out of the array's interned UTF-8.
 pub(in crate::executor) fn read_string_array(slot: &KindedSlot) -> Option<Vec<String>> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element, V2ElemType,
+        V2ElemType, as_v2_typed_array, read_element,
     };
     use shape_value::{HeapKind, NativeKind};
     if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -1711,6 +1940,409 @@ pub(in crate::executor) fn read_content_arc(
     }
 }
 
+/// Parse a chart-type string (the carrier of a `ChartType` namespace member,
+/// or a plain string literal) into the matching `ChartType` enum variant.
+///
+/// The user-facing member names mirror `is_style_spec_member`
+/// (`property_access.rs`): the book writes `boxplot` one word while the Rust
+/// variant is `BoxPlot` (serde `box_plot`), so both spellings are accepted.
+/// Unknown strings reject cleanly — no Bool-default, no dynamic fallback.
+pub fn parse_chart_type(s: &str) -> Result<shape_value::content::ChartType, VMError> {
+    use shape_value::content::ChartType;
+    match s.to_ascii_lowercase().as_str() {
+        "line" => Ok(ChartType::Line),
+        "bar" => Ok(ChartType::Bar),
+        "scatter" => Ok(ChartType::Scatter),
+        "area" => Ok(ChartType::Area),
+        "candlestick" => Ok(ChartType::Candlestick),
+        "histogram" => Ok(ChartType::Histogram),
+        "boxplot" | "box_plot" => Ok(ChartType::BoxPlot),
+        "heatmap" => Ok(ChartType::Heatmap),
+        "bubble" => Ok(ChartType::Bubble),
+        other => Err(VMError::RuntimeError(format!(
+            "Content.chart(): unknown chart type '{}' — expected one of \
+             line, bar, scatter, area, candlestick, histogram, boxplot, \
+             heatmap, bubble (e.g. ChartType.line)",
+            other
+        ))),
+    }
+}
+
+struct ChartProjection {
+    x: Option<(String, Vec<f64>)>,
+    y: Vec<(String, Vec<f64>)>,
+}
+
+fn build_fstring_content_chart(
+    vm: &VirtualMachine,
+    args: &[KindedSlot],
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 4 {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart requires value, chart type, x column, and \
+             at least one y column; got {} arguments",
+            args.len()
+        )));
+    }
+    let chart_type_str = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart chart type must be a string, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    let chart_type = parse_chart_type(chart_type_str)?;
+    let x_column_raw = args[2].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart x column must be a string, got kind {:?}",
+            args[2].kind
+        ))
+    })?;
+    let x_column = if x_column_raw.is_empty() {
+        None
+    } else {
+        Some(x_column_raw)
+    };
+    let mut y_columns = Vec::with_capacity(args.len().saturating_sub(3));
+    for arg in &args[3..] {
+        let name = arg.as_str().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart y column must be a string, got kind {:?}",
+                arg.kind
+            ))
+        })?;
+        if name.is_empty() {
+            return Err(VMError::RuntimeError(
+                "FStringContentChart y column cannot be empty".to_string(),
+            ));
+        }
+        y_columns.push(name.to_string());
+    }
+
+    let projection = project_chart_columns(vm, &args[0], x_column, &y_columns)?;
+    let mut channels = Vec::new();
+    if let Some((label, values)) = projection.x {
+        channels.push(shape_value::content::ChartChannel {
+            name: "x".to_string(),
+            label,
+            values,
+            color: None,
+        });
+    }
+    for (label, values) in projection.y {
+        channels.push(shape_value::content::ChartChannel {
+            name: "y".to_string(),
+            label,
+            values,
+            color: None,
+        });
+    }
+
+    let spec = shape_value::content::ChartSpec {
+        chart_type,
+        channels,
+        x_categories: None,
+        title: None,
+        x_label: x_column.map(str::to_string),
+        y_label: if y_columns.len() == 1 {
+            Some(y_columns[0].clone())
+        } else {
+            None
+        },
+        width: None,
+        height: None,
+        echarts_options: None,
+        interactive: true,
+    };
+    Ok(KindedSlot::from_content(std::sync::Arc::new(
+        shape_value::content::ContentNode::Chart(spec),
+    )))
+}
+
+fn project_chart_columns(
+    vm: &VirtualMachine,
+    value: &KindedSlot,
+    x_column: Option<&str>,
+    y_columns: &[String],
+) -> Result<ChartProjection, VMError> {
+    use shape_value::{HeapKind, NativeKind};
+    match value.kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            project_typed_object_array_chart_columns(vm, value, x_column, y_columns)
+        }
+        NativeKind::Ptr(HeapKind::TableView) => {
+            project_table_view_chart_columns(vm, value, x_column, y_columns)
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "FStringContentChart: expected typed object array or Table<T> \
+             value, got kind {:?}",
+            other
+        ))),
+    }
+}
+
+fn project_typed_object_array_chart_columns(
+    vm: &VirtualMachine,
+    value: &KindedSlot,
+    x_column: Option<&str>,
+    y_columns: &[String],
+) -> Result<ChartProjection, VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{
+        V2ElemType, as_v2_typed_array, read_element,
+    };
+    let view = as_v2_typed_array(value.raw(), value.kind).ok_or_else(|| {
+        VMError::RuntimeError(
+            "FStringContentChart: array value has invalid typed-array header".to_string(),
+        )
+    })?;
+    if view.elem_type != V2ElemType::TypedObject {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart: chart array elements must be typed objects, \
+             got {:?}",
+            view.elem_type
+        )));
+    }
+    if view.len == 0 {
+        return Err(VMError::RuntimeError(
+            "FStringContentChart: empty typed-object array has no schema-bearing \
+             row to project"
+                .to_string(),
+        ));
+    }
+
+    let mut x_values = x_column.map(|_| Vec::with_capacity(view.len as usize));
+    let mut y_values: Vec<Vec<f64>> = y_columns
+        .iter()
+        .map(|_| Vec::with_capacity(view.len as usize))
+        .collect();
+    for row_idx in 0..view.len {
+        let (bits, kind) = read_element(&view, row_idx).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: failed to read typed-object row {}",
+                row_idx
+            ))
+        })?;
+        // Ownership: the elem_type guard above guarantees `read_element`
+        // uses its `V2ElemType::TypedObject` arm, which calls
+        // `copy_typed_object_for_bind` and returns a fresh `_new`-allocated
+        // TypedObjectStorage share. Wrapping that pair in KindedSlot is
+        // therefore ownership-correct; `drop(row_slot)` retires the copied
+        // row, not a borrowed array element.
+        let row_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let row = row_slot.as_typed_object_storage().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: row {} is not a typed object (kind {:?})",
+                row_idx, kind
+            ))
+        })?;
+        if let (Some(name), Some(values)) = (x_column, x_values.as_mut()) {
+            values.push(typed_object_numeric_field(vm, row, name)?);
+        }
+        for (col_idx, name) in y_columns.iter().enumerate() {
+            y_values[col_idx].push(typed_object_numeric_field(vm, row, name)?);
+        }
+        drop(row_slot);
+    }
+
+    Ok(ChartProjection {
+        x: x_column.map(|name| (name.to_string(), x_values.unwrap_or_default())),
+        y: y_columns.iter().cloned().zip(y_values).collect::<Vec<_>>(),
+    })
+}
+
+fn typed_object_numeric_field(
+    vm: &VirtualMachine,
+    row: &shape_value::TypedObjectStorage,
+    field_name: &str,
+) -> Result<f64, VMError> {
+    let schema = vm
+        .program
+        .type_schema_registry
+        .get_by_id(row.schema_id as u32)
+        .ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: unknown typed-object schema ID {}",
+                row.schema_id
+            ))
+        })?;
+    let field = schema.get_field(field_name).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: schema '{}' has no field '{}'",
+            schema.name, field_name
+        ))
+    })?;
+    ensure_chart_numeric_field_type(&schema.name, field_name, &field.field_type)?;
+    let slot = row
+        .clone_field_kinded(field.index as usize)
+        .ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: failed to read field '{}' from schema '{}'",
+                field_name, schema.name
+            ))
+        })?;
+    let value = chart_slot_to_f64(&slot).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: field '{}.{}' must be numeric, got kind {:?}",
+            schema.name, field_name, slot.kind
+        ))
+    })?;
+    drop(slot);
+    Ok(value)
+}
+
+fn project_table_view_chart_columns(
+    vm: &VirtualMachine,
+    value: &KindedSlot,
+    x_column: Option<&str>,
+    y_columns: &[String],
+) -> Result<ChartProjection, VMError> {
+    let (schema_id, table) = table_view_data_table(value)?;
+    if table.schema_id() != Some(schema_id as u32) {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart: TableView schema ID {} does not match \
+             DataTable schema ID {:?}",
+            schema_id,
+            table.schema_id()
+        )));
+    }
+    let schema = vm
+        .program
+        .type_schema_registry
+        .get_by_id(schema_id as u32)
+        .ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: unknown table schema ID {}",
+                schema_id
+            ))
+        })?;
+    let x = x_column
+        .map(|name| {
+            table_numeric_column(schema, table, name).map(|values| (name.to_string(), values))
+        })
+        .transpose()?;
+    let mut y = Vec::with_capacity(y_columns.len());
+    for name in y_columns {
+        y.push((name.clone(), table_numeric_column(schema, table, name)?));
+    }
+    Ok(ChartProjection { x, y })
+}
+
+fn table_view_data_table<'a>(
+    value: &'a KindedSlot,
+) -> Result<(u64, &'a shape_value::DataTable), VMError> {
+    use shape_value::{HeapKind, NativeKind, TableViewData};
+    if value.kind != NativeKind::Ptr(HeapKind::TableView) {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart: expected TableView carrier, got {:?}",
+            value.kind
+        )));
+    }
+    let bits = value.raw();
+    if bits == 0 {
+        return Err(VMError::RuntimeError(
+            "FStringContentChart: null TableView carrier".to_string(),
+        ));
+    }
+    // SAFETY: Ptr(TableView) slots carry Arc::into_raw(Arc<TableViewData>).
+    let table_view: &TableViewData = unsafe { &*(bits as *const TableViewData) };
+    match table_view {
+        TableViewData::TypedTable { schema_id, table } => Ok((*schema_id, table.as_ref())),
+        other => Err(VMError::RuntimeError(format!(
+            "FStringContentChart: chart projection expects a TypedTable \
+             carrier, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn table_numeric_column(
+    schema: &shape_runtime::type_schema::TypeSchema,
+    table: &shape_value::DataTable,
+    name: &str,
+) -> Result<Vec<f64>, VMError> {
+    let field = schema.get_field(name).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: schema '{}' has no field '{}'",
+            schema.name, name
+        ))
+    })?;
+    ensure_chart_numeric_field_type(&schema.name, name, &field.field_type)?;
+    let column = table.column_by_name(name).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: table has no column '{}'",
+            name
+        ))
+    })?;
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Float64Array>() {
+        return Ok((0..values.len()).map(|idx| values.value(idx)).collect());
+    }
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Float32Array>() {
+        return Ok((0..values.len())
+            .map(|idx| values.value(idx) as f64)
+            .collect());
+    }
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Int64Array>() {
+        return Ok((0..values.len())
+            .map(|idx| values.value(idx) as f64)
+            .collect());
+    }
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Int32Array>() {
+        return Ok((0..values.len())
+            .map(|idx| values.value(idx) as f64)
+            .collect());
+    }
+    Err(VMError::RuntimeError(format!(
+        "FStringContentChart: column '{}' must be numeric, got Arrow type {:?}",
+        name,
+        column.data_type()
+    )))
+}
+
+fn ensure_chart_numeric_field_type(
+    type_name: &str,
+    field_name: &str,
+    field_type: &shape_runtime::type_schema::FieldType,
+) -> Result<(), VMError> {
+    use shape_runtime::type_schema::FieldType;
+    if matches!(
+        field_type,
+        FieldType::F64
+            | FieldType::I64
+            | FieldType::I8
+            | FieldType::U8
+            | FieldType::I16
+            | FieldType::U16
+            | FieldType::I32
+            | FieldType::U32
+            | FieldType::U64
+    ) {
+        return Ok(());
+    }
+    Err(VMError::RuntimeError(format!(
+        "FStringContentChart: field '{}.{}' must be numeric, got schema \
+         field type {}",
+        type_name, field_name, field_type
+    )))
+}
+
+fn chart_slot_to_f64(slot: &KindedSlot) -> Option<f64> {
+    use shape_value::NativeKind;
+    match slot.kind {
+        NativeKind::Float64 => Some(f64::from_bits(slot.raw())),
+        NativeKind::Float32 => Some(f32::from_bits(slot.raw() as u32) as f64),
+        NativeKind::Int64 => Some(slot.raw() as i64 as f64),
+        NativeKind::Int32 => Some(slot.raw() as u32 as i32 as f64),
+        NativeKind::Int16 => Some(slot.raw() as u16 as i16 as f64),
+        NativeKind::Int8 => Some(slot.raw() as u8 as i8 as f64),
+        NativeKind::UInt64 => Some(slot.raw() as f64),
+        NativeKind::UInt32 => Some(slot.raw() as u32 as f64),
+        NativeKind::UInt16 => Some(slot.raw() as u16 as f64),
+        NativeKind::UInt8 => Some(slot.raw() as u8 as f64),
+        NativeKind::IntSize => Some(slot.raw() as isize as f64),
+        NativeKind::UIntSize => Some(slot.raw() as usize as f64),
+        _ => None,
+    }
+}
+
 /// Build a `ContentTable` from a `Content.table(headers, rows)` arg list.
 ///
 /// `args[0]` is the headers array (`Array<string>`), `args[1]` is the
@@ -1737,9 +2369,7 @@ fn build_table_from_headers_and_rows(
     // Rows is an Array<Array<string>>. The outer array carries
     // TypedArray-of-TypedArray pointers. Read each inner row via
     // `read_string_array`.
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
     use shape_value::{HeapKind, NativeKind};
     if args[1].kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(VMError::RuntimeError(format!(
@@ -1748,12 +2378,9 @@ fn build_table_from_headers_and_rows(
             args[1].kind
         )));
     }
-    let outer_view = as_v2_typed_array(args[1].slot.raw(), args[1].kind)
-        .ok_or_else(|| {
-            VMError::RuntimeError(
-                "Content.table: rows array has invalid v2 header".to_string(),
-            )
-        })?;
+    let outer_view = as_v2_typed_array(args[1].slot.raw(), args[1].kind).ok_or_else(|| {
+        VMError::RuntimeError("Content.table: rows array has invalid v2 header".to_string())
+    })?;
     let mut rows: Vec<Vec<shape_value::content::ContentNode>> =
         Vec::with_capacity(outer_view.len as usize);
     for i in 0..outer_view.len {
@@ -1808,9 +2435,7 @@ fn build_kv_pairs_from_keys_values(
             args[0].kind
         ))
     })?;
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
     use shape_value::{HeapKind, NativeKind};
     if args[1].kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(VMError::RuntimeError(format!(
@@ -1857,9 +2482,7 @@ fn collect_content_nodes_from_array_arg(
             args.len()
         )));
     }
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
     use shape_value::{HeapKind, NativeKind};
     if args[0].kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(VMError::RuntimeError(format!(
@@ -1869,17 +2492,12 @@ fn collect_content_nodes_from_array_arg(
         )));
     }
     let view = as_v2_typed_array(args[0].slot.raw(), args[0].kind).ok_or_else(|| {
-        VMError::RuntimeError(
-            "Content.fragment: parts array has invalid v2 header".to_string(),
-        )
+        VMError::RuntimeError("Content.fragment: parts array has invalid v2 header".to_string())
     })?;
     let mut parts = Vec::with_capacity(view.len as usize);
     for i in 0..view.len {
         let (bits, kind) = read_element(&view, i).ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Content.fragment: failed to read element {}",
-                i
-            ))
+            VMError::RuntimeError(format!("Content.fragment: failed to read element {}", i))
         })?;
         let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         let arc = read_content_arc(&elem_slot).ok_or_else(|| {
@@ -1923,7 +2541,10 @@ const FSTRING_FLAG_ITALIC: i64 = 2;
 const FSTRING_FLAG_UNDERLINE: i64 = 4;
 const FSTRING_FLAG_DIM: i64 = 8;
 
-fn decode_fstring_color(kind: i64, payload: i64) -> Result<Option<shape_value::content::Color>, VMError> {
+fn decode_fstring_color(
+    kind: i64,
+    payload: i64,
+) -> Result<Option<shape_value::content::Color>, VMError> {
     use shape_value::content::{Color, NamedColor};
     match kind {
         FSTRING_COLOR_NONE => Ok(None),
@@ -1974,6 +2595,52 @@ fn decode_fstring_style(
         underline: (flags & FSTRING_FLAG_UNDERLINE) != 0,
         dim: (flags & FSTRING_FLAG_DIM) != 0,
     })
+}
+
+#[cfg(test)]
+mod random_intrinsic_tests {
+    use super::*;
+    use crate::bytecode::BuiltinFunction;
+
+    #[test]
+    fn random_seed_restarts_shared_runtime_rng_sequence() {
+        let seed_args = [KindedSlot::from_number(42.0)];
+        let seed_slot =
+            vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        assert_eq!(seed_slot.kind, NativeKind::Null);
+
+        let first = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandom, &[]).unwrap();
+        let first_value = first.as_f64().unwrap();
+
+        let seed_args = [KindedSlot::from_number(42.0)];
+        let _ = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        let second = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandom, &[]).unwrap();
+        assert_eq!(second.as_f64().unwrap(), first_value);
+    }
+
+    #[test]
+    fn random_normal_returns_float64_slot() {
+        let seed_args = [KindedSlot::from_number(7.0)];
+        let _ = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        let args = [KindedSlot::from_number(10.0), KindedSlot::from_number(2.0)];
+        let slot = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomNormal, &args).unwrap();
+        assert_eq!(slot.kind, NativeKind::Float64);
+        assert!(slot.as_f64().unwrap().is_finite());
+    }
+
+    #[test]
+    fn random_array_returns_v2_f64_typed_array_carrier() {
+        let seed_args = [KindedSlot::from_number(11.0)];
+        let _ = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        let args = [KindedSlot::from_int(3)];
+        let slot = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomArray, &args).unwrap();
+        assert_eq!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray));
+
+        let ptr = slot.slot().raw() as *const shape_value::v2::typed_array::TypedArray<f64>;
+        let values = unsafe { shape_value::v2::typed_array::TypedArray::<f64>::as_slice(ptr) };
+        assert_eq!(values.len(), 3);
+        assert!(values.iter().all(|v| *v >= 0.0 && *v < 1.0));
+    }
 }
 
 #[cfg(test)]
@@ -2029,10 +2696,7 @@ mod fstring_decode_tests {
             0,
             FSTRING_COLOR_NONE,
             0,
-            FSTRING_FLAG_BOLD
-                | FSTRING_FLAG_ITALIC
-                | FSTRING_FLAG_UNDERLINE
-                | FSTRING_FLAG_DIM,
+            FSTRING_FLAG_BOLD | FSTRING_FLAG_ITALIC | FSTRING_FLAG_UNDERLINE | FSTRING_FLAG_DIM,
         )
         .unwrap();
         assert!(style.bold);

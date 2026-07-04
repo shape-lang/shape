@@ -11,7 +11,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
 /// ADR-006 §2.7.4 / §2.7.7 surface marker for the closure-call /
 /// extern-FFI / JIT-dispatch paths in this module that still depended on
@@ -24,6 +24,49 @@ use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
 /// are deferred to phase-2c per §2.7.4.
 const PHASE_2C_CALL_REBUILD_SURFACE: &str =
     "phase-2c — closure / call / extern-FFI rebuild (ADR-006 §2.7.4 / §2.7.5)";
+
+/// Exhaustive HeapKind sink for pointer-truthiness checks.
+#[inline]
+fn heap_ptr_is_truthy(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits != 0,
+    }
+}
 
 /// ADR-006 §2.7.7: bool truthiness from raw bits + kind. Mirrors the
 /// helper in `executor/logical/mod.rs` (kept module-local; no cross-
@@ -61,10 +104,11 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         NativeKind::Char => bits != 0,
         // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
         // (2026-05-14): truthy iff `bits != 0` — the v2-raw carrier ptr is
-        // non-null when live (same shape as the String / Ptr(_) heap-arm
-        // truthy rule below).
+        // non-null when live (same shape as the String / Ptr(HeapKind::*)
+        // heap-arm truthy rule below).
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
-        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        NativeKind::String => bits != 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_truthy(bits, heap_kind),
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is the absence-of-value
         // sentinel; falsy by definition.
@@ -497,7 +541,6 @@ impl VirtualMachine {
         //   - `Operand::ClosureAlloc { fid, .. }` — compiler-tagged with
         //     escape status (the VM path is identical; the JIT's MIR
         //     lowering reads `escapes` to pick stack vs. heap codegen).
-        use shape_value::HeapKind;
         use shape_value::heap_value::HeapValue;
         use shape_value::v2::closure_layout::CaptureKind;
         use shape_value::v2::closure_raw::{
@@ -561,18 +604,184 @@ impl VirtualMachine {
         // in-bounds for every `i < capture_count`.
         let owned = unsafe {
             let ptr = alloc_typed_closure(func_id.0, 0, &layout);
-            for (i, (bits, _kind)) in popped.iter().enumerate() {
+            for (i, (bits, kind)) in popped.iter().enumerate() {
                 match layout.capture_storage_kind(i) {
                     CaptureKind::Immutable => {
-                        // Write the popped bits verbatim. For `Ptr`
-                        // captures the popped share transfers into the
-                        // block's slot; `release_typed_closure` walks
-                        // `heap_capture_mask` and drops via
-                        // `drop_with_kind(bits, layout.capture_native_kind(i))`
-                        // (closure_raw.rs:412-418). For non-Ptr scalars
-                        // the slot is value-only — no refcount semantics
-                        // apply.
-                        write_capture_raw_u64(ptr, &layout, i, *bits);
+                        // Named-function-value carrier reconciliation
+                        // (R1 named-fn-as-value capture fix).
+                        //
+                        // A *named* function value is produced as a bare
+                        // function-id with runtime kind
+                        // `NativeKind::UInt64` (see
+                        // `PushConst(Constant::Function)` in
+                        // `stack_ops/mod.rs` — `(id as u64, UInt64)`),
+                        // whereas a *closure* value is produced as
+                        // `Arc::into_raw(Arc<HeapValue::ClosureRaw>)` with
+                        // kind `Ptr(HeapKind::Closure)`.
+                        //
+                        // A callable capture is stamped
+                        // `Ptr(HeapKind::Closure)` in the layout
+                        // (`resolve_capture_concrete_type` →
+                        // `ConcreteType::Function` →
+                        // `native_kind_from_concrete_type`) whenever the
+                        // compiler classifies the capture as a function
+                        // value (called or passed onward in the body).
+                        //
+                        // Storing the bare fn-id verbatim into the
+                        // `Ptr(HeapKind::Closure)` slot is a carrier
+                        // mismatch: `release_typed_closure` (and any later
+                        // value-call via `as_heap_value()`) would treat the
+                        // fn-id integer as an `Arc<HeapValue>` pointer and
+                        // dereference garbage → SIGSEGV. The popped runtime
+                        // `kind` is the single source of truth here
+                        // (ADR-006 §2.7.7 — no fabrication): when the layout
+                        // expects a closure carrier but the value arrived as
+                        // a `UInt64` fn-id, materialize a real zero-capture
+                        // closure carrier for that fn-id so the carrier
+                        // matches the layout's `Ptr(HeapKind::Closure)`
+                        // release discipline, and every downstream path
+                        // (capture read, value-call, refcount drop) is
+                        // sound. A genuine closure value (already
+                        // `Ptr(HeapKind::Closure)`) is written verbatim.
+                        if layout.capture_native_kind(i) == NativeKind::Ptr(HeapKind::Closure) {
+                            match *kind {
+                                // Genuine closure value: write the
+                                // `Arc<HeapValue::ClosureRaw>` pointer bits
+                                // verbatim — the popped share transfers into
+                                // the slot and `release_typed_closure` drops
+                                // it via `drop_with_kind(bits, Ptr(Closure))`.
+                                NativeKind::Ptr(HeapKind::Closure) => {
+                                    write_capture_raw_u64(ptr, &layout, i, *bits);
+                                }
+                                // Named-function value (`UInt64` fn-id):
+                                // materialize a real zero-capture closure
+                                // carrier so the slot holds a true
+                                // `Arc<HeapValue::ClosureRaw>` matching the
+                                // `Ptr(HeapKind::Closure)` drop discipline.
+                                NativeKind::UInt64 => {
+                                    let fn_id = *bits as u16;
+                                    let empty_layout = Arc::new(
+                                        shape_value::v2::closure_layout::ClosureLayout
+                                            ::from_capture_types_with_native_kinds(
+                                                &[], &[], &[],
+                                            ),
+                                    );
+                                    let inner_ptr = alloc_typed_closure(fn_id, 0, &empty_layout);
+                                    let inner_block = OwnedClosureBlock::from_raw(
+                                        inner_ptr as *const u8,
+                                        empty_layout,
+                                    );
+                                    let arc = Arc::new(HeapValue::ClosureRaw(inner_block));
+                                    let closure_bits = Arc::into_raw(arc) as u64;
+                                    write_capture_raw_u64(ptr, &layout, i, closure_bits);
+                                }
+                                // The compiler stamped this capture's slot as
+                                // a closure carrier (`Ptr(HeapKind::Closure)`)
+                                // but the value that arrived is neither a
+                                // closure pointer nor a function-id — a
+                                // construction-side classification mismatch
+                                // (e.g. a non-callable capture mis-classified
+                                // as a function value). Writing the bits
+                                // verbatim would have
+                                // `release_typed_closure` drop a non-pointer
+                                // value as an `Arc<HeapValue>` → heap
+                                // corruption / SIGSEGV. Surface-and-stop
+                                // instead (ADR-006 §2.7.8 #4 — no fabrication,
+                                // no garbage write): a clean RuntimeError is
+                                // the binding-compliant outcome.
+                                //
+                                // The partially-built block (slot `i` still
+                                // zeroed) is intentionally NOT reclaimed via
+                                // `release_typed_closure`: walking the masks
+                                // would `drop_with_kind(0, Ptr(Closure))` on
+                                // the null slot `i` and segfault. We leak the
+                                // raw allocation — this arm is a fatal,
+                                // should-be-unreachable error exit (a
+                                // well-formed program never mis-classifies a
+                                // capture), so a one-shot leak on the
+                                // terminating path is the safe choice over a
+                                // null deref.
+                                bad => {
+                                    return Err(VMError::RuntimeError(format!(
+                                        "op_make_closure: capture {} is stamped a \
+                                         closure carrier (Ptr(HeapKind::Closure)) but \
+                                         the captured value has kind {:?}; a \
+                                         non-callable value cannot be captured into a \
+                                         function-typed capture slot",
+                                        i, bad
+                                    )));
+                                }
+                            }
+                        } else {
+                            // Carrier-mismatch guard (closures_hof transitive-
+                            // capture SIGSEGV fix, 2026-06-22). The layout's
+                            // `capture_native_kind(i)` is the compile-time stamp
+                            // from `resolve_capture_concrete_type`. When a
+                            // capture's `ConcreteType` could NOT be proven at
+                            // compile time (e.g. a transitively-captured outer
+                            // closure param — `|c| a + b + c` where `b` is the
+                            // enclosing closure's unannotated param), the
+                            // resolver falls to the `Pointer(Void)` "opaque
+                            // heap slot" sentinel → `Ptr(HeapKind::NativeView)`.
+                            // That stamp puts the slot in `heap_capture_mask`,
+                            // so `release_typed_closure` will
+                            // `drop_with_kind(bits, Ptr(NativeView))` it on the
+                            // closure's last drop — i.e. reinterpret the bits as
+                            // an `Arc<NativeViewData>`. But the value that
+                            // actually arrived here is a scalar (the body proves
+                            // `b: int` via `a + b` and reads it as `Int64`); its
+                            // bits are an integer, not a heap pointer. Writing
+                            // them verbatim and later dropping them as an `Arc`
+                            // dereferences a small integer as a pointer →
+                            // SIGSEGV (the exact closures_hof crash class).
+                            //
+                            // The popped runtime `kind` is the single source of
+                            // truth (ADR-006 §2.7.7 — no fabrication, no
+                            // Bool-default). When the layout stamps a heap `Ptr`
+                            // carrier for this slot but the value arrived with a
+                            // non-`Ptr` scalar kind, that is a construction-side
+                            // classification mismatch the compiler could not
+                            // prove away. We refuse to write a scalar into a
+                            // heap-drop-masked slot (which would corrupt the heap
+                            // on drop) and surface-and-stop with a clean
+                            // RuntimeError — never a garbage Arc drop. This is
+                            // the same discipline as the R1 named-fn `bad =>`
+                            // arm above.
+                            //
+                            // The partially-built block (slot `i` still zeroed)
+                            // is intentionally NOT reclaimed via
+                            // `release_typed_closure`: walking the masks would
+                            // `drop_with_kind(0, Ptr(..))` on the null slot and
+                            // segfault. We leak the raw allocation on this fatal
+                            // terminating path — a one-shot leak is the safe
+                            // choice over a null deref.
+                            if matches!(layout.capture_native_kind(i), NativeKind::Ptr(_))
+                                && !matches!(*kind, NativeKind::Ptr(_))
+                            {
+                                return Err(VMError::RuntimeError(format!(
+                                    "op_make_closure: capture {} is stamped a \
+                                     heap carrier ({:?}) but the captured value \
+                                     arrived with scalar kind {:?}; the closure \
+                                     captures a value whose type could not be \
+                                     proven at compile time (e.g. a \
+                                     transitively-captured un-annotated closure \
+                                     parameter). Annotate the capture's source \
+                                     binding so its type is statically known.",
+                                    i,
+                                    layout.capture_native_kind(i),
+                                    *kind
+                                )));
+                            }
+                            // Write the popped bits verbatim. For `Ptr`
+                            // captures the popped share transfers into the
+                            // block's slot; `release_typed_closure` walks
+                            // `heap_capture_mask` and drops via
+                            // `drop_with_kind(bits, layout.capture_native_kind(i))`
+                            // (closure_raw.rs:412-418). For non-Ptr scalars
+                            // the slot is value-only — no refcount semantics
+                            // apply.
+                            write_capture_raw_u64(ptr, &layout, i, *bits);
+                        }
                     }
                     CaptureKind::OwnedMutable => {
                         // Allocate a typed `Box<T>` matching the layout's
@@ -589,9 +798,7 @@ impl VirtualMachine {
                         let inner = layout.capture_inner_kind(i);
                         let cell_ptr_bits: u64 = match inner {
                             FieldKind::I64 => alloc_owned_mutable_i64(*bits as i64) as u64,
-                            FieldKind::F64 => {
-                                alloc_owned_mutable_f64(f64::from_bits(*bits)) as u64
-                            }
+                            FieldKind::F64 => alloc_owned_mutable_f64(f64::from_bits(*bits)) as u64,
                             FieldKind::I32 => alloc_owned_mutable_i32(*bits as i64 as i32) as u64,
                             FieldKind::I16 => alloc_owned_mutable_i16(*bits as i64 as i16) as u64,
                             FieldKind::I8 => alloc_owned_mutable_i8(*bits as i64 as i8) as u64,
@@ -641,7 +848,6 @@ impl VirtualMachine {
         let bits = Arc::into_raw(arc) as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::Closure))
     }
-
 
     // Foreign function call
 
@@ -889,4 +1095,3 @@ impl VirtualMachine {
         self.return_value_inner(bits, src_kind)
     }
 }
-

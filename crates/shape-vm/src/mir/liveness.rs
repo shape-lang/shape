@@ -175,6 +175,10 @@ fn add_rvalue_uses(live: &mut HashSet<SlotId>, rvalue: &Rvalue) {
             add_operand_uses(live, lhs);
             add_operand_uses(live, rhs);
         }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+            add_operand_uses(live, lhs);
+            add_operand_uses(live, rhs);
+        }
         Rvalue::Aggregate(ops) => {
             for op in ops {
                 add_operand_uses(live, op);
@@ -183,7 +187,8 @@ fn add_rvalue_uses(live: &mut HashSet<SlotId>, rvalue: &Rvalue) {
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
-        | Rvalue::EnumDiscriminantTest { operand, .. } => {
+        | Rvalue::EnumDiscriminantTest { operand, .. }
+        | Rvalue::PrimitiveCast { operand, .. } => {
             add_operand_uses(live, operand);
         }
     }
@@ -269,6 +274,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -339,6 +346,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);

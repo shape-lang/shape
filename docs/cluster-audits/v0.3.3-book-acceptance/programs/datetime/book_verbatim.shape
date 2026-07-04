@@ -1,0 +1,5 @@
+// Verbatim from datetime.mdx lines 345-350 (Business Hours example)
+from std::core::intrinsics use { DateTime }
+let office_open_et = DateTime.parse("2024-06-15T09:00:00-04:00")
+let tokyo_open = office_open_et.to_timezone("Asia/Tokyo")
+print(f"NY office opens at {tokyo_open.format('%H:%M')} Tokyo time")

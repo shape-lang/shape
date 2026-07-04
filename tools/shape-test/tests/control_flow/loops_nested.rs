@@ -335,7 +335,7 @@ fn cf_21_while_loop_expression() {
 // Test 21: While loop as expression
 let result = while false { 42 }
 print(result)
-// Expected: () or error
+// Expected: None
 "#;
     ShapeTest::new(code).expect_run_ok().expect_output("None");
 }

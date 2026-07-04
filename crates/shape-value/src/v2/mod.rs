@@ -1,3 +1,4 @@
+pub mod alloc_budget;
 pub mod closure_layout;
 pub mod closure_raw;
 pub mod concrete_type;
@@ -6,10 +7,9 @@ pub mod function_type_registry;
 pub mod heap_element;
 pub mod heap_header;
 pub mod refcount;
-pub mod struct_layout;
 pub mod string_obj;
+pub mod struct_layout;
 pub mod typed_array;
-pub mod typed_map;
 pub mod typed_option;
 pub mod typed_result;
 

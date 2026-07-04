@@ -39,6 +39,13 @@ pub struct BytecodeExecutor {
     /// When true, the compiler allows `__intrinsic_*` calls from user code.
     /// Used by test helpers that inline stdlib source as top-level code.
     pub allow_internal_builtins: bool,
+    /// Optional resource limits installed on every VM this executor builds.
+    /// `None` (default) = unlimited, matching trusted CLI execution. The
+    /// shape-test harness sets a generous-but-finite cap so a runaway test
+    /// program (e.g. a strict-flip inference regression producing an
+    /// unbounded allocating loop) fails IN-PROCESS with a
+    /// `ResourceLimitExceeded` error instead of OOM-killing the whole box.
+    pub(crate) resource_limits: Option<crate::resource_limits::ResourceLimits>,
 }
 
 impl Default for BytecodeExecutor {
@@ -67,6 +74,7 @@ impl BytecodeExecutor {
             module_loader: None,
             permission_set: None,
             allow_internal_builtins: false,
+            resource_limits: None,
         };
         executor.register_stdlib_modules();
 
@@ -208,6 +216,18 @@ impl BytecodeExecutor {
     /// not present in this set. Pass `None` to disable checking (default).
     pub fn set_permission_set(&mut self, permissions: Option<shape_abi_v1::PermissionSet>) {
         self.permission_set = permissions;
+    }
+
+    /// Install resource limits applied to every VM this executor builds.
+    ///
+    /// Pass `None` (the default) for unlimited, trusted execution. Pass a
+    /// finite [`ResourceLimits`](crate::resource_limits::ResourceLimits) to
+    /// make a runaway program fail in-process (instruction / memory /
+    /// wall-time / output caps) rather than exhausting the machine. The
+    /// limits cap *resource consumption only* — they never change the
+    /// observable result of a program that stays within them.
+    pub fn set_resource_limits(&mut self, limits: Option<crate::resource_limits::ResourceLimits>) {
+        self.resource_limits = limits;
     }
 }
 

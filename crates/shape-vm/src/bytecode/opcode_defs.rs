@@ -349,6 +349,16 @@ define_opcodes! {
     Throw = 0xA2, Exception, pops: 1, pushes: 0;
     /// Try operator: unified Result/Option propagation with early return on Err/None
     TryUnwrap = 0xA3, Exception, pops: 1, pushes: 1;
+    /// Non-consuming `?`-failure classifier. Pops one carrier (retiring its
+    /// share), pushes a `Bool`: `true` when `TryUnwrap` WOULD short-circuit
+    /// (Err / None / null-coded-None), `false` when it would unwrap
+    /// (Ok / Some / bare-value). Drives the compiler-emitted pending-Drop
+    /// branch in the `?` lowering so in-scope Drop-bearing locals are
+    /// released on the Err/None early-return path (resource-management
+    /// chapter L12). Classification routes through the SAME `read_result`
+    /// / `read_option` / `is_null_sentinel` helpers as `op_try_unwrap` —
+    /// single source of truth, no divergence.
+    IsTryFailure = 0x18, Exception, pops: 1, pushes: 1;
     /// Unwrap Option: extract inner value from Some, panic on None
     UnwrapOption = 0xA4, Exception, pops: 1, pushes: 1;
     /// Add context to Result/Option failures and lift success into Result
@@ -492,6 +502,19 @@ define_opcodes! {
     /// the legacy `PushNull; Eq` and `emit_unit; Eq` patterns at the 16
     /// null/unit-check sites in the compiler.
     IsNull = 0xF2, Comparison, pops: 1, pushes: 1;
+    /// Null-coalescing probe (`??`). Pops one value and pushes back TWO
+    /// slots: `[present_value, is_absent_bool]`. The `is_absent_bool` is
+    /// `true` when the popped value is absent (the `None` / null sentinel),
+    /// `false` otherwise. The `present_value`:
+    ///   - `Some(v)` Option carrier → the UNWRAPPED inner `v`
+    ///   - `None` Option / null sentinel → a placeholder (the absence
+    ///     value; discarded by the `??` lowering on the absent branch)
+    ///   - bare non-null value → the value itself (null-coding `Some(x) ≡ x`)
+    /// Replaces the `Dup; IsNull` prologue of the `??` lowering so that an
+    /// `Option<T>` carrier (`Arc<OptionData>`) is correctly unwrapped to
+    /// `T` instead of leaking the wrapper — the v0.3.3 book-gate fix for
+    /// `Some(5) ?? 99 -> 5`.
+    CoalesceProbe = 0x17, Comparison, pops: 1, pushes: 2;
 
     // ===== Numeric Coercion Operations =====
     /// Coerce int to number (i64 -> f64)
@@ -761,67 +784,93 @@ define_opcodes! {
     /// pushes nothing. Releases prior element, transfers new value's refcount share.
     TypedArraySetTypedObject = 0x1B8, Object, pops: 3, pushes: 0;
 
-    // ===== v2 Typed Map Operations =====
-    /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
-    NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<*const StringObj, i64>. Pushes ptr.
-    NewTypedMapStringI64 = 0xCE, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<*const StringObj, *const u8>. Pushes ptr.
-    NewTypedMapStringPtr = 0xCF, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<i64, f64>. Pushes ptr.
-    NewTypedMapI64F64 = 0xD5, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<i64, i64>. Pushes ptr.
-    NewTypedMapI64I64 = 0xD6, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<i64, *const u8>. Pushes ptr.
-    NewTypedMapI64Ptr = 0xD9, Object, pops: 0, pushes: 1;
-    /// String→f64 get: pops (map_ptr, key), pushes f64 (or null).
-    TypedMapStringF64Get = 0xDA, Object, pops: 2, pushes: 1;
-    /// String→i64 get: pops (map_ptr, key), pushes i64 (or null).
-    TypedMapStringI64Get = 0xDB, Object, pops: 2, pushes: 1;
-    /// String→Ptr get: pops (map_ptr, key), pushes ptr (or null).
-    TypedMapStringPtrGet = 0xDC, Object, pops: 2, pushes: 1;
-    /// I64→f64 get: pops (map_ptr, key), pushes f64 (or null).
-    TypedMapI64F64Get = 0xDD, Object, pops: 2, pushes: 1;
-    /// I64→i64 get: pops (map_ptr, key), pushes i64 (or null).
-    TypedMapI64I64Get = 0xDE, Object, pops: 2, pushes: 1;
-    /// I64→Ptr get: pops (map_ptr, key), pushes ptr (or null).
-    TypedMapI64PtrGet = 0xDF, Object, pops: 2, pushes: 1;
-    /// String→f64 set: pops (map_ptr, key, value).
-    TypedMapStringF64Set = 0x4D, Object, pops: 3, pushes: 0;
-    /// String→i64 set: pops (map_ptr, key, value).
-    TypedMapStringI64Set = 0x4E, Object, pops: 3, pushes: 0;
-    /// String→Ptr set: pops (map_ptr, key, value).
-    TypedMapStringPtrSet = 0x4F, Object, pops: 3, pushes: 0;
-    /// I64→f64 set: pops (map_ptr, key, value).
-    TypedMapI64F64Set = 0x6D, Object, pops: 3, pushes: 0;
-    /// I64→i64 set: pops (map_ptr, key, value).
-    TypedMapI64I64Set = 0x6E, Object, pops: 3, pushes: 0;
-    /// I64→Ptr set: pops (map_ptr, key, value).
-    TypedMapI64PtrSet = 0x6F, Object, pops: 3, pushes: 0;
-    /// String→f64 has: pops (map_ptr, key), pushes bool.
-    TypedMapStringF64Has = 0x8E, Object, pops: 2, pushes: 1;
-    /// String→i64 has: pops (map_ptr, key), pushes bool.
-    TypedMapStringI64Has = 0x8F, Object, pops: 2, pushes: 1;
-    /// String→Ptr has: pops (map_ptr, key), pushes bool.
-    TypedMapStringPtrHas = 0xB9, Object, pops: 2, pushes: 1;
-    /// I64→f64 has: pops (map_ptr, key), pushes bool.
-    TypedMapI64F64Has = 0xBA, Object, pops: 2, pushes: 1;
-    /// I64→i64 has: pops (map_ptr, key), pushes bool.
-    TypedMapI64I64Has = 0xBB, Object, pops: 2, pushes: 1;
-    /// I64→Ptr has: pops (map_ptr, key), pushes bool.
-    TypedMapI64PtrHas = 0xBC, Object, pops: 2, pushes: 1;
-    /// String→f64 delete: pops (map_ptr, key).
-    TypedMapStringF64Delete = 0xBD, Object, pops: 2, pushes: 0;
-    /// String→i64 delete: pops (map_ptr, key).
-    TypedMapStringI64Delete = 0xBE, Object, pops: 2, pushes: 0;
-    /// String→Ptr delete: pops (map_ptr, key).
-    TypedMapStringPtrDelete = 0xBF, Object, pops: 2, pushes: 0;
-    /// I64→f64 delete: pops (map_ptr, key).
-    TypedMapI64F64Delete = 0xF9, Object, pops: 2, pushes: 0;
-    /// I64→i64 delete: pops (map_ptr, key).
-    TypedMapI64I64Delete = 0xFA, Object, pops: 2, pushes: 0;
-    /// I64→Ptr delete: pops (map_ptr, key).
-    TypedMapI64PtrDelete = 0xFB, Object, pops: 2, pushes: 0;
+    // ===== Construction strict-typing close (USER RULING 2026-06-05) =====
+    // Nested-array element carrier: `TypedArray<*const TypedArrayElem>`. The
+    // stored element is itself a v2-raw `*mut TypedArray<U>` (any inner
+    // monomorphization), viewed through its HeapHeader. Per-element retain
+    // touches only the refcount at offset 0; per-element release dispatches
+    // through the kind-erased `release_v2_typed_array` (reads the inner array's
+    // own `_pad` discriminant). The element carrier kind is
+    // `NativeKind::Ptr(HeapKind::TypedArray)` — the same kind the outer array
+    // itself uses.
+
+    /// Create a new TypedArray<*const TypedArrayElem> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayNested = 0x1B9, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const TypedArrayElem>: pops (arr_ptr, index),
+    /// pushes inner-array ptr with NativeKind::Ptr(HeapKind::TypedArray)
+    /// (retains element).
+    TypedArrayGetNested = 0x1BA, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<*const TypedArrayElem>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers their refcount share to the array.
+    TypedArrayPushNested = 0x1BB, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<*const TypedArrayElem>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior element, transfers new value's refcount share.
+    TypedArraySetNested = 0x1BC, Object, pops: 3, pushes: 0;
+
+    // ── Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) ──
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.C (TraitObject
+    // re-introduction, all-traits-dyn-able): `Array<dyn Trait>` literals route
+    // through the v2-raw `TypedArray<*const TraitObjectStorage>` element
+    // carrier. Mirror of the W16.2-A TypedObject opcodes (0x1B5..0x1B8 above),
+    // swapping `TypedObjectStorage` → `TraitObjectStorage` and
+    // `NativeKind::Ptr(HeapKind::TypedObject)` →
+    // `NativeKind::Ptr(HeapKind::TraitObject)`.
+    //
+    // The TraitObjectStorage HeapElement impl is wired at
+    // `crates/shape-value/src/heap_value.rs:3092`; `TraitObjectStorage::_new`
+    // / `_drop` raw-pointer allocators at `:2948`/`:2987` (Wave 2 Agent E +
+    // D4 close, audit §4.3 O-3a RESOLVED). The element values are produced by
+    // `OpCode::BoxTraitObject` (`trait_object_ops.rs:205`) which already
+    // allocates via `TraitObjectStorage::_new` and pushes
+    // `Ptr(HeapKind::TraitObject)` — the producer/consumer carrier shapes are
+    // already in lockstep (no Arc-vs-raw split). The 4-table HeapKind dispatch
+    // for `HeapKind::TraitObject` (stack.rs:224/584 / kinded_slot.rs /
+    // closure_layout.rs:491 / heap_value.rs) is pre-existing.
+
+    /// Create a new TypedArray<*const TraitObjectStorage> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayTraitObject = 0x1BD, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const TraitObjectStorage>: pops (arr_ptr, index),
+    /// pushes (*const TraitObjectStorage) bits with
+    /// NativeKind::Ptr(HeapKind::TraitObject) (retains element).
+    TypedArrayGetTraitObject = 0x1BE, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<*const TraitObjectStorage>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers their refcount share to the array.
+    TypedArrayPushTraitObject = 0x1BF, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<*const TraitObjectStorage>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior element, transfers new value's refcount share.
+    TypedArraySetTraitObject = 0x1C0, Object, pops: 3, pushes: 0;
+
+    // ── W22 callable-array element carrier (2026-06-27) ──
+    //
+    // Compile-time-proven `Array<Function<...>>` literals use a dedicated
+    // `TypedArray<CallableArrayElem>` descriptor carrier. Closure elements own
+    // `Arc<HeapValue>` shares; named/module functions are inline ids. The
+    // descriptor records the exact callable NativeKind shape per element, so
+    // element reads can call through existing `CallValue` dispatch without
+    // runtime probing and without pretending closures have a HeapHeader.
+
+    /// Create a new TypedArray<CallableArrayElem> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayCallable = 0x1C4, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<CallableArrayElem>: pops (arr_ptr, index),
+    /// pushes the stored callable bits with the stored callable kind.
+    TypedArrayGetCallable = 0x1C5, Object, pops: 2, pushes: 1;
+    /// Push callable element to TypedArray<CallableArrayElem>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers any closure share to the array.
+    TypedArrayPushCallable = 0x1C6, Object, pops: 2, pushes: 0;
+    /// Set callable element in TypedArray<CallableArrayElem>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior closure share, transfers the new share.
+    TypedArraySetCallable = 0x1C7, Object, pops: 3, pushes: 0;
+
+    // U3 (SB-9 deletion): the v2 `TypedMap<K,V>` opcode family (0xCD-0xFB
+    // ranges) was deleted along with the dual-HashMap-carrier split-brain.
+    // ALL HashMap operations now use the single honest `HashMapData` carrier
+    // (HeapKind::HashMap) via the generic CallMethod path and the local-slot
+    // MapGetStr*/MapHasStr/MapSetStr*/MapLenTyped fast path. Those opcode
+    // discriminants are VACATED (do-not-reuse).
 
     // ===== v2 Concatenation Operations =====
     /// Concatenate two heap strings/chars, pushing a new string. Pops (a, b).
@@ -838,6 +887,9 @@ define_opcodes! {
     /// content-compares the decimal payloads, pushes bool. Both operands
     /// must be non-null v2 DecimalObj pointers. Use Neq via `EqDecimal; Not`.
     EqDecimal = 0xFF, Comparison, pops: 2, pushes: 1;
+    /// Equal (typed object × typed object → bool); compiler-proven same schema.
+    /// Use Neq via `EqTypedObject; Not`.
+    EqTypedObject = 0x1C8, Comparison, pops: 2, pushes: 1;
 
     // ===== v2 Stage 4.2: Typed Ordered Comparison for Strings =====
     /// Greater than (string × string → bool). Lexicographic comparison.
@@ -856,6 +908,20 @@ define_opcodes! {
     /// Load local with Clone semantics — clones the value, source stays live.
     /// For heap-tagged values, this bumps the Arc refcount.
     LoadLocalClone = 0x105, Variable, pops: 0, pushes: 1;
+    /// Load local with DeepClone semantics — produces an INDEPENDENT deep copy
+    /// of the source heap value, source stays live (`var copy = data`
+    /// auto-clone). Scalars copy verbatim. Routes heap carriers
+    /// (Array / struct / HashMap / …) through the same per-kind deep-clone
+    /// primitives as an explicit `.clone()` so mutating the copy never touches
+    /// the source (ADR-006 SharedCow independence-on-mutation).
+    LoadLocalDeepClone = 0x1C2, Variable, pops: 0, pushes: 1;
+    /// Replace the top-of-stack value with an INDEPENDENT deep copy and
+    /// release the original's share. Stack-based sibling of
+    /// `LoadLocalDeepClone` for the module-binding `var copy = data`
+    /// auto-clone (top-level script bindings load via `LoadModuleBinding`,
+    /// not a local-slot read). Scalars pass through verbatim; heap carriers
+    /// route through the same per-kind deep-clone primitives as `.clone()`.
+    DeepCloneTop = 0x1C3, Variable, pops: 1, pushes: 1;
     /// Store local with Drop semantics — drops the old value before storing.
     /// Respects ownership: if old value is uniquely owned, frees immediately.
     StoreLocalDrop = 0x106, Variable, pops: 1, pushes: 0;
@@ -891,6 +957,9 @@ define_opcodes! {
     MapHasStr = 0x112, Object, pops: 1, pushes: 1;
     /// Get HashMap length. Operand: map slot.
     MapLenTyped = 0x113, Object, pops: 0, pushes: 1;
+    // U3 (SB-9 deletion): `TypedMapLenStack` (0x1C1) deleted with the
+    // `TypedMap<K,V>` carrier. HashMap `.len()` uses `MapLenTyped` (slot-based,
+    // HashMapData) or the generic CallMethod path. Discriminant VACATED.
 
     // ===== Typed String Access (local-slot based) =====
     /// Get string length (chars). Operand: string slot.
@@ -1947,10 +2016,7 @@ define_opcodes! {
 impl OpCode {
     /// Returns true if this is a trusted opcode variant (compiler-proved types, no runtime guard).
     pub const fn is_trusted(self) -> bool {
-        matches!(
-            self,
-            OpCode::LoadLocalTrusted | OpCode::JumpIfFalseTrusted
-        )
+        matches!(self, OpCode::LoadLocalTrusted | OpCode::JumpIfFalseTrusted)
     }
 
     /// Map a trusted opcode back to its guarded (runtime-checked) counterpart.
@@ -2036,6 +2102,21 @@ impl OpCode {
             | OpCode::TypedArrayGetTypedObject
             | OpCode::TypedArrayPushTypedObject
             | OpCode::TypedArraySetTypedObject
+            // Construction strict-typing close (2026-06-05) — nested-array carrier.
+            | OpCode::NewTypedArrayNested
+            | OpCode::TypedArrayGetNested
+            | OpCode::TypedArrayPushNested
+            | OpCode::TypedArraySetNested
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            | OpCode::NewTypedArrayTraitObject
+            | OpCode::TypedArrayGetTraitObject
+            | OpCode::TypedArrayPushTraitObject
+            | OpCode::TypedArraySetTraitObject
+            // W22 callable-array element carrier.
+            | OpCode::NewTypedArrayCallable
+            | OpCode::TypedArrayGetCallable
+            | OpCode::TypedArrayPushCallable
+            | OpCode::TypedArraySetCallable
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64
@@ -2415,6 +2496,12 @@ pub enum BuiltinFunction {
     /// `(r<<16)|(g<<8)|b`. `flags`: bitmask (bold=1, italic=2, underline=4,
     /// dim=8). Pushes `Ptr(HeapKind::Content)`.
     FStringContentStyledText,
+    /// R8 W6 host residuals: build a `ContentNode::Chart` from a typed
+    /// table/typed-object-array value plus compile-time parsed chart spec.
+    /// Pops `[value, chart_type, x_column, y_column...]`; validates all
+    /// column names against the carrier schema/table before extracting
+    /// numeric channels. Pushes `Ptr(HeapKind::Content)`.
+    FStringContentChart,
     /// R8 W4 W18.4: combine N stack content values into a
     /// `ContentNode::Fragment`. Pops N `Ptr(HeapKind::Content)` slots,
     /// pushes the fragment. The arg-count slot encodes N per the standard
@@ -2587,6 +2674,21 @@ pub enum BuiltinFunction {
     /// Content.fragment(parts) — create a fragment ContentNode
     ContentFragmentCtor,
 
+    // Style-spec namespace constructors (SC1, R8 — supervisor)
+    //
+    // `Color.rgb(r, g, b)` — the only call-form style-spec constructor.
+    // Named members (`Color.red`, `Border.rounded`, `ChartType.line`,
+    // etc.) are compile-time-constant strings emitted directly as
+    // `Constant::String` by the property-access path — no builtin needed.
+    // The runtime carrier for every style spec is `NativeKind::String`
+    // (the canonical serde snake_case name; `rgb(r,g,b)` for the explicit
+    // RGB form) so the existing string-typed `.border(style)` method and
+    // the future `.fg`/`.bg`/`Content.chart` parsers consume them with no
+    // new HeapKind and no parallel discriminator.
+    /// Color.rgb(r, g, b) — build an `rgb(r,g,b)` color-spec string from
+    /// three int channel values (0–255 each, validated at runtime).
+    ColorRgbCtor,
+
     // DateTime constructors
     /// DateTime.now() — current local time as DateTime<FixedOffset>
     DateTimeNow,
@@ -2658,6 +2760,11 @@ pub enum BuiltinFunction {
     CodeBuilderNew,
     /// KeyValue::new() — return an empty `ContentNode::KeyValue` builder seed
     KeyValueBuilderNew,
+
+    /// Statically stamped `Set<string>` constructor.
+    SetCtorString,
+    /// Statically stamped `Set<int>` constructor.
+    SetCtorI64,
 }
 
 impl BuiltinFunction {
@@ -2743,6 +2850,7 @@ impl BuiltinFunction {
             // R8 W4 W18.4: f-string content-lowering builtins (3)
             BuiltinFunction::FStringContentText,
             BuiltinFunction::FStringContentStyledText,
+            BuiltinFunction::FStringContentChart,
             BuiltinFunction::FStringContentFragment,
             // Optimization
             BuiltinFunction::IntrinsicMinimize,
@@ -2866,6 +2974,8 @@ impl BuiltinFunction {
             BuiltinFunction::ContentCodeCtor,
             BuiltinFunction::ContentKvCtor,
             BuiltinFunction::ContentFragmentCtor,
+            // Style-spec ctors (1) — SC1
+            BuiltinFunction::ColorRgbCtor,
             // DateTime (6)
             BuiltinFunction::DateTimeNow,
             BuiltinFunction::DateTimeUtc,
@@ -2894,6 +3004,9 @@ impl BuiltinFunction {
             BuiltinFunction::TableBuilderNew,
             BuiltinFunction::CodeBuilderNew,
             BuiltinFunction::KeyValueBuilderNew,
+            // W74B statically stamped Set<T> ctors (2)
+            BuiltinFunction::SetCtorString,
+            BuiltinFunction::SetCtorI64,
         ];
         VARIANTS.get(id as usize).copied()
     }
@@ -3136,7 +3249,10 @@ mod tests {
     #[test]
     fn r55_string_scalar_concat_opcodes_are_object_category() {
         assert_eq!(OpCode::StringConcatInt.category(), OpcodeCategory::Object);
-        assert_eq!(OpCode::StringConcatNumber.category(), OpcodeCategory::Object);
+        assert_eq!(
+            OpCode::StringConcatNumber.category(),
+            OpcodeCategory::Object
+        );
         assert_eq!(OpCode::StringConcatBool.category(), OpcodeCategory::Object);
     }
 

@@ -1,0 +1,2 @@
+let r: Result<Option<int>,string> = Ok(Some(9))
+match r { Ok(Some(n)) => print(n), Ok(None) => print(0), Err(e) => print(-1) }

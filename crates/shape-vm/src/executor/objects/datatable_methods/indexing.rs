@@ -12,7 +12,7 @@
 
 use shape_runtime::context::ExecutionContext;
 use shape_value::{
-    KindedSlot, NativeKind, TableViewData, ValueSlot, VMError, heap_value::HeapKind,
+    KindedSlot, NativeKind, TableViewData, VMError, ValueSlot, heap_value::HeapKind,
 };
 use std::sync::Arc;
 

@@ -25,13 +25,15 @@
 //! See `docs/adr/006-value-and-memory-model.md` §2.7.7 and §17 Q9.
 
 use super::super::*;
+#[cfg(miri)]
+use shape_value::heap_value::MiriSlotProvenance;
 use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
-        AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
-        IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
-        PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-        TraitObjectStorage, TypedObjectStorage,
+        AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue, IoHandleData,
+        LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, PriorityQueueData,
+        RangeData, TableViewData, TaskGroupData, TemporalData, TraitObjectStorage,
+        TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -45,6 +47,146 @@ use std::sync::Arc;
 // lockstep — divergence is a refcount bug. If a new heap-bearing
 // `NativeKind` variant lands, both this module's helpers and the
 // `KindedSlot` impls must be updated together.
+
+#[cfg(miri)]
+thread_local! {
+    static STACK_PROVENANCE: std::cell::RefCell<Vec<StackProvenanceEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(miri)]
+#[derive(Clone, Copy)]
+struct StackProvenanceEntry {
+    vm: *const VirtualMachine,
+    idx: usize,
+    provenance: MiriSlotProvenance,
+}
+
+#[cfg(miri)]
+#[inline]
+fn miri_set_stack_provenance(vm: &VirtualMachine, idx: usize, provenance: MiriSlotProvenance) {
+    let vm_ptr = vm as *const VirtualMachine;
+    STACK_PROVENANCE.with(|entries| {
+        let mut entries = entries.borrow_mut();
+        match provenance {
+            MiriSlotProvenance::None => {
+                if let Some(pos) = entries
+                    .iter()
+                    .position(|entry| entry.vm == vm_ptr && entry.idx == idx)
+                {
+                    entries.swap_remove(pos);
+                }
+            }
+            _ => {
+                if let Some(entry) = entries
+                    .iter_mut()
+                    .find(|entry| entry.vm == vm_ptr && entry.idx == idx)
+                {
+                    entry.provenance = provenance;
+                } else {
+                    entries.push(StackProvenanceEntry {
+                        vm: vm_ptr,
+                        idx,
+                        provenance,
+                    });
+                }
+            }
+        }
+    });
+}
+
+#[cfg(miri)]
+#[inline]
+fn miri_take_stack_provenance(vm: &VirtualMachine, idx: usize) -> MiriSlotProvenance {
+    let vm_ptr = vm as *const VirtualMachine;
+    STACK_PROVENANCE.with(|entries| {
+        let mut entries = entries.borrow_mut();
+        match entries
+            .iter()
+            .position(|entry| entry.vm == vm_ptr && entry.idx == idx)
+        {
+            Some(pos) => entries.swap_remove(pos).provenance,
+            None => MiriSlotProvenance::None,
+        }
+    })
+}
+
+#[cfg(miri)]
+#[inline]
+fn miri_read_stack_provenance(vm: &VirtualMachine, idx: usize) -> MiriSlotProvenance {
+    let vm_ptr = vm as *const VirtualMachine;
+    STACK_PROVENANCE.with(|entries| {
+        entries
+            .borrow()
+            .iter()
+            .find(|entry| entry.vm == vm_ptr && entry.idx == idx)
+            .map(|entry| entry.provenance)
+            .unwrap_or(MiriSlotProvenance::None)
+    })
+}
+
+#[cfg(miri)]
+#[inline]
+fn drop_with_kind_and_miri_provenance(bits: u64, kind: NativeKind, provenance: MiriSlotProvenance) {
+    if bits == 0 {
+        return;
+    }
+
+    match (kind, provenance) {
+        (
+            NativeKind::String | NativeKind::Ptr(HeapKind::String),
+            MiriSlotProvenance::String(ptr),
+        ) if !ptr.is_null() => {
+            unsafe { Arc::decrement_strong_count(ptr) };
+        }
+        (NativeKind::Ptr(HeapKind::TypedObject), MiriSlotProvenance::TypedObject(ptr))
+            if !ptr.is_null() =>
+        {
+            use shape_value::v2::heap_element::HeapElement;
+            unsafe { TypedObjectStorage::release_elem(ptr) };
+        }
+        (NativeKind::String | NativeKind::Ptr(HeapKind::String), _) => {
+            panic!("drop_with_kind: missing Miri provenance for String carrier");
+        }
+        (NativeKind::Ptr(HeapKind::TypedObject), _) => {
+            panic!("drop_with_kind: missing Miri provenance for TypedObject carrier");
+        }
+        _ => drop_with_kind(bits, kind),
+    }
+}
+
+#[cfg(miri)]
+#[inline]
+fn clone_with_kind_and_miri_provenance(
+    bits: u64,
+    kind: NativeKind,
+    provenance: MiriSlotProvenance,
+) {
+    if bits == 0 {
+        return;
+    }
+
+    match (kind, provenance) {
+        (
+            NativeKind::String | NativeKind::Ptr(HeapKind::String),
+            MiriSlotProvenance::String(ptr),
+        ) if !ptr.is_null() => {
+            unsafe { Arc::increment_strong_count(ptr) };
+        }
+        (NativeKind::Ptr(HeapKind::TypedObject), MiriSlotProvenance::TypedObject(ptr))
+            if !ptr.is_null() =>
+        {
+            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header) };
+        }
+        (NativeKind::String | NativeKind::Ptr(HeapKind::String), _) => {
+            panic!("clone_with_kind: missing Miri provenance for String carrier");
+        }
+        (NativeKind::Ptr(HeapKind::TypedObject), _) => {
+            panic!("clone_with_kind: missing Miri provenance for TypedObject carrier");
+        }
+        _ => clone_with_kind(bits, kind),
+    }
+}
 
 /// WB2.4 retain-on-read: bump the matching `Arc<T>` strong-count for a
 /// heap-bearing kind, no-op for inline scalars (ADR-006 §2.7.7).
@@ -799,14 +941,50 @@ impl VirtualMachine {
     /// Releases the overflow-dropped share via `drop_with_kind` (FR.1 / WB2.x).
     #[cold]
     #[inline(never)]
-    pub(crate) fn push_kinded_slow(
+    #[cfg_attr(miri, allow(dead_code))]
+    pub(crate) fn push_kinded_slow(&mut self, bits: u64, kind: NativeKind) -> Result<(), VMError> {
+        #[cfg(miri)]
+        {
+            return self.push_kinded_slow_with_miri_provenance(
+                bits,
+                kind,
+                MiriSlotProvenance::None,
+            );
+        }
+        #[cfg(not(miri))]
+        {
+            if self.sp >= self.config.max_stack_size {
+                // Release the share that would have been pushed.
+                drop_with_kind(bits, kind);
+                return Err(VMError::StackOverflow);
+            }
+            let new_len = self.sp * 2 + 1;
+            self.stack.reserve(new_len - self.stack.len());
+            self.kinds.reserve(new_len - self.kinds.len());
+            while self.stack.len() < new_len {
+                self.stack.push(0u64);
+                self.kinds.push(NativeKind::Bool);
+            }
+            self.stack[self.sp] = bits;
+            self.kinds[self.sp] = kind;
+            self.sp += 1;
+            self.debug_assert_kinds_in_sync();
+            Ok(())
+        }
+    }
+
+    #[cfg(miri)]
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn push_kinded_slow_with_miri_provenance(
         &mut self,
         bits: u64,
         kind: NativeKind,
+        provenance: MiriSlotProvenance,
     ) -> Result<(), VMError> {
         if self.sp >= self.config.max_stack_size {
             // Release the share that would have been pushed.
-            drop_with_kind(bits, kind);
+            drop_with_kind_and_miri_provenance(bits, kind, provenance);
             return Err(VMError::StackOverflow);
         }
         let new_len = self.sp * 2 + 1;
@@ -818,6 +996,7 @@ impl VirtualMachine {
         }
         self.stack[self.sp] = bits;
         self.kinds[self.sp] = kind;
+        miri_set_stack_provenance(self, self.sp, provenance);
         self.sp += 1;
         self.debug_assert_kinds_in_sync();
         Ok(())
@@ -832,8 +1011,38 @@ impl VirtualMachine {
     /// `drop_with_kind` on subsequent overwrite / pop / VM teardown.
     #[inline(always)]
     pub(crate) fn push_kinded(&mut self, bits: u64, kind: NativeKind) -> Result<(), VMError> {
+        #[cfg(miri)]
+        {
+            return self.push_kinded_with_miri_provenance(bits, kind, MiriSlotProvenance::None);
+        }
+        #[cfg(not(miri))]
+        {
+            if self.sp >= self.stack.len() {
+                return self.push_kinded_slow(bits, kind);
+            }
+            unsafe {
+                let dptr = self.stack.as_mut_ptr().add(self.sp);
+                let kptr = self.kinds.as_mut_ptr().add(self.sp);
+                std::ptr::write(dptr, bits);
+                std::ptr::write(kptr, kind);
+            }
+            self.sp += 1;
+            Ok(())
+        }
+    }
+
+    /// Miri-only variant of `push_kinded` that carries pointer provenance
+    /// alongside the unchanged `(u64, NativeKind)` stack ABI.
+    #[cfg(miri)]
+    #[inline(always)]
+    pub(crate) fn push_kinded_with_miri_provenance(
+        &mut self,
+        bits: u64,
+        kind: NativeKind,
+        provenance: MiriSlotProvenance,
+    ) -> Result<(), VMError> {
         if self.sp >= self.stack.len() {
-            return self.push_kinded_slow(bits, kind);
+            return self.push_kinded_slow_with_miri_provenance(bits, kind, provenance);
         }
         unsafe {
             let dptr = self.stack.as_mut_ptr().add(self.sp);
@@ -841,6 +1050,7 @@ impl VirtualMachine {
             std::ptr::write(dptr, bits);
             std::ptr::write(kptr, kind);
         }
+        miri_set_stack_provenance(self, self.sp, provenance);
         self.sp += 1;
         Ok(())
     }
@@ -854,6 +1064,39 @@ impl VirtualMachine {
     /// auto-drop — the bits are handed out live.
     #[inline(always)]
     pub(crate) fn pop_kinded(&mut self) -> Result<(u64, NativeKind), VMError> {
+        #[cfg(miri)]
+        {
+            let (bits, kind, _) = self.pop_kinded_with_miri_provenance()?;
+            return Ok((bits, kind));
+        }
+        #[cfg(not(miri))]
+        {
+            if self.sp == 0 {
+                return Err(VMError::StackUnderflow);
+            }
+            self.sp -= 1;
+            let (bits, kind);
+            unsafe {
+                let dptr = self.stack.as_mut_ptr().add(self.sp);
+                let kptr = self.kinds.as_mut_ptr().add(self.sp);
+                bits = std::ptr::read(dptr as *const u64);
+                kind = std::ptr::read(kptr as *const NativeKind);
+                // Replace the dead slot with safe sentinel bits. Bool kind +
+                // zero bits = no-op for `drop_with_kind` if anyone reads it.
+                std::ptr::write(dptr, 0u64);
+                std::ptr::write(kptr, NativeKind::Bool);
+            }
+            Ok((bits, kind))
+        }
+    }
+
+    /// Miri-only pop that transfers the slot's pointer provenance with the
+    /// owned `(bits, kind)` pair.
+    #[cfg(miri)]
+    #[inline(always)]
+    pub(crate) fn pop_kinded_with_miri_provenance(
+        &mut self,
+    ) -> Result<(u64, NativeKind, MiriSlotProvenance), VMError> {
         if self.sp == 0 {
             return Err(VMError::StackUnderflow);
         }
@@ -869,7 +1112,50 @@ impl VirtualMachine {
             std::ptr::write(dptr, 0u64);
             std::ptr::write(kptr, NativeKind::Bool);
         }
-        Ok((bits, kind))
+        let provenance = miri_take_stack_provenance(self, self.sp);
+        Ok((bits, kind, provenance))
+    }
+
+    /// Pop into a `KindedSlot`, preserving the Miri provenance sidecar when
+    /// Miri is active. The returned carrier owns the popped share.
+    #[inline]
+    pub(crate) fn pop_kinded_slot_preserving_miri(&mut self) -> Result<KindedSlot, VMError> {
+        #[cfg(miri)]
+        {
+            let (bits, kind, provenance) = self.pop_kinded_with_miri_provenance()?;
+            return Ok(KindedSlot::new_with_miri_provenance(
+                ValueSlot::from_raw(bits),
+                kind,
+                provenance,
+            ));
+        }
+        #[cfg(not(miri))]
+        {
+            let (bits, kind) = self.pop_kinded()?;
+            Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+        }
+    }
+
+    /// Push a `KindedSlot` while preserving its Miri provenance sidecar.
+    /// The carrier's share transfers into the stack slot.
+    #[inline]
+    pub(crate) fn push_kinded_slot_preserving_miri(
+        &mut self,
+        slot: KindedSlot,
+    ) -> Result<(), VMError> {
+        let bits = slot.slot().raw();
+        let kind = slot.kind();
+        #[cfg(miri)]
+        let provenance = slot.miri_provenance();
+        std::mem::forget(slot);
+        #[cfg(miri)]
+        {
+            self.push_kinded_with_miri_provenance(bits, kind, provenance)
+        }
+        #[cfg(not(miri))]
+        {
+            self.push_kinded(bits, kind)
+        }
     }
 
     /// Read an **owning share** of the slot at `idx` as a `KindedSlot`
@@ -880,12 +1166,26 @@ impl VirtualMachine {
     /// Use this at every site that hands a slot to a runtime-tier carrier
     /// (`Vec<KindedSlot>` for builtin args, snapshot serialization, etc.).
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn read_owned_kinded(&self, idx: usize) -> KindedSlot {
         debug_assert!(idx < self.sp, "read_owned_kinded: idx out of live range");
         let bits = self.stack[idx];
         let kind = self.kinds[idx];
-        clone_with_kind(bits, kind);
-        KindedSlot::new(ValueSlot::from_raw(bits), kind)
+        #[cfg(miri)]
+        {
+            let provenance = miri_read_stack_provenance(self, idx);
+            clone_with_kind_and_miri_provenance(bits, kind, provenance);
+            return KindedSlot::new_with_miri_provenance(
+                ValueSlot::from_raw(bits),
+                kind,
+                provenance,
+            );
+        }
+        #[cfg(not(miri))]
+        {
+            clone_with_kind(bits, kind);
+            KindedSlot::new(ValueSlot::from_raw(bits), kind)
+        }
     }
 
     /// Read the raw bits + kind at `idx` as a borrow (no refcount change).
@@ -901,11 +1201,40 @@ impl VirtualMachine {
     /// share transferred in by the caller (ADR-006 §2.7.7).
     #[inline(always)]
     pub(crate) fn stack_write_kinded(&mut self, idx: usize, bits: u64, kind: NativeKind) {
+        #[cfg(miri)]
+        {
+            self.stack_write_kinded_with_miri_provenance(idx, bits, kind, MiriSlotProvenance::None);
+        }
+        #[cfg(not(miri))]
+        {
+            let old_bits = self.stack[idx];
+            let old_kind = self.kinds[idx];
+            drop_with_kind(old_bits, old_kind);
+            self.stack[idx] = bits;
+            self.kinds[idx] = kind;
+        }
+    }
+
+    /// Miri-only overwrite variant that transfers explicit incoming pointer
+    /// provenance with the fresh slot share. This preserves the production
+    /// `(u64, NativeKind)` stack ABI while giving targeted Miri probes a
+    /// provenance-bearing overwrite contract to exercise.
+    #[cfg(miri)]
+    #[inline(always)]
+    pub(crate) fn stack_write_kinded_with_miri_provenance(
+        &mut self,
+        idx: usize,
+        bits: u64,
+        kind: NativeKind,
+        provenance: MiriSlotProvenance,
+    ) {
         let old_bits = self.stack[idx];
         let old_kind = self.kinds[idx];
-        drop_with_kind(old_bits, old_kind);
+        let old_provenance = miri_take_stack_provenance(self, idx);
+        drop_with_kind_and_miri_provenance(old_bits, old_kind, old_provenance);
         self.stack[idx] = bits;
         self.kinds[idx] = kind;
+        miri_set_stack_provenance(self, idx, provenance);
     }
 
     /// Take ownership of the slot at `idx`, replacing it with the
@@ -916,6 +1245,10 @@ impl VirtualMachine {
         let kind = self.kinds[idx];
         self.stack[idx] = 0u64;
         self.kinds[idx] = NativeKind::Bool;
+        #[cfg(miri)]
+        {
+            let _ = miri_take_stack_provenance(self, idx);
+        }
         (bits, kind)
     }
 
@@ -929,7 +1262,15 @@ impl VirtualMachine {
         for i in len..self.sp {
             let bits = self.stack[i];
             let kind = self.kinds[i];
-            drop_with_kind(bits, kind);
+            #[cfg(miri)]
+            {
+                let provenance = miri_take_stack_provenance(self, i);
+                drop_with_kind_and_miri_provenance(bits, kind, provenance);
+            }
+            #[cfg(not(miri))]
+            {
+                drop_with_kind(bits, kind);
+            }
             self.stack[i] = 0u64;
             self.kinds[i] = NativeKind::Bool;
         }
@@ -1015,6 +1356,7 @@ impl VirtualMachine {
     /// Post-Wave-6.5, every peek site receives kind alongside bits so
     /// downstream dispatch can match on kind without re-probing.
     #[inline(always)]
+    #[allow(dead_code)]
     pub(crate) fn stack_peek_kinded<F, R>(&self, idx: usize, f: F) -> R
     where
         F: FnOnce(u64, NativeKind) -> R,
@@ -1100,6 +1442,179 @@ mod kinded_stack_tests {
         assert_eq!(weak.strong_count(), 1);
         vm.truncate_stack(0);
         assert_eq!(weak.strong_count(), 0, "truncate dropped the share");
+    }
+
+    /// Targeted Miri proof-boundary probe: the VM stack's Miri-only
+    /// provenance sidecar must carry legacy `Arc<String>` pointer provenance
+    /// through read, pop, and truncate paths. This is evidence for this
+    /// sidecar path only, not a full VM UB proof.
+    #[cfg(miri)]
+    #[test]
+    fn miri_stack_provenance_string_read_pop_and_truncate() {
+        let mut vm = make_vm();
+
+        let arc = Arc::new("miri stack string".to_string());
+        let weak = Arc::downgrade(&arc);
+        let ptr = Arc::into_raw(arc);
+
+        vm.push_kinded_with_miri_provenance(
+            ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(ptr),
+        )
+        .unwrap();
+        assert_eq!(weak.strong_count(), 1, "stack owns the initial share");
+
+        let owned = vm.read_owned_kinded(vm.sp - 1);
+        assert_eq!(weak.strong_count(), 2, "read_owned retained via sidecar");
+        assert_eq!(owned.as_str(), Some("miri stack string"));
+        drop(owned);
+        assert_eq!(weak.strong_count(), 1, "owned read drop released its share");
+
+        let (bits, kind, provenance) = vm.pop_kinded_with_miri_provenance().unwrap();
+        assert_eq!(bits, ptr as u64);
+        assert_eq!(kind, NativeKind::String);
+        drop_with_kind_and_miri_provenance(bits, kind, provenance);
+        assert_eq!(weak.strong_count(), 0, "pop + drop retired the stack share");
+
+        let arc = Arc::new("miri truncate string".to_string());
+        let weak = Arc::downgrade(&arc);
+        let ptr = Arc::into_raw(arc);
+        vm.push_kinded_with_miri_provenance(
+            ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(ptr),
+        )
+        .unwrap();
+        vm.truncate_stack(0);
+        assert_eq!(weak.strong_count(), 0, "truncate used the sidecar to drop");
+    }
+
+    /// Targeted Miri proof-boundary probe: a stack overwrite can transfer
+    /// explicit incoming `Arc<String>` provenance, drop the overwritten
+    /// occupant through its old provenance, and later drop the fresh slot
+    /// without integer-to-pointer reconstruction.
+    #[cfg(miri)]
+    #[test]
+    fn miri_stack_provenance_string_overwrite_and_drop() {
+        let mut vm = make_vm();
+
+        let old_arc = Arc::new("miri old stack string".to_string());
+        let old_weak = Arc::downgrade(&old_arc);
+        let old_ptr = Arc::into_raw(old_arc);
+        vm.push_kinded_with_miri_provenance(
+            old_ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(old_ptr),
+        )
+        .unwrap();
+        assert_eq!(old_weak.strong_count(), 1, "stack owns the old slot share");
+
+        let new_arc = Arc::new("miri fresh stack string".to_string());
+        let new_weak = Arc::downgrade(&new_arc);
+        let new_ptr = Arc::into_raw(new_arc);
+        vm.stack_write_kinded_with_miri_provenance(
+            0,
+            new_ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(new_ptr),
+        );
+        assert_eq!(
+            old_weak.strong_count(),
+            0,
+            "overwrite dropped the old slot through its provenance"
+        );
+        assert_eq!(
+            new_weak.strong_count(),
+            1,
+            "stack owns the fresh slot share"
+        );
+
+        let owned = vm.read_owned_kinded(0);
+        assert_eq!(
+            new_weak.strong_count(),
+            2,
+            "read_owned retained the fresh slot via overwrite provenance"
+        );
+        assert_eq!(owned.as_str(), Some("miri fresh stack string"));
+        drop(owned);
+        assert_eq!(
+            new_weak.strong_count(),
+            1,
+            "owned fresh-string read drop released its share"
+        );
+
+        vm.truncate_stack(0);
+        assert_eq!(
+            new_weak.strong_count(),
+            0,
+            "truncate dropped the overwritten-in fresh slot"
+        );
+    }
+
+    /// Targeted Miri proof-boundary probe: the VM stack's Miri-only
+    /// provenance sidecar must carry v2-raw `TypedObjectStorage` provenance
+    /// through owning reads and pop/drop. This avoids integer-to-pointer
+    /// reconstruction while exercising the HeapHeader refcount path only.
+    #[cfg(miri)]
+    #[test]
+    fn miri_stack_provenance_typed_object_read_and_pop() {
+        use shape_value::v2::heap_element::HeapElement;
+        use shape_value::v2::refcount::{v2_get_refcount, v2_retain};
+
+        let mut vm = make_vm();
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let ptr = TypedObjectStorage::_new(
+            91,
+            vec![ValueSlot::from_int(7)].into_boxed_slice(),
+            0,
+            kinds,
+        );
+        let header = unsafe { &(*ptr).header as *const _ };
+
+        unsafe { v2_retain(header) };
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            2,
+            "test guard plus stack-owned share"
+        );
+
+        vm.push_kinded_with_miri_provenance(
+            ptr as u64,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            MiriSlotProvenance::TypedObject(ptr),
+        )
+        .unwrap();
+
+        let owned = vm.read_owned_kinded(vm.sp - 1);
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            3,
+            "read_owned retained the typed object via sidecar"
+        );
+        let storage = owned
+            .as_typed_object_storage()
+            .expect("sidecar preserves typed-object pointer provenance");
+        assert_eq!(storage.schema_id, 91);
+        assert_eq!(storage.slots()[0].as_i64(), 7);
+        drop(owned);
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            2,
+            "owned typed-object drop released its share"
+        );
+
+        let (bits, kind, provenance) = vm.pop_kinded_with_miri_provenance().unwrap();
+        assert_eq!(bits, ptr as u64);
+        assert_eq!(kind, NativeKind::Ptr(HeapKind::TypedObject));
+        drop_with_kind_and_miri_provenance(bits, kind, provenance);
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            1,
+            "pop + drop retired only the stack share"
+        );
+
+        unsafe { TypedObjectStorage::release_elem(ptr) };
     }
 
     /// Inline scalars: clone/drop are no-ops on the bits.

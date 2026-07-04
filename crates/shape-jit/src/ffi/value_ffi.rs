@@ -27,6 +27,7 @@
 //! it reads a field from a heap-resident struct). The `HK_*` constants
 //! mirror `HeapKind` ordinals (cast to `u16`) for use as the prefix.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_value::HeapKind;
 use std::sync::Arc;
 
@@ -356,11 +357,13 @@ pub fn unbox_heap_pointer(bits: u64) -> *const u8 {
 // Result Type (Ok/Err) Helper Functions
 // ============================================================================
 //
-// JIT-internal Ok/Err carriers. Each wraps a single u64 inner-bits payload
-// in a `UnifiedValue<u64>` heap allocation with prefix kind=HK_OK/HK_ERR.
-// The strict-typed `HeapValue::Reference` / typed-Result rebuild is in a
-// later W10/Phase-2c sub-cluster; until then, JIT-emitted code stays on
-// the raw-u64 wrapper shape per §2.7.5 stable-FFI rule.
+// Retired JIT-internal Ok/Err carriers. Each wraps a single u64 inner-bits
+// payload in a `UnifiedValue<u64>` heap allocation with prefix kind=HK_OK/HK_ERR.
+// Generated JIT code must not use these helpers or the old Result/Option typed-
+// Arc producers in `ffi/result.rs`; W88A deopts those constructors until a
+// schema-backed `__Result` / `__Option` TypedObject ABI exists. These helpers
+// remain only as compatibility definitions for old boundary conversion/tests
+// until that surface is deleted.
 
 #[inline]
 pub fn is_ok_tag(bits: u64) -> bool {
@@ -571,8 +574,8 @@ pub unsafe fn unbox_string(bits: u64) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::jit_kinds::UnifiedValue;
+    use super::*;
 
     #[test]
     fn test_inline_types_in_negative_nan_space() {

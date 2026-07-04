@@ -54,8 +54,6 @@ fn extend_number_is_positive_false() {
 
 #[test]
 fn extend_string_shout() {
-    // BUG: extend blocks on built-in String type are not yet supported at runtime.
-    // The method is registered but not dispatched for String values.
     ShapeTest::new(
         r#"
         extend String {
@@ -65,12 +63,13 @@ fn extend_string_shout() {
         s.shout()
     "#,
     )
-    .expect_run_err();
+    .expect_string("hello!");
 }
 
 #[test]
 fn extend_string_wrap() {
-    // BUG: extend blocks on built-in String type are not yet supported at runtime.
+    // Unannotated extend method params remain `unknown` under strict checking,
+    // so string concatenation rejects `prefix + self + suffix`.
     ShapeTest::new(
         r#"
         extend String {

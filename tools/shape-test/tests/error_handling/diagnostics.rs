@@ -338,6 +338,11 @@ fn parse_err_empty_program_ok() {
 }
 
 #[test]
+fn parse_err_null_literal_rejected() {
+    ShapeTest::new("let x = null").expect_parse_err();
+}
+
+#[test]
 fn parse_err_lone_operator() {
     ShapeTest::new("+").expect_parse_err();
 }
@@ -400,9 +405,9 @@ fn runtime_err_division_by_zero() {
     .expect_run_err();
 }
 
-// Array out-of-bounds returns null in Shape (not an error).
+// Array indexing is strict: out-of-bounds access is a runtime error.
 #[test]
-fn runtime_err_array_index_out_of_bounds_returns_null() {
+fn runtime_err_array_index_out_of_bounds_is_error() {
     ShapeTest::new(
         r#"
         let a = [1, 2, 3]
@@ -410,12 +415,12 @@ fn runtime_err_array_index_out_of_bounds_returns_null() {
         v == None
     "#,
     )
-    .expect_bool(true);
+    .expect_run_err_contains("Index 10 out of bounds (length 3)");
 }
 
-// Negative out-of-bounds also returns null.
+// Negative out-of-bounds indexing is also a runtime error.
 #[test]
-fn runtime_err_negative_index_beyond_length_returns_null() {
+fn runtime_err_negative_index_beyond_length_is_error() {
     ShapeTest::new(
         r#"
         let a = [1, 2, 3]
@@ -423,7 +428,7 @@ fn runtime_err_negative_index_beyond_length_returns_null() {
         v == None
     "#,
     )
-    .expect_bool(true);
+    .expect_run_err_contains("Index -10 out of bounds (length 3)");
 }
 
 #[test]
@@ -434,7 +439,7 @@ fn runtime_err_stack_overflow() {
         infinite()
     "#,
     )
-    .expect_run_err();
+    .expect_run_err_contains("Stack overflow");
 }
 
 #[test]
@@ -478,17 +483,17 @@ fn runtime_err_modulo_by_zero() {
     .expect_run_err();
 }
 
-// Empty array access returns null (not an error).
+// Empty array access is a bounds error, not an implicit None.
 #[test]
-fn runtime_err_empty_array_access_returns_null() {
+fn runtime_err_empty_array_access_is_error() {
     ShapeTest::new(
         r#"
-        let a = []
+        let a: Array<int> = []
         let v = a[0]
         v == None
     "#,
     )
-    .expect_bool(true);
+    .expect_run_err_contains("Index 0 out of bounds (length 0)");
 }
 
 #[test]

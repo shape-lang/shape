@@ -1,0 +1,10 @@
+// geomlib/linalg.shape  -> importable as "geomlib::linalg"
+// Cross-module import: this module imports `mean` from geomlib::stats,
+// exactly as the book's "Two-File Library Example" shows.
+
+from geomlib::stats use { mean }
+
+pub fn center(v: Array<number>) -> Array<number> {
+    let mu = mean(v)
+    v.map(|x| x - mu)
+}

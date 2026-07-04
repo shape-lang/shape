@@ -215,7 +215,7 @@ fn test_hof_array_every_false() {
 fn test_hof_multiplier_factory() {
     ShapeTest::new(
         r#"
-        fn multiplier(n) { |x| x * n }
+        fn multiplier(n: int) -> (int) -> int { |x: int| { x * n } }
         let triple = multiplier(3)
         let quadruple = multiplier(4)
         triple(10) + quadruple(10)
@@ -542,7 +542,6 @@ fn hof_compose_two_functions() {
     .expect_number(41.0);
 }
 
-// BUG: Chained closure calls `compose(...)(20)` fail -- see hof_adder_chained_call
 #[test]
 fn hof_compose_used_directly() {
     ShapeTest::new(
@@ -554,6 +553,9 @@ fn hof_compose_used_directly() {
         h(20)
     "#,
     )
+    // W20: direct compose is now pinned by compile-time literal/callable facts
+    // through the closure call-sites. No numeric defaulting or runtime callable
+    // probing is involved; the all-int computation returns the book result.
     .expect_number(42.0);
 }
 
@@ -600,12 +602,51 @@ fn hof_apply_two_args() {
     .expect_number(42.0);
 }
 
+// Strict-flip W1a-B (multi-call): two calls to the SAME inferred fn-typed-param
+// wrapper with DIFFERENT closure literals must BOTH infer their params. The
+// per-call closure signature is reconstructed from the wrapper's OWN resolved
+// params (the let-generalization instantiation discipline), not from a shared
+// `f`-param projection that the second call site collapses into a
+// `Union([fn(unknown,unknown), …])`. int is preserved EXACTLY: `42` and `1`
+// print without a `.0`, proving the closure bodies (`a * b`, `a % b`) typed as
+// int — `%` only exists for int, and `int`/`number` never unified.
+#[test]
+fn hof_apply_two_args_two_calls_same_wrapper_preserves_int() {
+    ShapeTest::new(
+        r#"
+        fn apply2(f, x, y) { f(x, y) }
+        let r: int = apply2(|a, b| a * b, 6, 7)
+        let s: int = apply2(|a, b| a % b, 7, 2)
+        print(r)
+        print(s)
+    "#,
+    )
+    .expect_output("42\n1");
+}
+
+// Sibling: two calls to the same wrapper with number closures keep number
+// (formatted with `.0`), proving the reconstruction copies the EXACT proven
+// outer-param type and never defaults int.
+#[test]
+fn hof_apply_two_args_two_calls_same_wrapper_preserves_number() {
+    ShapeTest::new(
+        r#"
+        fn apply2(f, x, y) { f(x, y) }
+        let r: number = apply2(|a, b| a * b, 6.0, 7.0)
+        let s: number = apply2(|a, b| a + b, 1.5, 2.5)
+        print(r)
+        print(s)
+    "#,
+    )
+    .expect_output("42.0\n4.0");
+}
+
 #[test]
 fn hof_function_as_return_value_with_state() {
     ShapeTest::new(
         r#"
-        fn multiplier(factor) {
-            |x| x * factor
+        fn multiplier(factor: int) -> (int) -> int {
+            |x: int| { x * factor }
         }
         let times3 = multiplier(3)
         let times7 = multiplier(7)
@@ -672,7 +713,6 @@ fn hof_return_function_from_if_else_branch() {
     .expect_number(12.0);
 }
 
-// BUG: Chained closure calls `curried_add(1)(2)(3)` fail -- see hof_adder_chained_call
 #[test]
 fn hof_curried_add() {
     ShapeTest::new(

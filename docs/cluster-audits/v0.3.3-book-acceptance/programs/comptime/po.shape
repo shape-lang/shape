@@ -1,0 +1,2 @@
+let O = comptime { { a: 1, b: 2 } }
+print(f"{O.a} {O.b}")

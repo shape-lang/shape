@@ -34,7 +34,11 @@ fn s1_self_test_classifies_convergent() {
         .join("tests")
         .join("smoke-self-test")
         .join("s1.shape");
-    assert!(seed.is_file(), "smoke self-test seed missing: {}", seed.display());
+    assert!(
+        seed.is_file(),
+        "smoke self-test seed missing: {}",
+        seed.display()
+    );
 
     let cfg = CompareConfig {
         shape_binary: bin,
@@ -52,7 +56,10 @@ fn s1_self_test_classifies_convergent() {
         cmp.jit,
     );
     assert_eq!(cmp.vm.stdout_tail, "4950", "s1 VM stdout_tail must be 4950");
-    assert_eq!(cmp.jit.stdout_tail, "4950", "s1 JIT stdout_tail must be 4950");
+    assert_eq!(
+        cmp.jit.stdout_tail, "4950",
+        "s1 JIT stdout_tail must be 4950"
+    );
     assert_eq!(cmp.vm.exit_code, Some(0));
     assert_eq!(cmp.jit.exit_code, Some(0));
 }

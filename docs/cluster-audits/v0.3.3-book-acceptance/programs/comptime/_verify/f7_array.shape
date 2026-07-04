@@ -1,0 +1,5 @@
+comptime fn mk() -> Array<int> {
+  [1, 2, 3]
+}
+let a = comptime { mk() }
+print(a)

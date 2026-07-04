@@ -39,8 +39,9 @@ JIT matches VM, AND the `[jit-fallback]` diagnostic emits exactly once.
 |------|---------------|----------------------|-----------------------|
 | `f1-shared-module-binding.shape` | Kind-source gap at `print` (Route A surface-and-stop, pre-existing baseline) | `(100, 0, 0)` | `(100, 0, 1)` |
 | `f2-preflight-shared-binding.shape` | Preflight rejection — `AllocSharedModuleBinding` / `LoadSharedModuleBinding` opcodes | `(<pre-existing VM err>, 1, 0)` | `(<same VM err>, 1, 1)` |
-| `f3-preflight-closure-capture.shape` | Preflight rejection — ClosureCapture missing function_id (MirToIR top-level preflight) | `(100, 0, 0)` | `(100, 0, 1)` |
+| `f3-preflight-closure-capture.shape` | Preflight rejection — `AllocSharedModuleBinding` in main code (`JitPreflightReport { vm_only_opcodes: [AllocSharedModuleBinding], unsupported_builtins: [] }`) | `(100, 0, 0)` | `(100, 0, 1)` |
 | `f4-kind-source-gap-print.shape` | Kind-source gap on `print` operand (Route A — distinct producer site from f1) | `(<VM output>, 0, 0)` | `(<VM output>, 0, 1)` |
+| `f6-struct-move-then-read.shape` | Move-then-read divergence — struct `let q = p` `Move`-sources `p`, projected later read `p.x` reads the JIT-nulled slot (ADR-006 §2.7.14) | `(1, 0, 0)` | `(1, 0, 1)` |
 
 `f1` is the canonical baseline preserved verbatim from the W12 close
 (`docs/cluster-audits/v0.3-w12-jit-mode-semantics-close.md` §3.2) — its
@@ -49,6 +50,16 @@ kind-source-gap" between W12 close and HEAD due to upstream MIR producer
 evolution (post-W12 routing changes; the SharedModuleBinding preflight
 class is still triggerable via `f2` which uses a closure-capture-promotion
 shape that emits the preflight-rejected opcodes).
+
+`f3` keeps the historical filename for harness stability, but its current
+observable class is the `AllocSharedModuleBinding` bytecode preflight shown
+above. The old W12 expectation, "ClosureCapture missing function_id" from
+MirToIR top-level preflight, is stale at HEAD for valid CLI fixtures: closure
+capture MIR starts with `function_id: None` during lowering, then the bytecode
+compiler back-patches captures with their concrete function ids before JIT
+MIR preflight runs. Source-level fixtures therefore cannot leave an unpatched
+`ClosureCapture` for MirToIR to reject; this fixture reaches the main-code
+bytecode preflight first.
 
 ## UNTRIGGERABLE-AT-HEAD classes (per W12 close §1.1 enumeration)
 
@@ -81,8 +92,14 @@ UNTRIGGERABLE-AT-HEAD with the following surface notes:
   execution). Most kind-source gaps surface at MIR-compile time
   (Route A) before reaching the host boundary. Hard to trigger
   distinctly at HEAD; UNTRIGGERABLE.
+- **MirToIR `ClosureCapture missing function_id` top-level preflight.**
+  Stale W12/F3 expectation. The guard remains in the MIR preflight code as
+  an internal invariant check, but the source-to-bytecode compiler patches
+  valid closure-capture MIR with concrete function ids before the JIT sees it.
+  At HEAD, the F3 source reaches `AllocSharedModuleBinding` bytecode preflight
+  instead, so this class is not triggerable by a valid CLI fixture.
 
-These four UNTRIGGERABLE classes share the same fall-through `match` arm
+These five UNTRIGGERABLE classes share the same fall-through `match` arm
 in `crates/shape-jit/src/executor.rs::execute_program` as the
 TRIGGERABLE classes — the diagnostic-emission contract holds
 structurally for them too. Surface-and-stop on the per-class trigger;

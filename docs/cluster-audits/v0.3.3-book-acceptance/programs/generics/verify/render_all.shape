@@ -1,0 +1,8 @@
+trait Display { fn display() -> string; }
+type User { name: string }
+impl Display for User { method display() -> string { self.name } }
+fn render_all<T: Display>(items: Vec<T>) -> Vec<string> {
+  items.map(|x| x.display())
+}
+let us: Vec<User> = [User{name:"a"}, User{name:"b"}]
+print(render_all(us))

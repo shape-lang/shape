@@ -89,7 +89,7 @@ Source data: `TypeInferenceEngine.constraint_origins` (`mod.rs:71`), `callable_o
   "from_type": "User?",
   "to_type": "User",
   "narrowed_at": {"line": 22, "col": 8, "span": [295, 304]},
-  "narrowing_condition": "user != null",
+  "narrowing_condition": "user != None",
   "valid_in_range": [310, 380],
   "snapshot_token": "s7393"
 }
@@ -104,7 +104,7 @@ Source data: `extract_narrowings` (`crates/shape-runtime/src/type_system/inferen
   "family": "attractor_match",
   "subject": { "kind": "expr", "loc": {"line": 50, "col": 12, "span": [720, 760]} },
   "attractor_name": "manual_option_unwrap_with_error",
-  "matched_shape": "if x == null { return Err(...) } else { x.foo }",
+  "matched_shape": "if x == None { return Err(...) } else { x.foo }",
   "canonical_form": "let v = x ?? return Err(\"…\"); v.foo",
   "severity": "hint",
   "snapshot_token": "s7394"

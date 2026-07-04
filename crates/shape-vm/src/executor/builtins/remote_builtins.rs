@@ -49,13 +49,14 @@
 //! `executor/vm_impl/modules.rs` (the VM stamps the active program
 //! before each module dispatch).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_runtime::json_value::JsonValue;
 use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_wire::WireValue;
 use shape_wire::transport::Transport;
 use shape_wire::transport::factory::TransportKind;
-use shape_wire::WireValue;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -72,6 +73,7 @@ thread_local! {
 }
 
 /// Set the thread-local program reference. Called by the VM before module dispatch.
+#[allow(dead_code)]
 pub fn set_current_program(program: &crate::bytecode::BytecodeProgram) {
     CURRENT_PROGRAM.with(|p| {
         *p.borrow_mut() = Some(program.clone());
@@ -79,6 +81,7 @@ pub fn set_current_program(program: &crate::bytecode::BytecodeProgram) {
 }
 
 /// Clear the thread-local program reference. Called by the VM after module dispatch.
+#[allow(dead_code)]
 pub fn clear_current_program() {
     CURRENT_PROGRAM.with(|p| {
         *p.borrow_mut() = None;
@@ -102,15 +105,13 @@ fn wire_roundtrip(
         .create_transport(TransportKind::Tcp)
         .map_err(|e| format!("remote: failed to create transport: {}", e))?;
 
-    let mp =
-        shape_wire::encode_message(msg).map_err(|e| format!("remote: encode error: {}", e))?;
+    let mp = shape_wire::encode_message(msg).map_err(|e| format!("remote: encode error: {}", e))?;
 
     let response_bytes = transport
         .send(addr, &mp)
         .map_err(|e| format!("remote: transport error: {}", e))?;
 
-    shape_wire::decode_message(&response_bytes)
-        .map_err(|e| format!("remote: decode error: {}", e))
+    shape_wire::decode_message(&response_bytes).map_err(|e| format!("remote: decode error: {}", e))
 }
 
 /// Project a `WireValue` into the strict-typed `JsonValue` tree.
@@ -146,9 +147,7 @@ fn wire_to_json_value(wire: &WireValue) -> JsonValue {
         WireValue::Ptr(v) => JsonValue::Int(*v as i64),
         WireValue::F32(v) => JsonValue::Number(*v as f64),
         WireValue::String(s) => JsonValue::String(s.clone()),
-        WireValue::Array(items) => {
-            JsonValue::Array(items.iter().map(wire_to_json_value).collect())
-        }
+        WireValue::Array(items) => JsonValue::Array(items.iter().map(wire_to_json_value).collect()),
         WireValue::Object(map) => JsonValue::Object(
             map.iter()
                 .map(|(k, v)| (k.clone(), wire_to_json_value(v)))
@@ -166,7 +165,10 @@ fn wire_to_json_value(wire: &WireValue) -> JsonValue {
         WireValue::Timestamp(ms) => JsonValue::Int(*ms),
         WireValue::Duration { value, unit } => JsonValue::Object(vec![
             ("__duration".to_string(), JsonValue::Number(*value)),
-            ("__unit".to_string(), JsonValue::String(format!("{:?}", unit))),
+            (
+                "__unit".to_string(),
+                JsonValue::String(format!("{:?}", unit)),
+            ),
         ]),
         // Non-JSON-projectable variants surface their wire-variant name
         // as a structured placeholder. The typed-Arc protocol for these
@@ -176,9 +178,7 @@ fn wire_to_json_value(wire: &WireValue) -> JsonValue {
         WireValue::FunctionRef { name } => {
             JsonValue::String(format!("<wire:FunctionRef:{}>", name))
         }
-        WireValue::PrintResult(_) => {
-            JsonValue::String("<wire:PrintResult:phase-2c>".to_string())
-        }
+        WireValue::PrintResult(_) => JsonValue::String("<wire:PrintResult:phase-2c>".to_string()),
         WireValue::Content(_) => JsonValue::String("<wire:Content:phase-2c>".to_string()),
     }
 }
@@ -283,18 +283,16 @@ pub fn create_remote_module() -> ModuleExports {
                 }
             };
             match response {
-                crate::remote::WireMessage::Pong(info) => {
-                    Ok(TypedReturn::OkObjectPairs(vec![
-                        (
-                            "shape_version".to_string(),
-                            ConcreteReturn::String(info.shape_version),
-                        ),
-                        (
-                            "wire_protocol".to_string(),
-                            ConcreteReturn::I64(info.wire_protocol as i64),
-                        ),
-                    ]))
-                }
+                crate::remote::WireMessage::Pong(info) => Ok(TypedReturn::OkObjectPairs(vec![
+                    (
+                        "shape_version".to_string(),
+                        ConcreteReturn::String(info.shape_version),
+                    ),
+                    (
+                        "wire_protocol".to_string(),
+                        ConcreteReturn::I64(info.wire_protocol as i64),
+                    ),
+                ])),
                 other => Ok(TypedReturn::Err(ConcreteReturn::String(format!(
                     "remote.ping(): unexpected response type: {:?}",
                     std::mem::discriminant(&other),

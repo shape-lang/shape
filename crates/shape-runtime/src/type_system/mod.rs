@@ -46,11 +46,14 @@ pub use types::{
 // Re-export other public types
 pub use checker::{
     TypeAnalysisMode, TypeCheckResult, TypeChecker, TypeWarning, analyze_program,
-    analyze_program_with_mode,
+    analyze_program_with_mode, analyze_program_with_mode_and_comptime_context,
 };
 pub use environment::TypeEnvironment;
 pub use errors::{TypeError, TypeErrorWithLocation, TypeResult};
-pub use inference::{PropertyAssignment, PropertyAssignmentCollector, TypeInferenceEngine};
+pub use inference::{
+    BindingFact, InferenceFacts, PropertyAssignment, PropertyAssignmentCollector,
+    TypeInferenceEngine,
+};
 pub use semantic::{EnumVariant, FunctionParam, FunctionSignature, SemanticType, TypeVarId};
 pub use storage::StorageType;
 pub use universal_error::{ErrorDetails, ErrorLocation, UniversalError};
@@ -78,9 +81,7 @@ mod tests {
     #[test]
     fn test_type_to_semantic_option() {
         let option_num = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let semantic = option_num.to_semantic().unwrap();
@@ -93,9 +94,7 @@ mod tests {
     #[test]
     fn test_type_to_semantic_result() {
         let result_num = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let semantic = result_num.to_semantic().unwrap();
@@ -111,9 +110,7 @@ mod tests {
     #[test]
     fn test_type_to_semantic_generic_table() {
         let table_num = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Table".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Table".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let semantic = table_num.to_semantic().unwrap();

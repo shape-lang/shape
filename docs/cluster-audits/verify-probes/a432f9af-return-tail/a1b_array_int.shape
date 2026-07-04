@@ -1,0 +1,8 @@
+fn g() -> Array<int> { [1, 2, 3] }
+fn use_it() -> int {
+  match g() {
+    [Some(n), _, _] => n,
+    _ => 0,
+  }
+}
+fn main() { print(use_it()) }

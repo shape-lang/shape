@@ -1,0 +1,3 @@
+fn greet(n) { n }
+let r: string = greet("hi")
+print(r)

@@ -26,7 +26,7 @@ pub use bounds::{AffineGuardArraySource, AffineSquareGuard, LinearBoundGuard};
 pub use call_path::CallPathPlan;
 pub use cross_function::Tier2CacheKey;
 pub use escape_analysis::EscapeAnalysisPlan;
-pub use hof_inline::{HofInlinePlan, HofInlineSite};
+pub use hof_inline::HofInlinePlan;
 pub use licm::LicmPlan;
 pub use loop_lowering::LoopLoweringPlan;
 pub use numeric_arrays::NumericArrayPlan;

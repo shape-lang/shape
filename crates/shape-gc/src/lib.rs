@@ -578,14 +578,6 @@ mod tests {
         }
     }
 
-    /// Helper: get a mutable GcHeader preceding an object pointer.
-    fn header_of_mut(ptr: *mut u8) -> &'static mut GcHeader {
-        unsafe {
-            let header_ptr = ptr.sub(std::mem::size_of::<GcHeader>()) as *mut GcHeader;
-            &mut *header_ptr
-        }
-    }
-
     // ── 1. Basic allocation and collection ──────────────────────────
 
     #[test]

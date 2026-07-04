@@ -103,11 +103,7 @@ fn test_variable_persistence_with_stdlib_executor() {
     );
 
     let wire_val = result2.unwrap().wire_value;
-    assert_eq!(
-        wire_val.as_number(),
-        Some(50.0),
-        "x + 8 should be 50"
-    );
+    assert_eq!(wire_val.as_number(), Some(50.0), "x + 8 should be 50");
 }
 
 /// Test multiple variables persist
@@ -178,10 +174,7 @@ fn test_type_definition_persistence_across_executions() {
     );
 
     // Cell 2: use the type from cell 1
-    let result2 = execute_repl_command(
-        &mut engine,
-        "let p = Point { x: 10, y: 20 }\np.x + p.y",
-    );
+    let result2 = execute_repl_command(&mut engine, "let p = Point { x: 10, y: 20 }\np.x + p.y");
     assert!(
         result2.is_ok(),
         "using type from previous cell should succeed: {:?}",
@@ -189,11 +182,7 @@ fn test_type_definition_persistence_across_executions() {
     );
 
     let wire_val = result2.unwrap();
-    assert_eq!(
-        wire_val.as_number(),
-        Some(30.0),
-        "p.x + p.y should be 30"
-    );
+    assert_eq!(wire_val.as_number(), Some(30.0), "p.x + p.y should be 30");
 }
 
 /// Test that multiple type definitions persist and can reference each other
@@ -223,9 +212,5 @@ fn test_multiple_type_definitions_persist() {
     );
 
     let wire_val = result.unwrap();
-    assert_eq!(
-        wire_val.as_number(),
-        Some(5.0),
-        "c.radius should be 5.0"
-    );
+    assert_eq!(wire_val.as_number(), Some(5.0), "c.radius should be 5.0");
 }

@@ -89,7 +89,10 @@ impl MultipleTestingStats {
         crate::type_schema::typed_object_from_pairs(&[
             ("n_tests", KindedSlot::from_number(self.n_tests as f64)),
             ("alpha", KindedSlot::from_number(self.alpha)),
-            ("adjusted_alpha", KindedSlot::from_number(self.adjusted_alpha)),
+            (
+                "adjusted_alpha",
+                KindedSlot::from_number(self.adjusted_alpha),
+            ),
             (
                 "method",
                 KindedSlot::from_string_arc(Arc::new(format!("{:?}", self.method))),

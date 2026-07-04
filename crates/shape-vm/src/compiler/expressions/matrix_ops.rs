@@ -7,11 +7,10 @@
 //! R5.4E extends this to element-wise matrix and vector arithmetic:
 //! - `Mat<number> + Mat<number>`   -> `IntrinsicMatAdd`
 //! - `Mat<number> - Mat<number>`   -> `IntrinsicMatSub`
-//! - `Vec<number> + Vec<number>`   -> `IntrinsicVecAdd`
 //! - `Vec<number> - Vec<number>`   -> `IntrinsicVecSub`
 //! - `Vec<number> * Vec<number>`   -> `IntrinsicVecMul`
 //! - `Vec<number> / Vec<number>`   -> `IntrinsicVecDiv`
-//! - `Vec<int>    + Vec<int>`      -> `IntrinsicVecAddI64`
+//! Numeric-array `+` is concatenation and routes through `ArrayConcat`.
 //!
 //! These retargets bypass the dynamic arithmetic fallback for the seven
 //! operand shapes pinned by the R5.4A baseline test.
@@ -36,28 +35,20 @@ pub(super) enum MatArithKernel {
     Sub,
 }
 
-/// Which element-wise vector arithmetic kernel to dispatch to. The I64Add
-/// variant covers `Vec<int> + Vec<int>` and preserves overflow-error
-/// semantics via `simd_vec_add_i64`; the remaining four cover the
-/// `Vec<number>` cases for +/-/*//.
+/// Which element-wise vector arithmetic kernel to dispatch to. Covers the
+/// `Vec<number>` cases for -/*//. `+` is intentionally absent: numeric-array
+/// `+` is CONCATENATION (USER RULING 2026-06-17), routed to `ArrayConcat`, not
+/// element-wise add. The `IntrinsicVecAdd` / `IntrinsicVecAddI64` builtins
+/// stay defined for a future `Vec`-type / method form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VecArithKernel {
-    Add,
     Sub,
     Mul,
     Div,
-    I64Add,
 }
 
 fn is_number_name(name: &str) -> bool {
     matches!(name.trim(), "number" | "Number" | "f64" | "float" | "Float")
-}
-
-fn is_int_name(name: &str) -> bool {
-    matches!(
-        name.trim(),
-        "int" | "Int" | "Integer" | "i64" | "i32" | "i16" | "i8"
-    )
 }
 
 fn parse_single_arg_generic<'a>(name: &'a str, base: &str) -> Option<&'a str> {
@@ -68,11 +59,19 @@ fn parse_single_arg_generic<'a>(name: &'a str, base: &str) -> Option<&'a str> {
 }
 
 fn is_vec_number_type_name(type_name: &str) -> bool {
-    parse_single_arg_generic(type_name, "Vec").is_some_and(is_number_name)
-}
+    let type_name = type_name.trim();
+    if parse_single_arg_generic(type_name, "Vec").is_some_and(is_number_name)
+        || parse_single_arg_generic(type_name, "Array").is_some_and(is_number_name)
+        || type_name.strip_suffix("[]").is_some_and(is_number_name)
+    {
+        return true;
+    }
 
-fn is_vec_int_type_name(type_name: &str) -> bool {
-    parse_single_arg_generic(type_name, "Vec").is_some_and(is_int_name)
+    // Function parameter tracking can display a statically proven Vec<number>
+    // operand as the canonical collection base only. This classifier runs after
+    // semantic operator inference has accepted `-`/`*`/`/` for numeric vectors;
+    // it is not a Numeric fallback for arbitrary arrays.
+    matches!(type_name, "Vec" | "Array")
 }
 
 fn is_mat_number_type_name(type_name: &str) -> bool {
@@ -154,7 +153,6 @@ impl BytecodeCompiler {
         ));
 
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = Some(VariableTypeInfo::named(
             match kernel {
                 MatMulKernel::MatVec => "Vec<number>",
@@ -224,37 +222,36 @@ impl BytecodeCompiler {
         ));
 
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = Some(VariableTypeInfo::named("Mat<number>".to_string()));
         Ok(true)
     }
 
     /// Classify an element-wise vector arithmetic form. Returns the kernel
-    /// for:
-    /// - `Vec<number>` +/-/*// `Vec<number>` (four kernels)
-    /// - `Vec<int> + Vec<int>` (one kernel, Add only — other ops on
-    ///   `Vec<int>` are not retargeted here and fall through to the
-    ///   dynamic arithmetic path unchanged).
+    /// for `Vec<number>` -/*// `Vec<number>` (three kernels).
+    ///
+    /// USER RULING 2026-06-17: numeric-array `+` means CONCATENATION, uniform
+    /// with string/struct arrays and the book spec. `+` is therefore NOT
+    /// classified here — it routes to the shared `ArrayConcat` path in
+    /// `binary_ops.rs` instead. The element-wise SIMD `IntrinsicVec*` opcodes
+    /// stay in place for a future `Vec`-type / method form; only `+` stops
+    /// routing to them. (The former `Vec<int> + Vec<int>` → `IntrinsicVecAddI64`
+    /// arm pointed at a non-working v0.4 stub and is removed.)
     fn classify_typed_vec_arithmetic(
         &mut self,
         op: &BinaryOp,
         left: &Expr,
         right: &Expr,
     ) -> Option<VecArithKernel> {
+        // `+` is concatenation, not element-wise add — never classify it.
+        if matches!(op, BinaryOp::Add) {
+            return None;
+        }
+
         let left_ty = self.expr_type_name_hint(left)?;
         let right_ty = self.expr_type_name_hint(right)?;
 
-        // Vec<int> + Vec<int> — Add only.
-        if matches!(op, BinaryOp::Add)
-            && is_vec_int_type_name(&left_ty)
-            && is_vec_int_type_name(&right_ty)
-        {
-            return Some(VecArithKernel::I64Add);
-        }
-
         if is_vec_number_type_name(&left_ty) && is_vec_number_type_name(&right_ty) {
             return match op {
-                BinaryOp::Add => Some(VecArithKernel::Add),
                 BinaryOp::Sub => Some(VecArithKernel::Sub),
                 BinaryOp::Mul => Some(VecArithKernel::Mul),
                 BinaryOp::Div => Some(VecArithKernel::Div),
@@ -268,9 +265,8 @@ impl BytecodeCompiler {
     /// matching `IntrinsicVec*` builtin. Returns `Ok(true)` when emission
     /// happened, `Ok(false)` otherwise.
     ///
-    /// The result type hint is `Vec<number>` for the number kernels and
-    /// `Vec<int>` for `IntrinsicVecAddI64` — both match the HeapKind of
-    /// the value the runtime intrinsic returns.
+    /// The result type hint is `Vec<number>`, matching the HeapKind of the
+    /// value the runtime intrinsic returns.
     pub(super) fn try_compile_typed_vec_arithmetic(
         &mut self,
         op: &BinaryOp,
@@ -291,11 +287,9 @@ impl BytecodeCompiler {
         ));
 
         let builtin = match kernel {
-            VecArithKernel::Add => BuiltinFunction::IntrinsicVecAdd,
             VecArithKernel::Sub => BuiltinFunction::IntrinsicVecSub,
             VecArithKernel::Mul => BuiltinFunction::IntrinsicVecMul,
             VecArithKernel::Div => BuiltinFunction::IntrinsicVecDiv,
-            VecArithKernel::I64Add => BuiltinFunction::IntrinsicVecAddI64,
         };
         self.emit(Instruction::new(
             OpCode::BuiltinCall,
@@ -303,14 +297,7 @@ impl BytecodeCompiler {
         ));
 
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
-        self.last_expr_type_info = Some(VariableTypeInfo::named(
-            match kernel {
-                VecArithKernel::I64Add => "Vec<int>",
-                _ => "Vec<number>",
-            }
-            .to_string(),
-        ));
+        self.last_expr_type_info = Some(VariableTypeInfo::named("Vec<number>".to_string()));
         Ok(true)
     }
 }

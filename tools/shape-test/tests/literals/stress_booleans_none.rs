@@ -1,4 +1,4 @@
-//! Stress tests for boolean and none literals.
+//! Stress tests for boolean and None literals.
 //!
 //! Migrated from shape-vm stress_01_primitives.rs — boolean, none, truthiness,
 //! string, and related literal sections.
@@ -178,19 +178,21 @@ test()"#,
 }
 
 // =============================================================================
-// SECTION 5: None / Null
+// SECTION 5: None / None
 // =============================================================================
 
-/// Verifies None literal returns none.
+/// Verifies None literal returns None.
 #[test]
-fn test_null_literal() {
+fn test_none_literal() {
     ShapeTest::new("let x = None\nx").expect_none();
 }
 
-/// Verifies None is not truthy.
+/// Strict Shape requires a bool operand: `!<Option>` is rejected (no truthiness
+/// coercion — user ruling 2026-06-01). Rebaselined from `expect_bool(true)`.
 #[test]
-fn test_null_is_not_truthy() {
-    ShapeTest::new("fn test() -> bool { !None }\ntest()").expect_bool(true);
+fn test_none_is_not_truthy() {
+    ShapeTest::new("fn test() -> bool { !None }\ntest()")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
 // =============================================================================
@@ -237,46 +239,60 @@ fn test_int_zero_is_not_truthy() {
     ShapeTest::new("fn test() -> int { 0 }\ntest()").expect_number(0.0);
 }
 
-/// Verifies int one is truthy (non-zero).
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion — user ruling 2026-06-01). Rebaselined from `expect_bool(true)`.
 #[test]
 fn test_int_one_is_truthy() {
-    ShapeTest::new("if 1 { true } else { false }").expect_bool(true);
+    ShapeTest::new("if 1 { true } else { false }")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies negative int is truthy.
+/// Strict Shape requires a bool condition: `if <int>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn test_int_negative_is_truthy() {
-    ShapeTest::new("if -1 { true } else { false }").expect_bool(true);
+    ShapeTest::new("if -1 { true } else { false }")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies number zero is not truthy.
+/// Strict Shape requires a bool condition: `if <number>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(false)`.
 #[test]
 fn test_number_zero_is_not_truthy() {
-    ShapeTest::new("if 0.0 { true } else { false }").expect_bool(false);
+    ShapeTest::new("if 0.0 { true } else { false }")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies positive number is truthy.
+/// Strict Shape requires a bool condition: `if <number>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn test_number_positive_is_truthy() {
-    ShapeTest::new("if 0.1 { true } else { false }").expect_bool(true);
+    ShapeTest::new("if 0.1 { true } else { false }")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies negative number is truthy.
+/// Strict Shape requires a bool condition: `if <number>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn test_number_negative_is_truthy() {
-    ShapeTest::new("if -0.1 { true } else { false }").expect_bool(true);
+    ShapeTest::new("if -0.1 { true } else { false }")
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies empty string is falsy.
+/// Strict Shape requires a bool condition: `if <string>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(false)`.
 #[test]
 fn test_empty_string_is_truthy() {
-    ShapeTest::new(r#"if "" { true } else { false }"#).expect_bool(false);
+    ShapeTest::new(r#"if "" { true } else { false }"#)
+        .expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies non-empty string is truthy.
+/// Strict Shape requires a bool condition: `if <string>` is rejected (no truthiness
+/// coercion). Rebaselined from `expect_bool(true)`.
 #[test]
 fn test_nonempty_string_is_truthy() {
-    ShapeTest::new(r#"if "x" { true } else { false }"#).expect_bool(true);
+    ShapeTest::new(r#"if "x" { true } else { false }"#)
+        .expect_run_err_contains("is not compatible with bool");
 }
 
 // =============================================================================
@@ -351,15 +367,15 @@ test()"#,
     .expect_bool(false);
 }
 
-/// Verifies null equality None == None.
+/// Verifies none equality None == None.
 #[test]
-fn test_null_equality() {
+fn test_none_equality() {
     ShapeTest::new("fn test() -> bool { None == None }\ntest()").expect_bool(true);
 }
 
 /// Verifies None != 0 (no implicit coercion).
 #[test]
-fn test_null_not_equal_to_zero() {
+fn test_none_not_equal_to_zero() {
     ShapeTest::new("fn test() -> bool { None != 0 }\ntest()").expect_bool(true);
 }
 

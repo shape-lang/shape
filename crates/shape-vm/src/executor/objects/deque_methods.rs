@@ -87,9 +87,9 @@ fn as_deque(slot: &KindedSlot) -> Result<Arc<DequeData>, VMError> {
 fn arg_slot_to_heap_value_arc(arg: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
     match arg.kind {
         NativeKind::Int64 => {
-            let i = arg.as_i64().ok_or_else(|| {
-                type_error("Deque element: Int64 slot bits not a valid integer")
-            })?;
+            let i = arg
+                .as_i64()
+                .ok_or_else(|| type_error("Deque element: Int64 slot bits not a valid integer"))?;
             Ok(Arc::new(HeapValue::BigInt(Arc::new(i))))
         }
         NativeKind::Float64 => Err(type_error(
@@ -118,12 +118,8 @@ fn arg_slot_to_heap_value_arc(arg: &KindedSlot) -> Result<Arc<HeapValue>, VMErro
             };
             Ok(Arc::new(HeapValue::String(arc)))
         }
-        NativeKind::Ptr(_) => {
-            // True heap pointer: `slot.as_heap_value()` → `&HeapValue`,
-            // clone the underlying typed-Arc payload (one strong-count
-            // bump per inner `Arc<T>`).
-            let hv: &HeapValue = arg.slot.as_heap_value();
-            Ok(Arc::new(hv.clone()))
+        NativeKind::Ptr(hk) => {
+            crate::executor::builtins::array_ops::ptr_slot_to_heap_arc(arg, hk, "Deque element")
         }
         other => Err(type_error(format!(
             "Deque element: kind {:?} cannot be stored",

@@ -260,10 +260,7 @@ mod tests {
         m.finalize();
 
         // Sign the manifest
-        let sig_data = crate::crypto::signing::sign_manifest_hash(
-            &m.manifest_hash,
-            &[42u8; 32],
-        );
+        let sig_data = crate::crypto::signing::sign_manifest_hash(&m.manifest_hash, &[42u8; 32]);
         m.signature = Some(ModuleSignature {
             author_key: sig_data.author_key,
             signature: sig_data.signature,
@@ -281,10 +278,7 @@ mod tests {
 
         // Create a signature with wrong hash
         let wrong_hash = [99u8; 32];
-        let sig_data = crate::crypto::signing::sign_manifest_hash(
-            &wrong_hash,
-            &[42u8; 32],
-        );
+        let sig_data = crate::crypto::signing::sign_manifest_hash(&wrong_hash, &[42u8; 32]);
         m.signature = Some(ModuleSignature {
             author_key: sig_data.author_key,
             signature: sig_data.signature,

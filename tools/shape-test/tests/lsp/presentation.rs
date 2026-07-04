@@ -317,11 +317,18 @@ fn inlay_hint_function_return_result_from_expression_style_ok_err() {
 
 #[test]
 fn inlay_hint_function_return_result_union_for_mixed_ok_values() {
+    // Strict-flip rebaseline (STAGE-2): only the TRAILING expression is the
+    // function's return value. `Ok(1)` is a discarded non-tail expression
+    // statement; the return is `Ok("str")` → `Result<string>`. The prior
+    // `Result<int | string>` label unioned both `Ok` constructors, which was a
+    // pre-strict over-approximation (a non-tail statement is not a return).
+    // Expectation-drift toward the more-correct trailing-expr return type, not a
+    // code rejection.
     let code = "fn test() {\n  Ok(1)\n  Ok(\"str\")\n}\n";
     ShapeTest::new(code)
-        .expect_type_hint_label("-> Result<int | string>")
+        .expect_type_hint_label("-> Result<string>")
         .at(pos(0, 4))
-        .expect_hover_contains("-> Result<int | string>");
+        .expect_hover_contains("-> Result<string>");
 }
 
 #[test]
@@ -364,7 +371,9 @@ fn inlay_hint_keeps_object_merge_type_with_semantic_error_elsewhere() {
 #[test]
 fn inlay_hint_closure_param_is_refined_from_body_constraints() {
     let code = "let x = { x: 1 }\nlet y = | x | 10 * (x.x * 2)\nprint(y(x))\n";
-    ShapeTest::new(code).expect_type_hint_label(": ({ x: number }) -> number");
+    ShapeTest::new(code)
+        .expect_type_hint_label(": { x: int }")
+        .expect_type_hint_label(": fn(_) -> number");
 }
 
 #[test]
@@ -454,13 +463,13 @@ fn code_lens_on_multiple_functions() {
 
 #[test]
 fn code_lens_on_trait_shows_implementations() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
     ShapeTest::new(code).expect_code_lens_not_empty();
 }
 
 #[test]
 fn code_lens_on_trait_at_correct_line() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
     ShapeTest::new(code).expect_code_lens_at_line(0);
 }
 
@@ -708,17 +717,17 @@ let doubled = xs.map(|x| x * 2)
 fn lsp_n_chain_hints_after_dot_on_method_chain() {
     // LSP-H §D #5: chain-hint visitor emits `: T` after each intermediate
     // `.method()` call in a multi-`.` chain. r-a-parity feature, default-on.
-    // We assert at least one intermediate type renders — the audit example is
-    // `xs.map(|x| x * 2).sum()` where the hint after `.map(...)` should be
-    // `: Array<int>` (the sum is the binding's final type, already on the
-    // `let` hint).
+    // We assert both the final binding type and at least one intermediate type
+    // render. Strict integer-array aggregation preserves the element type, so
+    // `sum()` over `Array<int>` resolves to `int`; the chain hint after
+    // `.map(...)` remains `: Array<int>`.
     let code = "\
 let xs = [1, 2, 3]
 let total = xs.map(|x| x * 2).sum()
 ";
     ShapeTest::new(code)
         // The binding hint shows the final type.
-        .expect_type_hint_label(": number")
+        .expect_type_hint_label(": int")
         // The chain hint after `.map(...)` shows the intermediate array shape.
         .expect_type_hint_label(": Array<int>");
 }

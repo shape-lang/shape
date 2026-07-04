@@ -1,0 +1,10 @@
+use std::core::snapshot
+
+match snapshot::snapshot() {
+    Snapshot::Hash(id) => {
+        print(f"snapshot id: {id}")
+    },
+    Snapshot::Resumed => {
+        print("resumed from a prior snapshot")
+    },
+}

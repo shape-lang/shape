@@ -25,8 +25,8 @@
 //! pre-§2.7.10 bodies. The shapes that survive — `borrow_data_table`,
 //! `push_data_table_result` — operate on the §2.7.10 carrier directly.
 
-use shape_value::{DataTable, KindedSlot, NativeKind, TableViewData, ValueSlot, VMError};
 use shape_value::heap_value::HeapKind;
+use shape_value::{DataTable, KindedSlot, NativeKind, TableViewData, VMError, ValueSlot};
 use std::sync::Arc;
 
 /// Borrow the receiver `DataTable` from `args[0]` without consuming the

@@ -72,9 +72,9 @@ fn as_str_arg(slot: &KindedSlot) -> Result<&str, VMError> {
 /// type error tagged with the component name.
 #[inline]
 fn numeric_component(args: &[KindedSlot], idx: usize, label: &str) -> Result<f64, VMError> {
-    let slot = args.get(idx).ok_or_else(|| {
-        type_error(format!("DateTime constructor missing argument: {}", label))
-    })?;
+    let slot = args
+        .get(idx)
+        .ok_or_else(|| type_error(format!("DateTime constructor missing argument: {}", label)))?;
     coerce_to_f64(slot).ok_or_else(|| {
         type_error(format!(
             "DateTime constructor argument {} must be numeric, got kind {:?}",
@@ -414,10 +414,8 @@ mod tests {
     #[test]
     fn datetime_parse_iso8601_z() {
         // The task fixture string.
-        let r = builtin_datetime_parse(&[KindedSlot::from_string(
-            "2024-03-15T14:30:45Z",
-        )])
-        .expect("parse() must not panic");
+        let r = builtin_datetime_parse(&[KindedSlot::from_string("2024-03-15T14:30:45Z")])
+            .expect("parse() must not panic");
         let dt = datetime_of(&r);
         assert_eq!(dt.timestamp(), 1_710_513_045);
     }
@@ -431,9 +429,7 @@ mod tests {
 
     #[test]
     fn datetime_parse_rejects_garbage() {
-        assert!(
-            builtin_datetime_parse(&[KindedSlot::from_string("not-a-date")]).is_err()
-        );
+        assert!(builtin_datetime_parse(&[KindedSlot::from_string("not-a-date")]).is_err());
     }
 
     #[test]
@@ -450,10 +446,8 @@ mod tests {
 
     #[test]
     fn datetime_from_epoch_millis() {
-        let r = builtin_datetime_from_epoch(&[KindedSlot::from_int(
-            1_705_314_600_000,
-        )])
-        .expect("fromEpoch() must not panic");
+        let r = builtin_datetime_from_epoch(&[KindedSlot::from_int(1_705_314_600_000)])
+            .expect("fromEpoch() must not panic");
         assert_eq!(datetime_of(&r).timestamp(), 1_705_314_600);
     }
 
@@ -468,10 +462,8 @@ mod tests {
 
     #[test]
     fn datetime_from_unix_secs_basic() {
-        let r = builtin_datetime_from_unix_secs(&[KindedSlot::from_int(
-            1_705_314_600,
-        )])
-        .expect("fromUnixSecs() must not panic");
+        let r = builtin_datetime_from_unix_secs(&[KindedSlot::from_int(1_705_314_600)])
+            .expect("fromUnixSecs() must not panic");
         let dt = datetime_of(&r);
         assert_eq!(dt.timestamp(), 1_705_314_600);
         assert_eq!(dt.timestamp_millis(), 1_705_314_600_000);
@@ -546,11 +538,8 @@ mod tests {
     #[test]
     fn datetime_from_parts_rejects_wrong_arity() {
         assert!(
-            builtin_datetime_from_parts(&[
-                KindedSlot::from_int(2024),
-                KindedSlot::from_int(1),
-            ])
-            .is_err()
+            builtin_datetime_from_parts(&[KindedSlot::from_int(2024), KindedSlot::from_int(1),])
+                .is_err()
         );
     }
 

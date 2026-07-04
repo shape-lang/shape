@@ -6,7 +6,11 @@
 use shape_test::shape_test::ShapeTest;
 
 #[test]
-fn inferred_shared_reference_accepts_explicit_ampersand_on_named_function() {
+fn named_function_rejects_explicit_reference_without_declared_contract() {
+    // W45 strict-flip: inferred pass-by-reference for unannotated heap
+    // parameters is disabled. An explicit `&` call-site argument is accepted
+    // only when the callee has a declared reference parameter; otherwise the
+    // compiler must reject at B0004 instead of guessing a reference contract.
     ShapeTest::new(
         r#"
         fn head(arr) { arr[0] }
@@ -14,7 +18,7 @@ fn inferred_shared_reference_accepts_explicit_ampersand_on_named_function() {
         head(&xs)
     "#,
     )
-    .expect_number(9.0);
+    .expect_run_err_contains("B0004");
 }
 
 #[test]
@@ -48,23 +52,9 @@ fn closure_can_capture_explicit_reference_parameter() {
 
 #[test]
 fn closure_can_capture_inferred_reference_parameter() {
-    // W14.2-G6 e2e-lifetime triage SURFACE-AND-STOP: GetProp on
-    // Ptr(NativeView) surface requires the W17-typed-carrier-
-    // monomorphization replacement for the deleted HashMapData::values:
-    // Arc<Buf<Arc<HeapValue>>> carrier (ADR-006 §2.7.24 Q25.B) or the
-    // per-receiver heterogeneous-kind body. The closure-capturing-array
-    // path lowers `arr[0]` through the NativeView host-tier carrier
-    // where the kind is not yet known at the GetProp dispatch site.
-    // Annotation-fix attempted (`fn make_head_reader(arr: Array<int>)`
-    // + `let xs: Array<int> = [1, 2, 3]`): a SECOND architectural panic
-    // surfaces at crates/shape-vm/src/executor/vm_impl/stack.rs:97
-    // "HeapKind::TypedArray ordinal 8 is vacated per W12 audit §3.6"
-    // (V3-S5 ckpt-4 v2-raw *mut TypedArray<T> carriers per ADR-006
-    // §2.7.24 Q25.A SUPERSEDED). Both surfaces route to W14.2-H1
-    // exception registry as
-    // `v0.4-w17-typed-carrier-monomorphization-getprop-nativeview` +
-    // `v0.4-v3-s5-ckpt-6-strict-close` chain. Test pinned via
-    // expect_run_err_contains to anchor the architectural gap.
+    // W45 strict-flip: the old W14.2 NativeView surface is stale. The
+    // unannotated array parameter is passed as the shared heap carrier by
+    // value, and the closure capture/index path now resolves structurally.
     ShapeTest::new(
         r#"
         fn make_head_reader(arr) {
@@ -75,5 +65,5 @@ fn closure_can_capture_inferred_reference_parameter() {
         reader()
     "#,
     )
-    .expect_run_err_contains("Ptr(NativeView)");
+    .expect_number(1.0);
 }

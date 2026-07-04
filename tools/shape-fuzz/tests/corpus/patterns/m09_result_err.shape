@@ -1,0 +1,4 @@
+// W88C patterns seed m09 - top-level Result<int, string> Err arm.
+let r: Result<int, string> = Err("bad")
+let v = match r { Ok(n) => n, Err(_) => -7 }
+print(v)

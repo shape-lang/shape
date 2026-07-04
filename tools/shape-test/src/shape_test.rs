@@ -89,6 +89,7 @@ pub struct ShapeTest {
     use_stdlib: bool,
     snapshot_dir: Option<tempfile::TempDir>,
     permission_set: Option<shape_abi_v1::PermissionSet>,
+    resource_limits: Option<shape_vm::resource_limits::ResourceLimits>,
 }
 
 impl ShapeTest {
@@ -104,6 +105,7 @@ impl ShapeTest {
             use_stdlib: false,
             snapshot_dir: None,
             permission_set: None,
+            resource_limits: None,
         }
     }
 
@@ -125,6 +127,15 @@ impl ShapeTest {
     /// not present in the given set.
     pub fn with_permissions(mut self, permissions: shape_abi_v1::PermissionSet) -> Self {
         self.permission_set = Some(permissions);
+        self
+    }
+
+    /// Override the default runtime resource limits for this test execution.
+    pub fn with_resource_limits(
+        mut self,
+        limits: shape_vm::resource_limits::ResourceLimits,
+    ) -> Self {
+        self.resource_limits = Some(limits);
         self
     }
 
@@ -175,6 +186,15 @@ impl ShapeTest {
                 line: last_line as u32,
                 character: last_char as u32,
             },
+        }
+    }
+
+    fn default_resource_limits() -> shape_vm::resource_limits::ResourceLimits {
+        shape_vm::resource_limits::ResourceLimits {
+            max_instructions: Some(2_000_000_000),
+            max_memory_bytes: Some(2 * 1024 * 1024 * 1024), // 2 GiB heap-growth budget
+            max_wall_time: Some(std::time::Duration::from_secs(120)),
+            max_output_bytes: None,
         }
     }
 
@@ -235,6 +255,29 @@ impl ShapeTest {
         }
 
         let mut executor = BytecodeExecutor::new();
+
+        // Bound per-test VM execution so a runaway program (e.g. a
+        // strict-flip-era inference regression producing an unbounded
+        // allocating loop) fails IN-PROCESS at the cap instead of growing RSS
+        // without bound until the host OOM-kills the whole test process (the
+        // 83GB single-process OOM / bulk-hang).
+        //
+        // The MEMORY cap is the load-bearing guard. Heap buffers grow via a
+        // doubling realloc, so byte size grows geometrically while the
+        // instruction count grows only linearly — a single doubling realloc
+        // can jump several GB in ONE instruction, so an instruction cap alone
+        // cannot bound RSS. The per-execution heap-growth budget (consulted by
+        // the doubling-realloc paths in shape-value) caps total live growth.
+        // The instruction + wall-time caps are coarse backstops for
+        // non-allocating spins. All three are far above anything a legitimate
+        // test reaches (the full 613-test operators binary peaks at ~27MB /
+        // 8.4s), so this caps resource consumption only and never changes an
+        // observable result.
+        executor.set_resource_limits(Some(
+            self.resource_limits
+                .clone()
+                .unwrap_or_else(Self::default_resource_limits),
+        ));
 
         // Wire permission set for compile-time capability checking
         if let Some(pset) = &self.permission_set {
@@ -444,12 +487,8 @@ impl ShapeTest {
         start_line_max: u32,
     ) -> Self {
         let uri = self.uri();
-        let impls = shape_lsp::definition::get_implementations(
-            &self.text,
-            self.position,
-            &uri,
-            None,
-        );
+        let impls =
+            shape_lsp::definition::get_implementations(&self.text, self.position, &uri, None);
         assert!(
             impls.is_some(),
             "Expected implementations at ({}, {})",
@@ -724,7 +763,8 @@ impl ShapeTest {
             let CodeActionOrCommand::CodeAction(action) = a else {
                 return false;
             };
-            let is_extract = matches!(action.kind.as_ref(), Some(k) if k == &CodeActionKind::REFACTOR_EXTRACT);
+            let is_extract =
+                matches!(action.kind.as_ref(), Some(k) if k == &CodeActionKind::REFACTOR_EXTRACT);
             let has_edit = action.edit.is_some();
             let title_matches = action.title.contains(title);
             is_extract && has_edit && title_matches
@@ -1019,7 +1059,8 @@ impl ShapeTest {
         let symbols = self.collect_flat_document_symbols();
         let count = symbols.iter().filter(|s| s.kind == kind).count();
         assert_eq!(
-            count, expected,
+            count,
+            expected,
             "Expected {} document symbols of kind {:?}, got {} (all: {:?})",
             expected,
             kind,
@@ -1075,8 +1116,7 @@ impl ShapeTest {
         assert!(
             is_empty,
             "Expected prepare_call_hierarchy empty/None at ({}, {})",
-            self.position.line,
-            self.position.character
+            self.position.line, self.position.character
         );
         self
     }
@@ -1241,7 +1281,7 @@ impl ShapeTest {
         self
     }
 
-    /// Assert the result is None/null.
+    /// Assert the result is Shape `None`.
     pub fn expect_none(self) -> Self {
         let result = self.eval();
         assert!(
@@ -1253,7 +1293,7 @@ impl ShapeTest {
         let is_none = val.is_null()
             || val == serde_json::Value::String("Null".to_string())
             || val == serde_json::Value::String("None".to_string());
-        assert!(is_none, "Expected None/null, got: {:?}", val);
+        assert!(is_none, "Expected None, got: {:?}", val);
         self
     }
 
@@ -1281,6 +1321,31 @@ impl ShapeTest {
             err.contains(msg),
             "Error should contain '{}', got: {}",
             msg,
+            err
+        );
+        self
+    }
+
+    /// Assert the code produces a run/compile error containing at least one of
+    /// `msgs`. Used where the strict checker's diagnostic message for a given
+    /// rejection is nondeterministic between equivalent passes (e.g. a
+    /// method-not-found rejection may surface either as
+    /// `Method 'X' not found on type 'Vec'` or as the downstream
+    /// `... cannot have fields` constraint cascade depending on checker pass
+    /// ordering). The error must still occur and match one of the named forms —
+    /// the negative-test intent is preserved.
+    pub fn expect_run_err_contains_any(self, msgs: &[&str]) -> Self {
+        let result = self.eval();
+        assert!(
+            result.is_err(),
+            "Expected run error, but got: {:?}",
+            result.ok()
+        );
+        let err = result.unwrap_err();
+        assert!(
+            msgs.iter().any(|m| err.contains(m)),
+            "Error should contain one of {:?}, got: {}",
+            msgs,
             err
         );
         self
@@ -1390,5 +1455,65 @@ impl ShapeTest {
             actual
         );
         self
+    }
+}
+
+#[cfg(test)]
+mod zzz_resource_bound_probe {
+    use super::*;
+
+    fn runaway_probe_limits() -> shape_vm::resource_limits::ResourceLimits {
+        shape_vm::resource_limits::ResourceLimits {
+            max_instructions: Some(1_000_000),
+            max_memory_bytes: Some(4 * 1024),
+            max_wall_time: Some(std::time::Duration::from_secs(5)),
+            max_output_bytes: None,
+        }
+    }
+
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(msg) = payload.downcast_ref::<String>() {
+            msg.clone()
+        } else if let Some(msg) = payload.downcast_ref::<&str>() {
+            msg.to_string()
+        } else {
+            "<non-string panic payload>".to_string()
+        }
+    }
+
+    // TEMPORARY M2-fix verification probe — removed after capped run.
+    #[test]
+    fn runaway_loop_fails_in_process() {
+        // Unbounded allocating loop: would grow RSS without bound under the
+        // old (unlimited) test path. With the per-buffer heap ceiling wired in
+        // it must fail in-process (a caught panic at the explicit test-local
+        // ceiling) rather than climbing RSS until the host OOM-killer reaps the
+        // process.
+        let src = "let mut a = [0]\nlet mut i = 0\nwhile i < 100000000000 {\n  a.push(i)\n  i = i + 1\n}\nprint(a.length)\n";
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ShapeTest::new(src)
+                .with_resource_limits(runaway_probe_limits())
+                .eval();
+        }));
+        let panic = outcome.expect_err("runaway loop should fail in-process at the heap ceiling");
+        let message = panic_message(panic);
+        assert!(
+            message.contains("Shape memory limit exceeded"),
+            "runaway loop should fail at the explicit memory ceiling, got: {message}"
+        );
+    }
+
+    // Sanity: a normal terminating program still runs fine under the cap.
+    #[test]
+    fn normal_program_ok_under_cap() {
+        ShapeTest::new("let x = 1 + 2\nprint(x)\n").expect_run_ok();
+    }
+
+    // A loop that allocates and frees many transient arrays must NOT trip the
+    // per-buffer ceiling (sizes are checked independently, never summed).
+    #[test]
+    fn transient_alloc_loop_ok_under_cap() {
+        let src = "let mut total = 0\nlet mut i = 0\nwhile i < 200 {\n  let tmp = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\n  total = total + tmp.length\n  i = i + 1\n}\nprint(total)\n";
+        ShapeTest::new(src).expect_run_ok();
     }
 }

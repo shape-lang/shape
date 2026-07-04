@@ -96,6 +96,27 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
             }
             parse_type_annotation(inner_pair)
         }
+        Rule::reference_type => {
+            // `&T` / `&mut T`. Inner pairs: an optional `param_mut_keyword`
+            // followed by the `primary_type` referent. Mutability is driven
+            // by the presence of the `param_mut_keyword` pair, not raw text.
+            let mut mutable = false;
+            let mut inner_ty = None;
+            for child in pair.clone().into_inner() {
+                match child.as_rule() {
+                    Rule::param_mut_keyword => mutable = true,
+                    _ => inner_ty = Some(parse_type_annotation(child)?),
+                }
+            }
+            let inner = inner_ty.ok_or_else(|| ShapeError::ParseError {
+                message: "expected inner type in reference type annotation".to_string(),
+                location: Some(pair_loc),
+            })?;
+            Ok(TypeAnnotation::Borrow {
+                mutable,
+                inner: Box::new(inner),
+            })
+        }
         Rule::basic_type => parse_basic_type(pair.as_str()),
         Rule::tuple_type => {
             let mut members = Vec::new();
@@ -340,11 +361,10 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
             // them into specialized bodies.
             if first.as_rule() == Rule::const_type_param {
                 let mut const_inner = first.into_inner();
-                let name_pair =
-                    const_inner.next().ok_or_else(|| ShapeError::ParseError {
-                        message: "expected const generic parameter name".to_string(),
-                        location: Some(pair_loc.clone()),
-                    })?;
+                let name_pair = const_inner.next().ok_or_else(|| ShapeError::ParseError {
+                    message: "expected const generic parameter name".to_string(),
+                    location: Some(pair_loc.clone()),
+                })?;
                 let name = name_pair.as_str().to_string();
                 let ty_pair = const_inner.next().ok_or_else(|| ShapeError::ParseError {
                     message: "expected const generic parameter type annotation".to_string(),
@@ -464,7 +484,10 @@ pub fn parse_generic_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
     if (name == "Vec" || name == "Array") && args.len() == 1 {
         Ok(TypeAnnotation::Array(Box::new(args.remove(0))))
     } else {
-        Ok(TypeAnnotation::Generic { name: name.into(), args })
+        Ok(TypeAnnotation::Generic {
+            name: name.into(),
+            args,
+        })
     }
 }
 
@@ -1195,7 +1218,48 @@ fn parse_trait_member_signature(pair: Pair<Rule>) -> Result<crate::ast::TraitMem
     for part in inner {
         match part.as_rule() {
             Rule::type_param_list => {
+                // Function-type-style param list (used when a trait member's
+                // signature is written as a function-type annotation). Not the
+                // grammar's method value-param list — that arrives as
+                // `Rule::function_params` (handled below).
                 params = parse_type_param_list(part)?;
+            }
+            // Root r7 fix: the trait-method grammar (shape.pest:187) emits the
+            // method's VALUE params as `Rule::function_params`. Without this arm
+            // they fell into `_ => {}` and were dropped, leaving `params` empty
+            // for every required trait method — so the arity check at
+            // inference/items.rs:588 compared trait_arity=0 against the impl's
+            // real arity and produced a spurious `TraitImplArityMismatch`.
+            //
+            // The reusable parser yields `FunctionParameter`; the trait member
+            // signature stores `Vec<FunctionParam>` (a distinct AST type whose
+            // `.len()` drives the arity check), so convert per-param. The
+            // conversion mirrors how `parse_type_param` builds a `FunctionParam`.
+            Rule::function_params => {
+                for param_pair in part.into_inner() {
+                    if param_pair.as_rule() == Rule::function_param {
+                        let fp = super::functions::parse_function_param(param_pair)?;
+                        let name = fp.simple_name().map(|s| s.to_string());
+                        let type_annotation = fp
+                            .type_annotation
+                            .clone()
+                            .unwrap_or(crate::ast::TypeAnnotation::Basic("void".to_string()));
+                        params.push(crate::ast::FunctionParam {
+                            name,
+                            optional: fp.default_value.is_some(),
+                            type_annotation,
+                        });
+                    }
+                }
+            }
+            // Method return type: `fn name(...) -> Ret`. Without this arm the
+            // return type was dropped and every method defaulted to `void` (the
+            // W6 fallback below). Property members instead carry their type as
+            // `Rule::type_annotation` (the colon form), handled separately.
+            Rule::return_type => {
+                if let Some(type_pair) = part.into_inner().next() {
+                    type_annotation = Some(parse_type_annotation(type_pair)?);
+                }
             }
             Rule::type_annotation => {
                 type_annotation = Some(parse_type_annotation(part)?);

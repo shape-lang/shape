@@ -73,7 +73,8 @@ fn test_for_in_statement() {
     match &items[0] {
         crate::ast::Item::Statement(crate::ast::Statement::Expression(expr, _), _) => match expr {
             crate::ast::Expr::For(fe, _) => {
-                assert_eq!(fe.pattern, crate::ast::Pattern::Identifier("x".to_string()));
+                assert_eq!(fe.pattern.as_simple_name(), Some("x"));
+                assert_eq!(fe.pattern.binder_span(), Some(crate::ast::Span::new(4, 5)));
             }
             other => panic!("Expected For expression, got {:?}", other),
         },
@@ -553,6 +554,18 @@ fn test_null_literal_is_rejected() {
     assert!(
         msg.contains("null") || msg.contains("Syntax error"),
         "unexpected parse error for null literal: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_null_type_annotation_is_rejected() {
+    let input = r#"let a: null = None;"#;
+    let err = parse_program(input).expect_err("null type annotation must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("null") || msg.contains("Syntax error"),
+        "unexpected parse error for null type annotation: {}",
         msg
     );
 }

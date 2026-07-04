@@ -12,14 +12,15 @@ test()"#,
     .expect_number(3.0);
 }
 
-/// Verifies array concat both empty.
+/// Verifies array concat both empty — bare `[]` receiver is correctly rejected at
+/// compile time (strict typing cannot infer the element type).
 #[test]
 fn test_array_concat_both_empty() {
     ShapeTest::new(
         r#"function test() { [].concat([]).length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array concat strings.
@@ -109,7 +110,7 @@ fn test_array_take_from_empty() {
         r#"function test() { [].take(5).length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array drop basic.
@@ -179,7 +180,7 @@ fn test_array_drop_from_empty() {
         r#"function test() { [].drop(3).length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array includes found.
@@ -229,7 +230,7 @@ fn test_array_includes_empty() {
         r#"function test() { [].includes(1) }
 test()"#,
     )
-    .expect_bool(false);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array includes string.
@@ -309,7 +310,7 @@ fn test_array_index_of_empty() {
         r#"function test() { [].indexOf(1) }
 test()"#,
     )
-    .expect_number(-1.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array index of first occurrence.
@@ -365,11 +366,14 @@ test()"#,
 /// Verifies array flatten already flat.
 #[test]
 fn test_array_flatten_already_flat() {
+    // Shape's strict flatten signature removes one nested array level and
+    // returns the receiver element type. For `Array<int>`, that result is
+    // `int`, so `.length()` is a static error rather than a no-op flatten.
     ShapeTest::new(
         r#"function test() { [1, 2, 3].flatten().length() }
 test()"#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains("Method 'length' not found on type 'int'");
 }
 
 /// Verifies array flatten mixed nested.
@@ -399,7 +403,7 @@ fn test_array_flatten_empty_array() {
         r#"function test() { [].flatten().length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array flatten three nested.
@@ -526,6 +530,41 @@ fn test_array_push_preserves_existing() {
 test()"#,
     )
     .expect_number(10.0);
+}
+
+/// R1 empty-array-push let-gen (2026-06-14): a bare empty-array
+/// accumulator self-push at MODULE scope (no enclosing function) must read
+/// back the pushed value. The prior prototype routed the bytecode but the
+/// self-push array module-binding slot read None and SIGSEGV'd (exit 139);
+/// this test pins that the typed-array allocator is patched AFTER the
+/// element type resolves so the module-binding slot is constructed with the
+/// right kind. No `function` wrapper — top-level script context.
+#[test]
+fn test_array_push_to_empty_module_scope() {
+    ShapeTest::new(
+        r#"let mut a = []
+a = a.push(42)
+a.first()"#,
+    )
+    .expect_number(42.0);
+}
+
+/// R1 empty-array-push let-gen (2026-06-14): a loop accumulator built via
+/// `a = a.push(x * x)` over a bare empty array must yield the squares. The
+/// loop-body assignment compiles via the `BlockItem::Assignment` self-push
+/// path; the accumulator finalizer resolves the element kind and patches the
+/// placeholder allocator before the typed push fires.
+#[test]
+fn test_array_push_to_empty_loop_accumulator_squares() {
+    ShapeTest::new(
+        r#"let xs = [1, 2, 3]
+let mut a = []
+for x in xs {
+    a = a.push(x * x)
+}
+a.last()"#,
+    )
+    .expect_number(9.0);
 }
 
 /// Verifies array in function return.

@@ -28,10 +28,10 @@ pub mod method_id;
 pub mod native_kind;
 pub mod reference;
 pub mod scalar;
-pub mod string_intern;
 pub mod shape_graph;
 pub mod shape_graph_current;
 pub mod slot;
+pub mod string_intern;
 // Phase 3 cluster-0+1 V3-S5 ckpt-4 (2026-05-15): `pub mod typed_buffer;`
 // deleted. The `TypedBuffer<T>` + `AlignedTypedBuffer` wrapper layer is
 // retired wholesale per W12-typed-array-data-deletion-audit §B
@@ -60,7 +60,7 @@ pub use iterator_state::{IteratorSource, IteratorState, IteratorTransform};
 pub use kinded_slot::KindedSlot;
 pub use method_id::MethodId;
 pub use native_kind::NativeKind;
-pub use reference::RefTarget;
+pub use reference::{RefTarget, TypedArrayPtr};
 pub use scalar::{ScalarKind, TypedScalar};
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,

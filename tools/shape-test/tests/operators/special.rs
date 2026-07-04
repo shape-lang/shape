@@ -1,6 +1,6 @@
 //! Special operator tests.
 //!
-//! Covers: pipe |>, null coalesce ??, error context !!, fuzzy ~=, range .. and ..=.
+//! Covers: pipe |>, coalesce ??, error context !!, fuzzy ~=, range .. and ..=.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -28,7 +28,7 @@ fn pipe_operator_chained() {
 }
 
 #[test]
-fn null_coalesce_with_value() {
+fn none_coalesce_with_value() {
     ShapeTest::new(
         r#"
         let x = 42
@@ -39,7 +39,7 @@ fn null_coalesce_with_value() {
 }
 
 #[test]
-fn null_coalesce_with_none() {
+fn none_coalesce_with_none() {
     ShapeTest::new(
         r#"
         let x = None
@@ -50,7 +50,7 @@ fn null_coalesce_with_none() {
 }
 
 #[test]
-fn null_coalesce_string() {
+fn none_coalesce_string() {
     ShapeTest::new(
         r#"
         let name = None

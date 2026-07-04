@@ -33,6 +33,14 @@ pub enum TypeAnnotation {
     },
     /// Type reference (custom type or type alias)
     Reference(TypePath),
+    /// Borrow type in type position: `&T` / `&mut T` (R1).
+    ///
+    /// Distinct from `Reference(TypePath)` (a named-type reference). This arm
+    /// carries an inner annotation and a mutability flag for `&T` and `&mut T`.
+    Borrow {
+        mutable: bool,
+        inner: Box<TypeAnnotation>,
+    },
     /// Void type
     Void,
     /// Never type
@@ -110,6 +118,13 @@ impl TypeAnnotation {
         match self {
             TypeAnnotation::Basic(name) => name.clone(),
             TypeAnnotation::Reference(path) => path.to_string(),
+            TypeAnnotation::Borrow { mutable, inner } => {
+                if *mutable {
+                    format!("&mut {}", inner.to_type_string())
+                } else {
+                    format!("&{}", inner.to_type_string())
+                }
+            }
             TypeAnnotation::Array(inner) => format!("Array<{}>", inner.to_type_string()),
             TypeAnnotation::Generic { name, args }
                 if name.as_str() == "Option" && args.len() == 1 =>

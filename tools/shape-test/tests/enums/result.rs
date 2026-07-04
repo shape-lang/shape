@@ -248,6 +248,9 @@ fn test_result_ok_bool() {
 
 #[test]
 fn test_result_in_array() {
+    // Strict array literals require one proven concrete element type. Mixing
+    // `Ok(int)` and `Err(string)` without an annotation leaves the Result
+    // element type unproven.
     ShapeTest::new(
         r#"
         let results = [Ok(1), Err("bad"), Ok(3)]
@@ -261,7 +264,7 @@ fn test_result_in_array() {
         sum
     "#,
     )
-    .expect_number(4.0);
+    .expect_run_err_contains("cannot infer the element type");
 }
 
 #[test]
@@ -758,4 +761,138 @@ fn result_ok_in_conditional() {
     "#,
     )
     .expect_number(1.0);
+}
+
+// =========================================================================
+// STAGE-P1 (v0.3.3 strict-flip): struct-payload `Ok(p) => p.x + p.y`.
+//
+// A `match g() { Ok(p) => p.x + p.y }` where `g() -> Result<Point,string>`
+// must resolve `p` to the success-payload struct so two field reads feeding
+// a binary op both type as the field's declared `int`. Pre-fix the
+// match-scrutinee call's declared return type was not projected to a
+// ConcreteType, the `Ok(p)` binder was never stamped with `Point`, and
+// `p.x + p.y` erased to `unknown + unknown` (a strict-typing compile reject).
+// The keystone expr-type-table fallback in `compile_expr_match` recovers it.
+// =========================================================================
+
+#[test]
+fn match_ok_struct_payload_two_field_add() {
+    ShapeTest::new(
+        r#"
+        type Point { x: int, y: int }
+        fn g() -> Result<Point, string> { Ok(Point { x: 3, y: 4 }) }
+        fn use_it() -> int {
+            match g() {
+                Ok(p) => p.x + p.y,
+                Err(_) => -1
+            }
+        }
+        print(use_it())
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("7");
+}
+
+#[test]
+fn match_ok_struct_payload_two_field_mul() {
+    ShapeTest::new(
+        r#"
+        type Point { x: int, y: int }
+        fn g() -> Result<Point, string> { Ok(Point { x: 3, y: 4 }) }
+        fn use_it() -> int {
+            match g() {
+                Ok(p) => p.x * p.y,
+                Err(_) => -1
+            }
+        }
+        print(use_it())
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("12");
+}
+
+#[test]
+fn match_some_struct_payload_two_field_add() {
+    ShapeTest::new(
+        r#"
+        type Point { x: int, y: int }
+        fn g() -> Option<Point> { Some(Point { x: 3, y: 4 }) }
+        fn use_it() -> int {
+            match g() {
+                Some(p) => p.x + p.y,
+                None => -1
+            }
+        }
+        print(use_it())
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("7");
+}
+
+#[test]
+fn match_ok_struct_payload_multi_op_body() {
+    ShapeTest::new(
+        r#"
+        type Point { x: int, y: int }
+        fn g() -> Result<Point, string> { Ok(Point { x: 3, y: 4 }) }
+        fn use_it() -> int {
+            match g() {
+                Ok(p) => {
+                    let a = p.x + p.y
+                    let b = p.x * p.y
+                    a + b
+                }
+                Err(_) => -1
+            }
+        }
+        print(use_it())
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("19");
+}
+
+#[test]
+fn match_ok_nested_struct_payload_field_access() {
+    ShapeTest::new(
+        r#"
+        type Inner { v: int }
+        type Outer { inner: Inner, w: int }
+        fn g() -> Result<Outer, string> { Ok(Outer { inner: Inner { v: 5 }, w: 2 }) }
+        fn use_it() -> int {
+            match g() {
+                Ok(o) => o.inner.v + o.w,
+                Err(_) => -1
+            }
+        }
+        print(use_it())
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("7");
+}
+
+// STAGE-P1 reinterpret-close guard: the new keystone scrutinee-CT fallback
+// must NOT relax the foreign-variant-pattern reject. A `Some(n)` pattern over
+// a `Result` scrutinee still has to be a clean compile error (the catastrophic
+// heap-pointer reinterpret the constructor-pattern-ownership check prevents).
+#[test]
+fn match_foreign_variant_over_result_still_rejected() {
+    ShapeTest::new(
+        r#"
+        type Point { x: int, y: int }
+        fn g() -> Result<Point, string> { Ok(Point { x: 3, y: 4 }) }
+        fn use_it() -> int {
+            match g() {
+                Some(n) => n,
+                Err(_) => -1
+            }
+        }
+        print(use_it())
+    "#,
+    )
+    .expect_run_err_contains("does not belong to scrutinee type");
 }

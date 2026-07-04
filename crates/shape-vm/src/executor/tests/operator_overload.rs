@@ -9,8 +9,7 @@
 //! - Operator trait fallback only fires when built-in paths don't match
 
 use crate::bytecode::{BuiltinFunction, OpCode, Operand};
-use crate::executor::tests::test_utils::{compile, eval, eval_result};
-use shape_value::{ValueWord, ValueWordExt};
+use crate::executor::tests::test_utils::{KindedSlotTestExt, compile, eval, eval_result};
 
 #[test]
 fn test_add_trait_overload() {
@@ -31,7 +30,7 @@ fn test_add_trait_overload() {
         c.x + c.y
     "#,
     );
-    let val = result.as_number_coerce().expect("should be a number");
+    let val = result.as_test_number().expect("should be a number");
     assert_eq!(val, 10.0, "Vec2(1,2) + Vec2(3,4) = Vec2(4,6), x+y = 10");
 }
 
@@ -53,7 +52,7 @@ fn test_sub_trait_overload() {
         c.x + c.y
     "#,
     );
-    let val = result.as_number_coerce().expect("should be a number");
+    let val = result.as_test_number().expect("should be a number");
     assert_eq!(val, 11.0, "Vec2(5,10) - Vec2(1,3) = Vec2(4,7), x+y = 11");
 }
 
@@ -75,7 +74,7 @@ fn test_mul_trait_overload() {
         c.x + c.y
     "#,
     );
-    let val = result.as_number_coerce().expect("should be a number");
+    let val = result.as_test_number().expect("should be a number");
     assert_eq!(val, 23.0, "Vec2(2,3) * Vec2(4,5) = Vec2(8,15), x+y = 23");
 }
 
@@ -97,7 +96,7 @@ fn test_div_trait_overload() {
         c.x + c.y
     "#,
     );
-    let val = result.as_number_coerce().expect("should be a number");
+    let val = result.as_test_number().expect("should be a number");
     assert_eq!(val, 9.0, "Vec2(10,20) / Vec2(2,5) = Vec2(5,4), x+y = 9");
 }
 
@@ -118,7 +117,7 @@ fn test_neg_trait_overload() {
         b.x + b.y
     "#,
     );
-    let val = result.as_number_coerce().expect("should be a number");
+    let val = result.as_test_number().expect("should be a number");
     assert_eq!(val, 4.0, "-Vec2(3,-7) = Vec2(-3,7), x+y = 4");
 }
 
@@ -162,7 +161,7 @@ fn test_builtin_arithmetic_still_works() {
     assert_eq!(result.as_i64().unwrap(), 5);
 
     let result = eval("10.0 - 3.0");
-    assert_eq!(result.as_number_coerce().unwrap(), 7.0);
+    assert_eq!(result.as_test_number().unwrap(), 7.0);
 
     let result = eval("4 * 5");
     assert_eq!(result.as_i64().unwrap(), 20);
@@ -459,14 +458,13 @@ fn has_builtin_call(program: &crate::bytecode::BytecodeProgram, builtin: Builtin
 
 /// R5.4E retarget-pin test for the v2 residuals closeout plan.
 ///
-/// This is the flipped successor of R5.4A's baseline. After R5.4E, the
-/// compiler retargets `Matrix`/`Vec` arithmetic at compile time to the
-/// `IntrinsicMat*` / `IntrinsicVec*` builtins added in R5.4D
-/// (`IntrinsicMatAdd`, `IntrinsicMatSub`, `IntrinsicVecAddI64`) and
-/// wired in R5.4C (`IntrinsicVecAdd/Sub/Mul/Div`). Each of the seven
-/// operand shapes the R5.4A baseline pinned to `*Dynamic` now compiles
-/// to a `BuiltinCall(BuiltinFunction::Intrinsic*)` and the `*Dynamic`
-/// opcode is absent from the emitted stream.
+/// This is the intended flipped successor of R5.4A's baseline. Once the
+/// active retarget gap is closed, the compiler should retarget `Matrix`/`Vec`
+/// arithmetic at compile time: Mat add/sub and Vec number sub/mul/div lower
+/// to `IntrinsicMat*` / `IntrinsicVec*` builtins, while numeric-array `+`
+/// follows the 2026-06-17 user ruling and lowers to `ArrayConcat`. Each
+/// operand shape the R5.4A baseline pinned to `*Dynamic` should compile to a
+/// static opcode path instead of dynamic arithmetic fallback.
 ///
 /// The two retarget helpers —
 /// `try_compile_typed_vec_arithmetic` and
@@ -515,7 +513,14 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
     }
 
-    // Case 3: `Vec<number> + Vec<number>` → IntrinsicVecAdd.
+    // Case 3: `Vec<number> + Vec<number>` → ArrayConcat.
+    // USER RULING 2026-06-17: numeric-array `+` is CONCATENATION, uniform
+    // with string/struct arrays and the book spec — NOT the element-wise
+    // SIMD `IntrinsicVecAdd` (a non-working v0.4 stub). `+` routes to the
+    // same `ArrayConcat` opcode every other array element kind uses. The
+    // `IntrinsicVecAdd` builtin stays defined for a future `Vec`-type /
+    // method form; only `+` stops routing to it. Sub/Mul/Div (Cases 4-6)
+    // are unchanged.
     {
         let program = compile(
             r#"
@@ -524,9 +529,15 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            has_builtin_call(&program, BuiltinFunction::IntrinsicVecAdd),
-            "R5.4E retarget: Vec<number>+Vec<number> must emit \
-             BuiltinCall(IntrinsicVecAdd). Ops emitted: {:?}",
+            ops.contains(&OpCode::ArrayConcat),
+            "numeric-array `+` is concat: Vec<number>+Vec<number> must emit \
+             ArrayConcat. Ops emitted: {:?}",
+            ops
+        );
+        assert!(
+            !has_builtin_call(&program, BuiltinFunction::IntrinsicVecAdd),
+            "numeric-array `+` must NOT route to the SIMD IntrinsicVecAdd stub. \
+             Ops emitted: {:?}",
             ops
         );
     }
@@ -582,10 +593,13 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
     }
 
-    // Case 7: `Vec<int> + Vec<int>` → IntrinsicVecAddI64.
-    // Overflow semantics (`simd_vec_add_i64`) are preserved by the
-    // intrinsic — see `intrinsic_vec_add_i64` at
-    // `shape-runtime::intrinsics::vector`.
+    // Case 7: `Vec<int> + Vec<int>` → ArrayConcat.
+    // USER RULING 2026-06-17: numeric-array `+` is CONCATENATION. The former
+    // `IntrinsicVecAddI64` retarget pointed at a non-working v0.4 runtime
+    // stub; `+` now concatenates uniformly via `ArrayConcat`. The
+    // `IntrinsicVecAddI64` builtin + its overflow-preserving kernel
+    // (`simd_vec_add_i64`) stay defined for a future `Vec`-type / method
+    // form; only `+` stops routing to them.
     {
         let program = compile(
             r#"
@@ -594,19 +608,87 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            has_builtin_call(&program, BuiltinFunction::IntrinsicVecAddI64),
-            "R5.4E retarget: Vec<int>+Vec<int> must emit \
-             BuiltinCall(IntrinsicVecAddI64). Ops emitted: {:?}",
+            ops.contains(&OpCode::ArrayConcat),
+            "numeric-array `+` is concat: Vec<int>+Vec<int> must emit \
+             ArrayConcat. Ops emitted: {:?}",
             ops
         );
+        assert!(
+            !has_builtin_call(&program, BuiltinFunction::IntrinsicVecAddI64),
+            "numeric-array `+` must NOT route to the SIMD IntrinsicVecAddI64 \
+             stub. Ops emitted: {:?}",
+            ops
+        );
+    }
+}
+
+/// USER RULING 2026-06-17 runtime pin: numeric-array `+` concatenates (it does
+/// NOT element-wise add). Covers `Array<int>` and `Array<number>`, the
+/// loop-accumulator idiom over a numeric array (the numeric analog of
+/// fundamentals/datetime.mdx §Date Range Iteration `weekdays = weekdays +
+/// [elem]`), and confirms strict element-family agreement still rejects
+/// `Array<int> + Array<number>`.
+#[test]
+fn test_numeric_array_plus_concatenates_user_ruling_2026_06_17() {
+    // Array<int> concat preserves element kind (no bit-reinterpret).
+    {
+        let result = eval(
+            r#"
+            let a = [1, 2]
+            let b = [3, 4, 5]
+            let c = a + b
+            c[0] + c[4]
+            "#,
+        );
+        let n = result
+            .as_test_int()
+            .expect("Array<int> concat result indexes to int");
+        assert_eq!(n, 6, "[1,2]+[3,4,5] => [1,2,3,4,5]; c[0]+c[4] = 1+5 = 6");
+    }
+
+    // Array<number> concat, mismatched lengths.
+    {
+        let result = eval(
+            r#"
+            let d = [1.0, 2.0] + [3.0]
+            d[0] + d[2]
+            "#,
+        );
+        let n = result
+            .as_test_number()
+            .expect("Array<number> concat result indexes to number");
+        assert!(
+            (n - 4.0).abs() < 1e-10,
+            "[1.0,2.0]+[3.0] => [1.0,2.0,3.0]; d[0]+d[2] = 1.0+3.0 = 4.0, got {}",
+            n
+        );
+    }
+
+    // Loop-accumulator idiom over a numeric array (datetime.mdx idiom shape).
+    {
+        let result = eval(
+            r#"
+            let mut nums = [0]
+            let mut i = 1
+            while i < 4 {
+                nums = nums + [i * 10]
+                i = i + 1
+            }
+            nums.length()
+            "#,
+        );
+        let n = result
+            .as_test_int()
+            .expect("numeric-array accumulation result has an int length");
+        assert_eq!(n, 4, "nums starts [0], appends 3 elems => length 4");
     }
 }
 
 /// R5.4E runtime: verify that the retargeted `Mat<number> + Mat<number>`
 /// path returns the expected element-wise sum. Uses the `let`-binding
 /// form with an explicit `Mat<number>` annotation so R5.4B's nested-array
-/// typed-inference rule applies (produces `HeapValue::Array` of
-/// `HeapValue::Array`, which `extract_matrix_f64` in the kernel expects).
+/// typed-array rule applies for the operands; the intrinsic projects that
+/// proven nested carrier to `MatrixData` and returns the direct Matrix carrier.
 #[test]
 fn test_r5_4e_mat_add_runtime_returns_correct_values() {
     // (a + b)[0][0] = 1 + 10 = 11, (a + b)[1][1] = 4 + 40 = 44, sum = 55.
@@ -619,7 +701,7 @@ fn test_r5_4e_mat_add_runtime_returns_correct_values() {
         "#,
     );
     let n = result
-        .as_number_coerce()
+        .as_test_number()
         .expect("R5.4E: Mat+Mat result should be numeric at c[0][0]+c[1][1]");
     assert!(
         (n - 55.0).abs() < 1e-10,
@@ -651,7 +733,5 @@ fn test_r5_4e_mat_add_runtime_returns_correct_values() {
 // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` above.
 // The Mat+Mat runtime path is exercised by
 // `test_r5_4e_mat_add_runtime_returns_correct_values` above, where
-// R5.4B's nested-array typed-inference rule produces operands in the
-// `HeapValue::Array` shape that `extract_matrix_f64` accepts.
-
-
+// R5.4B's nested-array typed-inference rule produces operands as nested
+// typed arrays and the intrinsic returns a direct Matrix carrier for indexing.

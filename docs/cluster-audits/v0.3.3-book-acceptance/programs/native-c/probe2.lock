@@ -1,0 +1,28 @@
+version = "1"
+packages = []
+
+[[artifacts]]
+namespace = "external.native.library"
+key = "native-c@0.0.0::libm"
+producer = "shape-runtime/native_resolution@v1"
+inputs_hash = "sha256:a2ad7115ef2d2f2c733ba725c62166bac88478ba7471a744940686ca28e88e51"
+created_at = "2026-06-16T13:49:28.675330371+00:00"
+payload_json = '{"Object":{"alias":{"String":"libm"},"arch":{"String":"x86_64"},"available":{"Bool":true},"cache_key":"Null","cached":{"Bool":false},"declared_version":"Null","env":"Null","fingerprint":{"String":"system-name:libm.so.6:version:unspecified"},"load_target":{"String":"libm.so.6"},"os":{"String":"linux"},"package_key":{"String":"native-c@0.0.0"},"package_name":{"String":"native-c"},"package_version":{"String":"0.0.0"},"path_exists":{"Bool":false},"path_like":{"Bool":false},"provider":{"String":"system"},"resolved":{"String":"libm.so.6"},"target":{"String":"linux-x86_64"}}}'
+
+[artifacts.determinism]
+mode = "external"
+
+[artifacts.determinism.fingerprints]
+"native:linux-x86_64:native-c@0.0.0:libm:system" = "system-name:libm.so.6:version:unspecified"
+
+[artifacts.inputs]
+alias = "libm"
+arch = "x86_64"
+"external::native:linux-x86_64:native-c@0.0.0:libm:system" = "system-name:libm.so.6:version:unspecified"
+os = "linux"
+package_key = "native-c@0.0.0"
+package_name = "native-c"
+package_version = "0.0.0"
+provider = "system"
+resolved = "libm.so.6"
+target = "linux-x86_64"

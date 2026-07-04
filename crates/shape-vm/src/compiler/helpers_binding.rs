@@ -149,6 +149,24 @@ impl BytecodeCompiler {
             .or_else(|| plan.slot_classes.get(&crate::mir::SlotId(slot)).copied())
     }
 
+    /// ADR-006 §2.7.30 (R3): is this bytecode-local slot the referent of a
+    /// reference that escapes via a flipped FLOOR sink (`return &x` /
+    /// module-binding `let r = &x`)? When true AND the storage class is
+    /// `SharedCow`, the let/const def-site emits `AllocSharedLocal` so the
+    /// `PromotedCell` owning carrier (R3) keeps the referent alive past
+    /// frame-pop. Uses the same +1 SlotId-offset convention as
+    /// `mir_storage_class_for_slot`.
+    pub(super) fn slot_is_reference_escape_promotion(&self, slot: u16) -> bool {
+        let Some(plan) = self.current_storage_plan() else {
+            return false;
+        };
+        plan.reference_escape_promotion_slots
+            .contains(&crate::mir::SlotId(slot.saturating_add(1)))
+            || plan
+                .reference_escape_promotion_slots
+                .contains(&crate::mir::SlotId(slot))
+    }
+
     /// MIR analysis is authoritative for both function bodies and top-level code.
     /// `analyze_non_function_items_with_mir` runs in the main pipeline before
     /// compilation, so MIR write authority applies universally.
@@ -169,7 +187,9 @@ impl BytecodeCompiler {
             return Some(name);
         }
         // Fall back to non-function MIR context (top-level code)
-        self.non_function_mir_context_stack.last().map(|s| s.as_str())
+        self.non_function_mir_context_stack
+            .last()
+            .map(|s| s.as_str())
     }
 
     /// Query the MIR borrow analysis for the ownership decision at a given span.
@@ -184,6 +204,45 @@ impl BytecodeCompiler {
         let span_map = self.mir_span_to_point.get(ctx)?;
         let point = span_map.get(span)?;
         Some(analysis.ownership_at(*point))
+    }
+
+    /// Ownership decision for an identifier READ whose own (token) span does
+    /// not equal the enclosing MIR statement span. `mir_span_to_point` is
+    /// keyed by STATEMENT spans (`stmt.span`), but a `var copy = data`
+    /// RHS identifier read carries the narrower `data`-token span — exact
+    /// `query_ownership_decision` therefore misses it. This resolves the
+    /// decision via the TIGHTEST enclosing statement span that contains the
+    /// read span (smallest `[start,end]` superset), so the read inherits its
+    /// binding statement's ownership decision (S1b 2026-06-21).
+    ///
+    /// Intentionally narrow: callers gate on the returned decision being
+    /// exactly `DeepClone` (the `var`-still-live auto-clone), so a coarse
+    /// containing-statement match cannot perturb the existing Move/Clone
+    /// emission, which keys on exact-span hits only.
+    pub(super) fn query_ownership_decision_enclosing(
+        &self,
+        span: &shape_ast::ast::Span,
+    ) -> Option<crate::mir::analysis::OwnershipDecision> {
+        if let Some(d) = self.query_ownership_decision(span) {
+            return Some(d);
+        }
+        let ctx = self.current_mir_context_name()?;
+        let analysis = self.mir_borrow_analyses.get(ctx)?;
+        let span_map = self.mir_span_to_point.get(ctx)?;
+        let mut best: Option<(&shape_ast::ast::Span, crate::mir::Point)> = None;
+        for (stmt_span, point) in span_map.iter() {
+            // Strict containment of the read span inside the statement span.
+            if stmt_span.start <= span.start && span.end <= stmt_span.end {
+                let tighter = match best {
+                    None => true,
+                    Some((cur, _)) => (stmt_span.end - stmt_span.start) < (cur.end - cur.start),
+                };
+                if tighter {
+                    best = Some((stmt_span, *point));
+                }
+            }
+        }
+        best.map(|(_, point)| analysis.ownership_at(point))
     }
 
     /// Emit a local-variable load with ownership awareness.
@@ -218,11 +277,7 @@ impl BytecodeCompiler {
     /// only.
     ///
     /// Flag off: emission is byte-identical to pre-V1.1C.
-    pub(super) fn emit_load_local_owned(
-        &mut self,
-        slot: u16,
-        span: &shape_ast::ast::Span,
-    ) {
+    pub(super) fn emit_load_local_owned(&mut self, slot: u16, span: &shape_ast::ast::Span) {
         use crate::bytecode::{Instruction, OpCode, Operand};
         use crate::mir::analysis::OwnershipDecision;
 
@@ -244,6 +299,26 @@ impl BytecodeCompiler {
             && self.slot_is_heap_backed_owned(slot)
             && !self.slot_is_boxed(slot)
         {
+            // S1b var-copy independence (2026-06-21): a `var copy = data`
+            // auto-clone of a still-live PROVEN-heap source must produce an
+            // INDEPENDENT deep copy, not the shallow `CloneLocal` refcount
+            // share — otherwise `copy.push(99)` mutates the source's
+            // TypedArray in place. When the MIR ownership decision for this
+            // read is `DeepClone`, emit the deep-cloning load. (The
+            // span-keyed query is skipped inside an interpolated-string
+            // fragment, where the span is parser-local and could collide —
+            // `LoadLocalDeepClone` would deep-copy a live binding read by the
+            // format call; the shallow `CloneLocal` is correct there.)
+            if self.in_interpolation_expr_depth == 0
+                && self.query_ownership_decision_enclosing(span)
+                    == Some(crate::mir::analysis::OwnershipDecision::DeepClone)
+            {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocalDeepClone,
+                    Some(Operand::Local(slot)),
+                ));
+                return;
+            }
             self.emit(Instruction::new(
                 OpCode::CloneLocal,
                 Some(Operand::Local(slot)),
@@ -251,11 +326,47 @@ impl BytecodeCompiler {
             return;
         }
 
-        let decision = self.query_ownership_decision(span);
+        // While compiling an interpolated-string inner expression, the
+        // `span` is parser-local (a fragment offset from
+        // `parse_expression_str`) and can collide with an unrelated real
+        // statement's span in the MIR borrow analysis — yielding a spurious
+        // `Move` that would `LoadLocalMove` (consume) a live binding such as
+        // a loop counter, causing non-termination. Skip the span-keyed
+        // ownership query here; the safe non-consuming load below is always
+        // correct for an f-string read (it is value-producing for the format
+        // call, never the binding's semantic last-use). See
+        // `in_interpolation_expr_depth`.
+        let decision = if self.in_interpolation_expr_depth > 0 {
+            None
+        } else {
+            self.query_ownership_decision(span)
+        };
+
+        // S1b var-copy independence (2026-06-21): when the exact-span query
+        // does not yield a `var`-still-live auto-clone but the TIGHTEST
+        // enclosing statement does (the common case — the RHS identifier
+        // read of `var copy = data` carries the narrower `data`-token span,
+        // not the `var copy = data` statement span), upgrade to the
+        // deep-cloning load so the copy is independent of the source. This
+        // path covers top-level script code, where the slot is not flagged
+        // `heap_backed_owned` and the early `CloneLocal` shortcut above does
+        // not fire. Narrowly scoped to `DeepClone` so the coarse
+        // containing-statement match cannot perturb Move/Clone emission.
+        let decision = match decision {
+            Some(OwnershipDecision::DeepClone) => decision,
+            _ if self.in_interpolation_expr_depth == 0
+                && self.query_ownership_decision_enclosing(span)
+                    == Some(OwnershipDecision::DeepClone) =>
+            {
+                Some(OwnershipDecision::DeepClone)
+            }
+            other => other,
+        };
 
         let opcode = match decision {
             Some(OwnershipDecision::Move) => Some(OpCode::LoadLocalMove),
             Some(OwnershipDecision::Clone) => Some(OpCode::LoadLocalClone),
+            Some(OwnershipDecision::DeepClone) => Some(OpCode::LoadLocalDeepClone),
             _ => None,
         };
 
@@ -350,63 +461,45 @@ impl BytecodeCompiler {
     /// same bits-through behavior), so this flip is behaviorally
     /// equivalent at the inner-function boundary — the encoded `<Kind>`
     /// is a static annotation for the JIT and downstream consumers.
-    /// Unproven types fall back to polymorphic `ReturnValue`.
+    /// Missing proof signals fall back to polymorphic `ReturnValue`; a
+    /// contradictory proof signal is a hard compile error.
     ///
     /// Strictly-typed contract: typed `ReturnValue<Kind>` handlers route
-    /// raw native bits through unchanged. The host-boundary return kind
-    /// comes from the compile-time `top_level_frame.return_kind` set by
-    /// `prove_native_kind` — no runtime stamping.
+    /// raw native bits through unchanged. The typed opcode is emitted only
+    /// when the return expression's proven `ConcreteType` projects exactly
+    /// to the producer-declared `NativeKind` via `prove_native_kind`; otherwise
+    /// this helper falls back to polymorphic `ReturnValue`.
     ///
     /// Mirror the same producer-side gate `infer_top_level_return_kind`
-    /// applies (`helpers.rs:2429`): only emit `ReturnValueI64`/`F64`/`Bool`
-    /// when `last_emitted_native_kind()` confirms the just-emitted opcode
-    /// is on the raw-native-producer list. The width-aware check (Int8/
-    /// .../UInt64 hint accepted against `Int64` native kind) preserves the
-    /// sub-i64 typed-return path; Float64 / Bool require an exact match.
-    /// Otherwise fall back to polymorphic `ReturnValue`, which carries no
-    /// runtime kind stamp and lets the synthesizer pass tagged bits
-    /// through.
-    pub(super) fn emit_return_value_with_ownership(&mut self) {
+    /// applies: only emit a typed `ReturnValue<Kind>` when the returned
+    /// expression has a structural `ConcreteType` proof and the just-emitted
+    /// producer reports the exact same canonical `NativeKind`. There is no
+    /// width-family allowance here: `i32` proven against an `Int64` producer is
+    /// not proof. Otherwise fall back to polymorphic `ReturnValue`.
+    pub(super) fn emit_return_value_with_ownership(
+        &mut self,
+        // U4-4: the returned expression — its resolved Type drives the numeric
+        // return-value storage hint (`numeric_type_of`), replacing the deleted
+        // `last_expr_numeric_type` register. `None` where the return value is
+        // not a single expr (falls back to `last_expr_type_info`).
+        return_expr: Option<&shape_ast::ast::Expr>,
+    ) -> shape_ast::error::Result<()> {
         use crate::bytecode::{Instruction, OpCode};
-        use crate::type_tracking::StorageHint;
         if matches!(
             self.current_function_return_ownership_mode(),
             Some(crate::mir::ReturnOwnershipMode::NewlyOwned)
         ) {
             self.emit(Instruction::simple(OpCode::ReturnOwned));
         }
-        // Per ADR-006 §2.7.5.1, the proven-hint state is carried locally
-        // as `Option<StorageHint>`. `None` ≡ "no proven kind" — the helper
-        // routes to the polymorphic legacy `ReturnValue`.
-        let hint = self.last_expr_numeric_type_to_storage_hint();
-        let gated_hint: Option<StorageHint> = hint.and_then(|h| {
-            self.last_emitted_native_kind().and_then(|native_kind| {
-                let is_int_family = matches!(
-                    h,
-                    StorageHint::Int8
-                        | StorageHint::UInt8
-                        | StorageHint::Int16
-                        | StorageHint::UInt16
-                        | StorageHint::Int32
-                        | StorageHint::UInt32
-                        | StorageHint::Int64
-                        | StorageHint::UInt64
-                );
-                if is_int_family && native_kind == StorageHint::Int64 {
-                    Some(h)
-                } else if native_kind == h {
-                    Some(h)
-                } else {
-                    None
-                }
-            })
-        });
+        let gated_hint = self
+            .exact_scalar_return_kind_for_expr("emit_return_value_with_ownership", return_expr)?;
         match gated_hint {
             Some(h) => self.emit_return_value_for_hint(h),
             None => {
                 self.emit(Instruction::simple(OpCode::ReturnValue));
             }
         }
+        Ok(())
     }
 
     /// Wave E+4: derive a `StorageHint` from `last_expr_numeric_type` /
@@ -419,9 +512,10 @@ impl BytecodeCompiler {
     /// Per ADR-006 §2.7.5.1, "kind not yet known" is carried locally as
     /// `Option<StorageHint>` — there is no `StorageHint::Unknown` sentinel.
     pub(in crate::compiler) fn let_decl_storage_hint(
-        &self,
+        &mut self,
+        value_expr: Option<&shape_ast::ast::Expr>,
     ) -> Option<crate::type_tracking::StorageHint> {
-        if let Some(hint) = self.last_expr_numeric_type_to_storage_hint() {
+        if let Some(hint) = self.last_expr_numeric_type_to_storage_hint(value_expr) {
             return Some(hint);
         }
         // Post-§2.7.5.1: `info.storage_hint` is itself `Option<StorageHint>`,
@@ -432,14 +526,22 @@ impl BytecodeCompiler {
             .and_then(|info| info.storage_hint)
     }
 
-    /// Priority order used by `infer_top_level_return_kind`. Returns
-    /// `None` when no signal is available — the caller then routes to
-    /// the polymorphic legacy `ReturnValue`. Per ADR-006 §2.7.5.1.
+    /// Derive the storage hint for the just-compiled `value_expr`.
+    ///
+    /// U4-4: the numeric kind is derived from `value_expr`'s one resolved Type
+    /// (`numeric_type_of` → `infer_expr_type`), NOT the deleted ambient
+    /// `last_expr_numeric_type` register. `last_expr_type_info` remains the
+    /// fallback for Bool / String / nullable / sub-i64-width kinds the
+    /// type-tracker resolved structurally. `value_expr == None` (no single
+    /// value expr in hand) skips the numeric derivation. Returns `None` when
+    /// no signal is available — the caller then routes to the polymorphic
+    /// legacy `ReturnValue`. Per ADR-006 §2.7.5.1.
     pub(in crate::compiler) fn last_expr_numeric_type_to_storage_hint(
-        &self,
+        &mut self,
+        value_expr: Option<&shape_ast::ast::Expr>,
     ) -> Option<crate::type_tracking::StorageHint> {
         use crate::type_tracking::StorageHint;
-        if let Some(nt) = self.last_expr_numeric_type {
+        if let Some(nt) = value_expr.and_then(|e| self.numeric_type_of(e)) {
             match nt {
                 crate::type_tracking::NumericType::Number => return Some(StorageHint::Float64),
                 crate::type_tracking::NumericType::Int => return Some(StorageHint::Int64),
@@ -464,6 +566,110 @@ impl BytecodeCompiler {
         self.last_expr_type_info
             .as_ref()
             .and_then(|info| info.storage_hint)
+    }
+
+    fn proof_gap_to_shape_error(
+        gap: crate::type_tracking::ProofGap,
+    ) -> shape_ast::error::ShapeError {
+        shape_ast::error::ShapeError::SemanticError {
+            message: gap.to_string(),
+            location: None,
+        }
+    }
+
+    pub(in crate::compiler) fn prove_exact_scalar_return_kind(
+        site: &'static str,
+        proven: &shape_value::v2::ConcreteType,
+        claimed_kind: crate::type_tracking::StorageHint,
+    ) -> shape_ast::error::Result<Option<crate::type_tracking::StorageHint>> {
+        let kind = crate::type_tracking::prove_native_kind(site, proven, claimed_kind)
+            .map_err(Self::proof_gap_to_shape_error)?;
+        if crate::compiler::helpers::typed_return_value_opcode(kind).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(kind))
+    }
+
+    pub(in crate::compiler) fn exact_scalar_return_kind_for_expr(
+        &self,
+        site: &'static str,
+        expr: Option<&shape_ast::ast::Expr>,
+    ) -> shape_ast::error::Result<Option<crate::type_tracking::StorageHint>> {
+        let Some(expr) = expr else {
+            return Ok(None);
+        };
+        let Some(proven) = self.return_identifier_slot_concrete_fact(expr).or_else(|| {
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)
+        }) else {
+            return Ok(None);
+        };
+        let Some(claimed) = self.last_emitted_native_kind() else {
+            return Ok(None);
+        };
+        Self::prove_exact_scalar_return_kind(site, &proven, claimed)
+    }
+
+    fn return_identifier_slot_concrete_fact(
+        &self,
+        expr: &shape_ast::ast::Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let shape_ast::ast::Expr::Identifier(name, _) = expr else {
+            return None;
+        };
+        if let Some(local_idx) = self.resolve_local(name) {
+            return self
+                .current_function_local_concrete_facts
+                .get(&local_idx)
+                .filter(|fact| {
+                    !matches!(
+                        fact.source,
+                        crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator
+                    )
+                })
+                .map(|fact| fact.concrete_type.clone());
+        }
+
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        let binding_idx = self.module_bindings.get(&scoped_name)?;
+        self.module_binding_concrete_facts
+            .get(binding_idx)
+            .filter(|fact| {
+                !matches!(
+                    fact.source,
+                    crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator
+                )
+            })
+            .map(|fact| fact.concrete_type.clone())
+    }
+
+    pub(in crate::compiler) fn top_level_metadata_return_kind_from_proof(
+        site: &'static str,
+        proven: &shape_value::v2::ConcreteType,
+        claimed_kind: crate::type_tracking::StorageHint,
+    ) -> Option<crate::type_tracking::StorageHint> {
+        // Top-level return metadata is a host-boundary annotation, not a
+        // typed-opcode emission site. A proof gap here means the walkback
+        // producer evidence is stale or non-authoritative for metadata, so the
+        // caller must leave `top_level_frame.return_kind` unset. The strict
+        // `prove_exact_scalar_return_kind` helper still propagates this same
+        // gap as a hard error for real typed `ReturnValue<Kind>` emission.
+        match Self::prove_exact_scalar_return_kind(site, proven, claimed_kind) {
+            Ok(kind) => kind,
+            Err(_) => None,
+        }
+    }
+
+    pub(in crate::compiler) fn exact_top_level_metadata_return_kind_for_expr(
+        &self,
+        site: &'static str,
+        expr: Option<&shape_ast::ast::Expr>,
+    ) -> Option<crate::type_tracking::StorageHint> {
+        match self.exact_scalar_return_kind_for_expr(site, expr) {
+            Ok(kind) => kind,
+            Err(_) => None,
+        }
     }
 
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
@@ -528,12 +734,13 @@ impl BytecodeCompiler {
                     .resolve_scoped_module_binding_name(&name)
                     .unwrap_or(name);
                 if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                    if let Some(mut sem) =
-                        self.type_tracker.get_binding_semantics(binding_idx).copied()
+                    if let Some(mut sem) = self
+                        .type_tracker
+                        .get_binding_semantics(binding_idx)
+                        .copied()
                     {
                         sem.return_ownership_hint = Some(hint);
-                        self.type_tracker
-                            .set_binding_semantics(binding_idx, sem);
+                        self.type_tracker.set_binding_semantics(binding_idx, sem);
                     }
                 }
             }
@@ -542,7 +749,7 @@ impl BytecodeCompiler {
 
     fn for_each_value_pattern_binding_name(pattern: &Pattern, visitor: &mut impl FnMut(&str)) {
         match pattern {
-            Pattern::Identifier(name) | Pattern::Typed { name, .. } => visitor(name),
+            Pattern::Identifier { name, .. } | Pattern::Typed { name, .. } => visitor(name),
             Pattern::Array(patterns) => {
                 for pattern in patterns {
                     Self::for_each_value_pattern_binding_name(pattern, visitor);
@@ -943,5 +1150,233 @@ impl BytecodeCompiler {
         ownership_class
             .map(Self::default_storage_class_for_ownership_class)
             .unwrap_or(BindingStorageClass::Deferred)
+    }
+}
+
+#[cfg(test)]
+mod u2_exact_native_kind_proof_tests {
+    use super::BytecodeCompiler;
+    use crate::bytecode::{Instruction, OpCode, Operand};
+    use crate::compiler::{BindingConcreteFact, BindingConcreteFactSource};
+    use crate::type_tracking::StorageHint;
+    use shape_ast::ast::{Expr, Span, TypeAnnotation, TypePath};
+    use shape_runtime::type_system::Type;
+    use shape_value::HeapKind;
+    use shape_value::v2::ConcreteType;
+    use std::collections::HashMap;
+
+    #[test]
+    fn exact_scalar_native_kind_proof_passes() {
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_exact_i64",
+                &ConcreteType::I64,
+                StorageHint::Int64,
+            )
+            .unwrap(),
+            Some(StorageHint::Int64)
+        );
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_exact_bool",
+                &ConcreteType::Bool,
+                StorageHint::Bool,
+            )
+            .unwrap(),
+            Some(StorageHint::Bool)
+        );
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_exact_f64",
+                &ConcreteType::F64,
+                StorageHint::Float64,
+            )
+            .unwrap(),
+            Some(StorageHint::Float64)
+        );
+    }
+
+    #[test]
+    fn width_narrowing_is_a_hard_native_kind_proof_error() {
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_no_width_narrow",
+            &ConcreteType::I8,
+            StorageHint::Int64,
+        )
+        .expect_err("width narrowing must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_no_unsigned_width_narrow",
+            &ConcreteType::U16,
+            StorageHint::Int64,
+        )
+        .expect_err("unsigned width narrowing must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+    }
+
+    #[test]
+    fn top_level_metadata_drops_non_authoritative_proof_gaps() {
+        assert_eq!(
+            BytecodeCompiler::top_level_metadata_return_kind_from_proof(
+                "test_top_level_exact_i64",
+                &ConcreteType::I64,
+                StorageHint::Int64,
+            ),
+            Some(StorageHint::Int64)
+        );
+
+        assert_eq!(
+            BytecodeCompiler::top_level_metadata_return_kind_from_proof(
+                "test_top_level_width_walkback_gap",
+                &ConcreteType::I32,
+                StorageHint::Int64,
+            ),
+            None
+        );
+
+        assert_eq!(
+            BytecodeCompiler::top_level_metadata_return_kind_from_proof(
+                "test_top_level_stale_bool_walkback_gap",
+                &ConcreteType::I64,
+                StorageHint::Bool,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn option_result_wrong_carriers_are_hard_native_kind_proof_errors() {
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_option_blocked",
+            &ConcreteType::Option(Box::new(ConcreteType::I64)),
+            StorageHint::Ptr(HeapKind::Option),
+        )
+        .expect_err("old Option carrier must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_result_blocked",
+            &ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String)),
+            StorageHint::Ptr(HeapKind::Result),
+        )
+        .expect_err("old Result carrier must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_option_canonical_ptr_not_scalar",
+                &ConcreteType::Option(Box::new(ConcreteType::I64)),
+                StorageHint::Ptr(HeapKind::TypedObject),
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn returned_try_unwrapped_identifier_uses_slot_fact_before_stale_span_result() {
+        let ident_span = Span::new(10, 11);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("v".to_string(), 0);
+        compiler.current_function_local_concrete_facts.insert(
+            0,
+            BindingConcreteFact {
+                concrete_type: ConcreteType::I64,
+                source: BindingConcreteFactSource::StructuralInitializer,
+            },
+        );
+        compiler.resolved_expr_types.insert(
+            ident_span,
+            Type::Concrete(TypeAnnotation::Generic {
+                name: TypePath::simple("Result"),
+                args: vec![
+                    TypeAnnotation::Basic("int".to_string()),
+                    TypeAnnotation::Void,
+                ],
+            }),
+        );
+        compiler.program.instructions.push(Instruction::new(
+            OpCode::LoadLocalI64,
+            Some(Operand::Local(0)),
+        ));
+
+        let expr = Expr::Identifier("v".to_string(), ident_span);
+        assert_eq!(
+            compiler
+                .exact_scalar_return_kind_for_expr("test_try_unwrapped_return", Some(&expr))
+                .unwrap(),
+            Some(StorageHint::Int64)
+        );
+    }
+
+    #[test]
+    fn returned_narrow_identifier_uses_exact_typed_load_kind() {
+        let cases = [
+            (
+                OpCode::LoadLocalI8,
+                ConcreteType::I8,
+                StorageHint::Int8,
+                "test_return_i8",
+            ),
+            (
+                OpCode::LoadLocalI16,
+                ConcreteType::I16,
+                StorageHint::Int16,
+                "test_return_i16",
+            ),
+            (
+                OpCode::LoadLocalI32,
+                ConcreteType::I32,
+                StorageHint::Int32,
+                "test_return_i32",
+            ),
+            (
+                OpCode::LoadLocalU8,
+                ConcreteType::U8,
+                StorageHint::UInt8,
+                "test_return_u8",
+            ),
+            (
+                OpCode::LoadLocalU16,
+                ConcreteType::U16,
+                StorageHint::UInt16,
+                "test_return_u16",
+            ),
+            (
+                OpCode::LoadLocalU32,
+                ConcreteType::U32,
+                StorageHint::UInt32,
+                "test_return_u32",
+            ),
+        ];
+
+        for (opcode, concrete_type, expected_hint, site) in cases {
+            let ident_span = Span::new(20, 21);
+            let mut compiler = BytecodeCompiler::new();
+            compiler.locals = vec![HashMap::new()];
+            compiler.locals[0].insert("v".to_string(), 0);
+            compiler.current_function_local_concrete_facts.insert(
+                0,
+                BindingConcreteFact {
+                    concrete_type,
+                    source: BindingConcreteFactSource::DeclaredAnnotation,
+                },
+            );
+            compiler
+                .program
+                .instructions
+                .push(Instruction::new(opcode, Some(Operand::Local(0))));
+
+            let expr = Expr::Identifier("v".to_string(), ident_span);
+            assert_eq!(
+                compiler
+                    .exact_scalar_return_kind_for_expr(site, Some(&expr))
+                    .unwrap(),
+                Some(expected_hint),
+                "{site}"
+            );
+        }
     }
 }

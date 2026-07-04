@@ -1,0 +1,322 @@
+---
+name = "large-native-c"
+
+[native-dependencies]
+stub = { provider = "path", path = "./libstub.so" }
+---
+// ============================================================================
+// large.shape — Native-C interop "fixed-point statistics + vector pipeline"
+//
+// A real-world, non-interactive, machine-proofable application that drives a
+// fixed deterministic C stub library (libstub.so, built from stub.c) entirely
+// through the `extern C fn` interface taught in the book chapter
+// `advanced/native-c-interop.mdx`.
+//
+// What it exercises (all from the book's normative tables/sections):
+//   * Core Syntax: `extern C fn ... from "<alias>" as "<symbol>";`
+//   * Marshalling Matrix: i64/int, i32, f64/number, u64, ptr.
+//   * Vec<T> -> cslice<T> copy-in slice marshalling (sum / max / dot product).
+//   * cmut_slice<T> copy-in/copy-out mutable-slice writeback (vector scaling).
+//   * Out Parameters: the `out` keyword form — return is
+//     [original_return, out_value].
+//   * Numeric Mixing Rule: integer-domain stays integer; explicit `as` casts
+//     where the matrix requires width changes.
+//
+// MACHINE-PROOFABLE: every native result is asserted against an expected value
+// derived from the C stub's arithmetic *before the first run* (see the
+// "EXPECTED" comments). On all-pass it prints ALL_CHECKS_PASSED; any mismatch
+// prints CHECK_FAILED: <which> expected=<e> got=<g>.
+//
+// The deterministic LCG section uses a fixed seed (12345) and the Numerical
+// Recipes constants, so its output is fully reproducible.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Native declarations (book "Core Syntax" + "Marshalling Matrix")
+// ----------------------------------------------------------------------------
+
+extern C fn stub_add_i64(a: i64, b: i64) -> i64 from "stub" as "stub_add_i64";
+extern C fn stub_sub_i64(a: i64, b: i64) -> i64 from "stub" as "stub_sub_i64";
+extern C fn stub_mul_i64(a: i64, b: i64) -> i64 from "stub" as "stub_mul_i64";
+extern C fn stub_add_f64(a: number, b: number) -> number from "stub" as "stub_add_f64";
+extern C fn stub_mul_f64(a: number, b: number) -> number from "stub" as "stub_mul_f64";
+extern C fn stub_mul_i32(a: i32, b: i32) -> i32 from "stub" as "stub_mul_i32";
+
+// out-parameter forms (book "Out Parameters", `out` keyword)
+extern C fn stub_divmod(a: i64, b: i64, out out_rem: ptr) -> i32
+    from "stub" as "stub_divmod";
+extern C fn stub_product(a: i64, b: i64, out out_prod: ptr) -> i32
+    from "stub" as "stub_product";
+
+// slice reductions (Vec<T> -> cslice<T>, copy-in)
+extern C fn stub_sum_i64(data: Vec<i64>) -> i64 from "stub" as "stub_sum_i64";
+extern C fn stub_max_i64(data: Vec<i64>) -> i64 from "stub" as "stub_max_i64";
+extern C fn stub_dot_f64(a: Vec<number>, b: Vec<number>) -> number
+    from "stub" as "stub_dot_f64";
+
+// mutable-slice writeback (CMutSlice<T>, copy-in/copy-out)
+extern C fn stub_scale_i64(data: CMutSlice<i64>, factor: i64) -> void
+    from "stub" as "stub_scale_i64";
+
+// deterministic LCG step (u64 in / u64 out)
+extern C fn stub_lcg_next(state: u64) -> u64 from "stub" as "stub_lcg_next";
+
+// ----------------------------------------------------------------------------
+// Assertion harness
+// ----------------------------------------------------------------------------
+
+let mut failures: i64 = 0
+
+fn check_i64(label: string, got: i64, expected: i64) {
+    if got != expected {
+        print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+        failures = failures + 1
+    }
+}
+
+fn check_f64(label: string, got: number, expected: number) {
+    // exact equality is fine here: all expected values are representable doubles
+    if got != expected {
+        print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+        failures = failures + 1
+    }
+}
+
+fn check_bool(label: string, cond: bool) {
+    if !cond {
+        print(f"CHECK_FAILED: {label} expected=true got=false")
+        failures = failures + 1
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Section 1 — scalar arithmetic round-trips
+// ----------------------------------------------------------------------------
+
+fn section_scalar() {
+    // EXPECTED stub_add_i64(20, 22) = 42
+    check_i64("add_i64", stub_add_i64(20, 22), 42)
+    // EXPECTED stub_sub_i64(100, 58) = 42
+    check_i64("sub_i64", stub_sub_i64(100, 58), 42)
+    // EXPECTED stub_mul_i64(6, 7) = 42
+    check_i64("mul_i64", stub_mul_i64(6, 7), 42)
+    // EXPECTED stub_mul_i64(-9, 9) = -81
+    check_i64("mul_i64_neg", stub_mul_i64(-9, 9), -81)
+
+    // EXPECTED stub_add_f64(1.5, 2.25) = 3.75
+    check_f64("add_f64", stub_add_f64(1.5, 2.25), 3.75)
+    // EXPECTED stub_mul_f64(2.5, 4.0) = 10.0
+    check_f64("mul_f64", stub_mul_f64(2.5, 4.0), 10.0)
+
+    // EXPECTED stub_mul_i32(6, 7) = 42 (i32, widened to i64 for assert via `as`)
+    check_i64("mul_i32", stub_mul_i32(6, 7) as i64, 42)
+}
+
+// ----------------------------------------------------------------------------
+// Section 2 — out-parameter forms (book `out` keyword)
+// ----------------------------------------------------------------------------
+
+fn section_out_params() {
+    // EXPECTED 17 / 5 = 3 rem 2.  Return is [original_return, out_value].
+    let [q1, r1] = stub_divmod(17, 5)
+    check_i64("divmod_17_5_q", q1 as i64, 3)
+    check_i64("divmod_17_5_r", r1 as i64, 2)
+
+    // EXPECTED 1000 / 7 = 142 rem 6
+    let [q2, r2] = stub_divmod(1000, 7)
+    check_i64("divmod_1000_7_q", q2 as i64, 142)
+    check_i64("divmod_1000_7_r", r2 as i64, 6)
+
+    // EXPECTED stub_product(6, 7) -> status 0, out 42
+    let [st, prod] = stub_product(6, 7)
+    check_i64("product_status", st as i64, 0)
+    check_i64("product_value", prod as i64, 42)
+
+    // EXPECTED stub_product(-3, 14) -> status 0, out -42
+    let [st2, prod2] = stub_product(-3, 14)
+    check_i64("product_neg_status", st2 as i64, 0)
+    check_i64("product_neg_value", prod2 as i64, -42)
+}
+
+// ----------------------------------------------------------------------------
+// Section 3 — slice reductions (Vec<T> -> cslice<T>, copy-in)
+// ----------------------------------------------------------------------------
+
+fn section_slices() {
+    let xs: Vec<i64> = [10, 20, 30, 40, 50]
+    // EXPECTED sum = 150
+    check_i64("sum_i64", stub_sum_i64(xs), 150)
+    // EXPECTED max = 50
+    check_i64("max_i64", stub_max_i64(xs), 50)
+
+    let single: Vec<i64> = [7]
+    // EXPECTED sum of one element = 7
+    check_i64("sum_single", stub_sum_i64(single), 7)
+    // EXPECTED max of one element = 7
+    check_i64("max_single", stub_max_i64(single), 7)
+
+    let negs: Vec<i64> = [-5, -10, -3, -20]
+    // EXPECTED sum = -38
+    check_i64("sum_neg", stub_sum_i64(negs), -38)
+    // EXPECTED max = -3 (largest of the negatives)
+    check_i64("max_neg", stub_max_i64(negs), -3)
+
+    // dot product of two number vectors
+    let va: Vec<number> = [1.0, 2.0, 3.0, 4.0]
+    let vb: Vec<number> = [5.0, 6.0, 7.0, 8.0]
+    // EXPECTED 1*5 + 2*6 + 3*7 + 4*8 = 5+12+21+32 = 70.0
+    check_f64("dot_f64", stub_dot_f64(va, vb), 70.0)
+
+    let unit: Vec<number> = [1.0, 0.0, 0.0]
+    let vec3: Vec<number> = [9.0, 8.0, 7.0]
+    // EXPECTED projection onto x-axis = 9.0
+    check_f64("dot_unit_x", stub_dot_f64(unit, vec3), 9.0)
+}
+
+// ----------------------------------------------------------------------------
+// Section 4 — mutable-slice writeback (CMutSlice<T>, copy-in/copy-out)
+// ----------------------------------------------------------------------------
+
+fn section_mutable_slice() {
+    let mut data: Vec<i64> = [10, 20, 30, 40, 50]
+    // scale each element by 3 in-place via cmut_slice writeback
+    stub_scale_i64(data, 3)
+    // EXPECTED in-place result = [30, 60, 90, 120, 150]
+    check_i64("scale_idx0", data[0], 30)
+    check_i64("scale_idx1", data[1], 60)
+    check_i64("scale_idx2", data[2], 90)
+    check_i64("scale_idx3", data[3], 120)
+    check_i64("scale_idx4", data[4], 150)
+    // EXPECTED post-scale sum (round-trip back through stub_sum_i64) = 450
+    check_i64("scale_sum_roundtrip", stub_sum_i64(data), 450)
+
+    let mut small: Vec<i64> = [1, 2, 3]
+    stub_scale_i64(small, -2)
+    // EXPECTED [-2, -4, -6]
+    check_i64("scale_neg_idx0", small[0], -2)
+    check_i64("scale_neg_idx1", small[1], -4)
+    check_i64("scale_neg_idx2", small[2], -6)
+}
+
+// ----------------------------------------------------------------------------
+// Section 5 — deterministic LCG sequence (u64 marshalling, seeded)
+//
+// The C stub computes one Numerical-Recipes LCG step:
+//   state' = state*6364136223846793005 + 1442695040888963407  (mod 2^64)
+// Seed = 12345. We take each state mod 1000 (deterministic small ints) and
+// build a fixed sequence; expected values pre-computed from the recurrence.
+//
+// EXPECTED mod-1000 sequence for seed 12345 (8 steps):
+//   [588, 923, 62, 277, 304, 775, 258, 281]
+// ----------------------------------------------------------------------------
+
+fn section_lcg() {
+    let expected: Vec<i64> = [588, 923, 62, 277, 304, 775, 258, 281]
+    let mut state: u64 = 12345
+    let mut produced: Vec<i64> = []
+    let mut i: i64 = 0
+    while i < 8 {
+        state = stub_lcg_next(state)
+        // u64 -> i64 mod-1000 reduction; values < 1000 fit i64 losslessly.
+        let m: i64 = (state as i64) % 1000
+        // C truncates toward zero; the state mod 2^64 reinterpreted as i64 may
+        // be negative, so normalize into [0, 1000) to match the unsigned mod.
+        let norm: i64 = if m < 0 { m + 1000 } else { m }
+        produced = produced.push(norm)
+        i = i + 1
+    }
+    let mut k: i64 = 0
+    while k < 8 {
+        check_i64(f"lcg_{k}", produced[k], expected[k])
+        k = k + 1
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Section 6 — composed pipeline (chains multiple native calls)
+// ----------------------------------------------------------------------------
+
+fn section_pipeline() {
+    // Build [1..=6], multiply each by 7 via the C scaler, sum, and assert.
+    let mut v: Vec<i64> = [1, 2, 3, 4, 5, 6]
+    stub_scale_i64(v, 7)
+    // EXPECTED [7,14,21,28,35,42], sum = 147
+    let total = stub_sum_i64(v)
+    check_i64("pipeline_sum", total, 147)
+    // EXPECTED max after scaling = 42
+    check_i64("pipeline_max", stub_max_i64(v), 42)
+
+    // divmod the total by the max: 147 / 42 = 3 rem 21
+    let [pq, pr] = stub_divmod(total, stub_max_i64(v))
+    check_i64("pipeline_divmod_q", pq as i64, 3)
+    check_i64("pipeline_divmod_r", pr as i64, 21)
+
+    // float pipeline: dot([2,2,2],[3,3,3]) = 18, times 0.5 = 9.0
+    let a: Vec<number> = [2.0, 2.0, 2.0]
+    let b: Vec<number> = [3.0, 3.0, 3.0]
+    let d = stub_dot_f64(a, b)
+    check_f64("pipeline_dot", d, 18.0)
+    check_f64("pipeline_dot_scaled", stub_mul_f64(d, 0.5), 9.0)
+}
+
+// ----------------------------------------------------------------------------
+// Section 7 — invariants / identity checks (cross-validate native vs native)
+// ----------------------------------------------------------------------------
+
+fn section_invariants() {
+    // a + b == b + a  (commutativity through the native adder)
+    check_bool("comm_add", stub_add_i64(13, 29) == stub_add_i64(29, 13))
+    // a * b == b * a
+    check_bool("comm_mul", stub_mul_i64(8, 9) == stub_mul_i64(9, 8))
+    // (a - b) + b == a
+    let a: i64 = 1234
+    let b: i64 = 567
+    check_i64("sub_add_identity", stub_add_i64(stub_sub_i64(a, b), b), a)
+
+    // distributive over the slice sum: sum(scale(v,k)) == k * sum(v)
+    let mut v: Vec<i64> = [3, 6, 9, 12]
+    let base_sum = stub_sum_i64(v)   // EXPECTED 30
+    check_i64("inv_base_sum", base_sum, 30)
+    stub_scale_i64(v, 4)
+    check_i64("inv_distributive", stub_sum_i64(v), stub_mul_i64(4, base_sum))
+}
+
+// ----------------------------------------------------------------------------
+// Section 8 — boundary / range cases within i64 domain
+// ----------------------------------------------------------------------------
+
+fn section_boundaries() {
+    // zero handling
+    check_i64("add_zero", stub_add_i64(0, 0), 0)
+    check_i64("mul_zero", stub_mul_i64(123, 0), 0)
+    // large but in-range i64 products
+    check_i64("mul_large", stub_mul_i64(1000000, 1000000), 1000000000000)
+    // sum of a longer vector
+    let big: Vec<i64> = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+    // EXPECTED 100+200+...+1000 = 5500
+    check_i64("sum_long", stub_sum_i64(big), 5500)
+    check_i64("max_long", stub_max_i64(big), 1000)
+}
+
+// ----------------------------------------------------------------------------
+// Driver
+// ----------------------------------------------------------------------------
+
+fn main() {
+    section_scalar()
+    section_out_params()
+    section_slices()
+    section_mutable_slice()
+    section_lcg()
+    section_pipeline()
+    section_invariants()
+    section_boundaries()
+
+    if failures == 0 {
+        print("ALL_CHECKS_PASSED")
+    } else {
+        print(f"FAILURES: {failures}")
+    }
+}
+
+main()

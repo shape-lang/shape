@@ -173,7 +173,6 @@ impl IntrinsicsRegistry {
             recurrence::intrinsic_linear_recurrence,
         );
     }
-
 }
 
 impl Default for IntrinsicsRegistry {

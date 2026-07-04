@@ -1,0 +1,63 @@
+// ledger/budget.shape  -> importable as "ledger::budget"
+//
+// Budget-vs-actual variance reporting. Imports the engine (sum_in) and the
+// model, demonstrating another cross-module dependency edge in the library
+// graph. All amounts are integer cents; "budget" amounts are stored as the
+// (negative) spending allowance per category.
+
+from ledger::model use { Txn, Category }
+from ledger::engine use { sum_in }
+from ledger::money use { format }
+
+pub type BudgetLine {
+    cat: Category,
+    planned_cents: int,
+}
+
+// Variance for one category: actual - planned. A negative variance means we
+// spent MORE than planned (over budget); positive means under budget.
+// (Named `cat_variance`, not `variance`, to avoid the prelude `variance`
+// global — exactly the stdlib-collision hazard the chapter's caution box
+// warns about for module *names*; the same applies to bare member names.)
+pub fn cat_variance(txns: Array<Txn>, b: BudgetLine) -> int {
+    sum_in(txns, b.cat) - b.planned_cents
+}
+
+// True if the category is within (or under) its planned allowance.
+pub fn within(txns: Array<Txn>, b: BudgetLine) -> bool {
+    // For spending categories planned is negative; actual<=planned (more
+    // negative) means over budget. "within" = actual >= planned.
+    sum_in(txns, b.cat) >= b.planned_cents
+}
+
+// Total planned spending across an array of budget lines.
+pub fn total_planned(lines: Array<BudgetLine>) -> int {
+    let mut s = 0
+    for l in lines {
+        s = s + l.planned_cents
+    }
+    s
+}
+
+// Number of categories that came in OVER budget.
+pub fn over_count(txns: Array<Txn>, lines: Array<BudgetLine>) -> int {
+    let mut n = 0
+    for l in lines {
+        if !within(txns, l) {
+            n = n + 1
+        }
+    }
+    n
+}
+
+// A formatted variance line, e.g. "Food: var -$22.99".
+pub fn variance_line(txns: Array<Txn>, b: BudgetLine) -> string {
+    let label = match b.cat {
+        Category::Food => "Food",
+        Category::Rent => "Rent",
+        Category::Transport => "Transport",
+        Category::Fun => "Fun",
+        Category::Income => "Income",
+    }
+    f"{label}: var {format(cat_variance(txns, b))}"
+}

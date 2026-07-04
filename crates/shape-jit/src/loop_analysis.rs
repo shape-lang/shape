@@ -225,10 +225,7 @@ fn detect_induction_vars(
         let (load, step_src, arith, store) =
             (&instrs[i], &instrs[i + 1], &instrs[i + 2], &instrs[i + 3]);
 
-        let is_arith = matches!(
-            arith.opcode,
-            OpCode::AddInt | OpCode::SubInt
-        );
+        let is_arith = matches!(arith.opcode, OpCode::AddInt | OpCode::SubInt);
         let is_supported_step_src = matches!(
             step_src.opcode,
             OpCode::PushConst

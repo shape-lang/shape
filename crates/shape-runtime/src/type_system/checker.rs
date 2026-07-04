@@ -74,6 +74,12 @@ impl TypeChecker {
         self
     }
 
+    /// Treat the analyzed program as a compiler-proven comptime mini-program.
+    pub fn with_root_comptime_context(mut self, enabled: bool) -> Self {
+        self.inference_engine.set_root_comptime_context(enabled);
+        self
+    }
+
     /// Type check a complete program
     pub fn check_program(
         &mut self,
@@ -342,12 +348,22 @@ impl TypeChecker {
                     self.check_expr(else_branch);
                 }
             }
-            Expr::FunctionCall { args, .. } => {
+            Expr::FunctionCall {
+                const_args, args, ..
+            } => {
+                for arg in const_args {
+                    self.check_expr(arg);
+                }
                 for arg in args {
                     self.check_expr(arg);
                 }
             }
-            Expr::QualifiedFunctionCall { args, .. } => {
+            Expr::QualifiedFunctionCall {
+                const_args, args, ..
+            } => {
+                for arg in const_args {
+                    self.check_expr(arg);
+                }
                 for arg in args {
                     self.check_expr(arg);
                 }
@@ -414,6 +430,20 @@ impl TypeChecker {
 
     /// Check if statements contain a return statement
     fn has_return_statement(&self, stmts: &[Statement]) -> bool {
+        // A value-producing TAIL EXPRESSION is the implicit return in Shape's
+        // tail-expression semantics: `fn f() -> int { 42 }`,
+        // `fn g(c: Color) -> string { match c { ... } }`, and
+        // `fn h(b: bool) -> int { if b { 1 } else { 2 } }` all return a value via
+        // their final expression — there is no explicit `return` keyword. The
+        // last statement being a `Statement::Expression` (or a value-yielding
+        // tail `if`/`match`) therefore satisfies the requirement. Type agreement
+        // between the tail expression and the declared return type is enforced
+        // separately by inference; this check only asks "is there a value-
+        // producing terminal at all".
+        if Self::block_yields_tail_value(stmts) {
+            return true;
+        }
+
         for stmt in stmts {
             match stmt {
                 Statement::Return(_, _) => return true,
@@ -444,6 +474,88 @@ impl TypeChecker {
         }
 
         false
+    }
+
+    /// True when the final statement of a function body produces a value (the
+    /// implicit tail return). Recurses through tail `if`/`match`/block so that
+    /// `if cond { a } else { b }` and `match x { ... }` count when every arm
+    /// yields a value via its own tail expression.
+    fn block_yields_tail_value(stmts: &[Statement]) -> bool {
+        let Some(last) = stmts.last() else {
+            return false;
+        };
+        match last {
+            // An explicit `return` is a value-producing terminal.
+            Statement::Return(_, _) => true,
+            // A bare tail expression is the implicit return value.
+            Statement::Expression(expr, _) => Self::expr_yields_tail_value(expr),
+            _ => false,
+        }
+    }
+
+    /// True when the items of a block expression (`{ ... }`) end in a
+    /// value-producing tail. The trailing `BlockItem::Expression` carries the
+    /// block's value; an explicit `return` also terminates with a value.
+    fn block_items_yield_tail_value(items: &[shape_ast::ast::BlockItem]) -> bool {
+        use shape_ast::ast::BlockItem;
+        match items.last() {
+            Some(BlockItem::Expression(expr)) => Self::expr_yields_tail_value(expr),
+            Some(BlockItem::Statement(Statement::Return(_, _))) => true,
+            Some(BlockItem::Statement(Statement::Expression(expr, _))) => {
+                Self::expr_yields_tail_value(expr)
+            }
+            _ => false,
+        }
+    }
+
+    /// True when an expression in tail position produces a value for the
+    /// enclosing function's implicit return. Plain value expressions (literals,
+    /// calls, arithmetic, identifiers, ...) always do; tail `if`/`match`/`block`
+    /// produce a value only when every arm/branch does.
+    fn expr_yields_tail_value(expr: &Expr) -> bool {
+        match expr {
+            // `if` in tail position yields a value only if BOTH branches do; a
+            // one-armed `if` (no `else`) cannot be the function's value. The
+            // parser emits `Expr::Conditional`; a desugar pass may also produce
+            // `Expr::If` — handle both shapes.
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                let Some(else_expr) = else_expr else {
+                    return false;
+                };
+                Self::expr_yields_tail_value(then_expr) && Self::expr_yields_tail_value(else_expr)
+            }
+            Expr::If(if_expr, _) => {
+                let Some(else_branch) = &if_expr.else_branch else {
+                    return false;
+                };
+                Self::expr_yields_tail_value(&if_expr.then_branch)
+                    && Self::expr_yields_tail_value(else_branch)
+            }
+            // `match` yields a value when every arm's body yields one. An empty
+            // match (no arms) cannot produce a value.
+            Expr::Match(match_expr, _) => {
+                !match_expr.arms.is_empty()
+                    && match_expr
+                        .arms
+                        .iter()
+                        .all(|arm| Self::expr_yields_tail_value(&arm.body))
+            }
+            // A nested block yields a value when its own tail does.
+            Expr::Block(block_expr, _) => Self::block_items_yield_tail_value(&block_expr.items),
+            // An explicit `return` expression always produces a value-terminal.
+            Expr::Return(_, _) => true,
+            // `Unit` (void) is not a value for a non-void return type. A tail
+            // `if` whose synthesized else is Unit must NOT satisfy the check.
+            Expr::Unit(_) => false,
+            // Any other expression in tail position is a value (literal, call,
+            // binary op, identifier, constructor, ...). Type correctness against
+            // the declared return type is checked by inference, not here.
+            _ => true,
+        }
     }
 
     /// Check for cyclic type aliases
@@ -537,6 +649,25 @@ pub fn analyze_program_with_mode(
     known_bindings: Option<&[String]>,
     analysis_mode: TypeAnalysisMode,
 ) -> Result<TypeCheckResult, Vec<TypeErrorWithLocation>> {
+    analyze_program_with_mode_and_comptime_context(
+        program,
+        source,
+        filename,
+        known_bindings,
+        analysis_mode,
+        false,
+    )
+}
+
+/// Shared type analysis with explicit recovery behavior and root comptime proof.
+pub fn analyze_program_with_mode_and_comptime_context(
+    program: &Program,
+    source: Option<&str>,
+    filename: Option<&str>,
+    known_bindings: Option<&[String]>,
+    analysis_mode: TypeAnalysisMode,
+    root_comptime_context: bool,
+) -> Result<TypeCheckResult, Vec<TypeErrorWithLocation>> {
     let mut checker = TypeChecker::new();
     if let Some(src) = source {
         checker = checker.with_source(src.to_string());
@@ -547,6 +678,7 @@ pub fn analyze_program_with_mode(
     if let Some(names) = known_bindings {
         checker = checker.with_known_bindings(names);
     }
+    checker = checker.with_root_comptime_context(root_comptime_context);
     checker = checker.with_analysis_mode(analysis_mode);
     checker.check_program(program)
 }
@@ -618,6 +750,71 @@ pub fn quick_check(source: &str) -> Result<TypeCheckResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_root_comptime_context_allows_comptime_builtin_forwarder() {
+        let source = r#"
+            fn build_config() -> int { 1 }
+            build_config()
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+
+        let outside = analyze_program_with_mode(
+            &program,
+            Some(source),
+            None,
+            None,
+            TypeAnalysisMode::FailFast,
+        );
+        assert!(
+            format!("{:?}", outside.err().expect("outside comptime must fail"))
+                .contains("comptime-only builtin"),
+            "ordinary source must still reject comptime-only builtin calls"
+        );
+
+        let inside = analyze_program_with_mode_and_comptime_context(
+            &program,
+            Some(source),
+            None,
+            None,
+            TypeAnalysisMode::FailFast,
+            true,
+        );
+        assert!(
+            inside.is_ok(),
+            "compiler-proven comptime mini-program should type-check: {:?}",
+            inside.err()
+        );
+    }
+
+    #[test]
+    fn w83e_comptime_fn_body_allows_comptime_only_builtin_gate() {
+        let source = r#"
+            comptime fn require_const_host() {
+                if false {
+                    error("not executed")
+                }
+            }
+
+            comptime {
+                require_const_host()
+            }
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+
+        let result = analyze_program_with_mode(
+            &program,
+            Some(source),
+            None,
+            None,
+            TypeAnalysisMode::FailFast,
+        );
+        assert!(
+            result.is_ok(),
+            "comptime fn bodies are comptime contexts; got: {:?}",
+            result.err()
+        );
+    }
 
     #[test]
     fn test_exhaustiveness_integration_non_exhaustive_match_produces_error() {

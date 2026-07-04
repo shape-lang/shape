@@ -1,0 +1,17 @@
+comptime fn fib(n: int) -> int {
+  if n < 2 { return n }
+  fib(n - 1) + fib(n - 2)
+}
+comptime fn squares(n: int) -> Array<int> {
+  let mut a = []
+  let mut i = 1
+  while i <= n {
+    a.push(i * i)
+    i = i + 1
+  }
+  a
+}
+let F10 = comptime { fib(10) }
+let SQ = comptime { squares(4) }
+print(f"F10={F10}")
+print(f"SQ0={SQ[0]} SQ3={SQ[3]} len={SQ.length}")

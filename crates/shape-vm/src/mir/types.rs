@@ -4,6 +4,7 @@
 //! Places track what can be borrowed (locals, fields, indices).
 //! Statements and terminators form basic blocks in a control flow graph.
 
+use shape_ast::ast::operators::{FuzzyOp, FuzzyTolerance};
 use shape_ast::ast::{Span, TypeAnnotation};
 use std::fmt;
 
@@ -329,6 +330,24 @@ pub enum Rvalue {
     Borrow(BorrowKind, Place),
     /// Binary operation.
     BinaryOp(BinOp, Operand, Operand),
+    /// Tolerance-aware fuzzy comparison (`~=` / `~>` / `~<`).
+    ///
+    /// Unlike `BinaryOp(Eq|Gt|Lt, lhs, rhs)`, this preserves the source
+    /// `within` tolerance through MIR so native consumers can emit the same
+    /// arithmetic shape as the bytecode VM compiler:
+    ///
+    /// - `a ~= b within abs` => `abs(a - b) <= abs`
+    /// - `a ~> b within abs` => `a > b || abs(a - b) <= abs`
+    /// - `a ~< b within abs` => `a < b || abs(a - b) <= abs`
+    ///
+    /// Percentage tolerance mirrors the bytecode compiler's denominator:
+    /// `abs(a - b) / ((abs(a) + abs(b)) / 2) <= pct`.
+    FuzzyComparison {
+        op: FuzzyOp,
+        lhs: Operand,
+        rhs: Operand,
+        tolerance: FuzzyTolerance,
+    },
     /// Unary operation.
     UnaryOp(UnOp, Operand),
     /// Function call result (arguments passed via terminator).
@@ -457,6 +476,34 @@ pub enum Rvalue {
         enum_name: Option<String>,
         variant_name: String,
     },
+    /// A primitive infallible `as`-cast (`expr as int` / `as number` /
+    /// `as string` / `as bool` / `as decimal` / `as char`) whose result
+    /// kind differs from the operand's source kind (e.g. `true as int` —
+    /// bool→int, `1 as number` — int→number).
+    ///
+    /// f-string bool-as-int VM!=JIT divergence fix (2026-06): the bytecode
+    /// VM lowers these to the kind-restamping `OpCode::ConvertTo*` family,
+    /// which `vm_only_opcode_reason` (`shape-jit::compiler::accessors`)
+    /// already lists as VM-only — the JIT has no typed convert body, and
+    /// the opcode-FFI trampoline (`ffi/generic_builtin::dispatch_opcode`)
+    /// passes the operand bits through UNCHANGED. The MIR lowering of
+    /// `Expr::TypeAssertion` previously mirrored that pass-through
+    /// (`Rvalue::Use(arg)` with a "value is already the right bits"
+    /// comment), so a JIT'd `f"{true as int}"` / `let v: int = true as int`
+    /// formatted the value with the SOURCE kind (`Bool`) and rendered
+    /// `true` instead of `1` — a real VM≠JIT correctness divergence.
+    ///
+    /// Producer-side classification per ADR-006 §2.7.5 stamp-at-compile-
+    /// time: the target type name is carried verbatim from the
+    /// `ast::TypeAnnotation`. Consumer status: the JIT MIR preflight
+    /// (`shape-jit::mir_compiler::preflight`) REJECTS on this Rvalue →
+    /// whole-program deopt via the W12 `[jit-fallback]` path routes the
+    /// program to the bytecode interpreter, where `OpCode::ConvertTo*`
+    /// restamps the result kind correctly. This is surface-and-stop (the
+    /// JIT simply does not implement the typed convert yet), NOT a dynamic
+    /// fallback shim. Mirrors the `TypePatternTest` / `EnumDiscriminantTest`
+    /// preflight-reject precedent. VM never consumes MIR.
+    PrimitiveCast { operand: Operand, target: String },
 }
 
 /// Binary operations in MIR.
@@ -714,8 +761,7 @@ pub struct MirFunction {
     /// — primitives, collections, plain object literals, function returns,
     /// etc. The downstream classifier surfaces unstamped per §2.7.7 #9 /
     /// forbidden #9 (no fabricated default).
-    pub local_struct_type_names:
-        std::collections::HashMap<SlotId, String>,
+    pub local_struct_type_names: std::collections::HashMap<SlotId, String>,
     /// Per-slot empty-typed-array element ConcreteType for slots produced by
     /// `let mut <name>: Array<C> = []` lowering (where `C` is a
     /// `concrete_type_from_annotation`-resolvable element type).
@@ -792,10 +838,37 @@ pub struct MirFunction {
     /// from_mir_with_resolvers`.
     pub local_declared_scalar_types:
         std::collections::HashMap<SlotId, shape_value::v2::ConcreteType>,
+    /// Slots that back a real user-visible `let`/`let mut`/param binding (any
+    /// local whose name does NOT start with `__mir_`). Compiler-synthesized
+    /// temporaries (`__mir_tmp*`, f-string concat accumulators, call-arg
+    /// staging slots) are excluded.
+    ///
+    /// Strict REAL-MOVE model (user 2026-06-21): a `let q = p` HEAP bind moves
+    /// `p`. Identifier reads lower to `Operand::Copy`, so the move-detection in
+    /// `solver::actual_move_places` must enter the Copy source into the
+    /// moved-set — but ONLY when the bind destination is a real user binding.
+    /// A Copy read into a synthesized temp (e.g. the `f"{s}"` concatenation
+    /// accumulator) is a NON-consuming derived-value read, never the binding's
+    /// semantic last-use, and must NOT consume the source (preserves the
+    /// f-string suppression at `helpers_binding.rs:280` at the MIR layer). This
+    /// set is the discriminator.
+    pub binding_slots: std::collections::HashSet<SlotId>,
+    /// Slots that back a `var` smart-default binding (`var x = ...`), as opposed
+    /// to an explicit `let` / `let mut` binding.
+    ///
+    /// Binding-move reconcile (user 2026-06-21): `let` / `let mut` are explicit
+    /// MOVE bindings — a `let q = p` HEAP rebind consumes `p`, and a still-live
+    /// read of the moved-from source is a compile-time use-after-move (B0005).
+    /// `var` is the ergonomic smart-default that AUTO-CLONES on a still-live
+    /// source (`var copy = data; print(data)` keeps BOTH — the documented
+    /// clone-on-still-live / CoW behavior). The destination binding slot's
+    /// membership in this set is the discriminator the ownership-decision uses
+    /// to keep `var` on `OwnershipDecision::Clone` while `let` gets `Move`.
+    pub var_binding_slots: std::collections::HashSet<SlotId>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalTypeInfo {
     /// Primitive (int, number, bool, none) — implicitly Copy, no borrow tracking.
     Copy,

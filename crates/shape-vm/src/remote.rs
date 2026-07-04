@@ -539,10 +539,8 @@ pub fn program_from_blobs_by_hash(
         function_local_concrete_types: source.function_local_concrete_types.clone(),
         function_return_concrete_types: source.function_return_concrete_types.clone(),
         monomorphized_method_call_sites: source.monomorphized_method_call_sites.clone(),
-        value_call_return_concrete_types:
-            source.value_call_return_concrete_types.clone(),
-        operator_trait_dispatch_sites:
-            source.operator_trait_dispatch_sites.clone(),
+        value_call_return_concrete_types: source.value_call_return_concrete_types.clone(),
+        operator_trait_dispatch_sites: source.operator_trait_dispatch_sites.clone(),
         data_schema: source.data_schema.clone(),
         type_schema_registry: source.type_schema_registry.clone(),
         trait_method_symbols: source.trait_method_symbols.clone(),
@@ -567,6 +565,8 @@ pub fn program_from_blobs_by_hash(
         has_w17_marshal_residual: source.has_w17_marshal_residual,
         // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
         has_try_unwrap_residual: source.has_try_unwrap_residual,
+        has_reference_escape_promotion: source.has_reference_escape_promotion,
+        has_null_coalesce_residual: source.has_null_coalesce_residual,
     })
 }
 
@@ -647,7 +647,7 @@ fn execute_inner(
     // expected kind is read from the callee's `frame_descriptor.slots`
     // (i.e. the per-slot proven `NativeKind` per ADR-006 §2.7.5.1 — no
     // `Unknown` placeholder). The return-kind is read from the callee's
-    // `frame_descriptor.return_kind`.
+    // `frame_descriptor.abi_return_kind()`.
     //
     // Per the §0.A.iv supervisor ruling, frame-descriptor absence
     // produces a structured `RemoteCallError` (no silent-degrade): a
@@ -679,7 +679,7 @@ fn execute_inner_with_runtimes(
 /// 2. Build a `VirtualMachine`, load the program, populate module objects.
 /// 3. Resolve the callee (hash → id → name precedence).
 /// 4. Read the callee's per-slot `NativeKind` from `frame_descriptor.slots`
-///    and the return kind from `frame_descriptor.return_kind`.
+///    and the return ABI kind from `frame_descriptor.abi_return_kind()`.
 /// 5. Materialize each `SerializableVMValue` arg into a `KindedSlot` via
 ///    `serializable_to_slot(arg, expected_kind, store)`.
 /// 6. Invoke the callee through the kinded ABI (`execute_function_by_id`).
@@ -718,8 +718,7 @@ fn run_remote_call(
     let mut program: BytecodeProgram = request.program;
     program.type_schema_registry = request.type_schemas;
 
-    if let (Some(blobs), Some(entry_hash)) =
-        (request.function_blobs.clone(), request.function_hash)
+    if let (Some(blobs), Some(entry_hash)) = (request.function_blobs.clone(), request.function_hash)
     {
         if let Some(ca) = program_from_blobs_by_hash(blobs, entry_hash, &program) {
             program.content_addressed = Some(ca);
@@ -832,7 +831,7 @@ fn run_remote_call(
         });
     };
 
-    let return_kind = frame_desc.as_ref().and_then(|fd| fd.return_kind);
+    let return_kind = frame_desc.as_ref().and_then(|fd| fd.abi_return_kind());
     let function_name_owned = function.name.clone();
     let _ = function; // release the borrow before moving vm into call
 
@@ -844,15 +843,14 @@ fn run_remote_call(
     let mut args: Vec<KindedSlot> = Vec::with_capacity(arity);
     for (idx, sv) in request.arguments.iter().enumerate() {
         let expected = arg_kinds[idx];
-        let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|e| {
-            RemoteCallError {
+        let (bits, kind) =
+            serializable_to_slot(sv, expected, store).map_err(|e| RemoteCallError {
                 message: format!(
                     "arg {} marshal failure (expected kind {:?}): {}",
                     idx, expected, e,
                 ),
                 kind: RemoteErrorKind::ArgumentError,
-            }
-        })?;
+            })?;
         args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
     }
 
@@ -872,9 +870,10 @@ fn run_remote_call(
     // serialization (slot_to_serializable does NOT consume the share —
     // it borrows). `KindedSlot::Drop` retires it at scope exit.
     let (bits, kind) = (result.slot.raw(), result.kind);
-    // Cross-check: if the program declared a top-level return_kind, the
-    // returned slot's kind must agree. Mismatch is a structured error
-    // rather than a silent reinterpretation (ADR-006 §2.7.7 / Q9).
+    // Cross-check: if the callee declared an ABI return kind, the returned
+    // slot's kind must agree. Wrapper semantics live in
+    // FrameDescriptor.return_wrapper and are intentionally not consulted
+    // by the marshal boundary.
     if let Some(declared) = return_kind {
         if kind != declared {
             return Err(RemoteCallError {
@@ -933,19 +932,15 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             function_local_concrete_types: ca.function_local_concrete_types.clone(),
             function_return_concrete_types: ca.function_return_concrete_types.clone(),
             monomorphized_method_call_sites: ca.monomorphized_method_call_sites.clone(),
-            value_call_return_concrete_types:
-                ca.value_call_return_concrete_types.clone(),
-            operator_trait_dispatch_sites:
-                ca.operator_trait_dispatch_sites.clone(),
+            value_call_return_concrete_types: ca.value_call_return_concrete_types.clone(),
+            operator_trait_dispatch_sites: ca.operator_trait_dispatch_sites.clone(),
             data_schema: ca.data_schema.clone(),
             type_schema_registry: ca.type_schema_registry.clone(),
             trait_method_symbols: ca.trait_method_symbols.clone(),
             foreign_functions: ca.foreign_functions.clone(),
             native_struct_layouts: ca.native_struct_layouts.clone(),
             debug_info: ca.debug_info.clone(),
-            closure_function_layouts_by_name: ca
-                .closure_function_layouts_by_name
-                .clone(),
+            closure_function_layouts_by_name: ca.closure_function_layouts_by_name.clone(),
             trait_vtables: ca.trait_vtables.clone(),
             // R8 W8 Cluster A surface-and-stop flag propagation.
             has_imported_const_inline: ca.has_imported_const_inline,
@@ -953,6 +948,8 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             has_w17_marshal_residual: ca.has_w17_marshal_residual,
             // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
             has_try_unwrap_residual: ca.has_try_unwrap_residual,
+            has_reference_escape_promotion: ca.has_reference_escape_promotion,
+            has_null_coalesce_residual: ca.has_null_coalesce_residual,
         });
     }
     // Copy top-level metadata needed by program_from_blobs
@@ -1237,7 +1234,6 @@ pub fn handle_wire_message(
         }
 
         // --- V2 message stubs ---
-
         WireMessage::Execute(req) => WireMessage::ExecuteResponse(ExecuteResponse {
             request_id: req.request_id,
             success: false,
@@ -1280,38 +1276,34 @@ pub fn handle_wire_message(
                 column: None,
             }],
         }),
-        WireMessage::ValidateResponse(_) => {
-            WireMessage::ExecuteResponse(ExecuteResponse {
-                request_id: 0,
-                success: false,
-                value: WireValue::Null,
-                stdout: None,
-                error: Some("Unexpected ValidateResponse on server side".to_string()),
-                content_terminal: None,
-                content_html: None,
-                diagnostics: vec![],
-                metrics: None,
-                print_output: None,
-            })
-        }
+        WireMessage::ValidateResponse(_) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: 0,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("Unexpected ValidateResponse on server side".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![],
+            metrics: None,
+            print_output: None,
+        }),
         WireMessage::Auth(_req) => WireMessage::AuthResponse(AuthResponse {
             authenticated: false,
             error: Some("V2 Auth handler not yet implemented".to_string()),
         }),
-        WireMessage::AuthResponse(_) => {
-            WireMessage::ExecuteResponse(ExecuteResponse {
-                request_id: 0,
-                success: false,
-                value: WireValue::Null,
-                stdout: None,
-                error: Some("Unexpected AuthResponse on server side".to_string()),
-                content_terminal: None,
-                content_html: None,
-                diagnostics: vec![],
-                metrics: None,
-                print_output: None,
-            })
-        }
+        WireMessage::AuthResponse(_) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: 0,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("Unexpected AuthResponse on server side".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![],
+            metrics: None,
+            print_output: None,
+        }),
         WireMessage::ExecuteFile(req) => WireMessage::ExecuteResponse(ExecuteResponse {
             request_id: req.request_id,
             success: false,
@@ -1871,6 +1863,8 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
 
         assert!(
@@ -2026,6 +2020,8 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2387,6 +2383,8 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2452,6 +2450,8 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),

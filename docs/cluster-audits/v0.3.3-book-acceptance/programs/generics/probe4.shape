@@ -1,0 +1,17 @@
+// Isolate: dyn Trait method returning int, accumulated with +
+trait Named {
+  fn name_len() -> int;
+}
+type User { name: string }
+impl Named for User {
+  method name_len() -> int { self.name.len() }
+}
+fn total_name_len(items: Vec<dyn Named>) -> int {
+  let mut acc = 0
+  for it in items {
+    acc = acc + it.name_len()
+  }
+  acc
+}
+let users: Vec<dyn Named> = [User { name: "Alice" }, User { name: "Bob" }, User { name: "Eve" }]
+print(total_name_len(users))

@@ -23,15 +23,15 @@ fn test_complex_enum_match_function_combo() {
         fn describe(s) {
             let a = area(s)
             match s {
-                Shape::Circle(r) => "circle area=" + a,
-                Shape::Square(side) => "square area=" + a
+                Shape::Circle(r) => f"circle area={a}",
+                Shape::Square(side) => f"square area={a}"
             }
         }
         print(describe(Shape::Circle(5)))
         print(describe(Shape::Square(4)))
     "#,
     )
-    .expect_output("circle area=75\nsquare area=16");
+    .expect_output("circle area=75.0\nsquare area=16.0");
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn test_complex_higher_order_with_enum_result() {
             if result < 0 { Err("negative result") } else { Ok(result) }
         }
         match try_apply(|x| x * 2 - 100, 30) {
-            Ok(v) => "ok: " + v,
+            Ok(v) => f"ok: {v}",
             Err(e) => "err: " + e
         }
     "#,
@@ -277,7 +277,7 @@ fn test_complex_higher_order_with_enum_result_ok_path() {
             if result < 0 { Err("negative result") } else { Ok(result) }
         }
         match try_apply(|x| x * 2 - 100, 80) {
-            Ok(v) => "ok: " + v,
+            Ok(v) => f"ok: {v}",
             Err(e) => "err: " + e
         }
     "#,
@@ -344,7 +344,7 @@ fn test_complex_trait_dispatch_polymorphism() {
     ShapeTest::new(
         r#"
         trait Describable {
-            describe(): string
+            method describe() -> string
         }
         type Dog { name: string }
         type Cat { name: string }
@@ -367,16 +367,20 @@ fn test_complex_trait_dispatch_polymorphism() {
 fn test_complex_hashmap_with_loop_aggregation() {
     ShapeTest::new(
         r#"
-        let mut scores = HashMap()
-        let entries = [["Alice", 90], ["Bob", 85], ["Alice", 95], ["Bob", 80]]
+        type ScoreEntry { name: string, score: int }
+        let mut scores: HashMap<string, int> = HashMap()
+        let entries = [
+            ScoreEntry { name: "Alice", score: 90 },
+            ScoreEntry { name: "Bob", score: 85 },
+            ScoreEntry { name: "Alice", score: 95 },
+            ScoreEntry { name: "Bob", score: 80 },
+        ]
         for entry in entries {
-            let name = entry[0]
-            let score = entry[1]
-            let existing = scores.get(name)
-            if existing == None {
-                scores = scores.set(name, score)
-            } else {
-                scores = scores.set(name, existing + score)
+            let name = entry.name
+            let score = entry.score
+            match scores.get(name) {
+                Some(prev) => { let p: int = prev; scores = scores.set(name, p + score) }
+                None => { scores = scores.set(name, score) }
             }
         }
         print(scores.get("Alice"))
@@ -418,9 +422,9 @@ fn test_complex_multi_return_function_with_option() {
             match safe_divide(a, b) {
                 Ok(v) => {
                     if v > 10 {
-                        "large: " + v
+                        f"large: {v}"
                     } else {
-                        "small: " + v
+                        f"small: {v}"
                     }
                 },
                 Err(e) => "error: " + e

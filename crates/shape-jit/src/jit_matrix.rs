@@ -108,11 +108,26 @@ mod tests {
 
     #[test]
     fn test_layout() {
-        assert_eq!(std::mem::offset_of!(JitMatrix, data), MATRIX_DATA_OFFSET as usize);
-        assert_eq!(std::mem::offset_of!(JitMatrix, rows), MATRIX_ROWS_OFFSET as usize);
-        assert_eq!(std::mem::offset_of!(JitMatrix, cols), MATRIX_COLS_OFFSET as usize);
-        assert_eq!(std::mem::offset_of!(JitMatrix, total_len), MATRIX_TOTAL_LEN_OFFSET as usize);
-        assert_eq!(std::mem::offset_of!(JitMatrix, owner), MATRIX_OWNER_OFFSET as usize);
+        assert_eq!(
+            std::mem::offset_of!(JitMatrix, data),
+            MATRIX_DATA_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitMatrix, rows),
+            MATRIX_ROWS_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitMatrix, cols),
+            MATRIX_COLS_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitMatrix, total_len),
+            MATRIX_TOTAL_LEN_OFFSET as usize
+        );
+        assert_eq!(
+            std::mem::offset_of!(JitMatrix, owner),
+            MATRIX_OWNER_OFFSET as usize
+        );
         assert_eq!(std::mem::size_of::<JitMatrix>(), 32);
     }
 

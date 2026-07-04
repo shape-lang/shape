@@ -44,6 +44,9 @@ fn array_literal_booleans() {
     .expect_output("false");
 }
 
+// Strict typing forbids heterogeneous array literals: every element must
+// share one proven concrete type. `[1, "two", true]` mixes int/string/bool,
+// so it is now a compile-time rejection (no `any`, no runtime coercion).
 #[test]
 fn array_literal_mixed_types() {
     ShapeTest::new(
@@ -52,8 +55,7 @@ fn array_literal_mixed_types() {
         print(arr.length)
     "#,
     )
-    .expect_run_ok()
-    .expect_output("3");
+    .expect_run_err_contains("not compatible");
 }
 
 // =========================================================================
@@ -64,7 +66,7 @@ fn array_literal_mixed_types() {
 fn empty_array_creation() {
     ShapeTest::new(
         r#"
-        let arr = []
+        let arr: Array<int> = []
         print(arr.length)
     "#,
     )
@@ -76,7 +78,7 @@ fn empty_array_creation() {
 fn empty_array_print() {
     ShapeTest::new(
         r#"
-        let arr = []
+        let arr: Array<int> = []
         print(arr)
     "#,
     )

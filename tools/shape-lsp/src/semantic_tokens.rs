@@ -352,6 +352,9 @@ impl<'a> TokenCollector<'a> {
             TypeAnnotation::Reference(name) => {
                 out.push(name.as_str());
             }
+            TypeAnnotation::Borrow { inner, .. } => {
+                Self::collect_type_annotation_identifiers(inner, out);
+            }
             TypeAnnotation::Generic { name, args } => {
                 out.push(name.as_str());
                 for arg in args {
@@ -473,7 +476,7 @@ impl<'a> TokenCollector<'a> {
         };
 
         match pattern {
-            Pattern::Identifier(name) => {
+            Pattern::Identifier { name, .. } => {
                 if let Some(rel) = pattern_src.find(name) {
                     let start = pattern_span.start + rel;
                     let (line, col) = offset_to_line_col(self.source, start);
@@ -483,6 +486,7 @@ impl<'a> TokenCollector<'a> {
             Pattern::Typed {
                 name,
                 type_annotation,
+                ..
             } => {
                 if let Some(rel) = pattern_src.find(name) {
                     let start = pattern_span.start + rel;
@@ -819,7 +823,6 @@ impl<'a> TokenCollector<'a> {
         // Emit STRING token for suffix (" or """)
         self.add_token_from_span(Span::new(span.end - suffix_len, span.end), 9, 0);
     }
-
 }
 
 /// Find interpolation expression segments in a formatted string body.

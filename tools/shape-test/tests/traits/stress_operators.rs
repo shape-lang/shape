@@ -594,3 +594,138 @@ fn operator_and_display_on_same_type() {
     )
     .expect_string("5/6");
 }
+
+// =========================================================================
+// 10b. ORD / BITWISE OPERATOR DISPATCH ON USER TYPES (book operators.mdx)
+// =========================================================================
+
+/// `impl Ord` lowers `<`/`>`/`<=`/`>=` to a `cmp(other) -> int` call followed
+/// by an integer comparison against 0. Book operators.mdx `impl Ord for Money`.
+#[test]
+fn impl_ord_for_custom_type_less_than() {
+    ShapeTest::new(
+        r#"
+        type Money { cents: int }
+        impl Ord for Money {
+            method cmp(other: Money) -> int { self.cents - other.cents }
+        }
+        let a = Money { cents: 100 }
+        let b = Money { cents: 250 }
+        a < b
+    "#,
+    )
+    .expect_bool(true);
+}
+
+/// `>` on a user `Ord` type (cmp result > 0).
+#[test]
+fn impl_ord_for_custom_type_greater_than() {
+    ShapeTest::new(
+        r#"
+        type Money { cents: int }
+        impl Ord for Money {
+            method cmp(other: Money) -> int { self.cents - other.cents }
+        }
+        let a = Money { cents: 100 }
+        let b = Money { cents: 250 }
+        b > a
+    "#,
+    )
+    .expect_bool(true);
+}
+
+/// `<=` boundary: equal values compare `<=` true, `<` false.
+#[test]
+fn impl_ord_for_custom_type_less_eq_boundary() {
+    ShapeTest::new(
+        r#"
+        type Money { cents: int }
+        impl Ord for Money {
+            method cmp(other: Money) -> int { self.cents - other.cents }
+        }
+        let a = Money { cents: 100 }
+        let c = Money { cents: 100 }
+        (a <= c) && !(a < c)
+    "#,
+    )
+    .expect_bool(true);
+}
+
+/// `impl Ord` comparison usable in an `if` condition.
+#[test]
+fn impl_ord_for_custom_type_in_if() {
+    ShapeTest::new(
+        r#"
+        type Money { cents: int }
+        impl Ord for Money {
+            method cmp(other: Money) -> int { self.cents - other.cents }
+        }
+        let a = Money { cents: 100 }
+        let b = Money { cents: 250 }
+        let cheaper = if a < b { a } else { b }
+        cheaper.cents
+    "#,
+    )
+    .expect_number(100.0);
+}
+
+/// `impl BitAnd` lowers `&` to a `bitand(other) -> Self` call. Book
+/// operators.mdx `impl BitAnd for Flags`.
+#[test]
+fn impl_bitand_for_custom_type() {
+    ShapeTest::new(
+        r#"
+        type Flags { bits: int }
+        impl BitAnd for Flags {
+            method bitand(other: Flags) -> Flags {
+                Flags { bits: self.bits & other.bits }
+            }
+        }
+        let a = Flags { bits: 12 }
+        let b = Flags { bits: 10 }
+        let c = a & b
+        c.bits == 8
+    "#,
+    )
+    .expect_bool(true);
+}
+
+/// `impl BitOr` lowers `|` to `bitor(other) -> Self`.
+#[test]
+fn impl_bitor_for_custom_type() {
+    ShapeTest::new(
+        r#"
+        type Flags { bits: int }
+        impl BitOr for Flags {
+            method bitor(other: Flags) -> Flags {
+                Flags { bits: self.bits | other.bits }
+            }
+        }
+        let a = Flags { bits: 12 }
+        let b = Flags { bits: 10 }
+        let c = a | b
+        c.bits == 14
+    "#,
+    )
+    .expect_bool(true);
+}
+
+/// `impl BitXor` lowers `^` to `bitxor(other) -> Self`.
+#[test]
+fn impl_bitxor_for_custom_type() {
+    ShapeTest::new(
+        r#"
+        type Flags { bits: int }
+        impl BitXor for Flags {
+            method bitxor(other: Flags) -> Flags {
+                Flags { bits: self.bits ^ other.bits }
+            }
+        }
+        let a = Flags { bits: 12 }
+        let b = Flags { bits: 10 }
+        let c = a ^ b
+        c.bits == 6
+    "#,
+    )
+    .expect_bool(true);
+}

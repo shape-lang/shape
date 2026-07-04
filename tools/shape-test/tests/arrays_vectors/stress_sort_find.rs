@@ -74,7 +74,7 @@ fn test_select_double() {
 fn test_select_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.select(|x| x + 1).length
     "#,
     )
@@ -154,7 +154,7 @@ fn test_order_by_negative_key() {
 fn test_order_by_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.orderBy(|x| x).length
     "#,
     )
@@ -473,7 +473,7 @@ fn test_chain_four_ops() {
 fn test_empty_through_map_filter() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.map(|x| x * 2).filter(|x| x > 0).length
     "#,
     )
@@ -485,7 +485,7 @@ fn test_empty_through_map_filter() {
 fn test_empty_through_sort_unique() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.sort().unique().length
     "#,
     )
@@ -509,7 +509,7 @@ fn test_large_array_map() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            let mut arr = []
+            let mut arr: Array<int> = []
             let mut i = 0
             while i < 100 {
                 arr = arr.concat([i])
@@ -529,7 +529,7 @@ fn test_large_array_filter() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            let mut arr = []
+            let mut arr: Array<int> = []
             let mut i = 0
             while i < 100 {
                 arr = arr.concat([i])
@@ -549,7 +549,7 @@ fn test_large_array_sort_reverse() {
     ShapeTest::new(
         r#"
         fn make_rev_array() {
-            let mut arr = []
+            let mut arr: Array<int> = []
             let mut i = 20
             while i > 0 {
                 arr = arr.concat([i])
@@ -570,7 +570,7 @@ fn test_large_array_unique() {
     ShapeTest::new(
         r#"
         fn make_dup_array() {
-            let mut arr = []
+            let mut arr: Array<int> = []
             let mut i = 0
             while i < 50 {
                 arr = arr.concat([i % 10])
@@ -585,7 +585,7 @@ fn test_large_array_unique() {
     ShapeTest::new(
         r#"
         fn make_dup_array() {
-            let mut arr = []
+            let mut arr: Array<int> = []
             let mut i = 0
             while i < 50 {
                 arr = arr.concat([i % 10])
@@ -605,7 +605,7 @@ fn test_large_array_reduce() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            let mut arr = []
+            let mut arr: Array<int> = []
             let mut i = 1
             while i <= 50 {
                 arr = arr.concat([i])
@@ -625,7 +625,7 @@ fn test_large_pipeline() {
     ShapeTest::new(
         r#"
         fn make_array() {
-            let mut arr = []
+            let mut arr: Array<int> = []
             let mut i = 0
             while i < 100 {
                 arr = arr.concat([i])

@@ -232,7 +232,10 @@ pub fn parse_extend_statement(pair: Pair<Rule>) -> Result<crate::ast::ExtendStat
         if type_args.is_empty() {
             TypeName::Simple(name.into())
         } else {
-            TypeName::Generic { name: name.into(), type_args }
+            TypeName::Generic {
+                name: name.into(),
+                type_args,
+            }
         }
     };
 
@@ -374,7 +377,10 @@ fn parse_type_name(pair: Pair<Rule>) -> Result<crate::ast::types::TypeName> {
     if type_args.is_empty() {
         Ok(TypeName::Simple(name.into()))
     } else {
-        Ok(TypeName::Generic { name: name.into(), type_args })
+        Ok(TypeName::Generic {
+            name: name.into(),
+            type_args,
+        })
     }
 }
 

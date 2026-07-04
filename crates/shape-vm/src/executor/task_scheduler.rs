@@ -130,8 +130,9 @@ impl TaskScheduler {
     pub fn complete(&mut self, task_id: u64, value_bits: u64, value_kind: NativeKind) {
         // Releasing a prior result preserves refcount discipline if a task
         // is somehow completed twice (defensive — should not normally happen).
-        if let Some(TaskStatus::Completed((old_bits, old_kind))) =
-            self.results.insert(task_id, TaskStatus::Completed((value_bits, value_kind)))
+        if let Some(TaskStatus::Completed((old_bits, old_kind))) = self
+            .results
+            .insert(task_id, TaskStatus::Completed((value_bits, value_kind)))
         {
             drop_with_kind(old_bits, old_kind);
         }
@@ -317,6 +318,9 @@ impl TaskScheduler {
                 Ok((bits, NativeKind::Ptr(HeapKind::TaskGroup)))
             }
             // Race: return first result (all run, but we return first).
+            // The loop intentionally returns on the first id (or errors if the
+            // task list is empty); the single-iteration shape is deliberate.
+            #[allow(clippy::never_loop)]
             1 => {
                 for &id in task_ids {
                     let res = self.resolve_task(id, &mut executor_fn)?;

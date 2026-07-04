@@ -122,21 +122,23 @@ impl PluginLoader {
         // Plugin authors generate this symbol automatically via the
         // `shape_abi_v1::language_runtime_plugin!` / `data_source_plugin!`
         // macros at `crates/shape-abi-v1/src/lib.rs:1493`.
-        let get_version = unsafe { lib.get::<GetAbiVersionFn>(b"shape_abi_version") }
-            .map_err(|e| ShapeError::RuntimeError {
-                message: format!(
-                    "Plugin '{}' missing required 'shape_abi_version' export \
+        let get_version =
+            unsafe { lib.get::<GetAbiVersionFn>(b"shape_abi_version") }.map_err(|e| {
+                ShapeError::RuntimeError {
+                    message: format!(
+                        "Plugin '{}' missing required 'shape_abi_version' export \
                      (fail-safe ABI version check, ADR-006 §2.7.4 / §2.7.5 — \
                      W17-foreign-ffi supervisor (iv) ruling). The host ABI \
                      version is {}. The extension must export \
                      `shape_abi_version()` — use the \
                      `shape_abi_v1::language_runtime_plugin!` macro to \
                      generate it automatically. Underlying loader error: {}",
-                    path.display(),
-                    ABI_VERSION,
-                    e
-                ),
-                location: None,
+                        path.display(),
+                        ABI_VERSION,
+                        e
+                    ),
+                    location: None,
+                }
             })?;
         let version = unsafe { get_version() };
         if version != ABI_VERSION {

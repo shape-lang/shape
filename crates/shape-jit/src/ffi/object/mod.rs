@@ -46,9 +46,7 @@ pub use closure::jit_alloc_owned_mut_cell;
 //                                       `emit_heap_closure`'s Shared branch.
 //   - `jit_shared_lock_contended`    — slow-path lock spin-wait.
 //   - `jit_shared_unlock_contended`  — slow-path unlock release store.
-pub use closure::{
-    jit_arc_shared_retain, jit_shared_lock_contended, jit_shared_unlock_contended,
-};
+pub use closure::{jit_arc_shared_retain, jit_shared_lock_contended, jit_shared_unlock_contended};
 
 // Session 1 Commit 3: Outer-scope Shared-cell lifecycle helpers.
 //   - `jit_alloc_shared_cell`        — allocates a fresh `Arc<SharedCell>`

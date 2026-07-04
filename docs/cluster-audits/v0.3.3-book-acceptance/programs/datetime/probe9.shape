@@ -1,0 +1,5 @@
+from std::core::intrinsics use { DateTime }
+let name = "hello"
+print(f"len={name.length()}")
+let dt = DateTime.parse("2024-06-15T14:30:45+00:00")
+print(f"iso={dt.iso8601()}")

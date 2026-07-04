@@ -217,12 +217,13 @@ true || (false && divzero(0))
 fn or_short_circuit_does_not_invoke_rhs_function_call() {
     jit_expect_int(
         r#"
+fn always_true() -> bool { true }
+
 fn main() -> int {
-    fn always_true() -> bool { true }
     let _r = true || always_true()
     // Pure value pin: short-circuit means RHS function NOT called.
-    // (Observed via counter not possible in current JIT mutable-capture
-    // ABI; pin via value equivalence with raw true literal.)
+    // Keep always_true top-level: nested fn desugaring is a separate
+    // frontend/type-inference surface and is not part of this JIT proof.
     if true || always_true() { 42 } else { 0 }
 }
 main()

@@ -478,6 +478,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[error.clone()]);
@@ -515,6 +517,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[]);
@@ -545,6 +549,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let repairs = generate_repairs(&error, &mir, &[]);
@@ -577,6 +583,8 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         assert!(analysis.errors[0].repairs.is_empty());

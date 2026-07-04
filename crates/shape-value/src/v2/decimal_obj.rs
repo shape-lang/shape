@@ -28,7 +28,7 @@
 //! struct. No nested buffer (Decimal payload is inline), so `drop` only frees
 //! `Layout::new::<Self>()`.
 
-use super::heap_header::{HeapHeader, HEAP_KIND_V2_DECIMAL};
+use super::heap_header::{HEAP_KIND_V2_DECIMAL, HeapHeader};
 use rust_decimal::Decimal;
 
 /// Refcounted, repr(C) Decimal carrier for v2 runtime.
@@ -100,6 +100,8 @@ unsafe impl super::heap_element::HeapElement for DecimalObj {
 }
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use rust_decimal::prelude::FromPrimitive;
@@ -161,7 +163,11 @@ mod tests {
             let ptr = DecimalObj::new(Decimal::ONE);
             let base = ptr as usize;
             let value_offset = &(*ptr).value as *const _ as usize - base;
-            assert_eq!(value_offset, DecimalObj::OFFSET_VALUE, "value must be at offset 8");
+            assert_eq!(
+                value_offset,
+                DecimalObj::OFFSET_VALUE,
+                "value must be at offset 8"
+            );
             DecimalObj::drop(ptr);
         }
     }

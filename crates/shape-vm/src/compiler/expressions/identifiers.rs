@@ -5,7 +5,7 @@ use shape_ast::ast::Span;
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::suggestions::suggest_variable;
 
-use crate::type_tracking::{BindingStorageClass, NumericType, StorageHint, VariableKind};
+use crate::type_tracking::{BindingStorageClass, StorageHint, VariableKind};
 
 use super::super::BytecodeCompiler;
 
@@ -74,40 +74,12 @@ impl BytecodeCompiler {
         result
     }
 
-    /// Map a storage hint to a numeric type (if applicable).
-    /// Width-specific hints (Int8, UInt16, etc.) → IntWidth(w);
-    /// default Int64 → Int; Float64 → Number.
-    pub(in crate::compiler) fn storage_hint_to_numeric_type(
-        hint: StorageHint,
-    ) -> Option<NumericType> {
-        use shape_ast::IntWidth;
-        match hint {
-            StorageHint::Int8 | StorageHint::NullableInt8 => {
-                Some(NumericType::IntWidth(IntWidth::I8))
-            }
-            StorageHint::UInt8 | StorageHint::NullableUInt8 => {
-                Some(NumericType::IntWidth(IntWidth::U8))
-            }
-            StorageHint::Int16 | StorageHint::NullableInt16 => {
-                Some(NumericType::IntWidth(IntWidth::I16))
-            }
-            StorageHint::UInt16 | StorageHint::NullableUInt16 => {
-                Some(NumericType::IntWidth(IntWidth::U16))
-            }
-            StorageHint::Int32 | StorageHint::NullableInt32 => {
-                Some(NumericType::IntWidth(IntWidth::I32))
-            }
-            StorageHint::UInt32 | StorageHint::NullableUInt32 => {
-                Some(NumericType::IntWidth(IntWidth::U32))
-            }
-            StorageHint::UInt64 | StorageHint::NullableUInt64 => {
-                Some(NumericType::IntWidth(IntWidth::U64))
-            }
-            _ if hint.is_default_int_family() => Some(NumericType::Int),
-            _ if hint.is_float_family() => Some(NumericType::Number),
-            _ => None,
-        }
-    }
+    // U4-4: `storage_hint_to_numeric_type` and
+    // `referent_type_name_to_numeric_type` are DELETED. They mapped a slot
+    // storage hint / referent type name to a `NumericType` only to stamp the
+    // deleted `last_expr_numeric_type` register on a variable / reference read.
+    // A downstream binop derives the operand's numeric kind from the one
+    // resolved Type (`numeric_type_of` → `infer_expr_type`).
 
     /// Compile an identifier (variable or function reference)
     pub(in crate::compiler) fn compile_expr_identifier(
@@ -180,7 +152,6 @@ impl BytecodeCompiler {
                 self.emit(Instruction::new(opcode, Some(Operand::Local(shared_idx))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = None;
                 return Ok(());
             }
             // Track A.1C.2b + Wave E: OwnedMutable (let mut) captures
@@ -205,18 +176,13 @@ impl BytecodeCompiler {
             // #17.
             if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name) {
                 debug_assert_eq!(upvalue_idx, owned_idx);
-                let opcode = match self
-                    .owned_mutable_capture_inner_kinds
-                    .get(name)
-                    .copied()
-                {
+                let opcode = match self.owned_mutable_capture_inner_kinds.get(name).copied() {
                     Some(kind) => crate::compiler::helpers::owned_mutable_typed_load_opcode(kind),
                     None => OpCode::LoadOwnedMutableCapture,
                 };
                 self.emit(Instruction::new(opcode, Some(Operand::Local(owned_idx))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = None;
                 return Ok(());
             }
             self.emit(Instruction::new(
@@ -225,7 +191,6 @@ impl BytecodeCompiler {
             ));
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = None;
             return Ok(());
         }
         if let Some(local_idx) = self.resolve_local(name) {
@@ -251,6 +216,22 @@ impl BytecodeCompiler {
                     OpCode::DerefLoad,
                     Some(Operand::Local(local_idx)),
                 ));
+                // ADR-006 §2.7.30 (GapA) — JIT deopt for first-class reference
+                // value locals (`let r = &n`) read in value position (`r + 1`,
+                // `-r`). The VM `DerefLoad` reads the referent through the
+                // reference's stack-cell carrier; the JIT models such a borrow
+                // as a throwaway-stack-cell snapshot and, fed into a typed
+                // numeric opcode, reads the raw reference pointer instead of the
+                // referent (VM=6, JIT=<stack-pointer> observed). The ref-PARAM
+                // deref path has a dedicated JIT lowering (`ref_param_slots`
+                // short-circuit in `mir_compiler/rvalues.rs`) and is correct, so
+                // this is scoped to `reference_value_locals` only. Whole-program
+                // deopt to the interpreter preserves VM == JIT semantics —
+                // identical shape + flag as the `-> &T` escape-promote deopt at
+                // `function_calls.rs` (`has_reference_escape_promotion`). JIT
+                // stack-cell-reference deref lowering is the root-cause v0.4
+                // JIT-lowering followup.
+                self.program.has_reference_escape_promotion = true;
             } else {
                 let source_loc = self.span_to_source_location(span);
                 self.check_read_allowed_in_current_context(
@@ -361,14 +342,11 @@ impl BytecodeCompiler {
             });
             self.last_expr_type_info = local_type;
             // Track numeric type for typed opcode emission. Post-§2.7.5.1:
-            // `info.storage_hint` is `Option<StorageHint>`, so we
-            // `.and_then` through both layers — `None` propagates "kind not
-            // yet proven" so no numeric type is recorded.
-            self.last_expr_numeric_type = self
-                .type_tracker
-                .get_local_type(local_idx)
-                .and_then(|info| info.storage_hint)
-                .and_then(Self::storage_hint_to_numeric_type);
+            // U4-4: the reference-value referent numeric-type stamp is DELETED
+            // (its sole purpose was to write the deleted `last_expr_numeric_type`
+            // register). A downstream `r + 1` on `let r = &n` now derives the
+            // referent's numeric type from the one resolved Type table — the
+            // U4-3 keystone consult projects `&int → int` at the reference read.
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
                 ShapeError::RuntimeError {
@@ -426,6 +404,21 @@ impl BytecodeCompiler {
                     OpCode::LoadModuleBinding,
                     Some(Operand::ModuleBinding(binding_idx)),
                 ));
+                // S1b var-copy independence (2026-06-21): a top-level
+                // `var copy = data` reads `data` via `LoadModuleBinding`
+                // (a shallow heap share). When the enclosing statement's
+                // MIR ownership decision is `DeepClone` (the `var`-still-
+                // live auto-clone), follow with `DeepCloneTop` so the copy
+                // is an INDEPENDENT deep value — otherwise `copy.push(99)`
+                // would mutate the source's TypedArray in place. Skipped
+                // inside an interpolated-string fragment (parser-local span
+                // collision risk, mirrors `emit_load_local_owned`).
+                if self.in_interpolation_expr_depth == 0
+                    && self.query_ownership_decision_enclosing(&span)
+                        == Some(crate::mir::analysis::OwnershipDecision::DeepClone)
+                {
+                    self.emit(Instruction::new(OpCode::DeepCloneTop, None));
+                }
             }
             // Track schema for typed merge optimization
             let binding_type = self.type_tracker.get_binding_type(binding_idx).cloned();
@@ -437,15 +430,10 @@ impl BytecodeCompiler {
                 }
             });
             self.last_expr_type_info = binding_type;
-            // Track numeric type for typed opcode emission. Post-§2.7.5.1:
-            // `info.storage_hint` is `Option<StorageHint>`, so we
-            // `.and_then` through both layers — `None` propagates "kind not
-            // yet proven" so no numeric type is recorded.
-            self.last_expr_numeric_type = self
-                .type_tracker
-                .get_binding_type(binding_idx)
-                .and_then(|info| info.storage_hint)
-                .and_then(Self::storage_hint_to_numeric_type);
+            // U4-4: the reference-value module-binding referent numeric-type
+            // stamp is DELETED (sole purpose was the deleted
+            // `last_expr_numeric_type` register). A downstream `r + 1` derives
+            // the referent's type from the one resolved Type table.
         } else if let Some(func_idx) = self.find_function(name) {
             let resolved_name = self.program.functions[func_idx].name.clone();
 
@@ -486,7 +474,6 @@ impl BytecodeCompiler {
             ));
             // Functions don't produce TypedObjects or numeric values
             self.last_expr_schema = None;
-            self.last_expr_numeric_type = None;
             self.last_expr_type_info = None;
         } else {
             // Collect available names for "Did you mean?" suggestion

@@ -26,7 +26,10 @@ impl BytecodeCompiler {
             Literal::Number(n) => Some(Constant::Number(*n)),
             Literal::Decimal(d) => Some(Constant::Decimal(*d)),
             Literal::String(s) => Some(Constant::String(s.clone())),
-            Literal::Char(c) => Some(Constant::Char(*c)),
+            // A char literal evaluates to its integer code point (operators.mdx
+            // "Character Literals"). `'A'` IS the int 65 — emit a plain int
+            // constant, not a distinct Char carrier. No char<->string coercion.
+            Literal::Char(c) => Some(Constant::Int(*c as i64)),
             Literal::FormattedString { .. } => unreachable!("handled above"),
             Literal::Bool(b) => Some(Constant::Bool(*b)),
             Literal::None => None,
@@ -55,9 +58,15 @@ impl BytecodeCompiler {
     }
 
     /// Compile binary operator
+    // Superseded by the strict-typing typed dispatch (`compile_binary_op_inner` /
+    // `helpers::emit_binary_op`); every arith/cmp/bitwise arm is `unreachable!`.
+    // Retained as the documented post-strict-typing reference path.
+    #[allow(dead_code)]
     pub(super) fn compile_binary_op(&mut self, op: &BinaryOp) -> Result<()> {
         let opcode = match op {
-            BinaryOp::Add => unreachable!("generic Add should be handled by helpers::emit_binary_op"),
+            BinaryOp::Add => {
+                unreachable!("generic Add should be handled by helpers::emit_binary_op")
+            }
             BinaryOp::Sub => unreachable!("generic Sub should be handled by typed dispatch"),
             BinaryOp::Mul => unreachable!("generic Mul should be handled by typed dispatch"),
             BinaryOp::Div => unreachable!("generic Div should be handled by typed dispatch"),
@@ -84,7 +93,9 @@ impl BytecodeCompiler {
             BinaryOp::GreaterEq => unreachable!("generic Gte should be handled by typed dispatch"),
             BinaryOp::LessEq => unreachable!("generic Lte should be handled by typed dispatch"),
             BinaryOp::Equal => unreachable!("generic Eq/Neq should be handled by typed dispatch"),
-            BinaryOp::NotEqual => unreachable!("generic Eq/Neq should be handled by typed dispatch"),
+            BinaryOp::NotEqual => {
+                unreachable!("generic Eq/Neq should be handled by typed dispatch")
+            }
             BinaryOp::And => OpCode::And,
             BinaryOp::Or => OpCode::Or,
             BinaryOp::FuzzyEqual | BinaryOp::FuzzyGreater | BinaryOp::FuzzyLess => {
@@ -115,7 +126,9 @@ impl BytecodeCompiler {
     pub(super) fn compile_unary_op(&mut self, op: &UnaryOp) -> Result<()> {
         let opcode = match op {
             UnaryOp::Not => OpCode::Not,
-            UnaryOp::Neg => unreachable!("generic Neg should be handled by unary_ops::compile_expr_unary_op"),
+            UnaryOp::Neg => {
+                unreachable!("generic Neg should be handled by unary_ops::compile_expr_unary_op")
+            }
             // c5 Phase B (v0.3.3, 2026-05-28) — `~x` handled exclusively
             // by the strict-typing gate at `unary_ops.rs:28`. That arm
             // emits typed `BitNotInt` on a proven-int operand and returns

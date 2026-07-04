@@ -9,6 +9,7 @@
 
 mod accessors;
 mod ffi_builder;
+mod kernel_ir;
 mod program;
 mod setup;
 mod strategy;

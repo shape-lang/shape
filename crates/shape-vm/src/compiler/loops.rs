@@ -67,8 +67,9 @@ impl BytecodeCompiler {
         self.set_local_type_info(end_local, "int");
 
         // compile(start) → [NumberToInt if float] → StoreLocal(counter)
+        // U4-4: endpoint numeric kind derived from the one resolved Type.
         self.compile_expr(start_expr)?;
-        let start_nt = self.last_expr_numeric_type;
+        let start_nt = self.numeric_type_of(start_expr);
         if matches!(start_nt, Some(NumericType::Number)) {
             self.emit(Instruction::simple(OpCode::NumberToInt));
         }
@@ -79,7 +80,7 @@ impl BytecodeCompiler {
 
         // compile(end) → [NumberToInt if float] → StoreLocal(__end)
         self.compile_expr(end_expr)?;
-        let end_nt = self.last_expr_numeric_type;
+        let end_nt = self.numeric_type_of(end_expr);
         if matches!(end_nt, Some(NumericType::Number)) {
             self.emit(Instruction::simple(OpCode::NumberToInt));
         }
@@ -188,6 +189,7 @@ impl BytecodeCompiler {
         self.loop_stack.push(loop_ctx);
 
         // Compile body
+        self.push_drop_scope();
         self.push_repeating_reference_release_barrier();
         let body_result = (|| -> Result<()> {
             for (idx, stmt) in while_loop.body.iter().enumerate() {
@@ -209,6 +211,7 @@ impl BytecodeCompiler {
         })();
         self.pop_repeating_reference_release_barrier();
         body_result?;
+        self.pop_drop_scope()?;
 
         // Jump back to LoopStart
         let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
@@ -306,14 +309,17 @@ impl BytecodeCompiler {
 
         match &for_loop.init {
             ForInit::ForIn { pattern, iter } => {
+                if matches!(iter, Expr::Array(elements, _) if elements.is_empty()) {
+                    return Ok(());
+                }
+
                 self.push_scope();
 
                 // Try range counter loop specialization (non-async only)
                 if !for_loop.is_async {
-                    if let Some(rcl) = self.try_begin_range_counter_loop(
-                        pattern.as_identifier(),
-                        iter,
-                    )? {
+                    if let Some(rcl) =
+                        self.try_begin_range_counter_loop(pattern.as_identifier(), iter)?
+                    {
                         self.apply_binding_semantics_to_pattern_bindings(
                             pattern,
                             true,
@@ -330,6 +336,7 @@ impl BytecodeCompiler {
                         });
 
                         // Compile body
+                        self.push_drop_scope();
                         self.push_repeating_reference_release_barrier();
                         let body_result = (|| -> Result<()> {
                             for (idx, stmt) in for_loop.body.iter().enumerate() {
@@ -352,6 +359,7 @@ impl BytecodeCompiler {
                         })();
                         self.pop_repeating_reference_release_barrier();
                         body_result?;
+                        self.pop_drop_scope()?;
 
                         self.end_range_counter_loop(&rcl);
 
@@ -385,6 +393,29 @@ impl BytecodeCompiler {
                     Some(Operand::Local(idx_local)),
                 ));
 
+                if let shape_ast::ast::DestructurePattern::Array(items) = pattern {
+                    for item in items {
+                        match item {
+                            shape_ast::ast::DestructurePattern::Identifier(_, _) => {}
+                            shape_ast::ast::DestructurePattern::Rest(_) => {
+                                return Err(ShapeError::SemanticError {
+                                    message: "array rest-pattern (`[a, ...rest]`) is not supported"
+                                        .to_string(),
+                                    location: None,
+                                });
+                            }
+                            _ => {
+                                return Err(ShapeError::SemanticError {
+                                    message:
+                                        "Nested patterns in for-loop array destructure not supported"
+                                            .to_string(),
+                                    location: None,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Pre-declare locals for destructuring pattern
                 // This ensures the locals are in scope for the entire loop
                 for name in pattern.get_identifiers() {
@@ -408,12 +439,47 @@ impl BytecodeCompiler {
                 // recover them when needed.
                 if let Some(var_name) = pattern.as_identifier() {
                     if let Some(local_idx) = self.resolve_local(var_name) {
-                        if let Some(elem_type) = self.iter_element_type_name(iter) {
-                            self.set_local_type_info(local_idx, &elem_type);
+                        let name_from_string_path = self.iter_element_type_name(iter);
+                        if let Some(ref elem_type) = name_from_string_path {
+                            self.set_local_type_info(local_idx, elem_type);
+                        }
+                        // R3-subcase struct-array HOF (strict-flip, 2026-06-15):
+                        // carry the element's full ConcreteType (struct/enum
+                        // identity, not just the tracker name string) so a
+                        // `for u in users { u.score }` field access — and the
+                        // `result.push(item)` accumulator in the monomorphized
+                        // `Vec.filter` body — resolves `u`/`item` to the named
+                        // struct rather than `unknown`.
+                        if let Some(elem_ct) = self.iter_element_concrete_type(iter) {
+                            // ROOT-1 (strict-flip, 2026-06-18): the string-name
+                            // path (`iter_element_type_name`) only resolves
+                            // primitive-element literals + name-tracked bindings;
+                            // an inline struct-array literal (`for p in [R{..}]`)
+                            // or an inferred struct-array binding fell to the
+                            // ConcreteType side-table ONLY, leaving the tracker
+                            // NAME `unknown` so `p.age` failed to infer. Derive
+                            // the tracker NAME from the proven element ConcreteType
+                            // when the string path missed. ConcreteType IS the
+                            // proof (ADR-006 §2.7.5); a no-stable-name shape stamps
+                            // nothing (surface-and-stop preserved).
+                            if name_from_string_path.is_none() {
+                                if let Some(tn) =
+                                    crate::compiler::patterns::binding::concrete_type_tracker_name(
+                                        &elem_ct,
+                                    )
+                                {
+                                    self.set_local_type_info(local_idx, &tn);
+                                }
+                            }
+                            crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                self,
+                                crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                elem_ct,
+                                crate::compiler::BindingConcreteFactSource::IteratorElement,
+                            );
                         }
                     }
                 }
-
                 let loop_start = self.program.current_offset();
                 self.emit(Instruction::simple(OpCode::LoopStart));
                 let loop_ctx = LoopContext {
@@ -450,6 +516,97 @@ impl BytecodeCompiler {
                 // Destructure value into loop variable(s)
                 self.compile_destructure_pattern(pattern)?;
 
+                // T1 sub-case (d) (strict-flip, 2026-06-20): the STATEMENT-form
+                // for-in (`for {x, y} in points`) destructure-binds each field
+                // via `compile_destructure_pattern` but — unlike the expression-
+                // form `compile_for_expr` — never stamped the bound field
+                // locals' tracker types, so a body `total + x + y` rejected the
+                // destructured operands as `unknown`. Stamp each field from the
+                // element's type: a NAMED struct via the schema field type, or an
+                // ANONYMOUS object-literal element via its inferred field
+                // annotation (the shared inference engine resolved it). The
+                // element type IS the proof (ADR-006 §2.7.5); a field with no
+                // scalar tracker name stamps nothing (surface-and-stop).
+                if let shape_ast::ast::DestructurePattern::Object(fields) = pattern {
+                    let mut named_done = false;
+                    if let Some(shape_value::v2::ConcreteType::Struct(layout)) =
+                        self.iter_element_concrete_type(iter)
+                    {
+                        if let Some(struct_name) = layout.name.as_ref().map(|n| n.to_string()) {
+                            for f in fields {
+                                let binder = f
+                                    .pattern
+                                    .as_identifier()
+                                    .unwrap_or(f.key.as_str())
+                                    .to_string();
+                                if let Some(local_idx) = self.resolve_local(&binder) {
+                                    if let Some(tn) =
+                                        self.struct_field_tracker_type_name(&struct_name, &f.key)
+                                    {
+                                        self.set_local_type_info(local_idx, &tn);
+                                    }
+                                }
+                            }
+                            named_done = true;
+                        }
+                    }
+                    if !named_done {
+                        if let Some(elem_fields) = self.anonymous_object_element_fields(iter) {
+                            for f in fields {
+                                let binder = f
+                                    .pattern
+                                    .as_identifier()
+                                    .unwrap_or(f.key.as_str())
+                                    .to_string();
+                                if let Some(local_idx) = self.resolve_local(&binder) {
+                                    if let Some(tn) = elem_fields
+                                        .iter()
+                                        .find(|ef| ef.name == f.key)
+                                        .and_then(|ef| {
+                                            crate::compiler::loops::type_annotation_scalar_tracker_name(
+                                                &ef.type_annotation,
+                                            )
+                                        })
+                                    {
+                                        self.set_local_type_info(local_idx, &tn);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Statement-form `for [a, b] in pairs`: the extracted loop
+                // element is `Array<T>`, so each top-level binder is `T`.
+                // `compile_destructure_pattern` cannot derive that from the
+                // iterator expression's outer `Array<Array<T>>` fact.
+                if let shape_ast::ast::DestructurePattern::Array(items) = pattern {
+                    if let Some(shape_value::v2::ConcreteType::Array(element_ct)) =
+                        self.iter_element_concrete_type(iter)
+                    {
+                        for item in items {
+                            let shape_ast::ast::DestructurePattern::Identifier(name, _) = item
+                            else {
+                                continue;
+                            };
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                    self,
+                                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                    element_ct.as_ref().clone(),
+                                    crate::compiler::BindingConcreteFactSource::IteratorElement,
+                                );
+                                if let Some(tn) =
+                                    crate::compiler::patterns::binding::concrete_type_tracker_name(
+                                        element_ct.as_ref(),
+                                    )
+                                {
+                                    self.set_local_type_info(local_idx, &tn);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Increment index before body so continue jumps advance correctly
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
@@ -470,6 +627,7 @@ impl BytecodeCompiler {
                 self.loop_stack.push(loop_ctx);
 
                 // Compile body
+                self.push_drop_scope();
                 self.push_repeating_reference_release_barrier();
                 let body_result = (|| -> Result<()> {
                     for (idx, stmt) in for_loop.body.iter().enumerate() {
@@ -492,6 +650,7 @@ impl BytecodeCompiler {
                 })();
                 self.pop_repeating_reference_release_barrier();
                 body_result?;
+                self.pop_drop_scope()?;
 
                 // Jump back to LoopStart
                 let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
@@ -550,6 +709,7 @@ impl BytecodeCompiler {
                 self.loop_stack.push(loop_ctx);
 
                 // Compile body
+                self.push_drop_scope();
                 self.push_repeating_reference_release_barrier();
                 let body_result = (|| -> Result<()> {
                     for (idx, stmt) in for_loop.body.iter().enumerate() {
@@ -572,6 +732,7 @@ impl BytecodeCompiler {
                 })();
                 self.pop_repeating_reference_release_barrier();
                 body_result?;
+                self.pop_drop_scope()?;
 
                 // Update
                 loop_ctx = self
@@ -619,14 +780,19 @@ impl BytecodeCompiler {
             });
         }
 
+        if matches!(&*for_expr.iterable, Expr::Array(elements, _) if elements.is_empty()) {
+            self.emit(Instruction::simple(OpCode::PushNull));
+            return Ok(());
+        }
+
         self.push_scope();
 
         // Try range counter specialization (non-async, simple identifier pattern)
         if !for_expr.is_async {
             let pattern_name = match &for_expr.pattern {
-                    shape_ast::ast::Pattern::Identifier(name) => Some(name.as_str()),
-                    _ => None,
-                };
+                shape_ast::ast::Pattern::Identifier { name, .. } => Some(name.as_str()),
+                _ => None,
+            };
             if let Some(rcl) =
                 self.try_begin_range_counter_loop(pattern_name, &for_expr.iterable)?
             {
@@ -708,7 +874,7 @@ impl BytecodeCompiler {
         ));
 
         match &for_expr.pattern {
-            shape_ast::ast::Pattern::Identifier(name) => {
+            shape_ast::ast::Pattern::Identifier { name, .. } => {
                 elem_local = self.declare_local(name)?;
                 is_object_destructure = false;
             }
@@ -716,7 +882,7 @@ impl BytecodeCompiler {
                 elem_local = self.declare_local("__elem")?;
                 for (key, pat) in fields {
                     let field_name = match pat {
-                        shape_ast::ast::Pattern::Identifier(n) => n.as_str(),
+                        shape_ast::ast::Pattern::Identifier { name, .. } => name.as_str(),
                         _ => key.as_str(),
                     };
                     let local = self.declare_local(field_name)?;
@@ -728,7 +894,7 @@ impl BytecodeCompiler {
                 elem_local = self.declare_local("__elem")?;
                 for pat in patterns {
                     let name = match pat {
-                        shape_ast::ast::Pattern::Identifier(n) => n.clone(),
+                        shape_ast::ast::Pattern::Identifier { name, .. } => name.clone(),
                         shape_ast::ast::Pattern::Wildcard => "__discard".to_string(),
                         _ => {
                             return Err(ShapeError::RuntimeError {
@@ -767,9 +933,103 @@ impl BytecodeCompiler {
         // `compile_for_loop`; `for x in arr` over `Array<int>` now
         // declares `x` with tracker type `int` so `sum + x` emits
         // `AddInt` rather than falling into trait dispatch.
-        if let shape_ast::ast::Pattern::Identifier(_) = &for_expr.pattern {
-            if let Some(elem_type) = self.iter_element_type_name(&for_expr.iterable) {
-                self.set_local_type_info(elem_local, &elem_type);
+        if let shape_ast::ast::Pattern::Identifier { .. } = &for_expr.pattern {
+            let name_from_string_path = self.iter_element_type_name(&for_expr.iterable);
+            if let Some(ref elem_type) = name_from_string_path {
+                self.set_local_type_info(elem_local, elem_type);
+            }
+            // R3-subcase struct-array HOF (strict-flip, 2026-06-15): see the
+            // matching site in `compile_for_loop` — carry the struct/enum
+            // element identity to the loop variable's ConcreteType.
+            if let Some(elem_ct) = self.iter_element_concrete_type(&for_expr.iterable) {
+                // ROOT-1 (strict-flip, 2026-06-18): an inline struct-array
+                // literal (`for p in [R{..}]`) leaves the string-name path
+                // empty; derive the tracker NAME from the proven element
+                // ConcreteType so `p.age` is field-accessible (the read sites
+                // consult the tracker NAME, not the ConcreteType side-table).
+                // ConcreteType IS the proof (ADR-006 §2.7.5). Mirror of the
+                // `compile_for_loop` site.
+                if name_from_string_path.is_none() {
+                    if let Some(tn) =
+                        crate::compiler::patterns::binding::concrete_type_tracker_name(&elem_ct)
+                    {
+                        self.set_local_type_info(elem_local, &tn);
+                    }
+                }
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(elem_local),
+                    elem_ct,
+                    crate::compiler::BindingConcreteFactSource::IteratorElement,
+                );
+            }
+        }
+        // ROOT-1 (strict-flip, 2026-06-18): destructuring for-in
+        // (`for {x, y} in [P{..}]` / `for [a, b] in [[1,2]]`) previously left
+        // EVERY bound field/element untyped — the prior code stamped only the
+        // single-identifier loop var. Recover the element's named struct
+        // ConcreteType and stamp each destructured field's tracker type from
+        // the struct schema field types (object form) so `x + y` infers. The
+        // element ConcreteType IS the proof (ADR-006 §2.7.5); a non-struct or
+        // unresolvable element stamps nothing (surface-and-stop preserved).
+        if is_object_destructure {
+            let mut stamped_via_named = false;
+            if let Some(shape_value::v2::ConcreteType::Struct(layout)) =
+                self.iter_element_concrete_type(&for_expr.iterable)
+            {
+                if let Some(struct_name) = layout.name.as_ref().map(|n| n.to_string()) {
+                    for (key, local) in &destructure_fields {
+                        if let Some(tn) = self.struct_field_tracker_type_name(&struct_name, key) {
+                            self.set_local_type_info(*local, &tn);
+                        }
+                    }
+                    stamped_via_named = true;
+                }
+            }
+            // T1 sub-case (d) (strict-flip, 2026-06-20): an ANONYMOUS
+            // object-literal element (`for {x, y} in [{x: 1, y: 2}]` /
+            // `for {x, y} in points` where `points = [{x:1,y:2}]`) has no
+            // registered struct NAME, so the named path above misses and the
+            // destructured fields erased — `x + y` rejected as
+            // `unknown + unknown`. Recover each field's tracker type from a
+            // representative element OBJECT LITERAL: the field-value expression's
+            // proven ConcreteType IS the proof (ADR-006 §2.7.5). A field with no
+            // statically-mappable kind stamps nothing (surface-and-stop). PER-
+            // SITE-ARM, int != number preserved (the field value's own kind).
+            if !stamped_via_named {
+                let af = self.anonymous_object_element_fields(&for_expr.iterable);
+                if let Some(elem_fields) = af {
+                    for (key, local) in &destructure_fields {
+                        if let Some(tn) =
+                            elem_fields.iter().find(|f| f.name == *key).and_then(|f| {
+                                crate::compiler::loops::type_annotation_scalar_tracker_name(
+                                    &f.type_annotation,
+                                )
+                            })
+                        {
+                            self.set_local_type_info(*local, &tn);
+                        }
+                    }
+                }
+            }
+        }
+        if is_array_destructure {
+            if let Some(shape_value::v2::ConcreteType::Array(element_ct)) =
+                self.iter_element_concrete_type(&for_expr.iterable)
+            {
+                for local in &array_destructure_locals {
+                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                        self,
+                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(*local),
+                        element_ct.as_ref().clone(),
+                        crate::compiler::BindingConcreteFactSource::IteratorElement,
+                    );
+                    if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(
+                        element_ct.as_ref(),
+                    ) {
+                        self.set_local_type_info(*local, &tn);
+                    }
+                }
             }
         }
 
@@ -955,31 +1215,30 @@ impl BytecodeCompiler {
     /// of a list-comprehension element expression that just compiled.
     ///
     /// Reads, in order:
-    ///   1. `last_expr_numeric_type` — set when the element is a numeric
-    ///      literal / operation (covers `x * 2`, `x + 1`, range-counter
-    ///      loop variables which the range specialization types as `int`).
+    ///   1. The element's one resolved Type (`numeric_type_of` →
+    ///      `infer_expr_type`) — covers `x * 2`, `x + 1`, range-counter loop
+    ///      variables which the range specialization types as `int`. (U4-4:
+    ///      this REPLACES the deleted ambient `last_expr_numeric_type`
+    ///      register.)
     ///   2. `last_expr_type_info`'s `storage_hint` — covers the `bool`
-    ///      case (a comparison result clears `last_expr_numeric_type` but
-    ///      stamps `StorageHint::Bool`).
+    ///      case (a comparison result stamps `StorageHint::Bool`).
     ///   3. `concrete_type_for_expr` on the element AST — covers a bare
     ///      identifier loop variable bound by a generic-iterator clause
     ///      (`[x for x in src]`), where the kind lives in the type tracker.
     ///
-    /// Per ADR-006 §2.7.5 every signal is a producer-side type proof set
-    /// when the element compiled (or a structural type-tracker fact) —
-    /// never fabricated, never decoded from runtime bits. Returns `None`
-    /// when no scalar kind is proven; the caller surfaces a clean compile
-    /// error.
+    /// Per ADR-006 §2.7.5 every signal is a producer-side type proof (or a
+    /// structural type-tracker fact) — never fabricated, never decoded from
+    /// runtime bits. Returns `None` when no scalar kind is proven; the caller
+    /// surfaces a clean compile error.
     fn resolve_pushed_element_typed_array_kind(
-        &self,
+        &mut self,
         element: &Expr,
     ) -> Option<super::v2_typed_emission::TypedArrayKind> {
         use super::monomorphization::type_resolution::concrete_type_for_expr;
         use super::v2_typed_emission::{
-            should_use_typed_array, typed_array_kind_from_numeric_type,
-            TypedArrayKind,
+            TypedArrayKind, should_use_typed_array, typed_array_kind_from_numeric_type,
         };
-        if let Some(nt) = self.last_expr_numeric_type {
+        if let Some(nt) = self.numeric_type_of(element) {
             return Some(typed_array_kind_from_numeric_type(nt));
         }
         if let Some(info) = &self.last_expr_type_info {
@@ -1040,8 +1299,7 @@ impl BytecodeCompiler {
                 // identifies the v2 typed-array carrier for both the VM
                 // and JIT (no generic-carrier slot-kind ambiguity).
                 for &site in &push_sites {
-                    self.program.instructions[site] =
-                        Instruction::simple(kind.push_opcode());
+                    self.program.instructions[site] = Instruction::simple(kind.push_opcode());
                 }
                 self.v2_typed_array_locals.insert(result_local, kind);
                 // Signal the typed-array kind to the enclosing `let c = [...]`
@@ -1081,16 +1339,12 @@ impl BytecodeCompiler {
         // receiver tag. Reset to the array shape — mirrors the tail of
         // `compile_expr_array`.
         if let Some(kind) = element_kind {
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::named(
-                    super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind)
-                        .to_string(),
-                ),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind).to_string(),
+            ));
         } else {
             self.last_expr_type_info = None;
         }
-        self.last_expr_numeric_type = None;
         self.last_expr_schema = None;
 
         self.pop_scope();
@@ -1148,10 +1402,9 @@ impl BytecodeCompiler {
         let clause = &clauses[0];
 
         // Try range counter specialization for this comprehension clause
-        if let Some(rcl) = self.try_begin_range_counter_loop(
-            clause.pattern.as_identifier(),
-            &clause.iterable,
-        )? {
+        if let Some(rcl) =
+            self.try_begin_range_counter_loop(clause.pattern.as_identifier(), &clause.iterable)?
+        {
             self.apply_binding_semantics_to_pattern_bindings(
                 &clause.pattern,
                 true,
@@ -1326,8 +1579,7 @@ impl BytecodeCompiler {
                         }
                     }
                 }
-                _ => concrete_type_for_expr(self, elem)
-                    .and_then(|ct| should_use_typed_array(&ct)),
+                _ => concrete_type_for_expr(self, elem).and_then(|ct| should_use_typed_array(&ct)),
             };
             let elem_kind = elem_kind?;
             match acc {
@@ -1352,10 +1604,7 @@ impl BytecodeCompiler {
         let result_local = self.declare_local("__array_result")?;
         match accumulator_kind {
             Some(kind) => {
-                self.emit(Instruction::new(
-                    kind.new_opcode(),
-                    Some(Operand::Count(0)),
-                ));
+                self.emit(Instruction::new(kind.new_opcode(), Some(Operand::Count(0))));
                 self.v2_typed_array_locals.insert(result_local, kind);
                 // Signal the kind to the enclosing `let b = [...spread]`
                 // binding path so the destination slot is recorded as a
@@ -1376,6 +1625,8 @@ impl BytecodeCompiler {
                 });
             }
         }
+        let accumulator_kind =
+            accumulator_kind.expect("spread accumulator kind was validated above");
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(result_local)),
@@ -1399,8 +1650,9 @@ impl BytecodeCompiler {
                         let end_local = self.declare_local(&format!("__spread_end_{idx}"))?;
 
                         // Compile start → [NumberToInt if float] → store
+                        // U4-4: endpoint numeric kind from the one resolved Type.
                         self.compile_expr(start_expr)?;
-                        let start_nt = self.last_expr_numeric_type;
+                        let start_nt = self.numeric_type_of(start_expr);
                         if matches!(start_nt, Some(NumericType::Number)) {
                             self.emit(Instruction::simple(OpCode::NumberToInt));
                         }
@@ -1411,7 +1663,7 @@ impl BytecodeCompiler {
 
                         // Compile end → [NumberToInt if float] → store
                         self.compile_expr(end_expr)?;
-                        let end_nt = self.last_expr_numeric_type;
+                        let end_nt = self.numeric_type_of(end_expr);
                         if matches!(end_nt, Some(NumericType::Number)) {
                             self.emit(Instruction::simple(OpCode::NumberToInt));
                         }
@@ -1447,11 +1699,7 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(counter_local)),
                         ));
-                        self.emit(Instruction::simple(OpCode::ArrayPush));
-                        self.emit(Instruction::new(
-                            OpCode::StoreLocal,
-                            Some(Operand::Local(result_local)),
-                        ));
+                        self.emit(Instruction::simple(accumulator_kind.push_opcode()));
 
                         // Increment counter
                         self.emit(Instruction::new(
@@ -1470,8 +1718,7 @@ impl BytecodeCompiler {
                             Some(Operand::Local(counter_local)),
                         ));
 
-                        let offset =
-                            loop_start as i32 - self.program.current_offset() as i32 - 1;
+                        let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
                         self.emit(Instruction::new(
                             OpCode::Jump,
                             Some(Operand::Offset(offset)),
@@ -1482,15 +1729,13 @@ impl BytecodeCompiler {
                         // Generic iterator path for non-range spreads
                         self.plan_flexible_binding_escape_from_expr(inner);
                         self.compile_expr(inner)?;
-                        let iter_local =
-                            self.declare_local(&format!("__spread_iter_{idx}"))?;
+                        let iter_local = self.declare_local(&format!("__spread_iter_{idx}"))?;
                         self.emit(Instruction::new(
                             OpCode::StoreLocal,
                             Some(Operand::Local(iter_local)),
                         ));
 
-                        let idx_local =
-                            self.declare_local(&format!("__spread_idx_{idx}"))?;
+                        let idx_local = self.declare_local(&format!("__spread_idx_{idx}"))?;
                         let zero_const = self.program.add_constant(Constant::Int(0));
                         self.emit(Instruction::new(
                             OpCode::PushConst,
@@ -1527,11 +1772,7 @@ impl BytecodeCompiler {
                             Some(Operand::Local(idx_local)),
                         ));
                         self.emit(Instruction::simple(OpCode::IterNext));
-                        self.emit(Instruction::simple(OpCode::ArrayPush));
-                        self.emit(Instruction::new(
-                            OpCode::StoreLocal,
-                            Some(Operand::Local(result_local)),
-                        ));
+                        self.emit(Instruction::simple(accumulator_kind.push_opcode()));
 
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
@@ -1548,8 +1789,7 @@ impl BytecodeCompiler {
                             Some(Operand::Local(idx_local)),
                         ));
 
-                        let offset =
-                            loop_start as i32 - self.program.current_offset() as i32 - 1;
+                        let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
                         self.emit(Instruction::new(
                             OpCode::Jump,
                             Some(Operand::Offset(offset)),
@@ -1565,11 +1805,7 @@ impl BytecodeCompiler {
                     ));
                     self.plan_flexible_binding_escape_from_expr(elem);
                     self.compile_expr(elem)?;
-                    self.emit(Instruction::simple(OpCode::ArrayPush));
-                    self.emit(Instruction::new(
-                        OpCode::StoreLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
+                    self.emit(Instruction::simple(accumulator_kind.push_opcode()));
                 }
             }
         }
@@ -1582,21 +1818,97 @@ impl BytecodeCompiler {
         // Reset `last_expr_*` to the array shape so the enclosing
         // `let b = [...spread]` binding records `b` as an array, not as
         // the bare element scalar the last spread element left behind.
-        if let Some(kind) = accumulator_kind {
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::named(
-                    super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind)
-                        .to_string(),
-                ),
-            );
-        } else {
-            self.last_expr_type_info = None;
-        }
-        self.last_expr_numeric_type = None;
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+            super::v2_typed_emission::vec_type_name_for_typed_array_kind(accumulator_kind)
+                .to_string(),
+        ));
         self.last_expr_schema = None;
 
         self.pop_scope();
         Ok(())
+    }
+
+    /// ROOT-1 (strict-flip, 2026-06-18): the type-tracker NAME for a named
+    /// struct's field, used to type a destructuring for-in binding
+    /// (`for {x, y} in [P{..}]`). Reads the field's `FieldType` off the
+    /// registered struct schema and maps it to the tracker name the
+    /// strict-typing binop emitter recognises. Returns `None` for an unknown
+    /// struct / field or a field type with no stable scalar tracker name
+    /// (surface-and-stop preserved — the binder then stays untyped). The
+    /// schema field type IS the proof (ADR-006 §2.7.5).
+    pub(super) fn struct_field_tracker_type_name(
+        &self,
+        struct_name: &str,
+        field_name: &str,
+    ) -> Option<String> {
+        use shape_runtime::type_schema::FieldType;
+        let schema = self.type_tracker.schema_registry().get(struct_name)?;
+        let field = schema.get_field(field_name)?;
+        let name = match &field.field_type {
+            FieldType::I64 => "int",
+            FieldType::F64 => "number",
+            FieldType::Bool => "bool",
+            FieldType::String => "string",
+            FieldType::Decimal => "decimal",
+            FieldType::I8 => "i8",
+            FieldType::U8 => "u8",
+            FieldType::I16 => "i16",
+            FieldType::U16 => "u16",
+            FieldType::I32 => "i32",
+            FieldType::U32 => "u32",
+            FieldType::U64 => "u64",
+            FieldType::Object(name) => name.as_str(),
+            // Array / Option / HashMap / Any / Timestamp / enum payloads:
+            // no stable scalar tracker name — leave the binder untyped.
+            _ => return None,
+        };
+        Some(name.to_string())
+    }
+
+    /// T1 sub-case (d) (strict-flip, 2026-06-20): resolve the iterable of a
+    /// `for {x, y} in ITER` to its element's ANONYMOUS object field list, when
+    /// the element is a structural object (object-literal array) rather than a
+    /// named struct. Reads the SHARED inference engine's resolved iterable type
+    /// (the same engine that ran the full program pass, so `points`'s element
+    /// type `Object([{x:int},{y:int}])` is already solved) and unwraps one
+    /// array layer. Returns `None` for a non-array / non-object-element iterable
+    /// (the named-struct path handled those, or the binder stays untyped —
+    /// surface-and-stop). The resolved element annotation IS the proof
+    /// (ADR-006 §2.7.5); no fabrication.
+    pub(super) fn anonymous_object_element_fields(
+        &mut self,
+        iterable: &Expr,
+    ) -> Option<Vec<shape_ast::ast::ObjectTypeField>> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        // U4-6a: resolve the iterable's type from the inference engine's
+        // per-expression span table via `infer_expr_type`. The engine (post-U4
+        // span-table keystone) records the resolved type of the iterable
+        // expression — including an IDENTIFIER iterable bound to an anonymous
+        // object-literal array (`let points = [{x:1,y:2}]; for {x,y} in points`)
+        // — keyed by the use-site span, so a fresh `infer_expr` is no longer
+        // needed and no longer errors `UndefinedVariable`. The former
+        // `binding_object_element_fields` side-table (a frozen projection
+        // recorded at let-binding compile time to work around the empty-env
+        // re-run) is deleted: the engine span-table is the single source of
+        // truth for the element object's field annotations.
+        let iter_ty = self.infer_expr_type(iterable).ok()?;
+        let elem_ann = match &iter_ty {
+            Type::Concrete(TypeAnnotation::Array(inner)) => (**inner).clone(),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if args.len() == 1 && matches!(name.name(), "Array" | "Vec") =>
+            {
+                args[0].clone()
+            }
+            _ => return None,
+        };
+        // The element may still carry an unresolved structural object whose
+        // field annotations are concrete — return it. A non-object element
+        // (named struct handled elsewhere, or unresolved) yields None.
+        match elem_ann {
+            TypeAnnotation::Object(fields) => Some(fields),
+            _ => None,
+        }
     }
 
     /// Phase 3e helper: infer the element type name of a `for x in ITER`
@@ -1612,55 +1924,190 @@ impl BytecodeCompiler {
     /// compile time (HashMap iteration, custom iterables, untyped arrays).
     pub(super) fn iter_element_type_name(&self, iter: &Expr) -> Option<String> {
         match iter {
-            Expr::Identifier(name, _) => {
-                let type_name = if let Some(local_idx) = self.resolve_local(name) {
-                    self.type_tracker
-                        .get_local_type(local_idx)?
-                        .type_name
-                        .clone()?
-                } else if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
-                    let binding_idx = *self.module_bindings.get(&scoped)?;
-                    self.type_tracker
-                        .get_binding_type(binding_idx)?
-                        .type_name
-                        .clone()?
-                } else {
-                    return None;
-                };
-                Self::array_type_name_inner(&type_name)
+            Expr::Identifier(..) => {
+                // U4-5b: recover the iterable's element type NAME STRUCTURALLY —
+                // the element `ConcreteType` of the array binding, projected to a
+                // tracker name. Replaces the deleted read of the binding's
+                // `type_name` display string + `array_type_name_inner`
+                // `strip_prefix("Vec<")` re-parse (the read half of the Rep-B
+                // string round-trip). A non-array (or unresolved) iterable yields
+                // `None` — the loop var stays unstamped and SURFACEs.
+                self.iter_element_concrete_type(iter)
+                    .as_ref()
+                    .and_then(crate::compiler::patterns::binding::concrete_type_tracker_name)
             }
             Expr::Array(elems, _) => {
                 let first = elems.first()?;
                 match first {
-                    Expr::Literal(shape_ast::ast::Literal::Int(_), _) => {
-                        Some("int".to_string())
-                    }
+                    Expr::Literal(shape_ast::ast::Literal::Int(_), _) => Some("int".to_string()),
                     Expr::Literal(shape_ast::ast::Literal::Number(_), _) => {
                         Some("number".to_string())
                     }
-                    Expr::Literal(shape_ast::ast::Literal::Bool(_), _) => {
-                        Some("bool".to_string())
-                    }
+                    Expr::Literal(shape_ast::ast::Literal::Bool(_), _) => Some("bool".to_string()),
                     Expr::Literal(shape_ast::ast::Literal::String(_), _) => {
                         Some("string".to_string())
                     }
+                    // Wave 1b FlattenReduce (2026-06-16): a nested-array literal
+                    // element (`[[1,2],[3,4]]` → first = `[1,2]`) — the element
+                    // type NAME is `Array<innerName>`. Recurse to resolve the
+                    // inner element name; this lets `[[1,2],[3,4]].iter().flatten()`
+                    // un-nest one level (the flatten arm strips the `Array<...>`
+                    // wrapper to recover `int`). A nested literal whose inner
+                    // element is itself unresolvable yields `None`.
+                    Expr::Array(..) => {
+                        let inner = self.iter_element_type_name(first)?;
+                        Some(format!("Array<{inner}>"))
+                    }
                     _ => None,
                 }
+            }
+            // Wave 1b SEAM C (2026-06-15): `for x in arr.iter()` /
+            // `for x in arr.iter().filter(..)`. Element-type-PRESERVING
+            // iterator adapters yield the same element type as their
+            // receiver, so recurse on the receiver — without this
+            // propagation, `x` is untyped and `sum + x` falls out of
+            // `AddInt` into trait dispatch (the same gap `for x in arr`
+            // solves via the `Identifier` arm).
+            //
+            // Type-preserving adapters recursed here: `iter` (0 args),
+            // `filter`/`take`/`skip` (the source element type is unchanged).
+            // Type-CHANGING adapters (`map`/`flatMap`/`enumerate`) are NOT
+            // recursed — their element type is the closure's return type /
+            // an `[index, e]` pair, neither statically recoverable from the
+            // receiver; the loop var is left untyped (bidirectional
+            // inference recovers it where it can).
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } if matches!(method.as_str(), "iter" | "filter" | "take" | "skip")
+                && (method != "iter" || args.is_empty()) =>
+            {
+                self.iter_element_type_name(receiver)
+            }
+            // Wave 1b FlattenReduce (2026-06-16): `flatten()` un-nests ONE
+            // level, so its element type NAME is the INNER element of the
+            // receiver's (nested-array) element. Recover the receiver's element
+            // name (`Vec<int>` / `Array<int>`), then strip ONE more array
+            // wrapper to yield `int`. Parallels the type-checker's
+            // `ElementOf(ReceiverParam(0))` flatten signature. A receiver whose
+            // element name is not an array (or unresolvable) yields `None` —
+            // the closure param stays unstamped and SURFACEs.
+            flatten @ Expr::MethodCall { method, args, .. }
+                if method.as_str() == "flatten" && args.is_empty() =>
+            {
+                // U4-5b: `flatten()` un-nests one level — its element type is the
+                // INNER element of the nested-array receiver. Derive that element
+                // NAME STRUCTURALLY: `iter_element_concrete_type` already resolves
+                // the flatten element `ConcreteType` (un-nesting one `Array`
+                // layer), so project it to the tracker name. Replaces the deleted
+                // `array_type_name_inner` `strip_prefix("Array<")` re-parse of the
+                // receiver's element-name display string. A receiver whose element
+                // is not an array (or unresolvable) yields `None` — the closure
+                // param stays unstamped and SURFACEs.
+                self.iter_element_concrete_type(flatten)
+                    .as_ref()
+                    .and_then(crate::compiler::patterns::binding::concrete_type_tracker_name)
             }
             _ => None,
         }
     }
 
-    /// Strip an `Array<T>` / `Vec<T>` wrapper to recover the element type
-    /// name. Returns `None` for non-array tracker names.
-    fn array_type_name_inner(name: &str) -> Option<String> {
-        let trimmed = name.trim();
-        let inner = trimmed
-            .strip_prefix("Vec<")
-            .or_else(|| trimmed.strip_prefix("Array<"))?
-            .strip_suffix('>')?;
-        Some(inner.trim().to_string())
+    /// R3-subcase struct-array HOF (strict-flip, 2026-06-15): recover the loop
+    /// variable's element [`ConcreteType`] from the iterable.
+    ///
+    /// Parallels [`iter_element_type_name`] but returns the full `ConcreteType`
+    /// rather than a tracker name string. This is the load-bearing fix for
+    /// `for u in users { ... }` / `users.iter().filter(|u| u.score > 85)` where
+    /// `users: Array<User>`: the string-name path records the loop var's tracker
+    /// type as `"User"`, but `concrete_type_for_expr(u)` →
+    /// `identifier_concrete_type`'s `concrete_type_from_type_name` fallback only
+    /// recognizes `Vec<...>` head-names — a bare struct name yields `None`, so
+    /// `u.score` (and the `result.push(item)` accumulator in the monomorphized
+    /// `Vec.filter` body) saw `u: unknown`. Seeding
+    /// an explicit binding fact for `elem_local` with the element
+    /// `ConcreteType::Struct(named)` carries the struct identity to field
+    /// access / accumulator resolution.
+    ///
+    /// Derivation is type-proven (ADR-006 §2.7.5): the element type is the
+    /// inner `T` of the iterable's already-resolved `ConcreteType::Array(T)`
+    /// (recorded at the binding's let-statement / literal span). A non-array or
+    /// unresolvable iterable yields `None` — the loop var stays unstamped and
+    /// the existing string-name path / bidirectional inference is unchanged.
+    pub(super) fn iter_element_concrete_type(
+        &self,
+        iter: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        use shape_value::v2::ConcreteType;
+        // Type-preserving iterator adapters yield the receiver's element type;
+        // recurse on the receiver (mirrors the `iter_element_type_name`
+        // MethodCall arm). Type-CHANGING adapters (`map`/`flatMap`/`enumerate`)
+        // are not recursed — their element type is not statically recoverable
+        // from the receiver here.
+        if let Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = iter
+        {
+            if matches!(method.as_str(), "iter" | "filter" | "take" | "skip")
+                && (method != "iter" || args.is_empty())
+            {
+                return self.iter_element_concrete_type(receiver);
+            }
+            // Wave 1b FlattenReduce (2026-06-16): `flatten()` removes ONE level
+            // of nesting — its element type is the INNER element type of the
+            // nested-array receiver (`Iterator<Array<T>>.flatten() ->
+            // Iterator<T>`). Recover the receiver's element `ConcreteType`
+            // (itself an `Array<T>` for a well-typed nested receiver), then
+            // strip the inner `Array` to yield `T`. This parallels the
+            // type-checker's `ElementOf(ReceiverParam(0))` flatten signature.
+            // A receiver whose element is not an array (or unresolvable) yields
+            // `None` — the closure param stays unstamped and SURFACEs. (Driven
+            // off the same recursion as the type-preserving adapters; for an
+            // inline nested literal the name-based `iter_element_type_name` path
+            // resolves first, so this serves the let-bound `ConcreteType::Array`
+            // receivers whose element ConcreteType is precisely tracked.)
+            if method.as_str() == "flatten" && args.is_empty() {
+                return match self.iter_element_concrete_type(receiver) {
+                    Some(ConcreteType::Array(inner)) => Some(*inner),
+                    _ => None,
+                };
+            }
+        }
+        match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, iter)
+        {
+            Some(ConcreteType::Array(elem)) => Some(*elem),
+            _ => None,
+        }
     }
+}
+
+/// T1 sub-case (d) (strict-flip, 2026-06-20): map a scalar `TypeAnnotation`
+/// (an anonymous object field's declared/inferred type) to the type-tracker
+/// name the strict-typing binop emitter recognises. Returns `None` for a
+/// non-scalar annotation (array / object / unknown / type-var) — the
+/// destructured binder then stays untyped (surface-and-stop). Mirrors the
+/// scalar arms of `struct_field_tracker_type_name`; int != number preserved.
+pub(crate) fn type_annotation_scalar_tracker_name(
+    ann: &shape_ast::ast::TypeAnnotation,
+) -> Option<String> {
+    use shape_ast::ast::TypeAnnotation;
+    let name = match ann {
+        TypeAnnotation::Basic(n) => match n.as_str() {
+            "int" | "number" | "bool" | "string" | "decimal" | "bigint" | "i8" | "u8" | "i16"
+            | "u16" | "i32" | "u32" | "u64" | "DateTime" => n.as_str(),
+            _ => return None,
+        },
+        TypeAnnotation::Reference(path) if !path.is_qualified() => match path.name() {
+            "int" | "number" | "bool" | "string" | "decimal" | "bigint" => path.name(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(name.to_string())
 }
 
 // ADR-006 §2.7.4 — Phase 2c rebuild (R8 C1-temporal-lowering, 2026-05-23).
@@ -1695,25 +2142,22 @@ mod tests {
 
     #[test]
     fn test_range_loop_exclusive() {
-        let result = compile_and_run_i64(
-            "fn t() { let mut s = 0; for i in 0..5 { s = s + i }; s } t()",
-        );
+        let result =
+            compile_and_run_i64("fn t() { let mut s = 0; for i in 0..5 { s = s + i }; s } t()");
         assert_eq!(result, 10);
     }
 
     #[test]
     fn test_range_loop_inclusive() {
-        let result = compile_and_run_i64(
-            "fn t() { let mut s = 0; for i in 0..=5 { s = s + i }; s } t()",
-        );
+        let result =
+            compile_and_run_i64("fn t() { let mut s = 0; for i in 0..=5 { s = s + i }; s } t()");
         assert_eq!(result, 15);
     }
 
     #[test]
     fn test_range_loop_empty() {
-        let result = compile_and_run_i64(
-            "fn t() { let mut s = 0; for i in 5..0 { s = s + i }; s } t()",
-        );
+        let result =
+            compile_and_run_i64("fn t() { let mut s = 0; for i in 5..0 { s = s + i }; s } t()");
         assert_eq!(result, 0);
     }
 
@@ -1753,26 +2197,40 @@ mod tests {
     }
 
     #[test]
-    fn test_range_loop_for_expr() {
-        let result = compile_and_run_i64(
-            "fn t() { let r = for i in 0..5 { i * 2 }; r } t()",
+    fn test_empty_array_for_loop_no_new_array() {
+        let program =
+            parse_program("fn t() { let mut s = 7; for x in [] { s = 0 }; s } t()").unwrap();
+        let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+        let generic_new_array_sites: Vec<_> = bytecode
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, ins)| matches!(ins.opcode, crate::bytecode::OpCode::NewArray))
+            .collect();
+        assert!(
+            generic_new_array_sites.is_empty(),
+            "empty array for-in must not emit generic NewArray without a proven element kind: {generic_new_array_sites:?}"
         );
+
+        let result = compile_and_run_i64("fn t() { let mut s = 7; for x in [] { s = 0 }; s } t()");
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn test_range_loop_for_expr() {
+        let result = compile_and_run_i64("fn t() { let r = for i in 0..5 { i * 2 }; r } t()");
         assert_eq!(result, 8);
     }
 
     #[test]
     fn test_range_loop_comprehension() {
-        let result = compile_and_run_i64(
-            "fn t() { let a = [i * 2 for i in 0..5]; a.len() } t()",
-        );
+        let result = compile_and_run_i64("fn t() { let a = [i * 2 for i in 0..5]; a.len() } t()");
         assert_eq!(result, 5);
     }
 
     #[test]
     fn test_range_loop_spread() {
-        let result = compile_and_run_i64(
-            "fn t() { let a = [...0..5]; a.len() } t()",
-        );
+        let result = compile_and_run_i64("fn t() { let a = [...0..5]; a.len() } t()");
         assert_eq!(result, 5);
     }
 
@@ -1782,5 +2240,166 @@ mod tests {
             "fn t() { let mut s = 0; for x in [10, 20, 30] { s = s + x }; s } t()",
         );
         assert_eq!(result, 60);
+    }
+
+    // ROOT-1 (strict-flip, 2026-06-18): the derived-read element-type flow.
+
+    #[test]
+    fn root1_for_in_let_bound_struct_array_field_add() {
+        // `let ps = [R{..}]` (no annotation) must type the loop var as `R` so
+        // `p.age + 10` infers under strict typing (pre-fix: `unknown + int`).
+        let result = compile_and_run_i64(
+            "type R { age: int } \
+             fn t() { let ps = [R{age:1}, R{age:2}]; let mut s = 0; \
+                      for p in ps { s = s + p.age + 10 }; s } t()",
+        );
+        assert_eq!(result, 23);
+    }
+
+    #[test]
+    fn root1_for_in_inline_struct_array_literal_field_add() {
+        // Inline struct-array literal in for-in: the element ConcreteType is
+        // recovered from the literal and stamped onto the loop var's tracker.
+        let result = compile_and_run_i64(
+            "type R { age: int } \
+             fn t() { let mut s = 0; for p in [R{age:5}] { s = s + p.age }; s } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn root1_for_in_object_destructure_struct_fields() {
+        // `for {x, y} in [P{..}]` must type each destructured field from the
+        // struct schema so `x + y` infers (pre-fix: `unknown + unknown`).
+        let result = compile_and_run_i64(
+            "type P { x: int, y: int } \
+             fn t() { let mut s = 0; for {x, y} in [P{x:3, y:4}] { s = s + x + y }; s } t()",
+        );
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn root1_derived_index_read_struct_field_add() {
+        // `let p = ps[0]` (derived read) must carry the struct identity so
+        // `p.age + 10` infers.
+        let result = compile_and_run_i64(
+            "type R { age: int } \
+             fn t() { let ps = [R{age:8}, R{age:9}]; let p = ps[0]; p.age + 10 } t()",
+        );
+        assert_eq!(result, 18);
+    }
+
+    // ROOT-2 (strict-flip, 2026-06-18): inline method-call return-type stamp.
+
+    #[test]
+    fn root2_inline_datetime_method_int_return_in_binop() {
+        // `d.hour() + 1` inline must resolve `d.hour()` to `int` (parity with
+        // the `let h = d.hour(); h + 1` form) — pre-fix: `unknown + int`.
+        let result = compile_and_run_i64(
+            "fn t() { let d = DateTime.parse(\"2024-01-15T08:30:00Z\"); d.hour() + 1 } t()",
+        );
+        assert_eq!(result, 9);
+    }
+
+    #[test]
+    fn root2_inline_user_fn_inferred_return_in_binop() {
+        // An unannotated user function's inferred return type flows into an
+        // inline binop operand (`dbl(n) + 1`) without an intervening `let`.
+        let result =
+            compile_and_run_i64("fn dbl(x: int) { x * 2 } fn t() { let n = 5; dbl(n) + 1 } t()");
+        assert_eq!(result, 11);
+    }
+
+    // T1 (strict-flip, 2026-06-20): type-erasure residuals (a)+(c)+(d).
+
+    fn compile_expect_err(code: &str) -> String {
+        let program = parse_program(code).unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        match compiler.compile(&program) {
+            Ok(_) => panic!("expected compile error, but compilation succeeded"),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
+    #[test]
+    fn stage_f1_unannotated_empty_push_accumulator_field_read_rejected() {
+        // STAGE F1 (strict-flip, 2026-06-20): re-tighten the T1 any-sink.
+        // `let mut rs = []; rs = rs.push(Run{..})` then `rs[0].len` reads a
+        // field off an element whose type is known ONLY from the push into an
+        // UNANNOTATED empty array. Per the no-untyped-array / no-`any` rule the
+        // element field type is unprovable WITHOUT an annotation, so the field
+        // read is a CLEAN compile-error (NOT an `any`-typed result that would
+        // wrongly accept an ill-typed program). Previously this any-sinked:
+        // `rs[0].len + 1` compiled and `let x: bool = rs[0].len` was accepted.
+        let err = compile_expect_err(
+            "type Run { value: int, len: int } \
+             fn t() { let mut rs = []; rs = rs.push(Run { value: 0, len: 4 }); \
+                      rs[0].len + 1 } t()",
+        );
+        assert!(
+            err.contains("annotate the array") || err.contains("cannot infer the type of field"),
+            "expected the annotate-the-array compile error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stage_f1_annotated_empty_push_accumulator_field_read_works() {
+        // STAGE F1: the SAME accumulator with a DECLARED `Array<Run>`
+        // annotation has a proven element type — the field read resolves and
+        // arithmetic works.
+        let result = compile_and_run_i64(
+            "type Run { value: int, len: int } \
+             fn t() { let mut rs: Array<Run> = []; rs = rs.push(Run { value: 0, len: 4 }); \
+                      rs[0].len + 1 } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn t1a_struct_array_literal_element_field_arith() {
+        // (a) the literal-element form: `rs[0].len + 1` over `[Run{..}]` — the
+        // element type is PROVEN by the non-empty literal (structural Object
+        // path), so it stays accepted under STAGE F1.
+        let result = compile_and_run_i64(
+            "type Run { value: int, len: int } \
+             fn t() { let rs = [Run { value: 0, len: 4 }]; rs[0].len + 1 } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn t1c_datetime_param_method_int_into_let_arith() {
+        // (c) an int-returning DateTime method on a DateTime PARAMETER flows
+        // into a let then arithmetic (ROOT-2 extended to a param receiver).
+        let result = compile_and_run_i64(
+            "fn days(d1: DateTime, d2: DateTime) { \
+                let s1 = d1.unix_timestamp(); let s2 = d2.unix_timestamp(); \
+                let diff = s2 - s1; diff / 86400 } \
+             fn t() { let a = DateTime.parse(\"2024-06-10T00:00:00Z\"); \
+                      let b = DateTime.parse(\"2024-06-15T00:00:00Z\"); days(a, b) } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn t1d_object_literal_array_destructure_field_arith() {
+        // (d) `for {x, y} in [{x:1, y:2}]` (ANONYMOUS object element) types each
+        // destructured field so `x + y` infers (pre-fix: `unknown + unknown`).
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for {x, y} in [{x: 1, y: 2}, {x: 3, y: 4}] \
+                      { s = s + x + y }; s } t()",
+        );
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn t1d_object_literal_array_binding_destructure_field_arith() {
+        // (d) the identifier-bound form: `let pts = [{..}]; for {x,y} in pts`.
+        let result = compile_and_run_i64(
+            "fn t() { let pts = [{x: 1, y: 2}, {x: 3, y: 4}]; let mut s = 0; \
+                      for {x, y} in pts { s = s + x + y }; s } t()",
+        );
+        assert_eq!(result, 10);
     }
 }

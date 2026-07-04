@@ -15,28 +15,76 @@ use super::super::ffi::v2::collection_arc;
 /// Register all v2 FFI symbols with the JIT builder.
 pub fn register_v2_symbols(builder: &mut JITBuilder) {
     // Array — f64
-    builder.symbol("jit_v2_array_new_f64", v2::jit_v2_array_new_f64 as *const u8);
-    builder.symbol("jit_v2_array_get_f64", v2::jit_v2_array_get_f64 as *const u8);
-    builder.symbol("jit_v2_array_set_f64", v2::jit_v2_array_set_f64 as *const u8);
-    builder.symbol("jit_v2_array_len_f64", v2::jit_v2_array_len_f64 as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_f64",
+        v2::jit_v2_array_new_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_f64",
+        v2::jit_v2_array_get_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_f64",
+        v2::jit_v2_array_set_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_len_f64",
+        v2::jit_v2_array_len_f64 as *const u8,
+    );
 
     // Array — i64
-    builder.symbol("jit_v2_array_new_i64", v2::jit_v2_array_new_i64 as *const u8);
-    builder.symbol("jit_v2_array_get_i64", v2::jit_v2_array_get_i64 as *const u8);
-    builder.symbol("jit_v2_array_set_i64", v2::jit_v2_array_set_i64 as *const u8);
-    builder.symbol("jit_v2_array_len_i64", v2::jit_v2_array_len_i64 as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_i64",
+        v2::jit_v2_array_new_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_i64",
+        v2::jit_v2_array_get_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_i64",
+        v2::jit_v2_array_set_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_len_i64",
+        v2::jit_v2_array_len_i64 as *const u8,
+    );
 
     // Array — i32
-    builder.symbol("jit_v2_array_new_i32", v2::jit_v2_array_new_i32 as *const u8);
-    builder.symbol("jit_v2_array_get_i32", v2::jit_v2_array_get_i32 as *const u8);
-    builder.symbol("jit_v2_array_set_i32", v2::jit_v2_array_set_i32 as *const u8);
-    builder.symbol("jit_v2_array_len_i32", v2::jit_v2_array_len_i32 as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_i32",
+        v2::jit_v2_array_new_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_i32",
+        v2::jit_v2_array_get_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_i32",
+        v2::jit_v2_array_set_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_len_i32",
+        v2::jit_v2_array_len_i32 as *const u8,
+    );
 
     // Array — bool (encoded as u8 internally)
-    builder.symbol("jit_v2_array_new_bool", v2::jit_v2_array_new_bool as *const u8);
-    builder.symbol("jit_v2_array_get_bool", v2::jit_v2_array_get_bool as *const u8);
-    builder.symbol("jit_v2_array_set_bool", v2::jit_v2_array_set_bool as *const u8);
-    builder.symbol("jit_v2_array_len_bool", v2::jit_v2_array_len_bool as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_bool",
+        v2::jit_v2_array_new_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_bool",
+        v2::jit_v2_array_get_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_bool",
+        v2::jit_v2_array_set_bool as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_len_bool",
+        v2::jit_v2_array_len_bool as *const u8,
+    );
 
     // ADR-006 §2.7.5 + §2.7.24 Q25.A SUPERSEDED + audit deliverable (b)
     // §4.1.B — v2-raw `TypedArray<*const StringObj>` / `TypedArray<*const
@@ -59,6 +107,11 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol(
         "jit_new_typed_array_typed_object",
         v2::jit_new_typed_array_typed_object as *const u8,
+    );
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    builder.symbol(
+        "jit_new_typed_array_trait_object",
+        v2::jit_new_typed_array_trait_object as *const u8,
     );
 
     // W16.2-J.3 (2026-05-22): macro-uniform per-kind allocator aliases +
@@ -106,6 +159,19 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
         "jit_v2_array_set_typed_object",
         v2::jit_v2_array_set_typed_object as *const u8,
     );
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    builder.symbol(
+        "jit_v2_array_new_trait_object",
+        v2::jit_v2_array_new_trait_object as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_trait_object",
+        v2::jit_v2_array_get_trait_object as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_trait_object",
+        v2::jit_v2_array_set_trait_object as *const u8,
+    );
 
     // W16.2-J.3 (2026-05-22): macro-generated per-kind new/get/set FFI
     // symbols for the 7 sized-integer + F32 + Char `TypedArrayKind` variants
@@ -124,21 +190,57 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_get_u8", v2::jit_v2_array_get_u8 as *const u8);
     builder.symbol("jit_v2_array_set_u8", v2::jit_v2_array_set_u8 as *const u8);
 
-    builder.symbol("jit_v2_array_new_i16", v2::jit_v2_array_new_i16 as *const u8);
-    builder.symbol("jit_v2_array_get_i16", v2::jit_v2_array_get_i16 as *const u8);
-    builder.symbol("jit_v2_array_set_i16", v2::jit_v2_array_set_i16 as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_i16",
+        v2::jit_v2_array_new_i16 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_i16",
+        v2::jit_v2_array_get_i16 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_i16",
+        v2::jit_v2_array_set_i16 as *const u8,
+    );
 
-    builder.symbol("jit_v2_array_new_u16", v2::jit_v2_array_new_u16 as *const u8);
-    builder.symbol("jit_v2_array_get_u16", v2::jit_v2_array_get_u16 as *const u8);
-    builder.symbol("jit_v2_array_set_u16", v2::jit_v2_array_set_u16 as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_u16",
+        v2::jit_v2_array_new_u16 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_u16",
+        v2::jit_v2_array_get_u16 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_u16",
+        v2::jit_v2_array_set_u16 as *const u8,
+    );
 
-    builder.symbol("jit_v2_array_new_u32", v2::jit_v2_array_new_u32 as *const u8);
-    builder.symbol("jit_v2_array_get_u32", v2::jit_v2_array_get_u32 as *const u8);
-    builder.symbol("jit_v2_array_set_u32", v2::jit_v2_array_set_u32 as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_u32",
+        v2::jit_v2_array_new_u32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_u32",
+        v2::jit_v2_array_get_u32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_u32",
+        v2::jit_v2_array_set_u32 as *const u8,
+    );
 
-    builder.symbol("jit_v2_array_new_f32", v2::jit_v2_array_new_f32 as *const u8);
-    builder.symbol("jit_v2_array_get_f32", v2::jit_v2_array_get_f32 as *const u8);
-    builder.symbol("jit_v2_array_set_f32", v2::jit_v2_array_set_f32 as *const u8);
+    builder.symbol(
+        "jit_v2_array_new_f32",
+        v2::jit_v2_array_new_f32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_f32",
+        v2::jit_v2_array_get_f32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_f32",
+        v2::jit_v2_array_set_f32 as *const u8,
+    );
 
     builder.symbol(
         "jit_v2_array_new_char",
@@ -157,14 +259,38 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_array_push", v2::jit_v2_array_push as *const u8);
 
     // Struct field access
-    builder.symbol("jit_v2_field_load_f64", v2::jit_v2_field_load_f64 as *const u8);
-    builder.symbol("jit_v2_field_load_i64", v2::jit_v2_field_load_i64 as *const u8);
-    builder.symbol("jit_v2_field_load_i32", v2::jit_v2_field_load_i32 as *const u8);
-    builder.symbol("jit_v2_field_load_ptr", v2::jit_v2_field_load_ptr as *const u8);
-    builder.symbol("jit_v2_field_store_f64", v2::jit_v2_field_store_f64 as *const u8);
-    builder.symbol("jit_v2_field_store_i64", v2::jit_v2_field_store_i64 as *const u8);
-    builder.symbol("jit_v2_field_store_i32", v2::jit_v2_field_store_i32 as *const u8);
-    builder.symbol("jit_v2_field_store_ptr", v2::jit_v2_field_store_ptr as *const u8);
+    builder.symbol(
+        "jit_v2_field_load_f64",
+        v2::jit_v2_field_load_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_field_load_i64",
+        v2::jit_v2_field_load_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_field_load_i32",
+        v2::jit_v2_field_load_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_field_load_ptr",
+        v2::jit_v2_field_load_ptr as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_field_store_f64",
+        v2::jit_v2_field_store_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_field_store_i64",
+        v2::jit_v2_field_store_i64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_field_store_i32",
+        v2::jit_v2_field_store_i32 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_field_store_ptr",
+        v2::jit_v2_field_store_ptr as *const u8,
+    );
 
     // Refcount
     builder.symbol("jit_v2_retain", v2::jit_v2_retain as *const u8);
@@ -183,13 +309,28 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_v2_alloc_struct", v2::jit_v2_alloc_struct as *const u8);
 
     // SIMD reductions (Phase C.3)
-    builder.symbol("jit_v2_array_sum_f64", v2::jit_v2_array_sum_f64 as *const u8);
-    builder.symbol("jit_v2_array_sum_i64", v2::jit_v2_array_sum_i64 as *const u8);
+    builder.symbol(
+        "jit_v2_array_sum_f64",
+        v2::jit_v2_array_sum_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_sum_i64",
+        v2::jit_v2_array_sum_i64 as *const u8,
+    );
 
     // SIMD reductions — min / max / mean / sum-of-squares (f64)
-    builder.symbol("jit_v2_array_min_f64", v2::jit_v2_array_min_f64 as *const u8);
-    builder.symbol("jit_v2_array_max_f64", v2::jit_v2_array_max_f64 as *const u8);
-    builder.symbol("jit_v2_array_mean_f64", v2::jit_v2_array_mean_f64 as *const u8);
+    builder.symbol(
+        "jit_v2_array_min_f64",
+        v2::jit_v2_array_min_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_max_f64",
+        v2::jit_v2_array_max_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_mean_f64",
+        v2::jit_v2_array_mean_f64 as *const u8,
+    );
     builder.symbol(
         "jit_v2_array_sum_squares_f64",
         v2::jit_v2_array_sum_squares_f64 as *const u8,
@@ -206,8 +347,14 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     );
 
     // SIMD element-wise binary ops (allocating, f64)
-    builder.symbol("jit_v2_array_add_f64", v2::jit_v2_array_add_f64 as *const u8);
-    builder.symbol("jit_v2_array_mul_f64", v2::jit_v2_array_mul_f64 as *const u8);
+    builder.symbol(
+        "jit_v2_array_add_f64",
+        v2::jit_v2_array_add_f64 as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_mul_f64",
+        v2::jit_v2_array_mul_f64 as *const u8,
+    );
 
     // ADR-006 §2.7.5 / §2.7.25 — Typed-Arc collection allocators
     // (W12-jit-collection-arc-ffi-ctors-and-refcount, Phase 3 cluster-0
@@ -218,17 +365,38 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     // HeapHeader carriers; the per-HeapKind retain/release entries
     // registered below operate on the Arc control block at offset -16,
     // never the offset-4 UnifiedValue path.
-    builder.symbol("jit_v2_make_hashset", collection_arc::jit_v2_make_hashset as *const u8);
-    builder.symbol("jit_v2_make_hashmap", collection_arc::jit_v2_make_hashmap as *const u8);
-    builder.symbol("jit_v2_make_deque", collection_arc::jit_v2_make_deque as *const u8);
+    builder.symbol(
+        "jit_v2_make_hashset",
+        collection_arc::jit_v2_make_hashset as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_hashmap",
+        collection_arc::jit_v2_make_hashmap as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_deque",
+        collection_arc::jit_v2_make_deque as *const u8,
+    );
     builder.symbol(
         "jit_v2_make_priorityqueue",
         collection_arc::jit_v2_make_priorityqueue as *const u8,
     );
-    builder.symbol("jit_v2_make_channel", collection_arc::jit_v2_make_channel as *const u8);
-    builder.symbol("jit_v2_make_atomic", collection_arc::jit_v2_make_atomic as *const u8);
-    builder.symbol("jit_v2_make_lazy", collection_arc::jit_v2_make_lazy as *const u8);
-    builder.symbol("jit_v2_make_mutex", collection_arc::jit_v2_make_mutex as *const u8);
+    builder.symbol(
+        "jit_v2_make_channel",
+        collection_arc::jit_v2_make_channel as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_atomic",
+        collection_arc::jit_v2_make_atomic as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_lazy",
+        collection_arc::jit_v2_make_lazy as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_make_mutex",
+        collection_arc::jit_v2_make_mutex as *const u8,
+    );
 
     // Per-HeapKind kinded retain/release. Refcount discipline at slots
     // whose `NativeKind` is `Ptr(HeapKind::HashSet|HashMap|Deque|
@@ -365,7 +533,7 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // arr ptr
         sig.params.push(AbiParam::new(types::I64)); // elem bits
-        sig.params.push(AbiParam::new(types::I8));  // elem byte size
+        sig.params.push(AbiParam::new(types::I8)); // elem byte size
         declare(module, ffi_funcs, "jit_v2_array_push", &sig);
     }
 
@@ -525,12 +693,16 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I32)); // capacity
         sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const TypedObjectStorage>
-        declare(
-            module,
-            ffi_funcs,
-            "jit_new_typed_array_typed_object",
-            &sig,
-        );
+        declare(module, ffi_funcs, "jit_new_typed_array_typed_object", &sig);
+    }
+
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    // jit_new_typed_array_trait_object(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const TraitObjectStorage>
+        declare(module, ffi_funcs, "jit_new_typed_array_trait_object", &sig);
     }
 
     // ========================================================================
@@ -544,6 +716,8 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         "jit_v2_array_new_string",
         "jit_v2_array_new_decimal",
         "jit_v2_array_new_typed_object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        "jit_v2_array_new_trait_object",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I32)); // capacity
@@ -554,6 +728,8 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         "jit_v2_array_get_string",
         "jit_v2_array_get_decimal",
         "jit_v2_array_get_typed_object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        "jit_v2_array_get_trait_object",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // arr ptr
@@ -565,6 +741,8 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         "jit_v2_array_set_string",
         "jit_v2_array_set_decimal",
         "jit_v2_array_set_typed_object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        "jit_v2_array_set_trait_object",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // arr ptr
@@ -889,7 +1067,7 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
     {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // bits
-        sig.params.push(AbiParam::new(types::I8));  // kind code
+        sig.params.push(AbiParam::new(types::I8)); // kind code
         sig.returns.push(AbiParam::new(types::I64));
         declare(module, ffi_funcs, "jit_v2_make_mutex", &sig);
     }

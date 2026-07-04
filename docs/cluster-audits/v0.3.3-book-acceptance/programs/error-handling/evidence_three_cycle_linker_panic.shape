@@ -1,0 +1,5 @@
+fn a(n: int) -> int { if n <= 0 { return 0; } return b(n - 1); }
+fn b(n: int) -> int { if n <= 0 { return 0; } return c(n - 1); }
+fn c(n: int) -> int { if n <= 0 { return 0; } return a(n - 1); }
+fn main() { print(f"{a(9)}"); }
+main();

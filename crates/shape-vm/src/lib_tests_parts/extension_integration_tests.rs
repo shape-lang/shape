@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod extension_integration_tests {
-    use super::*;
     use crate::BytecodeExecutor;
     use shape_runtime::engine::ShapeEngine;
     use shape_runtime::marshal::{register_typed_fn_0, register_typed_fn_1};
@@ -184,12 +183,6 @@ pub @force_int() fn connect(const uri) { 1 }
     }
 
     #[test]
-    #[ignore = "v0.4 deferred — const-specialization for imported module functions \
-                (same class as sibling `test_imported_module_const_function_specializes_on_namespace_call`, \
-                docs/cluster-audits/v0.3-ws10b-29-classification.md row 21). Body \
-                ported off `register_test_function` onto the V3-S5 kinded marshal layer \
-                (R8 W2, 2026-05-23); the residual failure is pre-existing const-spec \
-                pipeline behavior, not a regression of the host-tier rebuild."]
     fn test_imported_module_comptime_set_return_expr_via_module_export() {
         // V3-S5 host-tier rebuild (R8 W2, 2026-05-23): same registrar
         // migration as `test_extension_module_registered` — the codegen
@@ -264,12 +257,6 @@ pub @force_int() fn connect(const uri) { 1 }
     }
 
     #[test]
-    #[ignore = "v0.4 deferred — const-specialization for imported module functions \
-                (same class as sibling `test_imported_module_const_function_specializes_on_namespace_call`, \
-                docs/cluster-audits/v0.3-ws10b-29-classification.md row 21). Body \
-                ported off `register_test_function` onto the V3-S5 kinded marshal layer \
-                (R8 W2, 2026-05-23); the residual failure is pre-existing const-spec \
-                pipeline behavior, not a regression of the host-tier rebuild."]
     fn test_imported_module_comptime_handler_can_call_comptime_helper_fn() {
         // V3-S5 host-tier rebuild (R8 W2, 2026-05-23): mirrors the
         // sibling `test_imported_module_comptime_set_return_expr_via_module_export`
@@ -342,16 +329,6 @@ pub @force_int() fn connect(const uri) { 1 }
     }
 
     #[test]
-    #[ignore = "v0.4 deferred — same const-specialization class as \
-                `test_imported_module_const_function_specializes_on_namespace_call` \
-                (docs/cluster-audits/v0.3-ws10b-29-classification.md row 21). \
-                The annotation's `set return` rewrite does not propagate the \
-                Table<T> schema across the comptime boundary in the imported-module \
-                path; downstream `conn.candles().filter(|u| u.open >= 18)` fails \
-                to resolve `u.open` and the `>=` operands stay `unknown`. Body \
-                ported off `register_test_function` onto the V3-S5 kinded marshal \
-                layer (R8 W2, 2026-05-23); pre-existing const-spec/annotation \
-                pipeline behavior, not a regression of the host-tier rebuild."]
     fn test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain() {
         // V3-S5 host-tier rebuild (R8 W2, 2026-05-23): two-export shape —
         // `__connect` returns unit (placeholder native handle for the

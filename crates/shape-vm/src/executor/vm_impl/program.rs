@@ -85,9 +85,7 @@ impl VirtualMachine {
                     eprintln!("  - {}", e);
                 }
             }
-            if let Err(errors) =
-                crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program)
-            {
+            if let Err(errors) = crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program) {
                 eprintln!(
                     "V2 bytecode verification warning: {} violation(s) found",
                     errors.len()
@@ -109,9 +107,7 @@ impl VirtualMachine {
                     eprintln!("  - {}", e);
                 }
             }
-            if let Err(errors) =
-                crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program)
-            {
+            if let Err(errors) = crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program) {
                 eprintln!(
                     "V2 bytecode verification failed: {} violation(s)",
                     errors.len()

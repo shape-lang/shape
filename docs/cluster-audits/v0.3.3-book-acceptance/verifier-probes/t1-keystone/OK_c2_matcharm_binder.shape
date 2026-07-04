@@ -1,0 +1,9 @@
+fn main() {
+    let m: HashMap<string, int> = HashMap();
+    m.set("a", 10);
+    match m.get("a") {
+        Some(n) => print(n + 1),
+        None => print(0),
+    }
+}
+main();

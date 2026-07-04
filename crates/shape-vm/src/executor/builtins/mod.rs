@@ -13,11 +13,11 @@ mod json_helpers;
 // off the `KindedSlot` carrier per the Q8 carrier-API bound.
 pub(crate) mod kind_coerce;
 pub(in crate::executor) mod math;
-mod matrix_intrinsics;
+pub(in crate::executor) mod matrix_intrinsics;
+mod minimize;
 mod object_ops;
 pub mod remote_builtins;
 mod runtime_delegated;
-mod minimize;
 mod special_ops;
 pub mod transport_builtins;
 pub mod transport_provider;

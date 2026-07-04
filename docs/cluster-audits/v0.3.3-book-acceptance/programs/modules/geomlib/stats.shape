@@ -1,0 +1,12 @@
+// geomlib/stats.shape  -> importable as "geomlib::stats"
+// Pure numeric helpers. Demonstrates `pub fn` exports and the int->number
+// `as` cast the book calls out (v.length is int, v.sum() is number).
+
+pub fn mean(v: Array<number>) -> number {
+    v.sum() / (v.length as number)
+}
+
+pub fn variance(v: Array<number>) -> number {
+    let mu = mean(v)
+    v.map(|x| (x - mu) * (x - mu)).sum() / (v.length as number)
+}

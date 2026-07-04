@@ -1,15 +1,19 @@
-//! Parity Matrix CLI
+//! Legacy Feature Parity Matrix CLI
 //!
-//! Runs all feature tests across Interpreter, VM, and JIT backends
-//! to verify execution parity.
+//! Runs all feature tests through the in-process legacy feature-test matrix.
+//! Real VM-vs-JIT parity is enforced by `scripts/differential-gate.sh`.
 
 use clap::Parser;
-use shape_vm::feature_tests::{ParityReport, ParityRunner, all_feature_tests};
+use shape_vm::feature_tests::{
+    ParityReport, ParityRunner, REAL_JIT_PARITY_CI, REAL_JIT_PARITY_GATE, all_feature_tests,
+};
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
 #[command(name = "parity_matrix")]
-#[command(about = "Test execution parity across Interpreter, VM, and JIT backends")]
+#[command(
+    about = "Run the legacy in-process feature matrix; JIT parity lives in the differential gate"
+)]
 struct Args {
     /// Output format: text, json, or markdown
     #[arg(short, long, default_value = "text")]
@@ -44,7 +48,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    println!("Running {} parity tests...\n", tests.len());
+    println!("Running {} legacy feature-matrix tests...", tests.len());
+    println!(
+        "JIT is not executed by this binary; use {} (wired in {}) for real VM-vs-JIT parity.\n",
+        REAL_JIT_PARITY_GATE, REAL_JIT_PARITY_CI
+    );
 
     // Create runner with default backends
     let runner = ParityRunner::with_defaults();
@@ -71,6 +79,13 @@ fn format_markdown(report: &ParityReport) -> String {
     let mut output = String::new();
 
     output.push_str("# Parity Test Report\n\n");
+    output.push_str(
+        "This is the legacy in-process feature matrix. The JIT lane is intentionally skipped; ",
+    );
+    output.push_str(&format!(
+        "real VM-vs-JIT parity is enforced by `{}` via `{}`.\n\n",
+        REAL_JIT_PARITY_GATE, REAL_JIT_PARITY_CI
+    ));
     output.push_str("## Summary\n\n");
     output.push_str(&format!("| Metric | Count |\n"));
     output.push_str(&format!("|--------|-------|\n"));
@@ -88,8 +103,10 @@ fn format_markdown(report: &ParityReport) -> String {
         }
     }
 
-    if report.all_passed() {
+    if report.all_passed() && report.partial == 0 {
         output.push_str("## Result: ✅ ALL TESTS PASSED\n");
+    } else if report.all_passed() {
+        output.push_str("## Result: NO MISMATCHES (PARTIAL COVERAGE)\n");
     } else {
         output.push_str(&format!("## Result: ❌ {} FAILURES\n", report.failed));
     }

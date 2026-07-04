@@ -1,7 +1,8 @@
-//! Stress tests for basic let bindings: int, number, bool, string, null,
+//! Stress tests for basic let bindings: int, number, bool, string, none,
 //! type-annotated lets, width-typed locals, const bindings, expressions,
 //! function parameters, module-level bindings, and large local counts.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================
@@ -58,7 +59,7 @@ fn test_let_bind_empty_string() {
 
 /// Verifies let binding of None.
 #[test]
-fn test_let_bind_null() {
+fn test_let_bind_none() {
     ShapeTest::new("let x = None\nx").expect_none();
 }
 
@@ -139,7 +140,9 @@ fn test_width_u32() {
 /// Verifies u64 width type.
 #[test]
 fn test_width_u64() {
-    ShapeTest::new("fn test() -> int { let a: u64 = 999999\nreturn a }\ntest()")
+    // `u64 -> int` is CAST-required (THE RULE: u64 range exceeds i64) — the
+    // return needs an explicit `as int`. The value 999999 fits i64.
+    ShapeTest::new("fn test() -> int { let a: u64 = 999999\nreturn a as int }\ntest()")
         .expect_number(999999.0);
 }
 
@@ -219,43 +222,48 @@ fn test_width_typed_u8_arithmetic() {
     .expect_number(150.0);
 }
 
-/// Verifies u8 var reassign truncates.
+/// Out-of-range literal reassignment is a COMPILE ERROR, not a silent wrap
+/// (THE RULE, user 2026-06-01 / numeric-conversion §4). Pre-rule this
+/// silently truncated `300` to `44`; the literal `300` is not losslessly
+/// representable in `u8`, so it does not adopt — compile error.
 #[test]
-fn test_width_var_reassign_truncates_u8() {
+fn test_width_var_reassign_u8_out_of_range_rejected() {
     ShapeTest::new(
         "fn test() -> int {
             let mut x: u8 = 10
             x = 300
-            return x
+            return x as int
         }\ntest()",
     )
-    .expect_number(44.0);
+    .expect_run_err();
 }
 
-/// Verifies i8 var reassign truncates with sign extension.
+/// Out-of-range literal reassignment into i8 (`200` > i8::MAX) rejected.
+/// Pre-rule this sign-extended to `-56`.
 #[test]
-fn test_width_var_reassign_truncates_i8() {
+fn test_width_var_reassign_i8_out_of_range_rejected() {
     ShapeTest::new(
         "fn test() -> int {
             let mut x: i8 = 0
             x = 200
-            return x
+            return x as int
         }\ntest()",
     )
-    .expect_number(-56.0);
+    .expect_run_err();
 }
 
-/// Verifies u16 var reassign truncates.
+/// Out-of-range literal reassignment into u16 (`70000` > u16::MAX) rejected.
+/// Pre-rule this truncated to `4464`.
 #[test]
-fn test_width_var_reassign_truncates_u16() {
+fn test_width_var_reassign_u16_out_of_range_rejected() {
     ShapeTest::new(
         "fn test() -> int {
             let mut x: u16 = 0
             x = 70000
-            return x
+            return x as int
         }\ntest()",
     )
-    .expect_number(4464.0);
+    .expect_run_err();
 }
 
 // =========================================================================

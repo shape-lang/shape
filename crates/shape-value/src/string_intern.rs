@@ -117,7 +117,10 @@ mod tests {
         // deduplicate to a single canonical Arc after going through the pool.
         let a = intern_short_string(Arc::new("intern_test_share_name".to_string()));
         let b = intern_short_string(Arc::new("intern_test_share_name".to_string()));
-        assert!(Arc::ptr_eq(&a, &b), "interned short strings must share allocation");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "interned short strings must share allocation"
+        );
         assert_eq!(&*a, "intern_test_share_name");
     }
 
@@ -169,7 +172,13 @@ mod tests {
             assert_eq!(&***r, *s);
         }
         // Duplicates must be Arc-equal to their first occurrence.
-        assert!(Arc::ptr_eq(&results[0], &results[3]), "dup 'a' must share Arc");
-        assert!(Arc::ptr_eq(&results[1], &results[4]), "dup 'b' must share Arc");
+        assert!(
+            Arc::ptr_eq(&results[0], &results[3]),
+            "dup 'a' must share Arc"
+        );
+        assert!(
+            Arc::ptr_eq(&results[1], &results[4]),
+            "dup 'b' must share Arc"
+        );
     }
 }

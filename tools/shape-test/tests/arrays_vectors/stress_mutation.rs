@@ -193,14 +193,15 @@ test()"#,
     .expect_number(42.0);
 }
 
-/// Verifies array empty chaining.
+/// Verifies array empty chaining — bare `[]` receiver is correctly rejected at
+/// compile time (strict typing cannot infer the element type).
 #[test]
 fn test_array_empty_chaining() {
     ShapeTest::new(
         r#"function test() { [].concat([]).take(0).drop(0).length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array take then drop.

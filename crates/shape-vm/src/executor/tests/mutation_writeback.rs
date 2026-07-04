@@ -6,7 +6,7 @@
 //! return a (possibly Arc-cloned) new receiver, the compiler emits a
 //! post-`CallMethod` `Dup; StoreLocal` writeback so the binding slot
 //! receives the new Arc identity. `let mut s = HashSet(); s.add("a");
-//! s.add("b"); s.size()` returns 2 (pre-ruling: 0).
+//! s.add("b"); s.len()` returns 2 (pre-ruling: 0).
 //!
 //! Coverage:
 //! - HashSet.add / .delete
@@ -17,19 +17,84 @@
 //! - r-value receiver silent-drop (post-`compute_set().add(x)` shape)
 //! - Compound-assignment operator sugar (`s += x`) for primitives
 
+use crate::bytecode::{BuiltinFunction, OpCode, Operand};
 use crate::test_utils::{compile, eval, eval_with_kind};
 use shape_value::NativeKind;
 
 // ─── HashSet ─────────────────────────────────────────────────────────────
 
+fn top_level_builtin_calls(source: &str) -> Vec<BuiltinFunction> {
+    compile(source)
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            if instruction.opcode == OpCode::BuiltinCall
+                && let Some(Operand::Builtin(builtin)) = instruction.operand
+            {
+                return Some(builtin);
+            }
+            None
+        })
+        .collect()
+}
+
+fn assert_set_ctor_stamped(source: &str, expected: BuiltinFunction, context: &str) {
+    let calls = top_level_builtin_calls(source);
+    assert!(
+        calls.contains(&expected),
+        "{context}: expected {expected:?}, got {calls:?}"
+    );
+    assert!(
+        !calls.contains(&BuiltinFunction::SetCtor),
+        "{context}: valid source must not emit raw SetCtor, got {calls:?}"
+    );
+}
+
 #[test]
-fn writeback_hashset_add_size() {
+fn set_ctor_explicit_annotation_emits_i64_ctor() {
+    assert_set_ctor_stamped(
+        r#"
+        let s: Set<int> = Set()
+        s.len()
+        "#,
+        BuiltinFunction::SetCtorI64,
+        "explicit Set<int> annotation",
+    );
+}
+
+#[test]
+fn set_ctor_usage_pinned_mut_receiver_emits_string_ctor() {
+    assert_set_ctor_stamped(
+        r#"
+        let mut s = Set()
+        s.add("a")
+        s.len()
+        "#,
+        BuiltinFunction::SetCtorString,
+        "let mut usage-pinned Set()",
+    );
+}
+
+#[test]
+fn set_ctor_usage_pinned_rvalue_receiver_emits_string_ctor() {
+    assert_set_ctor_stamped(
+        r#"
+        Set().add("x")
+        42
+        "#,
+        BuiltinFunction::SetCtorString,
+        "rvalue receiver usage-pinned Set()",
+    );
+}
+
+#[test]
+fn writeback_hashset_add_len() {
     let result = eval(
         r#"
         let mut s = Set()
         s.add("a")
         s.add("b")
-        s.size()
+        s.len()
         "#,
     );
     assert_eq!(result.as_i64(), Some(2));
@@ -42,7 +107,7 @@ fn writeback_hashset_add_duplicate_is_idempotent() {
         let mut s = Set()
         s.add("a")
         s.add("a")
-        s.size()
+        s.len()
         "#,
     );
     assert_eq!(result.as_i64(), Some(1));
@@ -56,16 +121,21 @@ fn writeback_hashset_delete() {
         s.add("a")
         s.add("b")
         s.delete("a")
-        s.size()
+        s.len()
         "#,
     );
     assert_eq!(result.as_i64(), Some(1));
 }
 
 #[test]
-fn writeback_hashset_let_immutable_compile_error() {
-    // `let s = Set(); s.add("x")` must fail at compile time —
-    // mutating method on an immutable binding.
+fn writeback_hashset_let_immutable_compiles_no_mutability_error() {
+    // R2 chained-builder-on-immutable (strict-flip): `let s = Set();
+    // s.add("x")` COMPILES. `.add` returns a NEW Set (clone-on-write);
+    // the immutable binding `s` is never reassigned, so no in-place
+    // write-back is emitted and there is NO mutability error. In-place
+    // mutation of the receiver is the opt-in `let mut` feature. This is
+    // the inverse of the pre-strict-flip assertion (which required a
+    // compile error here — the misclassification the R2 fix corrects).
     let program = shape_ast::parser::parse_program(
         r#"
         let s = Set()
@@ -75,16 +145,13 @@ fn writeback_hashset_let_immutable_compile_error() {
     .expect("parse should succeed");
     let compiler = crate::compiler::BytecodeCompiler::new();
     let result = compiler.compile(&program);
-    assert!(
-        result.is_err(),
-        "expected compile error for mutation on immutable binding, got Ok"
-    );
-    let err_msg = format!("{:?}", result.err().unwrap());
-    assert!(
-        err_msg.contains("immutable") || err_msg.contains("let mut"),
-        "expected `immutable` / `let mut` diagnostic, got: {}",
-        err_msg
-    );
+    if let Err(e) = &result {
+        let msg = format!("{e:?}");
+        assert!(
+            !(msg.contains("immutable") || msg.contains("let mut")),
+            "builder call on immutable binding must NOT raise a mutability error, got: {msg}"
+        );
+    }
 }
 
 // ─── HashMap ─────────────────────────────────────────────────────────────
@@ -117,19 +184,23 @@ fn writeback_hashmap_delete() {
 }
 
 #[test]
-fn writeback_hashmap_let_immutable_compile_error() {
+fn writeback_hashmap_let_immutable_compiles_no_mutability_error() {
+    // R2: `let m = HashMap(); m.set("a", 1)` compiles — `.set` returns a
+    // new map; the immutable binding is unchanged; no mutability error.
+    // Annotated so the (orthogonal) empty-ctor V-inference path is pinned.
     let program = shape_ast::parser::parse_program(
         r#"
-        let m = HashMap()
-        m.set("a", 1)
+        let m: HashMap<string, int> = HashMap()
+        m.set("a", 1).set("b", 2)
         "#,
     )
     .expect("parse should succeed");
     let compiler = crate::compiler::BytecodeCompiler::new();
     let result = compiler.compile(&program);
     assert!(
-        result.is_err(),
-        "expected compile error for HashMap.set on immutable binding"
+        result.is_ok(),
+        "chained builder on immutable HashMap must compile, got: {:?}",
+        result.err()
     );
 }
 
@@ -169,7 +240,9 @@ fn writeback_deque_push_front_then_size() {
 // corrupting the slot. See `method_registry::MUT_SELF_DEQUE_METHODS`.
 
 #[test]
-fn writeback_deque_let_immutable_compile_error() {
+fn writeback_deque_let_immutable_compiles_no_mutability_error() {
+    // R2: builder on immutable Deque compiles — no in-place writeback,
+    // no mutability error. (`.pushBack` returns the new Deque value.)
     let program = shape_ast::parser::parse_program(
         r#"
         let d = Deque()
@@ -179,10 +252,13 @@ fn writeback_deque_let_immutable_compile_error() {
     .expect("parse should succeed");
     let compiler = crate::compiler::BytecodeCompiler::new();
     let result = compiler.compile(&program);
-    assert!(
-        result.is_err(),
-        "expected compile error for Deque.pushBack on immutable binding"
-    );
+    if let Err(e) = &result {
+        let msg = format!("{e:?}");
+        assert!(
+            !(msg.contains("immutable") || msg.contains("let mut")),
+            "Deque.pushBack on immutable binding must NOT raise a mutability error, got: {msg}"
+        );
+    }
 }
 
 // ─── PriorityQueue ───────────────────────────────────────────────────────
@@ -202,7 +278,9 @@ fn writeback_priority_queue_push_pop() {
 }
 
 #[test]
-fn writeback_priority_queue_let_immutable_compile_error() {
+fn writeback_priority_queue_let_immutable_compiles_no_mutability_error() {
+    // R2: builder on immutable PriorityQueue compiles — no in-place
+    // writeback, no mutability error.
     let program = shape_ast::parser::parse_program(
         r#"
         let q = PriorityQueue()
@@ -212,10 +290,13 @@ fn writeback_priority_queue_let_immutable_compile_error() {
     .expect("parse should succeed");
     let compiler = crate::compiler::BytecodeCompiler::new();
     let result = compiler.compile(&program);
-    assert!(
-        result.is_err(),
-        "expected compile error for PriorityQueue.push on immutable binding"
-    );
+    if let Err(e) = &result {
+        let msg = format!("{e:?}");
+        assert!(
+            !(msg.contains("immutable") || msg.contains("let mut")),
+            "PriorityQueue.push on immutable binding must NOT raise a mutability error, got: {msg}"
+        );
+    }
 }
 
 // ─── R-value receiver — silent drop per dispatch-text decision call ──────
@@ -439,7 +520,7 @@ fn writeback_emits_dup_storelocal_on_mut_method() {
         r#"
         let mut s = Set()
         s.add("a")
-        s.size()
+        s.len()
         "#,
     );
     // Look for the `Dup; Store{Local,ModuleBinding}` sequence in the
@@ -456,7 +537,10 @@ fn writeback_emits_dup_storelocal_on_mut_method() {
         if ins.opcode == OpCode::CallMethod
             && i + 2 < top.len()
             && top[i + 1].opcode == OpCode::Dup
-            && matches!(top[i + 2].opcode, OpCode::StoreLocal | OpCode::StoreModuleBinding)
+            && matches!(
+                top[i + 2].opcode,
+                OpCode::StoreLocal | OpCode::StoreModuleBinding
+            )
         {
             saw_dup_after_call = true;
             break;

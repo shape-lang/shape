@@ -15,6 +15,7 @@
 //!   `tan`, `asin`, `acos`, `atan`, `exp`, `ln`, `log`, `round`
 //! - Matrix/collection methods: `row`, `col`, `transpose`, `shape`, `len`
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use std::collections::HashMap;
 
 use shape_vm::bytecode::{BuiltinFunction, BytecodeProgram, OpCode, Operand};
@@ -103,10 +104,7 @@ fn is_invariant_value_producer(
 }
 
 /// Analyze a single loop for hoistable pure calls.
-fn analyze_loop_calls(
-    program: &BytecodeProgram,
-    info: &LoopInfo,
-) -> Vec<HoistableCall> {
+fn analyze_loop_calls(program: &BytecodeProgram, info: &LoopInfo) -> Vec<HoistableCall> {
     let mut hoistable = Vec::new();
 
     // Skip instructions inside nested loops (same approach as loop_analysis.rs).
@@ -136,9 +134,7 @@ fn analyze_loop_calls(
         if instr.opcode == OpCode::BuiltinCall {
             if let Some(Operand::Builtin(builtin)) = &instr.operand {
                 if is_pure_builtin(builtin) {
-                    if let Some(call) =
-                        try_hoist_builtin_call(program, info, i)
-                    {
+                    if let Some(call) = try_hoist_builtin_call(program, info, i) {
                         hoistable.push(call);
                     }
                 }
@@ -148,28 +144,11 @@ fn analyze_loop_calls(
         // Check for CallMethod with a pure method name.
         if instr.opcode == OpCode::CallMethod {
             match &instr.operand {
-                Some(Operand::TypedMethodCall { string_id, arg_count: _, .. }) => {
+                Some(Operand::TypedMethodCall { string_id, .. }) => {
                     let str_idx = *string_id as usize;
                     if let Some(method_name) = program.strings.get(str_idx) {
                         if is_pure_method_name(method_name) {
-                            if let Some(call) =
-                                try_hoist_method_call(program, info, i)
-                            {
-                                hoistable.push(call);
-                            }
-                        }
-                    }
-                }
-                Some(Operand::TypedMethodCall {
-                    string_id,
-                    ..
-                }) => {
-                    let str_idx = *string_id as usize;
-                    if let Some(method_name) = program.strings.get(str_idx) {
-                        if is_pure_method_name(method_name) {
-                            if let Some(call) =
-                                try_hoist_method_call(program, info, i)
-                            {
+                            if let Some(call) = try_hoist_method_call(program, info, i) {
                                 hoistable.push(call);
                             }
                         }
@@ -246,7 +225,6 @@ fn try_hoist_method_call(
     // Get arg_count from the operand directly.
     let operand_arg_count = match &program.instructions[call_idx].operand {
         Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize,
-        Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize,
         _ => return None,
     };
 
@@ -285,10 +263,7 @@ fn try_hoist_method_call(
 }
 
 /// Read a small non-negative integer from a PushConst operand.
-fn read_const_int(
-    program: &BytecodeProgram,
-    operand: &Option<Operand>,
-) -> Option<usize> {
+fn read_const_int(program: &BytecodeProgram, operand: &Option<Operand>) -> Option<usize> {
     let Some(Operand::Const(const_idx)) = operand else {
         return None;
     };
@@ -301,7 +276,9 @@ fn read_const_int(
             }
         }
         Some(shape_vm::bytecode::Constant::UInt(v)) => Some(*v as usize),
-        Some(shape_vm::bytecode::Constant::Number(v)) if *v >= 0.0 && *v == (*v as usize) as f64 => {
+        Some(shape_vm::bytecode::Constant::Number(v))
+            if *v >= 0.0 && *v == (*v as usize) as f64 =>
+        {
             Some(*v as usize)
         }
         _ => None,
@@ -309,10 +286,7 @@ fn read_const_int(
 }
 
 /// Analyze all loops in the program for hoistable pure calls.
-pub fn analyze_licm(
-    program: &BytecodeProgram,
-    loop_info: &HashMap<usize, LoopInfo>,
-) -> LicmPlan {
+pub fn analyze_licm(program: &BytecodeProgram, loop_info: &HashMap<usize, LoopInfo>) -> LicmPlan {
     let mut plan = LicmPlan::default();
 
     for (header, info) in loop_info {
@@ -386,20 +360,23 @@ mod tests {
         //   ...increment i...
         //   LoopEnd
         let instrs = vec![
-            make_instr(OpCode::LoopStart, None),                                    // 0
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 1: i
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),                  // 2: n
-            make_instr(OpCode::LtInt, None),                                         // 3
-            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))),               // 4
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),                  // 5: x (invariant)
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 6: argc=1
-            make_instr(OpCode::BuiltinCall, Some(Operand::Builtin(BuiltinFunction::Sin))), // 7
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 8
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 9
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 10
-            make_instr(OpCode::AddInt, None),                                        // 11
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 12
-            make_instr(OpCode::LoopEnd, None),                                       // 13
+            make_instr(OpCode::LoopStart, None),                       // 0
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 1: i
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),    // 2: n
+            make_instr(OpCode::LtInt, None),                           // 3
+            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))), // 4
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),    // 5: x (invariant)
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 6: argc=1
+            make_instr(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::Sin)),
+            ), // 7
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),   // 8
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 9
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 10
+            make_instr(OpCode::AddInt, None),                          // 11
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),   // 12
+            make_instr(OpCode::LoopEnd, None),                         // 13
         ];
 
         let program = make_program(instrs, vec![Constant::Int(1)]);
@@ -418,20 +395,23 @@ mod tests {
     fn test_non_invariant_arg_not_hoisted() {
         // Loop with sin(i) where i is the induction variable (not invariant):
         let instrs = vec![
-            make_instr(OpCode::LoopStart, None),                                    // 0
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 1: i
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),                  // 2: n
-            make_instr(OpCode::LtInt, None),                                         // 3
-            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))),               // 4
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 5: i (NOT invariant)
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 6: argc=1
-            make_instr(OpCode::BuiltinCall, Some(Operand::Builtin(BuiltinFunction::Sin))), // 7
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 8
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 9
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 10
-            make_instr(OpCode::AddInt, None),                                        // 11
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 12
-            make_instr(OpCode::LoopEnd, None),                                       // 13
+            make_instr(OpCode::LoopStart, None),                       // 0
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 1: i
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),    // 2: n
+            make_instr(OpCode::LtInt, None),                           // 3
+            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))), // 4
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 5: i (NOT invariant)
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 6: argc=1
+            make_instr(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::Sin)),
+            ), // 7
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),   // 8
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 9
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 10
+            make_instr(OpCode::AddInt, None),                          // 11
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),   // 12
+            make_instr(OpCode::LoopEnd, None),                         // 13
         ];
 
         let program = make_program(instrs, vec![Constant::Int(1)]);
@@ -440,7 +420,9 @@ mod tests {
 
         // sin(i) should NOT be hoisted because i is the induction variable
         assert!(
-            plan.hoistable_calls_by_loop.get(&0).map_or(true, |c| c.is_empty()),
+            plan.hoistable_calls_by_loop
+                .get(&0)
+                .map_or(true, |c| c.is_empty()),
             "sin(i) should not be hoisted when i is the IV"
         );
     }
@@ -449,20 +431,23 @@ mod tests {
     fn test_impure_builtin_not_hoisted() {
         // Loop with print(x) where x is loop-invariant but print is impure:
         let instrs = vec![
-            make_instr(OpCode::LoopStart, None),                                    // 0
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 1
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),                  // 2
-            make_instr(OpCode::LtInt, None),                                         // 3
-            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))),               // 4
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),                  // 5
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 6
-            make_instr(OpCode::BuiltinCall, Some(Operand::Builtin(BuiltinFunction::Print))), // 7
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 8
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 9
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 10
-            make_instr(OpCode::AddInt, None),                                        // 11
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 12
-            make_instr(OpCode::LoopEnd, None),                                       // 13
+            make_instr(OpCode::LoopStart, None),                       // 0
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 1
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),    // 2
+            make_instr(OpCode::LtInt, None),                           // 3
+            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))), // 4
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),    // 5
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 6
+            make_instr(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::Print)),
+            ), // 7
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),   // 8
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 9
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 10
+            make_instr(OpCode::AddInt, None),                          // 11
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),   // 12
+            make_instr(OpCode::LoopEnd, None),                         // 13
         ];
 
         let program = make_program(instrs, vec![Constant::Int(1)]);
@@ -470,7 +455,9 @@ mod tests {
         let plan = analyze_licm(&program, &loop_info);
 
         assert!(
-            plan.hoistable_calls_by_loop.get(&0).map_or(true, |c| c.is_empty()),
+            plan.hoistable_calls_by_loop
+                .get(&0)
+                .map_or(true, |c| c.is_empty()),
             "print() should not be hoisted (impure)"
         );
     }
@@ -486,15 +473,14 @@ mod tests {
         //   StoreLocal(3)
         //   ...increment...
         //   LoopEnd
-        use shape_value::StringId;
         let instrs = vec![
-            make_instr(OpCode::LoopStart, None),                                    // 0
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 1
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),                  // 2
-            make_instr(OpCode::LtInt, None),                                         // 3
-            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))),               // 4
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),                  // 5: matrix (invariant)
-            make_instr(OpCode::PushConst, Some(Operand::Const(1))),                  // 6: argc=0
+            make_instr(OpCode::LoopStart, None),                       // 0
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 1
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),    // 2
+            make_instr(OpCode::LtInt, None),                           // 3
+            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))), // 4
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),    // 5: matrix (invariant)
+            make_instr(OpCode::PushConst, Some(Operand::Const(1))),    // 6: argc=0
             make_instr(
                 OpCode::CallMethod,
                 Some(Operand::TypedMethodCall {
@@ -503,13 +489,13 @@ mod tests {
                     string_id: 0,
                     receiver_type_tag: 0xFF,
                 }),
-            ),                                                                        // 7
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 8
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 9
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 10
-            make_instr(OpCode::AddInt, None),                                        // 11
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 12
-            make_instr(OpCode::LoopEnd, None),                                       // 13
+            ), // 7
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),   // 8
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 9
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 10
+            make_instr(OpCode::AddInt, None),                          // 11
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),   // 12
+            make_instr(OpCode::LoopEnd, None),                         // 13
         ];
 
         let program = make_program_with_strings(
@@ -531,29 +517,35 @@ mod tests {
         // Outer loop with sin(x) where x is invariant to outer loop.
         // Inner loop body should not produce LICM candidates for the outer loop.
         let instrs = vec![
-            make_instr(OpCode::LoopStart, None),                                    // 0: outer start
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 1
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),                  // 2
-            make_instr(OpCode::LtInt, None),                                         // 3
-            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(15))),              // 4
+            make_instr(OpCode::LoopStart, None), // 0: outer start
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 1
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))), // 2
+            make_instr(OpCode::LtInt, None),     // 3
+            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(15))), // 4
             // sin(x) in outer loop body - should be hoistable
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),                  // 5
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 6
-            make_instr(OpCode::BuiltinCall, Some(Operand::Builtin(BuiltinFunction::Sin))), // 7
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))),                 // 8
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))), // 5
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))), // 6
+            make_instr(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::Sin)),
+            ), // 7
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(3))), // 8
             // Inner loop
-            make_instr(OpCode::LoopStart, None),                                    // 9: inner start
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))),                  // 10
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 11
-            make_instr(OpCode::BuiltinCall, Some(Operand::Builtin(BuiltinFunction::Cos))), // 12
-            make_instr(OpCode::Pop, None),                                           // 13
-            make_instr(OpCode::LoopEnd, None),                                       // 14: inner end
+            make_instr(OpCode::LoopStart, None), // 9: inner start
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(2))), // 10
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))), // 11
+            make_instr(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::Cos)),
+            ), // 12
+            make_instr(OpCode::Pop, None),       // 13
+            make_instr(OpCode::LoopEnd, None),   // 14: inner end
             // Increment outer IV
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 15
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 16
-            make_instr(OpCode::AddInt, None),                                        // 17
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 18
-            make_instr(OpCode::LoopEnd, None),                                       // 19: outer end
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))), // 15
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))), // 16
+            make_instr(OpCode::AddInt, None),                       // 17
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))), // 18
+            make_instr(OpCode::LoopEnd, None),                      // 19: outer end
         ];
 
         let program = make_program(instrs, vec![Constant::Int(1)]);
@@ -563,7 +555,10 @@ mod tests {
         // Outer loop should have sin(x) hoistable but NOT cos(x) from inner loop
         if let Some(calls) = plan.hoistable_calls_by_loop.get(&0) {
             assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].call_idx, 7, "should be the sin() call in outer body");
+            assert_eq!(
+                calls[0].call_idx, 7,
+                "should be the sin() call in outer body"
+            );
         }
     }
 
@@ -571,26 +566,26 @@ mod tests {
     fn test_constant_arg_hoistable() {
         // sin(3.14) where the argument is a constant
         let instrs = vec![
-            make_instr(OpCode::LoopStart, None),                                    // 0
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 1
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),                  // 2
-            make_instr(OpCode::LtInt, None),                                         // 3
-            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))),               // 4
-            make_instr(OpCode::PushConst, Some(Operand::Const(1))),                  // 5: 3.14
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 6: argc=1
-            make_instr(OpCode::BuiltinCall, Some(Operand::Builtin(BuiltinFunction::Sin))), // 7
-            make_instr(OpCode::Pop, None),                                           // 8
-            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),                  // 9
-            make_instr(OpCode::PushConst, Some(Operand::Const(0))),                  // 10
-            make_instr(OpCode::AddInt, None),                                        // 11
-            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),                 // 12
-            make_instr(OpCode::LoopEnd, None),                                       // 13
+            make_instr(OpCode::LoopStart, None),                       // 0
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 1
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(1))),    // 2
+            make_instr(OpCode::LtInt, None),                           // 3
+            make_instr(OpCode::JumpIfFalse, Some(Operand::Offset(8))), // 4
+            make_instr(OpCode::PushConst, Some(Operand::Const(1))),    // 5: 3.14
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 6: argc=1
+            make_instr(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::Sin)),
+            ), // 7
+            make_instr(OpCode::Pop, None),                             // 8
+            make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 9
+            make_instr(OpCode::PushConst, Some(Operand::Const(0))),    // 10
+            make_instr(OpCode::AddInt, None),                          // 11
+            make_instr(OpCode::StoreLocal, Some(Operand::Local(0))),   // 12
+            make_instr(OpCode::LoopEnd, None),                         // 13
         ];
 
-        let program = make_program(
-            instrs,
-            vec![Constant::Int(1), Constant::Number(3.14)],
-        );
+        let program = make_program(instrs, vec![Constant::Int(1), Constant::Number(3.14)]);
         let loop_info = crate::loop_analysis::analyze_loops(&program);
         let plan = analyze_licm(&program, &loop_info);
 

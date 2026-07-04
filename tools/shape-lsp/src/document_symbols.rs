@@ -52,11 +52,7 @@ fn extract_document_symbols(program: &Program, text: &str) -> Vec<DocumentSymbol
 /// `fallback_line` is the enumerate index used only when an item carries a
 /// dummy span (resilient parse can produce these for partially-recovered
 /// nodes). Properly-parsed items use the AST span via `span_to_range`.
-fn item_to_document_symbols(
-    item: &Item,
-    text: &str,
-    fallback_line: usize,
-) -> Vec<DocumentSymbol> {
+fn item_to_document_symbols(item: &Item, text: &str, fallback_line: usize) -> Vec<DocumentSymbol> {
     match item {
         Item::Function(func, span) => {
             let params: Vec<String> = func
@@ -84,16 +80,12 @@ fn item_to_document_symbols(
             crate::symbols::get_pattern_names(&var_decl.pattern)
                 .into_iter()
                 .map(|(name, name_span)| {
-                    let use_span = if name_span.is_dummy() { *span } else { name_span };
-                    create_symbol_from_span(
-                        &name,
-                        kind,
-                        "",
-                        use_span,
-                        text,
-                        fallback_line,
-                        None,
-                    )
+                    let use_span = if name_span.is_dummy() {
+                        *span
+                    } else {
+                        name_span
+                    };
+                    create_symbol_from_span(&name, kind, "", use_span, text, fallback_line, None)
                 })
                 .collect()
         }
@@ -463,10 +455,7 @@ fn create_symbol_from_span(
     let range = if span.is_dummy() {
         let line = fallback_line as u32;
         Range {
-            start: Position {
-                line,
-                character: 0,
-            },
+            start: Position { line, character: 0 },
             end: Position {
                 line,
                 character: 100,

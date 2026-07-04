@@ -1,0 +1,10 @@
+type Point { x: int, y: int }
+fn g() -> Result<Result<Point, string>, string> { Ok(Ok(Point { x: 1, y: 2 })) }
+fn sink(n: int) -> int { n + 1 }
+fn use_it() -> int {
+  match g() {
+    Ok(Ok(Some(n))) => sink(n),
+    _ => 0,
+  }
+}
+fn main() { print(use_it()) }

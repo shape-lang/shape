@@ -23,7 +23,10 @@
 //! `stdlib-src/core/json_value.shape`). See
 //! `docs/adr/005-typed-slot-construction.md`.
 
-use shape_value::heap_value::HeapValue;
+use shape_value::heap_value::{
+    HashMapKindedRef, HashSetElementKind, HeapValue, TypedObjectPtr, TypedObjectStorage,
+};
+use shape_value::{HeapKind, NativeKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonValue {
@@ -98,105 +101,23 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         HeapValue::String(s) => Ok(JsonValue::String((**s).clone())),
         HeapValue::BigInt(n) => Ok(JsonValue::Int(**n)),
         HeapValue::Char(c) => Ok(JsonValue::String(c.to_string())),
-        HeapValue::HashMap(kref) => {
-            // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk
-            // reading keys (`*mut TypedArray<*const StringObj>` → `&str`)
-            // and values (`*mut TypedArray<V>` → `JsonValue` per V).
-            // ADR-006 §2.7.24 Q25.B SUPERSEDED + audit §C.4.
-            use shape_value::heap_value::HashMapKindedRef;
-            let n = kref.len();
-            let mut out: Vec<(String, JsonValue)> = Vec::with_capacity(n);
-            // Read keys helper: walk `*mut TypedArray<*const StringObj>` for any V.
-            let keys_ptr = match kref {
-                HashMapKindedRef::I64(arc) => arc.keys,
-                HashMapKindedRef::F64(arc) => arc.keys,
-                HashMapKindedRef::Bool(arc) => arc.keys,
-                HashMapKindedRef::Char(arc) => arc.keys,
-                HashMapKindedRef::String(arc) => arc.keys,
-                HashMapKindedRef::Decimal(arc) => arc.keys,
-                HashMapKindedRef::TypedObject(arc) => arc.keys,
-                HashMapKindedRef::TraitObject(arc) => arc.keys,
-                HashMapKindedRef::HashMap(arc) => arc.keys,
-            };
-            for i in 0..n {
-                let key: String = unsafe {
-                    let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
-                        keys_ptr, i as u32,
-                    );
-                    shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
-                };
-                let value: JsonValue = match kref {
-                    HashMapKindedRef::I64(arc) => {
-                        let v: i64 = unsafe { *(*arc.values).data.add(i) };
-                        JsonValue::Int(v)
-                    }
-                    HashMapKindedRef::F64(arc) => {
-                        let v: f64 = unsafe { *(*arc.values).data.add(i) };
-                        JsonValue::Number(v)
-                    }
-                    HashMapKindedRef::Bool(arc) => {
-                        let v: u8 = unsafe { *(*arc.values).data.add(i) };
-                        JsonValue::Bool(v != 0)
-                    }
-                    HashMapKindedRef::Char(arc) => {
-                        let v: char = unsafe { *(*arc.values).data.add(i) };
-                        JsonValue::String(v.to_string())
-                    }
-                    HashMapKindedRef::String(arc) => {
-                        let ptr: *const shape_value::v2::string_obj::StringObj =
-                            unsafe { *(*arc.values).data.add(i) };
-                        JsonValue::String(unsafe {
-                            shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
-                        })
-                    }
-                    HashMapKindedRef::Decimal(_) => {
-                        return Err("HeapValue::HashMap<string, decimal> → JsonValue: \
-                            decimal serialization policy not yet decided (precision \
-                            preservation vs lossy f64 cast). Surface-and-stop per \
-                            playbook §6."
-                            .to_string());
-                    }
-                    HashMapKindedRef::TypedObject(_) => {
-                        return Err("HeapValue::HashMap<string, TypedObject> → JsonValue: \
-                            nested TypedObject serialization requires the schema \
-                            walker which is its own cluster. Surface-and-stop."
-                            .to_string());
-                    }
-                    HashMapKindedRef::TraitObject(_) => {
-                        return Err("HeapValue::HashMap<string, TraitObject> → JsonValue: \
-                            no canonical JSON shape for TraitObject. Surface-and-stop."
-                            .to_string());
-                    }
-                    HashMapKindedRef::HashMap(arc) => {
-                        // Recursive carrier (Wave N hashmap-value-v-arm
-                        // follow-up, cluster-2 closure-wave-C, 2026-05-16).
-                        // Read the inner HashMapKindedRef, wrap as a fresh
-                        // HeapValue::HashMap, recurse. The recursive call
-                        // takes ownership semantics by reference; we
-                        // share-clone the inner Arc so the recursive
-                        // call doesn't accidentally drop our share.
-                        let inner_ref: &HashMapKindedRef =
-                            unsafe { &*(*arc.values).data.add(i) };
-                        let inner_hv = HeapValue::HashMap(inner_ref.clone());
-                        heap_to_json_value(&inner_hv)?
-                    }
-                };
-                out.push((key, value));
-            }
-            Ok(JsonValue::Object(out))
-        }
+        HeapValue::HashMap(kref) => hashmap_kref_to_json_value(kref),
 
-        // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
-        // 2026-05-10): Set serializes as a JSON array of strings (the
-        // §2.7.15 amendment's documented wire shape — string-only
-        // keyspace at landing). One mechanical-yes mapping; no
-        // architectural-choice deferral.
-        HeapValue::HashSet(d) => Ok(JsonValue::Array(
-            d.keys
-                .iter()
-                .map(|k| JsonValue::String((**k).clone()))
-                .collect(),
-        )),
+        // Wave 13 W13-hashset-rebuild plus W74B int-key redrive: Set
+        // serializes as a JSON array matching its explicit element arm.
+        // No fallback to the string buffer: an int set with zero string keys
+        // must not silently serialize as an empty string set.
+        HeapValue::HashSet(d) => match d.element_kind() {
+            HashSetElementKind::String => Ok(JsonValue::Array(
+                d.string_keys()
+                    .iter()
+                    .map(|k| JsonValue::String((**k).clone()))
+                    .collect(),
+            )),
+            HashSetElementKind::I64 => Ok(JsonValue::Array(
+                d.i64_keys().iter().map(|k| JsonValue::Int(*k)).collect(),
+            )),
+        },
 
         // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10):
         // Deque serializes as a JSON array of front-to-back elements.
@@ -213,11 +134,7 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         }
 
         // TypedObject schema-aware (1)
-        HeapValue::TypedObject(storage) => typed_object_to_json_value(
-            storage.schema_id,
-            &storage.slots,
-            storage.heap_mask,
-        ),
+        HeapValue::TypedObject(storage) => typed_object_ptr_to_json_value(storage),
 
         // Categorically-non-data Reject (5)
         HeapValue::Future(_) => Err("cannot serialize: Future".into()),
@@ -362,13 +279,132 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
 // before the value becomes a `HeapValue`). Refusal #1 binding: do not
 // reintroduce under any rename/shim/bridge.
 
+/// Walk a direct `HashMapKindedRef` carrier and produce `JsonValue::Object`.
+///
+/// This is the post-W70 direct-carrier counterpart to the
+/// `HeapValue::HashMap` arm. It never assumes a `Box<HeapValue>` or
+/// `Arc<HeapValue>` wrapper around the map.
+pub fn hashmap_kref_to_json_value(kref: &HashMapKindedRef) -> Result<JsonValue, String> {
+    hashmap_kref_to_json_value_with_registry(kref, None)
+}
+
+fn hashmap_kref_to_json_value_with_registry(
+    kref: &HashMapKindedRef,
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Result<JsonValue, String> {
+    // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk
+    // reading keys (`*mut TypedArray<*const StringObj>` → `&str`) and
+    // values (`*mut TypedArray<V>` → `JsonValue` per V). ADR-006
+    // §2.7.24 Q25.B SUPERSEDED + audit §C.4.
+    let n = kref.len();
+    let mut out: Vec<(String, JsonValue)> = Vec::with_capacity(n);
+    let keys_ptr = match kref {
+        HashMapKindedRef::I64(arc) => arc.keys,
+        HashMapKindedRef::F64(arc) => arc.keys,
+        HashMapKindedRef::Bool(arc) => arc.keys,
+        HashMapKindedRef::Char(arc) => arc.keys,
+        HashMapKindedRef::String(arc) => arc.keys,
+        HashMapKindedRef::Decimal(arc) => arc.keys,
+        HashMapKindedRef::TypedObject(arc) => arc.keys,
+        HashMapKindedRef::TraitObject(arc) => arc.keys,
+        HashMapKindedRef::Callable(arc) => arc.keys,
+        HashMapKindedRef::HashMap(arc) => arc.keys,
+    };
+    for i in 0..n {
+        let key: String = unsafe {
+            let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+            shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+        };
+        let value: JsonValue = match kref {
+            HashMapKindedRef::I64(arc) => {
+                let v: i64 = unsafe { *(*arc.values).data.add(i) };
+                JsonValue::Int(v)
+            }
+            HashMapKindedRef::F64(arc) => {
+                let v: f64 = unsafe { *(*arc.values).data.add(i) };
+                JsonValue::Number(v)
+            }
+            HashMapKindedRef::Bool(arc) => {
+                let v: u8 = unsafe { *(*arc.values).data.add(i) };
+                JsonValue::Bool(v != 0)
+            }
+            HashMapKindedRef::Char(arc) => {
+                let v: char = unsafe { *(*arc.values).data.add(i) };
+                JsonValue::String(v.to_string())
+            }
+            HashMapKindedRef::String(arc) => {
+                let ptr: *const shape_value::v2::string_obj::StringObj =
+                    unsafe { *(*arc.values).data.add(i) };
+                JsonValue::String(unsafe {
+                    shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                })
+            }
+            HashMapKindedRef::Decimal(_) => {
+                return Err("HeapValue::HashMap<string, decimal> → JsonValue: \
+                    decimal serialization policy not yet decided (precision \
+                    preservation vs lossy f64 cast). Surface-and-stop per \
+                    playbook §6."
+                    .to_string());
+            }
+            HashMapKindedRef::TypedObject(arc) => {
+                let elem: &TypedObjectPtr = unsafe { &*(*arc.values).data.add(i) };
+                typed_object_ptr_to_json_value_with_registry_opt(elem, schemas)?
+            }
+            HashMapKindedRef::TraitObject(_) => {
+                return Err("HeapValue::HashMap<string, TraitObject> → JsonValue: \
+                    no canonical JSON shape for TraitObject. Surface-and-stop."
+                    .to_string());
+            }
+            HashMapKindedRef::Callable(_) => {
+                return Err("HeapValue::HashMap<string, Function> → JsonValue: \
+                    no canonical JSON shape for callable values. Surface-and-stop."
+                    .to_string());
+            }
+            HashMapKindedRef::HashMap(arc) => {
+                let inner_ref: &HashMapKindedRef = unsafe { &*(*arc.values).data.add(i) };
+                hashmap_kref_to_json_value_with_registry(inner_ref, schemas)?
+            }
+        };
+        out.push((key, value));
+    }
+    Ok(JsonValue::Object(out))
+}
+
+/// Walk a direct `TypedObjectPtr` carrier and produce `JsonValue::Object`.
+pub fn typed_object_ptr_to_json_value(ptr: &TypedObjectPtr) -> Result<JsonValue, String> {
+    typed_object_ptr_to_json_value_with_registry_opt(ptr, None)
+}
+
+pub fn typed_object_ptr_to_json_value_with_registry(
+    ptr: &TypedObjectPtr,
+    schemas: &crate::type_schema::TypeSchemaRegistry,
+) -> Result<JsonValue, String> {
+    typed_object_ptr_to_json_value_with_registry_opt(ptr, Some(schemas))
+}
+
+fn typed_object_ptr_to_json_value_with_registry_opt(
+    ptr: &TypedObjectPtr,
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Result<JsonValue, String> {
+    if ptr.is_null() {
+        return Err("heap_to_json_value: null TypedObject pointer".to_string());
+    }
+    let storage: &TypedObjectStorage = unsafe { &*ptr.as_ptr() };
+    typed_object_to_json_value(
+        storage.schema_id,
+        storage.slots(),
+        storage.heap_mask,
+        &storage.field_kinds,
+        schemas,
+    )
+}
+
 /// Walk a `HeapValue::TypedObject` and produce `JsonValue::Object`.
 ///
 /// Schema lookup via `lookup_schema_by_id_public`; per-FieldDef
-/// `field_type` dispatch using `wire_name()` for JSON field name.
-/// Heap-typed fields are read via `slot.as_heap_value()` and recursed
-/// into `heap_to_json_value`; inline-typed fields are read via
-/// `slot.as_i64()` / `as_f64()` / `as_bool()` per the FieldType arm.
+/// `field_type` dispatch using `wire_name()` for JSON field name. Heap
+/// fields are decoded from their stamped `NativeKind` carrier, while inline
+/// fields use the schema `FieldType` arm.
 ///
 /// Mirrors json.rs's parse-side `build_typed_object_from_json` in
 /// reverse direction.
@@ -376,15 +412,20 @@ fn typed_object_to_json_value(
     schema_id: u64,
     slots: &[shape_value::ValueSlot],
     heap_mask: u64,
+    field_kinds: &[NativeKind],
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
 ) -> Result<JsonValue, String> {
-    use crate::type_schema::{lookup_schema_by_id_public, FieldType};
+    use crate::type_schema::{FieldType, lookup_schema_by_id_public};
 
-    let schema = lookup_schema_by_id_public(schema_id as u32).ok_or_else(|| {
-        format!(
-            "heap_to_json_value: unknown TypedObject schema id {}",
-            schema_id
-        )
-    })?;
+    let schema = schemas
+        .and_then(|registry| registry.get_by_id(schema_id as u32).cloned())
+        .or_else(|| lookup_schema_by_id_public(schema_id as u32))
+        .ok_or_else(|| {
+            format!(
+                "heap_to_json_value: unknown TypedObject schema id {}",
+                schema_id
+            )
+        })?;
 
     let mut pairs: Vec<(String, JsonValue)> = Vec::with_capacity(schema.fields.len());
     for field in &schema.fields {
@@ -399,6 +440,14 @@ fn typed_object_to_json_value(
         }
         let slot = &slots[idx];
         let is_heap = (heap_mask & (1u64 << field.index)) != 0;
+        let field_kind = field_kinds.get(idx).copied().ok_or_else(|| {
+            format!(
+                "heap_to_json_value: TypedObject field '{}' index {} missing NativeKind (field_kinds.len()={})",
+                field.name,
+                idx,
+                field_kinds.len()
+            )
+        })?;
         let child = match (&field.field_type, is_heap) {
             (FieldType::I64, false)
             | (FieldType::I8, false)
@@ -426,7 +475,9 @@ fn typed_object_to_json_value(
                     field.name
                 ));
             }
-            (_, true) => heap_to_json_value(slot.as_heap_value())?,
+            (_, true) => {
+                typed_object_heap_field_to_json_value(slot.raw(), field_kind, &field.name, schemas)?
+            }
             // Inline scalar types where storage doesn't match field_type
             // (Array/Object/Any when not heap-tagged; impossible if heap_mask
             // is correct).
@@ -440,6 +491,84 @@ fn typed_object_to_json_value(
         pairs.push((field.wire_name().to_string(), child));
     }
     Ok(JsonValue::Object(pairs))
+}
+
+fn typed_object_heap_field_to_json_value(
+    bits: u64,
+    kind: NativeKind,
+    field_name: &str,
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Result<JsonValue, String> {
+    match kind {
+        NativeKind::Null => Ok(JsonValue::Null),
+        NativeKind::String => {
+            if bits == 0 {
+                return Err(format!(
+                    "heap_to_json_value: TypedObject field '{}' has null String carrier",
+                    field_name
+                ));
+            }
+            let s = unsafe { &*(bits as *const String) };
+            Ok(JsonValue::String(s.clone()))
+        }
+        NativeKind::StringV2 => {
+            if bits == 0 {
+                return Err(format!(
+                    "heap_to_json_value: TypedObject field '{}' has null StringV2 carrier",
+                    field_name
+                ));
+            }
+            let ptr = bits as *const shape_value::v2::string_obj::StringObj;
+            Ok(JsonValue::String(unsafe {
+                shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+            }))
+        }
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            if bits == 0 {
+                return Err(format!(
+                    "heap_to_json_value: TypedObject field '{}' has null TypedObject carrier",
+                    field_name
+                ));
+            }
+            let ptr = TypedObjectPtr::new(bits as *const TypedObjectStorage);
+            let out = typed_object_ptr_to_json_value_with_registry_opt(&ptr, schemas);
+            std::mem::forget(ptr);
+            out
+        }
+        NativeKind::Ptr(HeapKind::HashMap) => {
+            if bits == 0 {
+                return Err(format!(
+                    "heap_to_json_value: TypedObject field '{}' has null HashMap carrier",
+                    field_name
+                ));
+            }
+            let kref: &HashMapKindedRef = unsafe { &*(bits as *const HashMapKindedRef) };
+            hashmap_kref_to_json_value_with_registry(kref, schemas)
+        }
+        NativeKind::Ptr(HeapKind::BigInt) => {
+            if bits == 0 {
+                return Err(format!(
+                    "heap_to_json_value: TypedObject field '{}' has null BigInt carrier",
+                    field_name
+                ));
+            }
+            let value = unsafe { &*(bits as *const i64) };
+            Ok(JsonValue::Int(*value))
+        }
+        NativeKind::Ptr(HeapKind::Char) | NativeKind::Char => {
+            let c = char::from_u32(bits as u32).ok_or_else(|| {
+                format!(
+                    "heap_to_json_value: TypedObject field '{}' has invalid char bits {}",
+                    field_name, bits
+                )
+            })?;
+            Ok(JsonValue::String(c.to_string()))
+        }
+        other => Err(format!(
+            "heap_to_json_value: TypedObject field '{}' has heap NativeKind {:?} with no JSON serialization policy",
+            field_name, other
+        )),
+    }
 }
 
 /// Convert a `JsonValue` into a `serde_json::Value`.
@@ -610,4 +739,52 @@ pub fn json_value_to_toml_value(jv: &JsonValue) -> toml::Value {
 pub fn json_value_to_msgpack_bytes(jv: &JsonValue) -> Result<Vec<u8>, String> {
     let serde_json_v = json_value_to_serde_json(jv);
     rmp_serde::to_vec(&serde_json_v).map_err(|e| format!("msgpack encode failed: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{json_value_to_serde_json, typed_object_ptr_to_json_value};
+    use crate::type_schema::{SyncRegistryScope, TypeSchemaBuilder, TypeSchemaRegistry};
+    use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
+    use shape_value::{NativeKind, ValueSlot};
+    use std::sync::Arc;
+
+    #[test]
+    fn typed_object_string_field_serializes_from_direct_carrier() {
+        let mut registry = TypeSchemaRegistry::new_with_stdlib();
+        let schema_id = TypeSchemaBuilder::new("__W71HttpJsonBody")
+            .string_field("key")
+            .register(&mut registry);
+        let _scope = SyncRegistryScope::enter(Arc::new(registry));
+
+        let value = Arc::new("value".to_string());
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            vec![ValueSlot::from_string_arc(Arc::clone(&value))].into_boxed_slice(),
+            1,
+            Arc::from(vec![NativeKind::String].into_boxed_slice()),
+        );
+        let object = TypedObjectPtr::new(ptr);
+
+        assert_eq!(
+            Arc::strong_count(&value),
+            2,
+            "TypedObject field slot must own one String share"
+        );
+
+        let json = typed_object_ptr_to_json_value(&object).expect("typed object to json");
+        let serde_value = json_value_to_serde_json(&json);
+
+        assert_eq!(
+            serde_value["key"],
+            serde_json::Value::String("value".to_string())
+        );
+
+        drop(object);
+        assert_eq!(
+            Arc::strong_count(&value),
+            1,
+            "dropping the TypedObjectPtr must release the field String share"
+        );
+    }
 }

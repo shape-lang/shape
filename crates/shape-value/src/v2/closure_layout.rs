@@ -46,10 +46,25 @@ use crate::heap_value::{
     // 4-table-lockstep territory deferred to V3-S5 ckpt-5 — it stays
     // cascade-broken at this checkpoint per multi-session chain step 2
     // (broken state OK on feature branch).
-    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
-    IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
-    PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-    TraitObjectStorage, TypedObjectStorage,
+    AtomicData,
+    ChannelData,
+    DequeData,
+    HashSetData,
+    HeapKind,
+    HeapValue,
+    IoHandleData,
+    LazyData,
+    MatrixData,
+    MatrixSliceData,
+    MutexData,
+    NativeViewData,
+    PriorityQueueData,
+    RangeData,
+    TableViewData,
+    TaskGroupData,
+    TemporalData,
+    TraitObjectStorage,
+    TypedObjectStorage,
 };
 use crate::native_kind::NativeKind;
 use std::collections::HashMap;
@@ -1761,11 +1776,8 @@ mod tests {
         // The §2.7.8 / Q10 lockstep invariant: every constructed layout
         // satisfies `capture_types.len() == capture_native_kinds.len() ==
         // capture_kinds.len()`.
-        let layout = immutable_layout(&[
-            ConcreteType::F64,
-            ConcreteType::String,
-            ConcreteType::I32,
-        ]);
+        let layout =
+            immutable_layout(&[ConcreteType::F64, ConcreteType::String, ConcreteType::I32]);
         assert_eq!(
             layout.capture_types.len(),
             layout.capture_native_kinds.len()
@@ -1782,11 +1794,8 @@ mod tests {
         let types = vec![ConcreteType::Pointer(Box::new(ConcreteType::Void))];
         let kinds = vec![CaptureKind::Immutable];
         let native_kinds = vec![NativeKind::Ptr(HeapKind::HashMap)];
-        let layout = ClosureLayout::from_capture_types_with_native_kinds(
-            &types,
-            &kinds,
-            &native_kinds,
-        );
+        let layout =
+            ClosureLayout::from_capture_types_with_native_kinds(&types, &kinds, &native_kinds);
         assert_eq!(
             layout.capture_native_kind(0),
             NativeKind::Ptr(HeapKind::HashMap)
@@ -1805,11 +1814,7 @@ mod tests {
         let types = vec![ConcreteType::F64, ConcreteType::I64];
         let kinds = vec![CaptureKind::Immutable, CaptureKind::Immutable];
         let native_kinds = vec![NativeKind::Float64]; // wrong length
-        let _ = ClosureLayout::from_capture_types_with_native_kinds(
-            &types,
-            &kinds,
-            &native_kinds,
-        );
+        let _ = ClosureLayout::from_capture_types_with_native_kinds(&types, &kinds, &native_kinds);
     }
 
     #[test]

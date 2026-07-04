@@ -91,8 +91,8 @@ pub fn create_math_intrinsics_module() -> ModuleExports {
             #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
             let var = variance_avx2(data, mean);
             #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-            let var: f64 = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
-                / data.len() as f64;
+            let var: f64 =
+                data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64;
             Ok(TypedReturn::Concrete(ConcreteReturn::F64(var)))
         },
     );
@@ -113,8 +113,8 @@ pub fn create_math_intrinsics_module() -> ModuleExports {
             #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
             let var = variance_avx2(data, mean);
             #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-            let var: f64 = data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>()
-                / data.len() as f64;
+            let var: f64 =
+                data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64;
             Ok(TypedReturn::Concrete(ConcreteReturn::F64(var.sqrt())))
         },
     );
@@ -125,11 +125,36 @@ pub fn create_math_intrinsics_module() -> ModuleExports {
     register_unary_f64_op(&mut module, "__intrinsic_cos", "Cosine of x", f64::cos);
     register_unary_f64_op(&mut module, "__intrinsic_tan", "Tangent of x", f64::tan);
     register_unary_f64_op(&mut module, "__intrinsic_asin", "Arc sine of x", f64::asin);
-    register_unary_f64_op(&mut module, "__intrinsic_acos", "Arc cosine of x", f64::acos);
-    register_unary_f64_op(&mut module, "__intrinsic_atan", "Arc tangent of x", f64::atan);
-    register_unary_f64_op(&mut module, "__intrinsic_sinh", "Hyperbolic sine of x", f64::sinh);
-    register_unary_f64_op(&mut module, "__intrinsic_cosh", "Hyperbolic cosine of x", f64::cosh);
-    register_unary_f64_op(&mut module, "__intrinsic_tanh", "Hyperbolic tangent of x", f64::tanh);
+    register_unary_f64_op(
+        &mut module,
+        "__intrinsic_acos",
+        "Arc cosine of x",
+        f64::acos,
+    );
+    register_unary_f64_op(
+        &mut module,
+        "__intrinsic_atan",
+        "Arc tangent of x",
+        f64::atan,
+    );
+    register_unary_f64_op(
+        &mut module,
+        "__intrinsic_sinh",
+        "Hyperbolic sine of x",
+        f64::sinh,
+    );
+    register_unary_f64_op(
+        &mut module,
+        "__intrinsic_cosh",
+        "Hyperbolic cosine of x",
+        f64::cosh,
+    );
+    register_unary_f64_op(
+        &mut module,
+        "__intrinsic_tanh",
+        "Hyperbolic tangent of x",
+        f64::tanh,
+    );
 
     register_typed_fn_2::<_, f64, f64>(
         &mut module,
@@ -156,7 +181,9 @@ pub fn create_math_intrinsics_module() -> ModuleExports {
                     code as u32
                 )
             })?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(ch.to_string())))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                ch.to_string(),
+            )))
         },
     );
 
@@ -220,7 +247,9 @@ pub fn intrinsic_char_code(
     _ctx: &mut ExecutionContext,
 ) -> Result<KindedSlot> {
     Err(ShapeError::RuntimeError {
-        message: "intrinsic_char_code: pending Phase 2c intrinsic kind threading — see ADR-006 §2.7.4".to_string(),
+        message:
+            "intrinsic_char_code: pending Phase 2c intrinsic kind threading — see ADR-006 §2.7.4"
+                .to_string(),
         location: None,
     })
 }
@@ -269,10 +298,20 @@ fn variance_avx2(data: &[f64], mean: f64) -> f64 {
 
 /// Core B-spline computation on a contiguous f64 slice (fastest path).
 #[inline]
+// B-spline batch compute helpers; retained for the math-intrinsic path,
+// currently uncalled after the v2 intrinsic re-routing.
+#[allow(dead_code)]
 fn bspline2_3d_batch_slice(
     grid: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64, z_lo: f64, z_hi: f64,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    x_lo: f64,
+    x_hi: f64,
+    y_lo: f64,
+    y_hi: f64,
+    z_lo: f64,
+    z_hi: f64,
     pos: &[f64],
 ) -> Vec<f64> {
     let n = pos.len() / 3;
@@ -341,10 +380,18 @@ fn bspline2_3d_batch_slice(
 /// Core B-spline computation using per-element access function (generic arrays).
 /// Only accesses 27 grid elements per query point — no bulk copy.
 #[inline]
+#[allow(dead_code)]
 fn bspline2_3d_batch_fn(
     grid: &dyn Fn(usize) -> f64,
-    nx: usize, ny: usize, nz: usize,
-    x_lo: f64, x_hi: f64, y_lo: f64, y_hi: f64, z_lo: f64, z_hi: f64,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    x_lo: f64,
+    x_hi: f64,
+    y_lo: f64,
+    y_hi: f64,
+    z_lo: f64,
+    z_hi: f64,
     pos: &[f64],
 ) -> Vec<f64> {
     let n = pos.len() / 3;
@@ -412,6 +459,7 @@ fn bspline2_3d_batch_fn(
 
 /// Quadratic B-spline basis weights for offset t.
 #[inline(always)]
+#[allow(dead_code)]
 fn bspline_weights(t: f64) -> (f64, f64, f64) {
     (
         0.5 * (0.5 - t) * (0.5 - t),

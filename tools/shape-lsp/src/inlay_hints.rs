@@ -312,8 +312,7 @@ impl<'a> HintContext<'a> {
             return;
         }
 
-        let want_type_hint =
-            self.config.show_variable_type_hints && decl.type_annotation.is_none();
+        let want_type_hint = self.config.show_variable_type_hints && decl.type_annotation.is_none();
         let want_binding_hint = self.config.show_binding_kind_hints;
 
         if !want_type_hint && !want_binding_hint {
@@ -376,6 +375,27 @@ impl<'a> HintContext<'a> {
                 })
         });
 
+        // LSP-H: if the engine produced a degraded type (a generic-method element
+        // collapsed to `unknown` — e.g. `xs.map(|x| x*2)` renders `Vec<unknown>`
+        // after the collection-method-table registration, since the result's
+        // `MethodParam` isn't bound to the closure return), prefer the syntactic
+        // heuristic, which recovers the element type from the closure body
+        // (`Array<int>`). Only swaps a strictly-more-resolved type in.
+        let inferred_type = inferred_type.map(|t| {
+            if t.contains("unknown") {
+                // Pass the program-level type_map as env so an identifier receiver
+                // (`xs` in `xs.map(...)`) resolves to its element type (`int[]`),
+                // yielding `Array<int>` rather than `Array<number>`.
+                decl.value
+                    .as_ref()
+                    .and_then(|v| infer_expr_type_with_env_public(v, &self.type_map))
+                    .filter(|h| !h.contains("unknown"))
+                    .unwrap_or(t)
+            } else {
+                t
+            }
+        });
+
         let Some(span) = decl.pattern.as_identifier_span() else {
             return;
         };
@@ -398,9 +418,7 @@ impl<'a> HintContext<'a> {
                 // `&` and the rendered type would diverge from what the
                 // user could write as an annotation.
                 let label_type = match decl.value.as_ref() {
-                    Some(Expr::Reference { is_mutable, .. })
-                        if !inferred_type.starts_with('&') =>
-                    {
+                    Some(Expr::Reference { is_mutable, .. }) if !inferred_type.starts_with('&') => {
                         let prefix = if *is_mutable { "&mut " } else { "&" };
                         format!("{}{}", prefix, inferred_type)
                     }
@@ -510,7 +528,9 @@ impl<'a> HintContext<'a> {
             // Use the program-level type_map as env so an identifier receiver
             // like `xs.filter(...)` can resolve `xs`'s type from the engine.
             let inferred = infer_expr_type_via_engine(node)
-                .or_else(|| crate::type_inference::infer_expr_type_with_env_public(node, &self.type_map))
+                .or_else(|| {
+                    crate::type_inference::infer_expr_type_with_env_public(node, &self.type_map)
+                })
                 .or_else(|| infer_expr_type(node));
             let Some(inferred) = inferred else {
                 continue;
@@ -1042,7 +1062,11 @@ fn classify_binding_storage(decl: &VariableDecl, label_type: Option<&str>) -> &'
     // fallback when the user wrote an explicit concurrency-primitive construction.
     if let Some(value) = decl.value.as_ref() {
         if is_async_or_spawn_shape(value) {
-            return if decl.is_mut { "SharedAtomicMut" } else { "SharedAtomic" };
+            return if decl.is_mut {
+                "SharedAtomicMut"
+            } else {
+                "SharedAtomic"
+            };
         }
         if let Some(class) = concurrency_constructor_class(value, decl.is_mut) {
             return class;
@@ -1111,7 +1135,9 @@ fn concurrency_constructor_class(expr: &Expr, is_mut: bool) -> Option<&'static s
     let head_name = match expr {
         Expr::FunctionCall { name, .. } => name.as_str(),
         Expr::QualifiedFunctionCall { function, .. } => function.as_str(),
-        Expr::MethodCall { receiver, method, .. } => {
+        Expr::MethodCall {
+            receiver, method, ..
+        } => {
             // Pattern: `Channel.new(...)` / `Mutex.new(...)` etc. — the receiver
             // is the type-name `Identifier`, the method is `new`.
             if method == "new" || method == "open" || method == "with_capacity" {
@@ -1446,6 +1472,7 @@ let total = xs.map(|x| x * 2).sum()
             Box::new(Expr::FunctionCall {
                 name: "some_func".to_string(),
                 args: vec![],
+                const_args: Vec::new(),
                 named_args: vec![],
                 span: Span::DUMMY,
             }),
@@ -1783,7 +1810,9 @@ let t: Table<FinRecord> = [1, 100.0, 60.0, "jan"], [2, 120.0, 70.0, "feb"]
         let code = "let f = |x| 42\n";
         let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
         let labels = type_hint_labels(&hints);
-        let has_fn_sig = labels.iter().any(|l| l.starts_with(": fn(") && l.contains("->"));
+        let has_fn_sig = labels
+            .iter()
+            .any(|l| l.starts_with(": fn(") && l.contains("->"));
         assert!(
             has_fn_sig,
             "Expected closure type hint with `_` for unannotated param, got: {:?}",
@@ -1886,7 +1915,10 @@ let r = xs.filter(|x| x > 0).reverse().sort()
             ("let s = \"hello\"\n", "[UniqueHeap approx]"),
             ("let f = |x| x + 1\n", "[SharedCow approx]"),
             ("let a = Atomic.new(0)\n", "[SharedAtomic approx]"),
-            ("let mut q = Channel.new()\n", "[SharedAtomicMut mut approx]"),
+            (
+                "let mut q = Channel.new()\n",
+                "[SharedAtomicMut mut approx]",
+            ),
         ];
 
         for (code, expected) in cases {
@@ -2201,7 +2233,10 @@ let i = 10D
     #[test]
     fn test_inlay_hints_config_show_type_hints_default() {
         let cfg = InlayHintConfig::default();
-        assert!(cfg.show_type_hints, "show_type_hints should default to true");
+        assert!(
+            cfg.show_type_hints,
+            "show_type_hints should default to true"
+        );
     }
 
     #[test]

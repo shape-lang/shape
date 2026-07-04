@@ -12,22 +12,16 @@ use shape_vm::type_tracking::NativeKind;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Compile a single MIR statement.
-    pub(crate) fn compile_statement(
-        &mut self,
-        stmt: &MirStatement,
-    ) -> Result<(), String> {
+    pub(crate) fn compile_statement(&mut self, stmt: &MirStatement) -> Result<(), String> {
         match &stmt.kind {
             StatementKind::Assign(place, rvalue) => {
                 // v2 fast path: when the destination is `Place::Local(s)` whose
                 // ConcreteType is `Array<scalar>`, allocate a real v2 typed
                 // array via FFI and bypass the legacy NaN-boxed Aggregate path.
-                if let (Rvalue::Aggregate(operands), Some(elem_kind)) = (
-                    rvalue,
-                    self.v2_typed_array_elem_kind(place),
-                ) {
-                    if let Some(arr_val) =
-                        self.emit_v2_array_aggregate(operands, elem_kind)?
-                    {
+                if let (Rvalue::Aggregate(operands), Some(elem_kind)) =
+                    (rvalue, self.v2_typed_array_elem_kind(place))
+                {
+                    if let Some(arr_val) = self.emit_v2_array_aggregate(operands, elem_kind)? {
                         self.release_old_value_if_heap(place)?;
                         self.write_place(place, arr_val)?;
                         return Ok(());
@@ -58,9 +52,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Aggregate site, not silently leaks. Per §2.7.5 the
                 // kind is stamped at compile time from the proven
                 // type information, never decoded from runtime bits.
-                if matches!(rvalue, Rvalue::Aggregate(_))
-                    && self.is_typed_object_slot(place)
-                {
+                if matches!(rvalue, Rvalue::Aggregate(_)) && self.is_typed_object_slot(place) {
                     return Ok(());
                 }
 
@@ -80,9 +72,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     ),
                 ) = (place, rvalue)
                 {
-                    if let Some(info) =
-                        self.stack_closure_call_info.get(src).cloned()
-                    {
+                    if let Some(info) = self.stack_closure_call_info.get(src).cloned() {
                         self.stack_closure_call_info.insert(*dst, info);
                     }
                     if let Some(ss) = self.stack_closure_slots.get(src).copied() {
@@ -100,26 +90,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // a method-call equivalent (writing the destination place
                 // directly) and return early. Otherwise fall through to
                 // the standard `compile_rvalue` path.
-                if let Rvalue::BinaryOp(_, lhs, rhs) = rvalue {
-                    if let Some((method_name, _arg_count)) = self
-                        .operator_trait_dispatch_sites
-                        .get(&stmt.span)
-                        .cloned()
+                if let Rvalue::BinaryOp(binop, lhs, rhs) = rvalue {
+                    if let Some((method_name, _arg_count)) =
+                        self.operator_trait_dispatch_sites.get(&stmt.span).cloned()
                     {
-                        self.emit_user_trait_method_call(
+                        // VM-parity: Ord comparisons dispatch `cmp` then
+                        // compare-against-0; `!=` dispatches `eq` then
+                        // negates. Thread the op so the JIT applies the
+                        // same post-transform (see
+                        // `emit_user_trait_method_call_with_result_op`).
+                        // `==`/`Add`/`Sub`/bitwise/... return their value
+                        // directly (result_op = None).
+                        let result_op = match binop {
+                            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Ne => {
+                                Some(*binop)
+                            }
+                            _ => None,
+                        };
+                        self.emit_user_trait_method_call_with_result_op(
                             &method_name,
                             std::slice::from_ref(lhs),
                             std::slice::from_ref(rhs),
                             place,
+                            result_op,
                         )?;
                         return Ok(());
                     }
                 }
                 if let Rvalue::UnaryOp(_, operand) = rvalue {
-                    if let Some((method_name, _arg_count)) = self
-                        .operator_trait_dispatch_sites
-                        .get(&stmt.span)
-                        .cloned()
+                    if let Some((method_name, _arg_count)) =
+                        self.operator_trait_dispatch_sites.get(&stmt.span).cloned()
                     {
                         self.emit_user_trait_method_call(
                             &method_name,
@@ -162,8 +162,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // deleted ValueWord-shape ABI. Per §2.7.14 forbidden list
                 // ("Bool-default fallback for unknown element kinds")
                 // surface-and-stop instead of fabricating a kind.
-                Err(
-                    "Route A surface-and-stop: SURFACE — \
+                Err("Route A surface-and-stop: SURFACE — \
                      StatementKind::ArrayStore reached the kind-blind \
                      fallback. The v2 typed-array fast path requires the \
                      container `Place::Local` to carry a \
@@ -171,8 +170,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                      element kind is not threaded from the producing call \
                      signature. Tracked as W11-jit-new-array per \
                      phase-3-kickoff-prompt.md. ADR-006 §2.7.14 / §2.7.5."
-                        .to_string(),
-                )
+                    .to_string())
             }
 
             StatementKind::ObjectStore {
@@ -223,18 +221,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 };
 
-                let schema_id = self.builder.ins().iconst(
-                    cranelift::prelude::types::I32,
-                    sid as i64,
-                );
-                let data_size = self.builder.ins().iconst(
-                    cranelift::prelude::types::I64,
-                    (operands.len() as i64) * 8,
-                );
-                let inst = self.builder.ins().call(
-                    self.ffi.typed_object_alloc,
-                    &[schema_id, data_size],
-                );
+                let schema_id = self
+                    .builder
+                    .ins()
+                    .iconst(cranelift::prelude::types::I32, sid as i64);
+                let data_size = self
+                    .builder
+                    .ins()
+                    .iconst(cranelift::prelude::types::I64, (operands.len() as i64) * 8);
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(self.ffi.typed_object_alloc, &[schema_id, data_size]);
                 let mut obj = self.builder.inst_results(inst)[0];
 
                 // Record field_name -> positional byte offset mapping.
@@ -253,14 +251,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 for (i, op) in operands.iter().enumerate() {
                     let val_raw = self.compile_operand_raw(op)?;
                     let val = self.widen_to_i64(val_raw);
-                    let offset_val = self.builder.ins().iconst(
-                        cranelift::prelude::types::I64,
-                        (i as i64) * 8,
-                    );
-                    let inst = self.builder.ins().call(
-                        self.ffi.typed_object_set_field,
-                        &[obj, offset_val, val],
-                    );
+                    let offset_val = self
+                        .builder
+                        .ins()
+                        .iconst(cranelift::prelude::types::I64, (i as i64) * 8);
+                    let inst = self
+                        .builder
+                        .ins()
+                        .call(self.ffi.typed_object_set_field, &[obj, offset_val, val]);
                     obj = self.builder.inst_results(inst)[0];
                 }
 
@@ -304,11 +302,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `NativeKind::Ptr(HeapKind::*)`.
                 if let Some(name) = variant_name.as_deref() {
                     if is_collection_ctor_name(name) {
-                        return self.emit_collection_ctor(
-                            name,
-                            *container_slot,
-                            operands,
-                        );
+                        return self.emit_collection_ctor(name, *container_slot, operands);
+                    }
+                    if is_result_option_variant_name(name) {
+                        return Err(format!(
+                            "EnumStore: SURFACE — JIT Result/Option variant '{}' \
+                             construction is disabled by W88A before FFI allocation. \
+                             The old jit_v2_make_result_* / jit_v2_make_option_* \
+                             imports would allocate Arc<ResultData>/Arc<OptionData>; \
+                             the replacement must build schema-backed __Result / \
+                             __Option TypedObjectStorage from a statically known \
+                             helper ABI. Whole-function deopt to the interpreter \
+                             preserves correctness until that ABI exists. \
+                             ADR-006 §2.7.5 / W84C deletion step 1.",
+                            name
+                        ));
                     }
                 }
                 // For unit variants (empty operands), the preceding
@@ -318,22 +326,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                // W12-jit-result-option-trinity (Phase 3 cluster-0
-                // Round 7A, 2026-05-12). EnumStore non-empty payload
-                // consumer per item (iii) of the trinity. The
-                // `variant_name` was producer-stamped at MIR-emission
-                // time (§2.7.5) by the bare-form enum-variant intercept
-                // in `mir/lowering/expr.rs:1556-1577` + the qualified
-                // `Expr::EnumConstructor` arm at `expr.rs:1669-1693`.
-                //
-                // Dispatches to the Arc-shape producers at
-                // `crates/shape-jit/src/ffi/result.rs::jit_v2_make_*`
-                // (committed as item (ii) of the trinity), which return
-                // `Arc::into_raw(Arc<ResultData>) as u64` /
-                // `Arc::into_raw(Arc<OptionData>) as u64` matching the
-                // VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /
-                // `SomeCtor` / `NoneCtor` output shape per ADR-006
-                // §2.7.17.
+                // Pre-W88A this Round 7A branch dispatched Result/Option
+                // variants to Arc-shape producers in `ffi/result.rs`.
+                // The W88A guard above now surfaces Ok / Err / Some / None
+                // before this point, because those imports would allocate old
+                // `Arc<ResultData>` / `Arc<OptionData>` carriers. The code
+                // below is retained only as a stale-structure backstop until
+                // the broader schema-backed `__Result` / `__Option` JIT ABI
+                // replaces it and the old FuncRefs can be deleted.
                 //
                 // Payload kind is stamped from the operand's MIR-inferred
                 // kind via `operand_slot_kind(op)` → `stack_kind_code::
@@ -347,8 +347,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // user-defined enum codegen is a separate workstream per
                 // the trinity audit §7 row 5.
                 let Some(name) = variant_name.as_deref() else {
-                    return Err(
-                        "EnumStore: SURFACE — variant_name is None on a \
+                    return Err("EnumStore: SURFACE — variant_name is None on a \
                          non-empty payload. The MIR producer sites in \
                          `mir/lowering/{expr,stmt}.rs` MUST thread \
                          `variant_name` per ADR-006 §2.7.5 producer-site \
@@ -357,8 +356,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                          (forbidden #9). \
                          W12-jit-result-option-trinity (Phase 3 cluster-0 \
                          Round 7A) / ADR-006 §2.7.17."
-                            .to_string(),
-                    );
+                        .to_string());
                 };
 
                 let Some(variant_tag) = shape_vm::mir::types::VariantTag::from_name(name) else {
@@ -384,14 +382,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // to `MirConstant::None` operand which still gets here
                 // with operands.len()==1 in some paths). For safety:
                 if matches!(variant_tag, shape_vm::mir::types::VariantTag::None_) {
-                    // None construction via the Arc-shape producer —
-                    // no payload, no kind code. The producer always
-                    // builds the same `Arc<OptionData>` with
-                    // `is_some=false` + the §2.7.17 placeholder.
-                    let inst = self.builder.ins().call(
-                        self.ffi.v2_make_option_none,
-                        &[],
-                    );
+                    // Unreachable under W88A's `is_result_option_variant_name`
+                    // guard above. If reached, this stale path calls the
+                    // fail-closed FFI backstop rather than allocating
+                    // `Arc<OptionData>`.
+                    let inst = self.builder.ins().call(self.ffi.v2_make_option_none, &[]);
                     let arc_bits = self.builder.inst_results(inst)[0];
                     let place = Place::Local(*container_slot);
                     self.release_old_value_if_heap(&place)?;
@@ -399,11 +394,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                // Ok / Err / Some — single-payload producers. The MIR
-                // enforces exactly one operand for these via the producer-
-                // side intercepts (`is_bare_enum_variant_ctor` + the
-                // `Expr::EnumConstructor` tuple-payload arm). If we ever
-                // see operands.len() != 1, that's a producer-site bug.
+                // Stale Ok / Err / Some single-payload branch. W88A should
+                // surface before this point; if a future edit bypasses the
+                // guard, the FFI backstop still fails closed before old
+                // carrier allocation.
                 if operands.len() != 1 {
                     return Err(format!(
                         "EnumStore: SURFACE — variant '{}' expects 1 \
@@ -428,8 +422,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // (NativeKind::UInt64) is the §2.7.5 stable-FFI carrier
                 // kind for raw I64-wide bits — NOT a Bool-default
                 // rationalization per §2.7.7 #9.
-                let payload_kind = self
-                    .operand_slot_kind_or_carrier(operand);
+                let payload_kind = self.operand_slot_kind_or_carrier(operand);
                 let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
 
                 // Compile the operand to its raw payload bits (the call
@@ -438,10 +431,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let payload_val = self.compile_operand_raw(operand)?;
                 let payload_i64 = self.widen_to_i64(payload_val);
 
-                let kind_code_val = self
-                    .builder
-                    .ins()
-                    .iconst(types::I8, kind_code as i64);
+                let kind_code_val = self.builder.ins().iconst(types::I8, kind_code as i64);
 
                 let func_ref = match variant_tag {
                     shape_vm::mir::types::VariantTag::Ok => self.ffi.v2_make_result_ok,
@@ -515,14 +505,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let layout_needs_heap = self
                     .closure_function_layouts
                     .get(&fid)
-                    .map(|l| {
-                        l.owned_mutable_capture_mask != 0
-                            || l.shared_capture_mask != 0
-                    })
+                    .map(|l| l.owned_mutable_capture_mask != 0 || l.shared_capture_mask != 0)
                     .unwrap_or(false);
-                if !layout_needs_heap
-                    && self.non_escaping_closure_slots.contains(closure_slot)
-                {
+                if !layout_needs_heap && self.non_escaping_closure_slots.contains(closure_slot) {
                     self.emit_stack_closure(fid, *closure_slot, operands)?;
                     return Ok(());
                 }
@@ -540,11 +525,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // path is unconditional whenever a layout is available.
                 //
                 // See `docs/v2-closure-specialization.md` §13 H2.
-                if let Some(layout) =
-                    self.closure_function_layouts.get(&fid).cloned()
-                {
-                    let closure_ptr =
-                        self.emit_heap_closure(fid, &layout, operands)?;
+                if let Some(layout) = self.closure_function_layouts.get(&fid).cloned() {
+                    let closure_ptr = self.emit_heap_closure(fid, &layout, operands)?;
                     // Closure-spec Phase H2: convert the raw TypedClosureHeader
                     // into a NaN-boxed Arc<HeapValue::Closure> via
                     // `jit_finalize_heap_closure`. The layout pointer is a
@@ -617,15 +599,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let val = if raw_ty == cranelift::prelude::types::I64 {
                         raw
                     } else if raw_ty == cranelift::prelude::types::F64 {
+                        self.builder.ins().bitcast(
+                            cranelift::prelude::types::I64,
+                            MemFlags::new(),
+                            raw,
+                        )
+                    } else if raw_ty == cranelift::prelude::types::I32 {
                         self.builder
                             .ins()
-                            .bitcast(cranelift::prelude::types::I64, MemFlags::new(), raw)
-                    } else if raw_ty == cranelift::prelude::types::I32 {
-                        self.builder.ins().sextend(cranelift::prelude::types::I64, raw)
+                            .sextend(cranelift::prelude::types::I64, raw)
                     } else if raw_ty == cranelift::prelude::types::I8 {
-                        self.builder.ins().uextend(cranelift::prelude::types::I64, raw)
+                        self.builder
+                            .ins()
+                            .uextend(cranelift::prelude::types::I64, raw)
                     } else if raw_ty == cranelift::prelude::types::I16 {
-                        self.builder.ins().sextend(cranelift::prelude::types::I64, raw)
+                        self.builder
+                            .ins()
+                            .sextend(cranelift::prelude::types::I64, raw)
                     } else {
                         raw
                     };
@@ -640,21 +630,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 // Update ctx.stack_ptr += captures_count
                 let new_sp = self.builder.ins().iadd_imm(old_sp, operands.len() as i64);
-                self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+                self.builder
+                    .ins()
+                    .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
 
                 // Call jit_make_closure(ctx, function_id, captures_count)
-                let fid_val = self.builder.ins().iconst(
-                    cranelift::prelude::types::I64,
-                    fid as i64,
-                );
-                let cap_count = self.builder.ins().iconst(
-                    cranelift::prelude::types::I64,
-                    operands.len() as i64,
-                );
-                let inst = self.builder.ins().call(
-                    self.ffi.make_closure,
-                    &[self.ctx_ptr, fid_val, cap_count],
-                );
+                let fid_val = self
+                    .builder
+                    .ins()
+                    .iconst(cranelift::prelude::types::I64, fid as i64);
+                let cap_count = self
+                    .builder
+                    .ins()
+                    .iconst(cranelift::prelude::types::I64, operands.len() as i64);
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(self.ffi.make_closure, &[self.ctx_ptr, fid_val, cap_count]);
                 let closure_val = self.builder.inst_results(inst)[0];
 
                 // Store the closure in the closure_slot
@@ -752,10 +744,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         ));
 
         // function_id at offset 0 (I32)
-        let fid_val = self
-            .builder
-            .ins()
-            .iconst(cl_types::I32, function_id as i64);
+        let fid_val = self.builder.ins().iconst(cl_types::I32, function_id as i64);
         self.builder.ins().stack_store(fid_val, slot, 0);
         // type_id at offset 4 (I32). Phase E stores 0 — Phase F threads
         // the real ClosureTypeId through once `Function<A,R>` dispatch
@@ -877,10 +866,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 total_size
             ));
         }
-        let size_val = self
-            .builder
-            .ins()
-            .iconst(cl_types::I32, total_size as i64);
+        let size_val = self.builder.ins().iconst(cl_types::I32, total_size as i64);
         let kind_val = self
             .builder
             .ins()
@@ -894,10 +880,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // 2. Write function_id as u32 at offset 8 (i.e., right after the
         //    HeapHeader). The allocator zeroed the memory so the high
         //    bits are 0 — no need to mask.
-        let fid_val = self
-            .builder
-            .ins()
-            .iconst(cl_types::I32, function_id as i64);
+        let fid_val = self.builder.ins().iconst(cl_types::I32, function_id as i64);
         self.builder
             .ins()
             .store(MemFlags::trusted(), fid_val, closure_ptr, 8);
@@ -975,8 +958,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     //   I32 / U32                 -> I32
                     //   I16 / U16 / I8 / U8 / Bool -> I32
                     let target_ty = ffi_param_type_for_field_kind(inner_kind);
-                    let initial = self
-                        .coerce_for_capture_store(raw, val_ty, target_ty);
+                    let initial = self.coerce_for_capture_store(raw, val_ty, target_ty);
                     let alloc_func = owned_mut_alloc_func(&self.ffi, inner_kind);
                     let inst = self.builder.ins().call(alloc_func, &[initial]);
                     let cell_ptr = self.builder.inst_results(inst)[0];
@@ -1037,8 +1019,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // the bytecode compiler emits the pointer bits as
                     // an I64 LoadLocal. Widen to I64 defensively in
                     // case upstream type inference narrowed it.
-                    let ptr_bits =
-                        self.coerce_for_capture_store(raw, val_ty, cl_types::I64);
+                    let ptr_bits = self.coerce_for_capture_store(raw, val_ty, cl_types::I64);
                     let inst = self
                         .builder
                         .ins()
@@ -1092,19 +1073,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // here would indicate a broken layout, but guarding is
             // cheap and avoids crashing the JIT'd code on bugs.
             let null = self.builder.ins().iconst(cl_types::I64, 0);
-            let is_non_null =
-                self.builder
-                    .ins()
-                    .icmp(IntCC::NotEqual, cap_ptr, null);
+            let is_non_null = self.builder.ins().icmp(IntCC::NotEqual, cap_ptr, null);
             let retain_block = self.builder.create_block();
             let continue_block = self.builder.create_block();
-            self.builder.ins().brif(
-                is_non_null,
-                retain_block,
-                &[],
-                continue_block,
-                &[],
-            );
+            self.builder
+                .ins()
+                .brif(is_non_null, retain_block, &[], continue_block, &[]);
             self.builder.switch_to_block(retain_block);
             self.builder.seal_block(retain_block);
             let one = self.builder.ins().iconst(cl_types::I32, 1);
@@ -1131,12 +1105,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Coerce a Cranelift value to the target capture storage type.
     /// Performs zero-extension for narrowings and bitcasts for F64/I64.
-    fn coerce_for_capture_store(
-        &mut self,
-        val: Value,
-        val_ty: Type,
-        target_ty: Type,
-    ) -> Value {
+    fn coerce_for_capture_store(&mut self, val: Value, val_ty: Type, target_ty: Type) -> Value {
         use cranelift::prelude::types as cl_types;
         if val_ty == target_ty {
             return val;
@@ -1191,6 +1160,10 @@ fn is_collection_ctor_name(name: &str) -> bool {
         name,
         "HashMap" | "Set" | "Deque" | "PriorityQueue" | "Channel" | "Mutex" | "Atomic" | "Lazy"
     )
+}
+
+fn is_result_option_variant_name(name: &str) -> bool {
+    matches!(name, "Ok" | "Err" | "Some" | "None")
 }
 
 impl<'a, 'b> super::MirToIR<'a, 'b> {
@@ -1311,12 +1284,8 @@ impl<'a, 'b> super::MirToIR<'a, 'b> {
             let payload_val = self.compile_operand_raw(&operands[0])?;
             let payload_i64 = self.widen_to_i64(payload_val);
             let payload_kind = self.operand_slot_kind_or_carrier(&operands[0]);
-            let kind_code =
-                super::super::ffi::stack_kind_code::encode(payload_kind);
-            let kind_code_val = self
-                .builder
-                .ins()
-                .iconst(types::I8, kind_code as i64);
+            let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
+            let kind_code_val = self.builder.ins().iconst(types::I8, kind_code as i64);
             let inst = self
                 .builder
                 .ins()
@@ -1361,20 +1330,16 @@ fn cranelift_type_for_field_kind(kind: shape_value::v2::struct_layout::FieldKind
 /// boundary. Sub-32 ints are widened to I32 to match the C ABI of the
 /// `jit_alloc_owned_mut_cell_<kind>` / `jit_*_shared_cell_<kind>`
 /// wrappers (declared in `crates/shape-jit/src/ffi_symbols/object_symbols.rs`).
-fn ffi_param_type_for_field_kind(
-    kind: shape_value::v2::struct_layout::FieldKind,
-) -> Type {
+fn ffi_param_type_for_field_kind(kind: shape_value::v2::struct_layout::FieldKind) -> Type {
     use cranelift::prelude::types as cl_types;
     use shape_value::v2::struct_layout::FieldKind;
     match kind {
         FieldKind::F64 => cl_types::F64,
         FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => cl_types::I64,
         FieldKind::I32 | FieldKind::U32 => cl_types::I32,
-        FieldKind::I16
-        | FieldKind::U16
-        | FieldKind::I8
-        | FieldKind::U8
-        | FieldKind::Bool => cl_types::I32,
+        FieldKind::I16 | FieldKind::U16 | FieldKind::I8 | FieldKind::U8 | FieldKind::Bool => {
+            cl_types::I32
+        }
     }
 }
 
@@ -1443,6 +1408,27 @@ fn phase_e_layout(capture_types: &[Type]) -> (Vec<i32>, usize, usize) {
 }
 
 #[cfg(test)]
+mod enumstore_containment_tests {
+    use super::*;
+
+    #[test]
+    fn result_option_variants_are_caught_before_ffi_producers() {
+        for name in ["Ok", "Err", "Some", "None"] {
+            assert!(
+                is_result_option_variant_name(name),
+                "{name} must deopt before jit_v2_make_result/option_*"
+            );
+        }
+        for name in ["HashMap", "Set", "UserVariant"] {
+            assert!(
+                !is_result_option_variant_name(name),
+                "{name} must keep its existing EnumStore path"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod phase_e_tests {
     //! Phase E (JIT stack-closure codegen) layout helper tests.
     //!
@@ -1499,8 +1485,7 @@ mod phase_e_tests {
     #[test]
     fn mixed_alignment_packing_layout() {
         // (Bool, I32, F64): bool @ 8 (1 byte), i32 @ 12 (pad from 9), f64 @ 16.
-        let (offsets, total, align) =
-            phase_e_layout(&[cl_types::I8, cl_types::I32, cl_types::F64]);
+        let (offsets, total, align) = phase_e_layout(&[cl_types::I8, cl_types::I32, cl_types::F64]);
         assert_eq!(offsets, vec![8, 12, 16]);
         assert_eq!(total, 24);
         assert_eq!(align, 8);
@@ -1509,12 +1494,8 @@ mod phase_e_tests {
     #[test]
     fn four_small_captures_pack_tightly() {
         // (I8, I8, I16, I32): 8, 9, 10, 12; total rounds up to 16.
-        let (offsets, total, align) = phase_e_layout(&[
-            cl_types::I8,
-            cl_types::I8,
-            cl_types::I16,
-            cl_types::I32,
-        ]);
+        let (offsets, total, align) =
+            phase_e_layout(&[cl_types::I8, cl_types::I8, cl_types::I16, cl_types::I32]);
         assert_eq!(offsets, vec![8, 9, 10, 12]);
         assert_eq!(total, 16);
         assert_eq!(align, 8);
@@ -1601,7 +1582,7 @@ mod phase_h1_tests {
         CaptureKind, ClosureLayout, HEAP_CLOSURE_HEADER_SIZE, STACK_CLOSURE_HEADER_SIZE,
     };
     use shape_value::v2::concrete_type::ConcreteType;
-    use shape_value::v2::heap_header::{HeapHeader, HEAP_KIND_V2_CLOSURE};
+    use shape_value::v2::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
     use shape_value::v2::struct_layout::FieldKind;
 
     // Test-local helper: immutable-only layout.
@@ -1649,11 +1630,8 @@ mod phase_h1_tests {
     fn multi_capture_heap_layout_matches_plan_example() {
         // Plan §13 H1 test 2: `|x| x + a + b + s` with s: string.
         // Expected: one atomic retain for s (Ptr), none for a (I64) or b (F64).
-        let layout = immutable_layout(&[
-            ConcreteType::I64,
-            ConcreteType::F64,
-            ConcreteType::String,
-        ]);
+        let layout =
+            immutable_layout(&[ConcreteType::I64, ConcreteType::F64, ConcreteType::String]);
         assert_eq!(layout.capture_count(), 3);
         assert_eq!(layout.capture_kind(0), FieldKind::I64);
         assert_eq!(layout.capture_kind(1), FieldKind::F64);
@@ -1677,11 +1655,8 @@ mod phase_h1_tests {
         // emit_heap_closure uses `heap_capture_offset(i)` directly as the
         // absolute byte offset from the allocation base. Cross-check
         // against `capture_offset` + `HEAP_CLOSURE_HEADER_SIZE`.
-        let layout = immutable_layout(&[
-            ConcreteType::F64,
-            ConcreteType::I32,
-            ConcreteType::String,
-        ]);
+        let layout =
+            immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::String]);
         for i in 0..layout.capture_count() {
             assert_eq!(
                 layout.heap_capture_offset(i),
@@ -1694,10 +1669,7 @@ mod phase_h1_tests {
     fn heap_and_stack_capture_offsets_differ_by_header_size_delta() {
         // A closure literal without captures has heap size 16 but stack
         // size 8 — the 8-byte delta is the `HeapHeader`.
-        let layout = immutable_layout(&[
-            ConcreteType::I64,
-            ConcreteType::Bool,
-        ]);
+        let layout = immutable_layout(&[ConcreteType::I64, ConcreteType::Bool]);
         for i in 0..layout.capture_count() {
             let heap_off = layout.heap_capture_offset(i);
             let stack_off = layout.stack_capture_offset(i);

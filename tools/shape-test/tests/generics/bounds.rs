@@ -121,7 +121,8 @@ fn bounded_generic_with_default_parses() {
 
 #[test]
 fn where_clause_with_function_body() {
-    // TDD: where clause with actual logic in the function body
+    // Strict typing: `int` has no `impl Display`, so `identity(42)` is correctly
+    // rejected (T: Display bound unsatisfied). Re-baselined to must-reject — A-final ROOT I.
     ShapeTest::new(
         r#"
         fn identity<T>(x: T) -> T where T: Display {
@@ -130,5 +131,5 @@ fn where_clause_with_function_body() {
         identity(42)
     "#,
     )
-    .expect_number(42.0);
+    .expect_run_err_contains("does not implement trait 'Display'");
 }

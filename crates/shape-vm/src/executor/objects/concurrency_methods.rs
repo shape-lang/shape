@@ -357,9 +357,7 @@ pub fn v2_lazy_is_initialized(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "Lazy.is_initialized() takes no arguments",
-        ));
+        return Err(type_error("Lazy.is_initialized() takes no arguments"));
     }
     let l: Arc<LazyData> = as_lazy(&args[0])?;
     Ok(KindedSlot::from_bool(l.is_initialized()))

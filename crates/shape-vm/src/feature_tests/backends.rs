@@ -1,11 +1,21 @@
-//! Backend executor trait for parity testing
+//! Backend executor trait for legacy feature-test execution
 //!
-//! Provides a unified interface for executing code across different backends
-//! (Interpreter, VM, JIT) to enable three-way parity testing.
+//! This in-process harness only has access to the VM-side executor. Real
+//! VM-vs-JIT evidence is collected by the subprocess differential gate named
+//! in `REAL_JIT_PARITY_GATE`; do not treat this module as JIT coverage.
 
 use super::FeatureTest;
 use super::parity::ExecutionResult;
 use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
+
+/// Curated subprocess gate that runs real `shape run --mode jit` comparisons.
+pub const REAL_JIT_PARITY_GATE: &str = "scripts/differential-gate.sh";
+
+/// CI workflow that invokes `REAL_JIT_PARITY_GATE` on every push/PR.
+pub const REAL_JIT_PARITY_CI: &str = ".github/workflows/ci.yml";
+
+const JIT_FEATURE_TEST_LANE_RETIRED: &str =
+    "feature-test JIT lane retired; use scripts/differential-gate.sh";
 
 /// Trait for executing Shape code across different backends
 pub trait BackendExecutor: Send + Sync {
@@ -17,6 +27,11 @@ pub trait BackendExecutor: Send + Sync {
 
     /// Check if this backend is available/enabled
     fn is_available(&self) -> bool;
+
+    /// Reason reported when this backend is intentionally unavailable.
+    fn unavailable_reason(&self) -> &'static str {
+        "backend not available"
+    }
 
     /// Get list of features this backend doesn't support yet
     fn unsupported_features(&self) -> &'static [&'static str] {
@@ -106,34 +121,31 @@ impl BackendExecutor for VMBackend {
     }
 }
 
-/// JIT backend - works for math operations, returns NotSupported for others
+/// Retired feature-test JIT lane.
+///
+/// `shape-vm` cannot instantiate the real `shape_jit::JITExecutor` without
+/// introducing a crate cycle (`shape-jit` depends on `shape-vm`). The previous
+/// implementation delegated to `BytecodeExecutor`, which made this harness look
+/// like JIT parity evidence while exercising only the VM. Keep the type as a
+/// compatibility marker, but make every use skip closed and point to the real
+/// subprocess VM-vs-JIT gate.
 pub struct JITBackend;
 
 impl BackendExecutor for JITBackend {
     fn name(&self) -> &'static str {
-        "JIT"
+        "JIT (external differential gate)"
     }
 
-    fn execute(&self, test: &FeatureTest) -> ExecutionResult {
-        // Check if the test uses features JIT doesn't support
-        for unsupported in self.unsupported_features() {
-            if test.covers.contains(unsupported) {
-                return ExecutionResult::NotSupported(unsupported);
-            }
-        }
-
-        // JIT execution via the VM with JIT compilation
-        // For now, delegate to VM since JIT is integrated there
-        execute_with_executor(&mut crate::BytecodeExecutor::new(), test)
+    fn execute(&self, _test: &FeatureTest) -> ExecutionResult {
+        ExecutionResult::Skipped(JIT_FEATURE_TEST_LANE_RETIRED)
     }
 
     fn is_available(&self) -> bool {
-        true // JIT is available
+        false
     }
 
-    fn unsupported_features(&self) -> &'static [&'static str] {
-        // Features that JIT doesn't support yet
-        &["pattern_def", "stream_handler", "async_block", "try_catch"]
+    fn unavailable_reason(&self) -> &'static str {
+        JIT_FEATURE_TEST_LANE_RETIRED
     }
 }
 
@@ -158,15 +170,29 @@ mod tests {
     #[test]
     fn test_jit_available() {
         let backend = JITBackend;
-        assert!(backend.is_available());
-        assert_eq!(backend.name(), "JIT");
+        assert!(!backend.is_available());
+        assert_eq!(backend.name(), "JIT (external differential gate)");
     }
 
     #[test]
-    fn test_jit_unsupported_features() {
+    fn test_jit_backend_skips_to_real_gate() {
         let backend = JITBackend;
-        let unsupported = backend.unsupported_features();
-        assert!(unsupported.contains(&"pattern_def"));
-        assert!(unsupported.contains(&"stream_handler"));
+        let test = FeatureTest {
+            name: "jit_marker",
+            covers: &[],
+            code: "1 + 1",
+            function: "",
+            category: super::super::FeatureCategory::Operator,
+            requires_data: false,
+        };
+
+        assert_eq!(
+            backend.unavailable_reason(),
+            "feature-test JIT lane retired; use scripts/differential-gate.sh"
+        );
+        assert!(matches!(
+            backend.execute(&test),
+            ExecutionResult::Skipped(_)
+        ));
     }
 }

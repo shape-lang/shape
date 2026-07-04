@@ -74,7 +74,7 @@ exact shape the design says only the *container* flip can build and only past a
 B0004 reject:
 
 ```shape
-type Node { mut peer: &Node }      // a struct field of reference type
+type Node { mut peer: Option<&Node> } // a struct field of optional reference type
 let mut a = Node{ peer: ... }
 module_ref = &a                    // PromotedCell{cell A}, A holds Arc<S_a>
 a.peer = module_ref                // *** container B0004 — see BREAK-C2 for why P2 fails to stop this ***
@@ -84,7 +84,7 @@ Once `a.peer` (a field inside `S_a`) holds `PromotedCell{cell A}`, we have
 `S_a -> A -> S_a`: a cycle. The design dispositions this as "leak." But:
 
 ```shape
-*module_ref = Node{ peer: null }   // deref-store into cell A
+*module_ref = Node{ peer: None }   // deref-store into cell A
 ```
 
 Cell A's prior payload was `Arc<S_a>`. The store releases that share via

@@ -26,9 +26,11 @@
 //! TypedObject construction (see `executor/exceptions/mod.rs`'s
 //! `build_any_error` Phase-2c surface).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::bytecode::{Constant, Instruction, Operand};
 use crate::executor::VirtualMachine;
 use crate::executor::printing::ValueFormatter;
+use crate::executor::result_option_carrier;
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
@@ -61,19 +63,26 @@ fn read_as_i64(slot: &KindedSlot) -> Result<i64, VMError> {
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => Ok(slot.slot.as_u64() as i64),
         NativeKind::Float64 | NativeKind::NullableFloat64 => {
+            // `number as int` truncates toward zero (user 2026-06-01 / spec
+            // §3.2, OD-1 resolved): `3.7 as int == 3`, `-3.7 as int == -3`.
+            // A non-finite (NaN / ±inf) or out-of-i64-range float is a
+            // structured RUNTIME error (D2) — never a panic, never a wrap.
             let n = slot.slot.as_f64();
             if !n.is_finite() {
                 return Err(VMError::RuntimeError(
                     "cannot convert non-finite number to int".to_string(),
                 ));
             }
-            let i = n as i64;
-            if (i as f64 - n).abs() > f64::EPSILON {
+            // `n.trunc()` drops the fraction toward zero; the range guard
+            // rejects magnitudes that have no i64 representation (`f64 as i64`
+            // saturates in Rust, which would silently clamp — we reject).
+            let truncated = n.trunc();
+            if truncated < i64::MIN as f64 || truncated >= 9_223_372_036_854_775_808.0 {
                 return Err(VMError::RuntimeError(format!(
-                    "cannot convert non-integer number '{n}' to int"
+                    "number '{n}' is out of range for int"
                 )));
             }
-            Ok(i)
+            Ok(truncated as i64)
         }
         NativeKind::String => {
             let bits = slot.slot.raw();
@@ -85,15 +94,57 @@ fn read_as_i64(slot: &KindedSlot) -> Result<i64, VMError> {
             // SAFETY: `NativeKind::String` means the slot bits are
             // `Arc::into_raw::<String>` and the carrier owns one share.
             let s: &String = unsafe { &*(bits as *const String) };
-            s.parse::<i64>().map_err(|_| {
-                VMError::RuntimeError(format!("cannot convert string '{s}' to int"))
-            })
+            s.parse::<i64>()
+                .map_err(|_| VMError::RuntimeError(format!("cannot convert string '{s}' to int")))
+        }
+        // strict-flip c4: Array-element strings flow as the v2-raw
+        // `*const StringObj` carrier (kind=StringV2), distinct from the
+        // let-bound/literal `Arc<String>` carrier (kind=String). Both are
+        // `string` values; recognize the proven carrier and parse its
+        // UTF-8 bytes — no bit-reinterpret, the kind label drives the read.
+        NativeKind::StringV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to int".to_string(),
+                ));
+            }
+            // SAFETY: kind=StringV2 => bits = `*const StringObj` with a
+            // bumped refcount owned by the carrier (§2.7.5 construction
+            // contract). Borrow the UTF-8 bytes without consuming the share.
+            let s = unsafe {
+                shape_value::v2::string_obj::StringObj::as_str(
+                    bits as *const shape_value::v2::string_obj::StringObj,
+                )
+            };
+            s.parse::<i64>()
+                .map_err(|_| VMError::RuntimeError(format!("cannot convert string '{s}' to int")))
         }
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` bits are `Arc::into_raw::<Decimal>`.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
+            use rust_decimal::prelude::ToPrimitive;
+            d.to_i64().ok_or_else(|| {
+                VMError::RuntimeError(format!("cannot convert decimal '{d}' to int"))
+            })
+        }
+        // strict-flip c4: v2-raw `*const DecimalObj` carrier (kind=DecimalV2),
+        // sibling to the `Ptr(HeapKind::Decimal)` arm above.
+        NativeKind::DecimalV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null decimal to int".to_string(),
+                ));
+            }
+            // SAFETY: kind=DecimalV2 => bits = `*const DecimalObj` with a
+            // bumped refcount (§2.7.5). `value(ptr)` returns a copy.
+            let d = unsafe {
+                shape_value::v2::decimal_obj::DecimalObj::value(
+                    bits as *const shape_value::v2::decimal_obj::DecimalObj,
+                )
+            };
             use rust_decimal::prelude::ToPrimitive;
             d.to_i64().ok_or_else(|| {
                 VMError::RuntimeError(format!("cannot convert decimal '{d}' to int"))
@@ -155,11 +206,48 @@ fn read_as_f64(slot: &KindedSlot) -> Result<f64, VMError> {
                 VMError::RuntimeError(format!("cannot convert string '{s}' to number"))
             })
         }
+        // strict-flip c4: v2-raw `*const StringObj` carrier (kind=StringV2)
+        // — Array-element string sibling of the `Arc<String>` arm above.
+        NativeKind::StringV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to number".to_string(),
+                ));
+            }
+            // SAFETY: kind=StringV2 => bits = `*const StringObj` (§2.7.5).
+            let s = unsafe {
+                shape_value::v2::string_obj::StringObj::as_str(
+                    bits as *const shape_value::v2::string_obj::StringObj,
+                )
+            };
+            s.parse::<f64>().map_err(|_| {
+                VMError::RuntimeError(format!("cannot convert string '{s}' to number"))
+            })
+        }
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
+            use rust_decimal::prelude::ToPrimitive;
+            d.to_f64().ok_or_else(|| {
+                VMError::RuntimeError(format!("cannot convert decimal '{d}' to number"))
+            })
+        }
+        // strict-flip c4: v2-raw `*const DecimalObj` carrier (kind=DecimalV2).
+        NativeKind::DecimalV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null decimal to number".to_string(),
+                ));
+            }
+            // SAFETY: kind=DecimalV2 => bits = `*const DecimalObj` (§2.7.5).
+            let d = unsafe {
+                shape_value::v2::decimal_obj::DecimalObj::value(
+                    bits as *const shape_value::v2::decimal_obj::DecimalObj,
+                )
+            };
             use rust_decimal::prelude::ToPrimitive;
             d.to_f64().ok_or_else(|| {
                 VMError::RuntimeError(format!("cannot convert decimal '{d}' to number"))
@@ -223,8 +311,7 @@ fn read_as_bool(slot: &KindedSlot) -> Result<bool, VMError> {
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
             Ok(!rust_decimal::prelude::Zero::is_zero(d))
         }
         NativeKind::Ptr(HeapKind::BigInt) => {
@@ -340,9 +427,8 @@ fn read_as_char(slot: &KindedSlot) -> Result<char, VMError> {
         | NativeKind::NullableIntSize => {
             let i = slot.slot.as_i64();
             let code = i as u32;
-            char::from_u32(code).ok_or_else(|| {
-                VMError::RuntimeError(format!("invalid Unicode code point: {code}"))
-            })
+            char::from_u32(code)
+                .ok_or_else(|| VMError::RuntimeError(format!("invalid Unicode code point: {code}")))
         }
         NativeKind::UInt8
         | NativeKind::UInt16
@@ -355,9 +441,8 @@ fn read_as_char(slot: &KindedSlot) -> Result<char, VMError> {
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => {
             let code = slot.slot.as_u64() as u32;
-            char::from_u32(code).ok_or_else(|| {
-                VMError::RuntimeError(format!("invalid Unicode code point: {code}"))
-            })
+            char::from_u32(code)
+                .ok_or_else(|| VMError::RuntimeError(format!("invalid Unicode code point: {code}")))
         }
         NativeKind::String => {
             let bits = slot.slot.raw();
@@ -437,8 +522,7 @@ fn read_as_string(
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
             Ok(d.to_string())
         }
         NativeKind::Ptr(HeapKind::BigInt) => {
@@ -661,54 +745,86 @@ impl VirtualMachine {
     // ── TryConvertTo* family ─────────────────────────────────────────
     //
     // `TryConvertTo*` is the FALLIBLE cast opcode for `expr as Type?`.
-    // Its result is an `Option<Target>` carried in the null-coded
-    // convention `op_try_unwrap` consumes (`executor/exceptions/mod.rs`):
-    // a bare scalar of the target kind ≡ `Some(v)`; the `(0,
-    // NativeKind::Null)` sentinel ≡ `None`. A successful conversion
-    // produces the scalar (same as the infallible sibling); a
-    // conversion FAILURE produces `None` rather than throwing.
+    // Per the book (`fundamentals/error-handling.mdx` §Fallible: "result
+    // type is `Result<Type, AnyError>`"), its result is a proper
+    // `Result<Target, AnyError>` carrier — the canonical `__Result`
+    // TypedObject. A successful conversion produces `Ok(v)` (the
+    // converted scalar moved into the payload field); a conversion
+    // FAILURE produces `Err(AnyError)` (the conversion-failure message
+    // wrapped in the Err payload)
+    // rather than throwing.
     //
-    // This is what makes the compiler's direct fallible path correct:
-    // `compile_expr_type_assertion` emits a bare `TryConvertTo*` for a
-    // direct `string as int?` (no `emit_option_lift_*` wrapping), and
-    // the enclosing `?` (`op_try_unwrap`) then sees the `None` sentinel
-    // on failure and early-returns `Err(AnyError{OPTION_NONE})` to the
-    // caller — never observing a thrown exception. PB5 (v0.3.3
-    // Wave-1-extension, 2026-05-29): before this, the bodies delegated
-    // to the THROWING infallible `op_convert_to_*`, so `(raw as int?)?`
-    // on a non-numeric string threw "cannot convert string '…' to int"
-    // instead of yielding `None` for `?` to propagate.
+    // This is what makes BOTH consumers correct with ONE carrier:
+    //   - `match (raw as int?) { Ok(v) => …, Err(e) => … }` destructures
+    //     the Result enum directly (the bare-scalar / null-sentinel
+    //     pre-fix shape matched NEITHER arm — "No match arm matched");
+    //   - the enclosing `?` (`op_try_unwrap`, `executor/exceptions/
+    //     mod.rs`) sees `Ok(v)` and unwraps, or sees `Err(e)` and
+    //     early-returns the Err carrier to the caller — same Result
+    //     carrier both modes consume, byte-identical.
+    //
+    // Pre-fix history: PB5 (v0.3.3 Wave-1-extension, 2026-05-29) made
+    // the bodies map a conversion failure to a null-coded `None`
+    // sentinel instead of throwing, so `(raw as int?)?` propagated. But
+    // a null/bare carrier is NOT a `Result` enum, so `match` could not
+    // destructure it (Stage B5). The fix below produces the real Result
+    // carrier the book documents; `op_try_unwrap` already handles a
+    // `__Result` carrier (Ok → unwrap, Err → early-return), so the
+    // `?`-form is preserved.
     //
     // Only a conversion-failure `VMError::RuntimeError` (the `read_as_*`
     // failure modes — unparseable string, non-integer float, unproven
-    // source kind) maps to `None`. Other error variants (notably the
-    // `VMError::NotImplemented` SURFACE arms in `read_as_string` for
-    // still-SURFACE heap kinds) propagate verbatim — masking a SURFACE
-    // gap as `None` is forbidden.
+    // source kind) maps to `Err(AnyError)`. Other error variants
+    // (notably the `VMError::NotImplemented` SURFACE arms in
+    // `read_as_string` for still-SURFACE heap kinds) propagate verbatim
+    // — masking a SURFACE gap as `Err` is forbidden.
 
-    /// Run an infallible `op_convert_to_*` body but map a conversion
-    /// failure (`VMError::RuntimeError`) to the `None` sentinel `(0,
-    /// NativeKind::Null)` instead of throwing — the fallible `as Type?`
-    /// contract. Non-`RuntimeError` variants (SURFACE `NotImplemented`,
-    /// stack underflow, …) propagate unchanged.
+    /// Run an infallible `op_convert_to_*` body but wrap its outcome in
+    /// a `Result<Target, AnyError>` carrier — the fallible `as Type?`
+    /// contract per the book. On success the converted scalar the inner
+    /// body pushed is re-wrapped as `Ok(v)`; a conversion failure
+    /// (`VMError::RuntimeError`) becomes `Err(AnyError{message})`.
+    /// Non-`RuntimeError` variants (SURFACE `NotImplemented`, stack
+    /// underflow, …) propagate unchanged.
     #[inline]
     fn try_convert_or_none(
         &mut self,
         convert: impl FnOnce(&mut Self) -> Result<(), VMError>,
     ) -> Result<(), VMError> {
         match convert(self) {
-            Ok(()) => Ok(()),
-            // Conversion failure → `None`. The infallible body already
-            // popped + dropped its source carrier before the `read_as_*`
-            // error returned, so the stack is balanced; we only push the
-            // null sentinel.
-            Err(VMError::RuntimeError(_)) => self.push_kinded(0, NativeKind::Null),
+            Ok(()) => {
+                // Success: the inner body pushed the converted scalar.
+                // Re-wrap it as `Ok(v)` so `match`/`?` see a real Result
+                // enum. Transferring the share into the payload KindedSlot
+                // (no clone) keeps refcounting balanced.
+                let value = pop_one_kinded(self)?;
+                self.push_kinded_slot(result_option_carrier::build_ok(
+                    &self.builtin_schemas,
+                    value,
+                ))
+            }
+            // Conversion failure → `Err(AnyError)`. The infallible body
+            // already popped + dropped its source carrier before the
+            // `read_as_*` error returned, so the stack is balanced; we
+            // build a fresh AnyError carrier from the failure message
+            // and wrap it in `__Result` Err.
+            Err(VMError::RuntimeError(msg)) => {
+                let payload = KindedSlot::from_string_arc(Arc::new(msg));
+                let trace = self.trace_info_full()?;
+                let any_err =
+                    self.build_any_error(payload, None, trace, Some("CONVERSION_FAILED"))?;
+                self.push_kinded_slot(result_option_carrier::build_err(
+                    &self.builtin_schemas,
+                    any_err,
+                ))
+            }
             Err(other) => Err(other),
         }
     }
 
-    /// `TryConvertToInt` (`expr as int?`): `Some(i)` on success, `None`
-    /// on conversion failure. Success path mirrors `op_convert_to_int`.
+    /// `TryConvertToInt` (`expr as int?`): `Ok(i)` on success,
+    /// `Err(AnyError)` on conversion failure. Success path mirrors
+    /// `op_convert_to_int`, then wraps in a `Result` carrier.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_int(&mut self) -> Result<(), VMError> {
         self.try_convert_or_none(Self::op_convert_to_int)
@@ -775,9 +891,26 @@ mod tests {
     }
 
     #[test]
-    fn read_as_i64_from_non_integer_float_errors() {
-        let s = KindedSlot::from_number(3.14);
-        assert!(read_as_i64(&s).is_err());
+    fn read_as_i64_from_non_integer_float_truncates_toward_zero() {
+        // `number as int` truncates toward zero (user 2026-06-01 / §3.2).
+        assert_eq!(read_as_i64(&KindedSlot::from_number(3.7)).unwrap(), 3);
+        assert_eq!(read_as_i64(&KindedSlot::from_number(-3.7)).unwrap(), -3);
+        assert_eq!(read_as_i64(&KindedSlot::from_number(3.14)).unwrap(), 3);
+        assert_eq!(read_as_i64(&KindedSlot::from_number(-0.9)).unwrap(), 0);
+    }
+
+    #[test]
+    fn read_as_i64_from_non_finite_float_errors() {
+        assert!(read_as_i64(&KindedSlot::from_number(f64::NAN)).is_err());
+        assert!(read_as_i64(&KindedSlot::from_number(f64::INFINITY)).is_err());
+        assert!(read_as_i64(&KindedSlot::from_number(f64::NEG_INFINITY)).is_err());
+    }
+
+    #[test]
+    fn read_as_i64_from_out_of_range_float_errors() {
+        // 1e30 exceeds i64::MAX — D2 out-of-range runtime error, not a wrap.
+        assert!(read_as_i64(&KindedSlot::from_number(1e30)).is_err());
+        assert!(read_as_i64(&KindedSlot::from_number(-1e30)).is_err());
     }
 
     #[test]
@@ -790,6 +923,57 @@ mod tests {
     fn read_as_f64_from_bool() {
         let s = KindedSlot::from_bool(true);
         assert_eq!(read_as_f64(&s).unwrap(), 1.0);
+    }
+
+    // ── strict-flip c4: v2-raw StringV2 / DecimalV2 carrier conversion ───
+    // Array-element strings flow as the v2-raw `*const StringObj` carrier
+    // (kind=StringV2), not the `Arc<String>` carrier. `read_as_i64` /
+    // `read_as_f64` must recognize the proven carrier and parse its bytes.
+
+    // NOTE: the constructed `KindedSlot` owns the one strong-count share
+    // minted by `StringObj::new` / `DecimalObj::new` (refcount=1); its
+    // `KindedSlot::Drop` impl releases that share via `release_elem` at end
+    // of scope. No manual `*::drop` here — that would double-free.
+
+    #[test]
+    fn read_as_i64_from_string_v2_parses() {
+        use shape_value::v2::string_obj::StringObj;
+        let ptr = StringObj::new("42");
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::StringV2);
+        assert_eq!(read_as_i64(&s).unwrap(), 42);
+    }
+
+    #[test]
+    fn read_as_i64_from_string_v2_non_numeric_errors() {
+        use shape_value::v2::string_obj::StringObj;
+        let ptr = StringObj::new("not-a-number");
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::StringV2);
+        assert!(read_as_i64(&s).is_err());
+    }
+
+    #[test]
+    fn read_as_f64_from_string_v2_parses() {
+        use shape_value::v2::string_obj::StringObj;
+        let ptr = StringObj::new("3.14");
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::StringV2);
+        assert_eq!(read_as_f64(&s).unwrap(), 3.14);
+    }
+
+    #[test]
+    fn read_as_i64_from_decimal_v2() {
+        use shape_value::v2::decimal_obj::DecimalObj;
+        let ptr = DecimalObj::new(rust_decimal::Decimal::from(123));
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::DecimalV2);
+        assert_eq!(read_as_i64(&s).unwrap(), 123);
+    }
+
+    #[test]
+    fn read_as_f64_from_decimal_v2() {
+        use rust_decimal::prelude::FromPrimitive;
+        use shape_value::v2::decimal_obj::DecimalObj;
+        let ptr = DecimalObj::new(rust_decimal::Decimal::from_f64(2.5).unwrap());
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::DecimalV2);
+        assert_eq!(read_as_f64(&s).unwrap(), 2.5);
     }
 
     #[test]
@@ -867,10 +1051,7 @@ mod tests {
         // wildcard heap fallback must surface-and-stop rather than
         // panic deep in the formatter.
         let registry = TypeSchemaRegistry::new();
-        let slot = KindedSlot::new(
-            ValueSlot::from_raw(0),
-            NativeKind::Ptr(HeapKind::Temporal),
-        );
+        let slot = KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Ptr(HeapKind::Temporal));
         let err = read_as_string(&slot, Some(&registry)).unwrap_err();
         assert!(
             matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Temporal")),
@@ -884,10 +1065,7 @@ mod tests {
         // Closure arm in `format_heap_kind` is still SURFACE per
         // §2.7.8 / Q10 B7-closure-cells extension dependency.
         let registry = TypeSchemaRegistry::new();
-        let slot = KindedSlot::new(
-            ValueSlot::from_raw(0),
-            NativeKind::Ptr(HeapKind::Closure),
-        );
+        let slot = KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Ptr(HeapKind::Closure));
         let err = read_as_string(&slot, Some(&registry)).unwrap_err();
         assert!(
             matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Closure")),

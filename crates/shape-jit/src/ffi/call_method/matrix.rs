@@ -1,8 +1,8 @@
 //! Matrix method dispatch for JIT.
 
-use crate::jit_matrix::JitMatrix;
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
+use crate::jit_matrix::JitMatrix;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::heap_value::MatrixData;
 use std::sync::Arc;

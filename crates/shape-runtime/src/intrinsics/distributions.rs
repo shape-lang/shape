@@ -236,8 +236,8 @@ fn sample_poisson(rng: &mut ChaCha8Rng, lambda: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use crate::intrinsics::random as random_intrinsics;
+    use rand::SeedableRng;
 
     fn mean_variance(samples: &[f64]) -> (f64, f64) {
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
@@ -251,8 +251,9 @@ mod tests {
             *rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
         });
 
-        let samples: Vec<f64> =
-            random_intrinsics::with_rng(|rng| (0..20000).map(|_| sample_uniform(rng, 0.0, 2.0)).collect());
+        let samples: Vec<f64> = random_intrinsics::with_rng(|rng| {
+            (0..20000).map(|_| sample_uniform(rng, 0.0, 2.0)).collect()
+        });
 
         let (mean, var) = mean_variance(&samples);
         assert!((mean - 1.0).abs() < 0.05);
@@ -267,7 +268,9 @@ mod tests {
 
         let lambda = 2.0;
         let samples: Vec<f64> = random_intrinsics::with_rng(|rng| {
-            (0..20000).map(|_| sample_exponential(rng, lambda)).collect()
+            (0..20000)
+                .map(|_| sample_exponential(rng, lambda))
+                .collect()
         });
         let (mean, var) = mean_variance(&samples);
         assert!((mean - 1.0 / lambda).abs() < 0.05);

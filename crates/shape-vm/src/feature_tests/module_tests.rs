@@ -249,4 +249,98 @@ mod tests {
         assert!(covered.contains(&"pub_item"));
         assert!(covered.contains(&"export_spec"));
     }
+
+    // ── STAGE Modules: imported-symbol resolution at every use position ──
+    //
+    // End-to-end file-module compile+run regression for the three resolution
+    // gaps fixed in STAGE Modules:
+    //   (1) imported call in a let-INITIALIZER (`let m = imax(3, 9)`),
+    //   (2) namespace-qualified call (`numbers::imax(3, 9)`),
+    //   (3) imported `pub type` constructed + field-read in the consumer.
+    // Before the fix, (1) raised "Undefined function" and (2) raised
+    // "module namespace ... is not typed" at the strict type-checker / compiler.
+
+    fn run_modules_program_to_i64(numbers_src: &str, main_src: &str) -> i64 {
+        use crate::executor::{VMConfig, VirtualMachine};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("calc")).unwrap();
+        std::fs::write(dir.path().join("calc/numbers.shape"), numbers_src).unwrap();
+
+        let program = shape_ast::parser::parse_program(main_src).expect("parse failed");
+
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.add_module_path(dir.path().to_path_buf());
+
+        let (graph, stdlib_names, prelude_imports) =
+            crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+                .expect("graph build failed");
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
+        let bytecode = compiler
+            .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
+            .expect("compile failed");
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        let slot = vm.execute(None).expect("execution failed");
+        slot.as_i64().expect("expected i64 program result")
+    }
+
+    const NUMBERS_SRC: &str = r#"
+pub fn imax(a: int, b: int) -> int {
+    if a > b { a } else { b }
+}
+pub fn imin(a: int, b: int) -> int {
+    if a < b { a } else { b }
+}
+"#;
+
+    #[test]
+    fn imported_call_resolves_in_let_initializer() {
+        // `let m = imax(3, 9)` — previously "Undefined function: imax".
+        let main = r#"
+from calc::numbers use { imax }
+let m = imax(3, 9)
+m
+"#;
+        assert_eq!(run_modules_program_to_i64(NUMBERS_SRC, main), 9);
+    }
+
+    #[test]
+    fn imported_call_resolves_nested_in_let_initializer() {
+        let main = r#"
+from calc::numbers use { imax, imin }
+let n = imin(imax(2, 5), 7)
+n
+"#;
+        assert_eq!(run_modules_program_to_i64(NUMBERS_SRC, main), 5);
+    }
+
+    #[test]
+    fn namespace_qualified_call_resolves() {
+        // `numbers::imax(3, 9)` — previously "module namespace not typed".
+        let main = r#"
+use calc::numbers
+let q = numbers::imax(3, 9)
+q
+"#;
+        assert_eq!(run_modules_program_to_i64(NUMBERS_SRC, main), 9);
+    }
+
+    #[test]
+    fn imported_pub_type_constructs_and_reads_field() {
+        let numbers = r#"
+pub type Rect { w: int, h: int }
+pub fn area(r: Rect) -> int { r.w * r.h }
+"#;
+        let main = r#"
+from calc::numbers use { Rect, area }
+let r = Rect { w: 4, h: 6 }
+let a = area(r)
+a + r.w
+"#;
+        // area(4,6)=24 ; r.w=4 ; 24+4 = 28
+        assert_eq!(run_modules_program_to_i64(numbers, main), 28);
+    }
 }

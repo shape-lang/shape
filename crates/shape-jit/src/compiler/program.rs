@@ -183,8 +183,14 @@ impl JITCompiler {
 
         let mut user_func_arities: HashMap<u16, u16> = HashMap::new();
         let mut user_func_ids: HashMap<u16, cranelift_module::FuncId> = HashMap::new();
+        let mut user_func_return_kinds: HashMap<u16, shape_vm::type_tracking::NativeKind> =
+            HashMap::new();
 
         for (idx, func) in program.functions.iter().enumerate() {
+            if let Some(return_kind) = func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
+            {
+                user_func_return_kinds.insert(idx as u16, return_kind);
+            }
             let func_name = format!("{}_{}", name, func.name.replace("::", "__"));
             let mut user_sig = self.module.make_signature();
             user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
@@ -205,6 +211,7 @@ impl JITCompiler {
             program,
             &user_func_ids,
             &user_func_arities,
+            &user_func_return_kinds,
         )?;
 
         for (idx, func) in program.functions.iter().enumerate() {
@@ -215,6 +222,7 @@ impl JITCompiler {
                 idx,
                 &user_func_ids,
                 &user_func_arities,
+                &user_func_return_kinds,
             )?;
         }
 
@@ -249,6 +257,7 @@ impl JITCompiler {
         func_idx: usize,
         user_func_ids: &HashMap<u16, cranelift_module::FuncId>,
         user_func_arities: &HashMap<u16, u16>,
+        user_func_return_kinds: &HashMap<u16, shape_vm::type_tracking::NativeKind>,
     ) -> Result<(), String> {
         let func = &program.functions[func_idx];
         let func_id = *user_func_ids
@@ -256,7 +265,8 @@ impl JITCompiler {
             .ok_or_else(|| format!("Function {} not pre-declared", name))?;
 
         let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64));
         // Closures receive captures as leading native args, followed by user params.
         let effective_arity = func.captures_count + func.arity;
         for _ in 0..effective_arity {
@@ -315,6 +325,7 @@ impl JITCompiler {
                 value_call_return_concrete_types: Default::default(),
                 operator_trait_dispatch_sites: Default::default(),
                 top_level_mir: None,
+                top_level_has_comptime: false,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
                 expanded_function_defs: program.expanded_function_defs.clone(),
@@ -329,6 +340,8 @@ impl JITCompiler {
                 has_imported_const_inline: program.has_imported_const_inline,
                 has_w17_marshal_residual: program.has_w17_marshal_residual,
                 has_try_unwrap_residual: program.has_try_unwrap_residual,
+                has_reference_escape_promotion: program.has_reference_escape_promotion,
+                has_null_coalesce_residual: program.has_null_coalesce_residual,
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
@@ -369,12 +382,11 @@ impl JITCompiler {
                 // couldn't prove a particular slot) → MirToIR's v2 fast
                 // path falls through to the legacy NaN-boxed path / surfaces
                 // honestly per ADR-006 §2.7.5.1 (no Bool-default).
-                let concrete_types: Vec<shape_value::v2::ConcreteType> =
-                    program
-                        .function_local_concrete_types
-                        .get(func_idx)
-                        .cloned()
-                        .unwrap_or_default();
+                let concrete_types: Vec<shape_value::v2::ConcreteType> = program
+                    .function_local_concrete_types
+                    .get(func_idx)
+                    .cloned()
+                    .unwrap_or_default();
                 // Build function name → index map for Call terminator resolution.
                 // Use the original program's functions (sub_program has empty functions list).
                 let function_indices: std::collections::HashMap<String, u16> = program
@@ -396,20 +408,22 @@ impl JITCompiler {
                     .enumerate()
                     .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_closure_layouts(
-                    &mut builder,
-                    ctx_ptr,
-                    ffi,
-                    mir_data,
-                    slot_kinds,
-                    concrete_types,
-                    &sub_program.strings,
-                    entry_block,
-                    &function_indices,
-                    user_func_refs.clone(),
-                    user_func_arities.clone(),
-                    closure_function_layouts,
-                );
+                let mut mir_compiler =
+                    crate::mir_compiler::MirToIR::new_with_closure_layouts_and_function_returns(
+                        &mut builder,
+                        ctx_ptr,
+                        ffi,
+                        mir_data,
+                        slot_kinds,
+                        concrete_types,
+                        &sub_program.strings,
+                        entry_block,
+                        &function_indices,
+                        user_func_refs.clone(),
+                        user_func_arities.clone(),
+                        user_func_return_kinds.clone(),
+                        closure_function_layouts,
+                    );
                 // V3-S6c-jit-method-monomorph-routing (ADR-006 §2.7.5
                 // stamp-at-compile-time; supervisor 2026-05-15 PATH α-prime
                 // RATIFIED): thread the V3-S6b side-table from the ORIGINAL
@@ -438,8 +452,7 @@ impl JITCompiler {
                 // before MIR codegen so `Place::Index` lowering can
                 // bypass the inline bounds check on trusted (arr, iv)
                 // pairs. Default empty plan keeps every access checked.
-                let elision_plan =
-                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                let elision_plan = crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
                 // W14.2-E-followup SURFACE-A2 fix (2026-05-19, v0.3-gating
                 // SOUNDNESS BUG per supervisor ratify): pre-populate
@@ -522,27 +535,24 @@ impl JITCompiler {
                     let native_idx = param_idx + 1; // +1 for ctx_ptr
                     if native_idx < entry_params.len() {
                         if let Some(&var) = mir_compiler.locals.get(&mir_slot) {
-                            let kind = crate::mir_compiler::types::slot_kind_for_local(
-                                &mir_compiler.slot_kinds,
-                                mir_slot.0,
-                            );
+                            let kind = mir_compiler.local_storage_kind(mir_slot);
                             let param_val = entry_params[native_idx];
                             let converted = match kind {
-                                Some(shape_vm::type_tracking::NativeKind::Float64) => mir_compiler
+                                shape_vm::type_tracking::NativeKind::Float64 => mir_compiler
                                     .builder
                                     .ins()
                                     .bitcast(types::F64, MemFlags::new(), param_val),
-                                Some(shape_vm::type_tracking::NativeKind::Int32)
-                                | Some(shape_vm::type_tracking::NativeKind::UInt32) => {
+                                shape_vm::type_tracking::NativeKind::Int32
+                                | shape_vm::type_tracking::NativeKind::UInt32 => {
                                     mir_compiler.builder.ins().ireduce(types::I32, param_val)
                                 }
-                                Some(shape_vm::type_tracking::NativeKind::Bool)
-                                | Some(shape_vm::type_tracking::NativeKind::Int8)
-                                | Some(shape_vm::type_tracking::NativeKind::UInt8) => {
+                                shape_vm::type_tracking::NativeKind::Bool
+                                | shape_vm::type_tracking::NativeKind::Int8
+                                | shape_vm::type_tracking::NativeKind::UInt8 => {
                                     mir_compiler.builder.ins().ireduce(types::I8, param_val)
                                 }
-                                Some(shape_vm::type_tracking::NativeKind::Int16)
-                                | Some(shape_vm::type_tracking::NativeKind::UInt16) => {
+                                shape_vm::type_tracking::NativeKind::Int16
+                                | shape_vm::type_tracking::NativeKind::UInt16 => {
                                     mir_compiler.builder.ins().ireduce(types::I16, param_val)
                                 }
                                 _ => param_val,
@@ -624,9 +634,30 @@ impl JITCompiler {
         name: &str,
         program: &BytecodeProgram,
     ) -> Result<(JittedStrategyFn, MixedFunctionTable), String> {
-        use super::accessors::preflight_instructions;
+        use super::accessors::{function_body_module_binding_accesses, preflight_instructions};
 
         maybe_emit_numeric_metrics(program);
+
+        let module_binding_accesses = function_body_module_binding_accesses(program);
+        if let Some(first) = module_binding_accesses.first() {
+            return Err(format!(
+                "W39 F1 module-binding function-body SURFACE (ADR-006 §2.7.14): \
+                 function '{}' contains {:?} at bytecode instruction {}. \
+                 Module bindings are not MIR places, so the JIT function-body \
+                 lowering has no compile-time side table for this storage. \
+                 Running native top-level code and then interpreting such a \
+                 function through the trampoline VM would read an unsynchronized \
+                 module-binding array (observed VM=100 / JIT=0 on \
+                 f1-shared-module-binding.shape). Whole-program deopting to the \
+                 bytecode interpreter via the existing `[jit-fallback]` path \
+                 preserves VM == JIT semantics until module-binding lowering is \
+                 rebuilt with static metadata. total_accesses={}",
+                first.function_name,
+                first.opcode,
+                first.instruction_index,
+                module_binding_accesses.len(),
+            ));
+        }
 
         // Phase 1: Per-function preflight to classify each function.
         // A function is JIT-compatible if its bytecode passes instruction
@@ -643,9 +674,10 @@ impl JITCompiler {
             let instructions = &program.instructions[func.entry_point..func_end];
             let report = preflight_instructions(instructions);
             let bytecode_ok = report.can_jit();
-            let mir_ok = func.mir_data.as_ref().is_some_and(|md| {
-                crate::mir_compiler::preflight(md).can_compile
-            });
+            let mir_ok = func
+                .mir_data
+                .as_ref()
+                .is_some_and(|md| crate::mir_compiler::preflight(md).can_compile);
             // Track A.1D / A.1D.2: the A.1B/A.1C.1/A.1C.3 mutable-cell
             // opcodes carry runtime semantics the MIR layer cannot
             // reconstruct from its slot-based model — MIR just sees
@@ -747,8 +779,14 @@ impl JITCompiler {
         // but won't have a body defined - they'll use the trampoline.
         let mut user_func_arities: HashMap<u16, u16> = HashMap::new();
         let mut user_func_ids: HashMap<u16, cranelift_module::FuncId> = HashMap::new();
+        let mut user_func_return_kinds: HashMap<u16, shape_vm::type_tracking::NativeKind> =
+            HashMap::new();
 
         for (idx, func) in program.functions.iter().enumerate() {
+            if let Some(return_kind) = func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
+            {
+                user_func_return_kinds.insert(idx as u16, return_kind);
+            }
             if !jit_compatible[idx] {
                 user_func_arities.insert(idx as u16, func.arity);
                 continue;
@@ -758,7 +796,8 @@ impl JITCompiler {
             // (e.g., multiple __closure_0 from different stdlib modules).
             let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
             let mut user_sig = self.module.make_signature();
-            user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+            // ctx_ptr
+            user_sig.params.push(AbiParam::new(types::I64));
             // Closures receive captures as leading native args, followed by user params.
             let effective_arity = func.captures_count + func.arity;
             for _ in 0..effective_arity {
@@ -780,6 +819,7 @@ impl JITCompiler {
             program,
             &user_func_ids,
             &user_func_arities,
+            &user_func_return_kinds,
         )?;
 
         // Phase 4: Compile only JIT-compatible function bodies.
@@ -813,6 +853,7 @@ impl JITCompiler {
                 idx,
                 &user_func_ids,
                 &user_func_arities,
+                &user_func_return_kinds,
             ) {
                 tracing::debug!(
                     target: "shape_jit",

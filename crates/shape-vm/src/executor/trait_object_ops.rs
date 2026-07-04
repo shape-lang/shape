@@ -37,11 +37,12 @@
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
-    executor::VirtualMachine,
+    executor::{VirtualMachine, result_option_carrier},
 };
+use shape_runtime::type_schema::BuiltinSchemaIds;
 use shape_value::{
     HeapKind, KindedSlot, NativeKind, VMError, ValueSlot,
-    heap_value::{OptionData, ResultData, TraitObjectStorage, TypedObjectStorage},
+    heap_value::{TraitObjectStorage, TypedObjectStorage},
     value::{VTable, VTableEntry, WrapTarget},
 };
 use smallvec::SmallVec;
@@ -231,11 +232,16 @@ impl VirtualMachine {
                 string_id,
                 ..
             }) => {
-                let name = self.program.strings.get(string_id as usize).cloned().ok_or_else(
-                    || VMError::RuntimeError(
-                        "DynMethodCall: method-name StringId out of range".to_string(),
-                    ),
-                )?;
+                let name = self
+                    .program
+                    .strings
+                    .get(string_id as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "DynMethodCall: method-name StringId out of range".to_string(),
+                        )
+                    })?;
                 (arg_count as usize, name)
             }
             _ => {
@@ -389,7 +395,9 @@ impl VirtualMachine {
                 /*wrap_targets=*/ &[],
                 /*self_arg_positions=*/ &[],
             ),
-            VTableEntry::BoxedReturn { ref wrap_targets, .. } => self.invoke_dyn_unified(
+            VTableEntry::BoxedReturn {
+                ref wrap_targets, ..
+            } => self.invoke_dyn_unified(
                 runtime_function_id,
                 trait_object,
                 arg_count,
@@ -444,13 +452,7 @@ impl VirtualMachine {
             VTableEntry::Closure {
                 function_id,
                 type_id: _,
-            } => self.invoke_dyn_closure(
-                function_id,
-                trait_object,
-                arg_count,
-                receiver_idx,
-                ctx,
-            ),
+            } => self.invoke_dyn_closure(function_id, trait_object, arg_count, receiver_idx, ctx),
         }
     }
 
@@ -497,8 +499,7 @@ impl VirtualMachine {
                 .and_then(|x| x.checked_add(pos as usize))
                 .ok_or_else(|| {
                     VMError::RuntimeError(
-                        "DynMethodCall SelfArg: arg_idx arithmetic overflow"
-                            .to_string(),
+                        "DynMethodCall SelfArg: arg_idx arithmetic overflow".to_string(),
                     )
                 })?;
             if arg_idx >= self.sp {
@@ -543,8 +544,7 @@ impl VirtualMachine {
                      `Self` in argument position requires the argument's \
                      concrete type to match the receiver's. Receiver \
                      trait(s): {:?}; argument trait(s): {:?}.",
-                    pos, trait_object.vtable.trait_names,
-                    arg_trait_object.vtable.trait_names
+                    pos, trait_object.vtable.trait_names, arg_trait_object.vtable.trait_names
                 )));
             }
         }
@@ -562,7 +562,9 @@ impl VirtualMachine {
         // `Arc<TraitObjectStorage>` carrier still holds the original.
         // SAFETY: `trait_object.value` is non-null per universal-dyn
         // construction; the borrowed Arc keeps it live for this scope.
-        unsafe { shape_value::v2::refcount::v2_retain(&(*trait_object.value).header); }
+        unsafe {
+            shape_value::v2::refcount::v2_retain(&(*trait_object.value).header);
+        }
         let new_bits = trait_object.value as u64;
         let new_kind = NativeKind::Ptr(HeapKind::TypedObject);
         self.stack_write_kinded(receiver_idx, new_bits, new_kind);
@@ -574,13 +576,13 @@ impl VirtualMachine {
             debug_assert_eq!(arg_kind, NativeKind::Ptr(HeapKind::TraitObject));
             // SAFETY: validated above; transient borrow to read the
             // inner typed object ptr, then v2_retain-bump and install.
-            let arg_to: &TraitObjectStorage = unsafe {
-                &*(arg_bits as *const TraitObjectStorage)
-            };
+            let arg_to: &TraitObjectStorage = unsafe { &*(arg_bits as *const TraitObjectStorage) };
             let arg_inner_ptr = arg_to.value;
             // SAFETY: same as above — inner ptr is non-null and live
             // for the duration of the borrowed Arc carrier.
-            unsafe { shape_value::v2::refcount::v2_retain(&(*arg_inner_ptr).header); }
+            unsafe {
+                shape_value::v2::refcount::v2_retain(&(*arg_inner_ptr).header);
+            }
             let new_arg_bits = arg_inner_ptr as u64;
             self.stack_write_kinded(arg_idx, new_arg_bits, new_kind);
         }
@@ -618,6 +620,7 @@ impl VirtualMachine {
             ret_kind,
             wrap_targets,
             &trait_object.vtable,
+            &self.builtin_schemas,
         )?;
         self.push_kinded(wrapped_bits, wrapped_kind)?;
         Ok(())
@@ -670,7 +673,8 @@ impl VirtualMachine {
              `call_value_immediate_nb`. The thunks tier (Wave 3 \
              W17-trait-object-thunks) reserves dispatch wire-through for \
              a future sub-cluster pending W7 emission. Storage shapes \
-             ready; emission gates the dispatch.".to_string(),
+             ready; emission gates the dispatch."
+                .to_string(),
         ))
     }
 
@@ -714,9 +718,7 @@ impl VirtualMachine {
         // operand — in that case the type is unknown at compile time;
         // we still pop+drop the slot (the kind dispatch handles refcount).
         let type_name_opt: Option<String> = match instruction.operand {
-            Some(Operand::Property(sid)) => {
-                self.program.strings.get(sid as usize).cloned()
-            }
+            Some(Operand::Property(sid)) => self.program.strings.get(sid as usize).cloned(),
             _ => None,
         };
 
@@ -811,11 +813,16 @@ fn drop_kinded(bits: u64, kind: NativeKind) {
 ///  2. The return value is structurally one of:
 ///     - `Self` directly → wrap_targets contains `path=[]`; consume
 ///       the value as `Arc<TypedObjectStorage>` and re-box.
-///     - `Result<T, E>` → outer is `HeapKind::Result`; wrap_targets
-///       at `path[0]=0` apply to the Ok arm payload, `path[0]=1`
-///       to the Err arm. Result is single-payload-discriminated.
-///     - `Option<T>` → outer is `HeapKind::Option`; only `path[0]=0`
-///       makes sense (None has no payload).
+///     - `Result<T, E>` → outer is the schema-backed `__Result`
+///       TypedObject; wrap_targets at `path[0]=0` apply to the Ok arm
+///       payload, `path[0]=1` to the Err arm. Result is
+///       single-payload-discriminated. Legacy `HeapKind::Result`
+///       returns surface here so this path does not keep old
+///       `ResultData` inspection alive.
+///     - `Option<T>` → outer is the schema-backed `__Option`
+///       TypedObject; only `path[0]=0` makes sense (None has no
+///       payload). Legacy `HeapKind::Option` returns surface for the
+///       same L5 carrier-cleanup reason.
 ///     - `HashMap<K, V>` with V=Self → applies to the values buffer;
 ///       descend into each value.
 ///     - tuple → represented as `Arc<TypedObjectStorage>` with
@@ -828,6 +835,7 @@ fn rewrap_return_value(
     ret_kind: NativeKind,
     wrap_targets: &[WrapTarget],
     receiver_vtable: &Arc<VTable>,
+    schemas: &BuiltinSchemaIds,
 ) -> Result<(u64, NativeKind), VMError> {
     // Top-level Self: wrap_targets contains a path=[] entry. Consume
     // the return as a TypedObject and re-box. Any additional
@@ -843,19 +851,10 @@ fn rewrap_return_value(
     // impl. Dispatch on the discriminator to find the substructure
     // each wrap-target targets.
     match ret_kind {
-        NativeKind::Ptr(HeapKind::Result) => {
-            rewrap_result_payload(ret_bits, wrap_targets, receiver_vtable)
-        }
-        NativeKind::Ptr(HeapKind::Option) => {
-            rewrap_option_payload(ret_bits, wrap_targets, receiver_vtable)
-        }
+        NativeKind::Ptr(HeapKind::Result) => surface_legacy_result_return(ret_bits, wrap_targets),
+        NativeKind::Ptr(HeapKind::Option) => surface_legacy_option_return(ret_bits, wrap_targets),
         NativeKind::Ptr(HeapKind::TypedObject) => {
-            // Tuples / records — represented as a TypedObject with
-            // numbered or named fields. Descend into each wrap-
-            // target's first path step (interpreted as a 0-based
-            // field index per the C+ amendment row 2 of
-            // playbook §3 W17-typed-carrier rescope note).
-            rewrap_typed_object_fields(ret_bits, wrap_targets, receiver_vtable)
+            rewrap_typed_object_return(ret_bits, wrap_targets, receiver_vtable, schemas)
         }
         NativeKind::Ptr(HeapKind::HashMap) => {
             // HashMap<K, Self> case. The values buffer is the
@@ -879,7 +878,10 @@ fn rewrap_return_value(
                  (tuples & records) / HashMap / TypedArray. Wrap-targets: \
                  {:?}.",
                 other,
-                wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+                wrap_targets
+                    .iter()
+                    .map(|w| w.path.as_slice())
+                    .collect::<Vec<_>>()
             )))
         }
     }
@@ -898,8 +900,7 @@ fn rebox_self_value(
         NativeKind::Ptr(HeapKind::TypedObject) => {
             if bits == 0 {
                 return Err(VMError::RuntimeError(
-                    "DynMethodCall BoxedReturn: null TypedObject return"
-                        .to_string(),
+                    "DynMethodCall BoxedReturn: null TypedObject return".to_string(),
                 ));
             }
             // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): post-cascade slot
@@ -939,23 +940,19 @@ fn rebox_self_value(
 /// payload corresponds to. We re-box the payload IFF the arm matches
 /// a wrap_target's first path step.
 fn rewrap_result_payload(
-    ret_bits: u64,
+    ret_slot: KindedSlot,
     wrap_targets: &[WrapTarget],
     receiver_vtable: &Arc<VTable>,
+    schemas: &BuiltinSchemaIds,
 ) -> Result<(u64, NativeKind), VMError> {
-    if ret_bits == 0 {
-        return Err(VMError::RuntimeError(
-            "DynMethodCall BoxedReturn: null Result return".to_string(),
-        ));
-    }
-    // SAFETY: kind=Ptr(Result); bits are
-    // `Arc::into_raw::<ResultData>(arc)`. Consume the share.
-    let result: Arc<ResultData> =
-        unsafe { Arc::from_raw(ret_bits as *const ResultData) };
+    let Some(result) = result_option_carrier::read_result(schemas, &ret_slot)? else {
+        let (ret_bits, _ret_kind) = into_bits_kind(ret_slot);
+        return rewrap_typed_object_fields(ret_bits, wrap_targets, receiver_vtable);
+    };
     // Determine whether to re-box the payload. Path=[0] applies to
     // the Ok arm, path=[1] to the Err arm; matching against the
     // result's `is_ok` selects which we descend into.
-    let arm_index: u8 = if result.is_ok { 0 } else { 1 };
+    let arm_index: u8 = if result.is_ok() { 0 } else { 1 };
     let descendants: SmallVec<[WrapTarget; 2]> = wrap_targets
         .iter()
         .filter(|w| !w.path.is_empty() && w.path[0] == arm_index)
@@ -966,57 +963,42 @@ fn rewrap_result_payload(
         .collect();
     if descendants.is_empty() {
         // The arm we're in doesn't have a wrap-target — return as-is.
-        let raw = Arc::into_raw(result) as u64;
-        return Ok((raw, NativeKind::Ptr(HeapKind::Result)));
+        return Ok(into_bits_kind(ret_slot));
     }
-    // Rewrap the payload. Pull it out, recurse, install fresh.
-    // Cloning the ResultData lets us mutate the new copy's payload
-    // without disturbing other shared references (Arc::make_mut
-    // semantics, but we synthesize a fresh Arc since the descendant
-    // recursion already consumed shares).
-    let mut new_result = (*result).clone();
-    // The cloned payload owns its own share (per KindedSlot::Clone).
-    // Take its bits + kind without disturbing its Drop — we'll
-    // install the rewrapped result.
-    let payload_bits = new_result.payload.raw();
-    let payload_kind = new_result.payload.kind();
-    std::mem::forget(std::mem::replace(
-        &mut new_result.payload,
-        KindedSlot::none(),
-    ));
-    let (new_payload_bits, new_payload_kind) =
-        rewrap_return_value(payload_bits, payload_kind, &descendants, receiver_vtable)?;
-    new_result.payload = KindedSlot::new(
-        ValueSlot::from_raw(new_payload_bits),
-        new_payload_kind,
-    );
-    // Drop the borrowed `result` (releases the original share).
-    drop(result);
-    let new_arc = Arc::new(new_result);
-    let raw = Arc::into_raw(new_arc) as u64;
-    Ok((raw, NativeKind::Ptr(HeapKind::Result)))
+    let payload = result.clone_payload()?;
+    let (payload_bits, payload_kind) = into_bits_kind(payload);
+    let (new_payload_bits, new_payload_kind) = rewrap_return_value(
+        payload_bits,
+        payload_kind,
+        &descendants,
+        receiver_vtable,
+        schemas,
+    )?;
+    let new_payload = KindedSlot::new(ValueSlot::from_raw(new_payload_bits), new_payload_kind);
+    let new_result = if result.is_ok() {
+        result_option_carrier::build_ok(schemas, new_payload)
+    } else {
+        result_option_carrier::build_err(schemas, new_payload)
+    };
+    drop(ret_slot);
+    Ok(into_bits_kind(new_result))
 }
 
 /// Re-wrap inside an `Option<T>` carrier — analogous to Result but
 /// single-arm (None has no payload).
 fn rewrap_option_payload(
-    ret_bits: u64,
+    ret_slot: KindedSlot,
     wrap_targets: &[WrapTarget],
     receiver_vtable: &Arc<VTable>,
+    schemas: &BuiltinSchemaIds,
 ) -> Result<(u64, NativeKind), VMError> {
-    if ret_bits == 0 {
-        return Err(VMError::RuntimeError(
-            "DynMethodCall BoxedReturn: null Option return".to_string(),
-        ));
-    }
-    // SAFETY: kind=Ptr(Option); bits are
-    // `Arc::into_raw::<OptionData>(arc)`. Consume the share.
-    let option: Arc<OptionData> =
-        unsafe { Arc::from_raw(ret_bits as *const OptionData) };
-    if !option.is_some {
+    let Some(option) = result_option_carrier::read_option(schemas, &ret_slot)? else {
+        let (ret_bits, _ret_kind) = into_bits_kind(ret_slot);
+        return rewrap_typed_object_fields(ret_bits, wrap_targets, receiver_vtable);
+    };
+    if !option.is_some() {
         // None: nothing to re-box.
-        let raw = Arc::into_raw(option) as u64;
-        return Ok((raw, NativeKind::Ptr(HeapKind::Option)));
+        return Ok(into_bits_kind(ret_slot));
     }
     let descendants: SmallVec<[WrapTarget; 2]> = wrap_targets
         .iter()
@@ -1027,26 +1009,97 @@ fn rewrap_option_payload(
         })
         .collect();
     if descendants.is_empty() {
-        let raw = Arc::into_raw(option) as u64;
-        return Ok((raw, NativeKind::Ptr(HeapKind::Option)));
+        return Ok(into_bits_kind(ret_slot));
     }
-    let mut new_option = (*option).clone();
-    let payload_bits = new_option.payload.raw();
-    let payload_kind = new_option.payload.kind();
-    std::mem::forget(std::mem::replace(
-        &mut new_option.payload,
-        KindedSlot::none(),
-    ));
-    let (new_payload_bits, new_payload_kind) =
-        rewrap_return_value(payload_bits, payload_kind, &descendants, receiver_vtable)?;
-    new_option.payload = KindedSlot::new(
-        ValueSlot::from_raw(new_payload_bits),
-        new_payload_kind,
+    let payload = option.clone_payload()?;
+    let (payload_bits, payload_kind) = into_bits_kind(payload);
+    let (new_payload_bits, new_payload_kind) = rewrap_return_value(
+        payload_bits,
+        payload_kind,
+        &descendants,
+        receiver_vtable,
+        schemas,
+    )?;
+    let new_payload = KindedSlot::new(ValueSlot::from_raw(new_payload_bits), new_payload_kind);
+    let new_option = result_option_carrier::build_some(schemas, new_payload);
+    drop(ret_slot);
+    Ok(into_bits_kind(new_option))
+}
+
+fn rewrap_typed_object_return(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+    receiver_vtable: &Arc<VTable>,
+    schemas: &BuiltinSchemaIds,
+) -> Result<(u64, NativeKind), VMError> {
+    if ret_bits == 0 {
+        return Err(VMError::RuntimeError(
+            "DynMethodCall BoxedReturn: null TypedObject return".to_string(),
+        ));
+    }
+    let ret_slot = KindedSlot::new(
+        ValueSlot::from_raw(ret_bits),
+        NativeKind::Ptr(HeapKind::TypedObject),
     );
-    drop(option);
-    let new_arc = Arc::new(new_option);
-    let raw = Arc::into_raw(new_arc) as u64;
-    Ok((raw, NativeKind::Ptr(HeapKind::Option)))
+    if result_option_carrier::read_result(schemas, &ret_slot)?.is_some() {
+        return rewrap_result_payload(ret_slot, wrap_targets, receiver_vtable, schemas);
+    }
+    if result_option_carrier::read_option(schemas, &ret_slot)?.is_some() {
+        return rewrap_option_payload(ret_slot, wrap_targets, receiver_vtable, schemas);
+    }
+
+    // Tuples / records — represented as a TypedObject with numbered or
+    // named fields. Descend into each wrap-target's first path step
+    // (interpreted as a 0-based field index per the C+ amendment row 2
+    // of playbook §3 W17-typed-carrier rescope note).
+    let (ret_bits, ret_kind) = into_bits_kind(ret_slot);
+    debug_assert_eq!(ret_kind, NativeKind::Ptr(HeapKind::TypedObject));
+    rewrap_typed_object_fields(ret_bits, wrap_targets, receiver_vtable)
+}
+
+fn surface_legacy_result_return(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+) -> Result<(u64, NativeKind), VMError> {
+    drop_kinded(ret_bits, NativeKind::Ptr(HeapKind::Result));
+    Err(VMError::NotImplemented(format!(
+        "SURFACE: DynMethodCall BoxedReturn with legacy HeapKind::Result \
+         return + wrap_targets {:?} per L5 trait-object Option/Result carrier \
+         cleanup — live Result<T, E> rewrap must arrive as the schema-backed \
+         `__Result` TypedObject carrier. Inspecting old `ResultData` here \
+         would keep the pre-L5 carrier path alive; migrate the producer or \
+         variant-codegen caller to `result_option_carrier::build_ok/build_err`.",
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
+    )))
+}
+
+fn surface_legacy_option_return(
+    ret_bits: u64,
+    wrap_targets: &[WrapTarget],
+) -> Result<(u64, NativeKind), VMError> {
+    drop_kinded(ret_bits, NativeKind::Ptr(HeapKind::Option));
+    Err(VMError::NotImplemented(format!(
+        "SURFACE: DynMethodCall BoxedReturn with legacy HeapKind::Option \
+         return + wrap_targets {:?} per L5 trait-object Option/Result carrier \
+         cleanup — live Option<T> rewrap must arrive as the schema-backed \
+         `__Option` TypedObject carrier. Inspecting old `OptionData` here \
+         would keep the pre-L5 carrier path alive; migrate the producer or \
+         variant-codegen caller to `result_option_carrier::build_some/build_none`.",
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
+    )))
+}
+
+fn into_bits_kind(slot: KindedSlot) -> (u64, NativeKind) {
+    let bits = slot.raw();
+    let kind = slot.kind();
+    std::mem::forget(slot);
+    (bits, kind)
 }
 
 /// Re-wrap inside a `TypedObject` that represents a tuple or record
@@ -1077,7 +1130,10 @@ fn rewrap_typed_object_fields(
          a trait-declared field-index lookup. The dispatch shell \
          surfaces; lifting this is a follow-up sub-cluster pending \
          the typed-record-rewrap recipe.",
-        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
     )))
 }
 
@@ -1111,7 +1167,10 @@ fn rewrap_hashmap_values(
          C2a (runtime tier) + C2b (JIT FFI tier) close. The dispatch \
          shell surfaces; lifting this pairs with the \
          `rewrap_typed_object_fields` follow-up.",
-        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
     )))
 }
 
@@ -1144,8 +1203,152 @@ fn rewrap_typed_array_elements(
          which is deleted (Wave 2 Round 1 Agent F, 2026-05-14, dead-arm \
          wholesale deletion). A user-facing Array<dyn T> carrier lands \
          per audit §A.3 row when reachability is required.",
-        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
     )))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shape_runtime::type_schema::builtin_schemas::register_builtin_schemas;
+    use shape_runtime::type_schema::registry::TypeSchemaRegistry;
+    use std::collections::HashMap;
 
+    fn schemas() -> BuiltinSchemaIds {
+        let mut registry = TypeSchemaRegistry::new();
+        register_builtin_schemas(&mut registry)
+    }
+
+    fn test_vtable() -> Arc<VTable> {
+        Arc::new(VTable {
+            trait_names: vec!["CloneLike".to_string()],
+            concrete_type_id: 42,
+            methods: HashMap::new(),
+        })
+    }
+
+    fn wrap(path: &[u8]) -> WrapTarget {
+        WrapTarget {
+            path: path.iter().copied().collect(),
+            wrap_as_trait_id: 7,
+        }
+    }
+
+    fn empty_typed_object(schema_id: u64) -> KindedSlot {
+        let slots: Box<[ValueSlot]> = Vec::new().into_boxed_slice();
+        let field_kinds: Arc<[NativeKind]> = Arc::from(Vec::<NativeKind>::new().into_boxed_slice());
+        let ptr = TypedObjectStorage::_new(schema_id, slots, 0, field_kinds);
+        KindedSlot::from_typed_object_raw(ptr)
+    }
+
+    fn assert_trait_object_payload(payload: KindedSlot, expected_vtable: &Arc<VTable>) {
+        assert_eq!(payload.kind(), NativeKind::Ptr(HeapKind::TraitObject));
+        let bits = payload.raw();
+        assert_ne!(bits, 0);
+        // SAFETY: the rewrap path returns HeapKind::TraitObject only through
+        // TraitObjectStorage::_new, and `payload` owns the cloned share while
+        // this borrow is live.
+        let trait_object = unsafe { &*(bits as *const TraitObjectStorage) };
+        assert!(Arc::ptr_eq(&trait_object.vtable, expected_vtable));
+        drop(payload);
+    }
+
+    #[test]
+    fn trait_object_rewraps_schema_backed_result_ok_payload() {
+        let schemas = schemas();
+        let vtable = test_vtable();
+        let payload = empty_typed_object(10_001);
+        let result = result_option_carrier::build_ok(&schemas, payload);
+        let (bits, kind) = into_bits_kind(result);
+
+        let (bits, kind) =
+            rewrap_return_value(bits, kind, &[wrap(&[0])], &vtable, &schemas).unwrap();
+        let wrapped = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+
+        assert_eq!(wrapped.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let result_view = result_option_carrier::read_result(&schemas, &wrapped)
+            .unwrap()
+            .unwrap();
+        assert!(result_view.is_ok());
+        let payload = result_view.clone_payload().unwrap();
+        assert_trait_object_payload(payload, &vtable);
+        drop(result_view);
+        drop(wrapped);
+    }
+
+    #[test]
+    fn trait_object_rewraps_schema_backed_option_some_payload() {
+        let schemas = schemas();
+        let vtable = test_vtable();
+        let payload = empty_typed_object(10_002);
+        let option = result_option_carrier::build_some(&schemas, payload);
+        let (bits, kind) = into_bits_kind(option);
+
+        let (bits, kind) =
+            rewrap_return_value(bits, kind, &[wrap(&[0])], &vtable, &schemas).unwrap();
+        let wrapped = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+
+        assert_eq!(wrapped.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let option_view = result_option_carrier::read_option(&schemas, &wrapped)
+            .unwrap()
+            .unwrap();
+        assert!(option_view.is_some());
+        let payload = option_view.clone_payload().unwrap();
+        assert_trait_object_payload(payload, &vtable);
+        drop(option_view);
+        drop(wrapped);
+    }
+
+    #[test]
+    fn legacy_result_option_heap_kind_rewrap_surfaces_and_retires_share() {
+        use shape_value::heap_value::{OptionData, ResultData};
+
+        let schemas = schemas();
+        let vtable = test_vtable();
+
+        let result_carrier = Arc::new(ResultData::ok(KindedSlot::from_int(7)));
+        let result_baseline = Arc::strong_count(&result_carrier);
+        let result_bits = Arc::into_raw(Arc::clone(&result_carrier)) as u64;
+        assert_eq!(Arc::strong_count(&result_carrier), result_baseline + 1);
+
+        let result_err = rewrap_return_value(
+            result_bits,
+            NativeKind::Ptr(HeapKind::Result),
+            &[wrap(&[0])],
+            &vtable,
+            &schemas,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            result_err,
+            VMError::NotImplemented(ref msg)
+                if msg.contains("legacy HeapKind::Result")
+                    && msg.contains("__Result")
+        ));
+        assert_eq!(Arc::strong_count(&result_carrier), result_baseline);
+
+        let option_carrier = Arc::new(OptionData::some(KindedSlot::from_int(9)));
+        let option_baseline = Arc::strong_count(&option_carrier);
+        let option_bits = Arc::into_raw(Arc::clone(&option_carrier)) as u64;
+        assert_eq!(Arc::strong_count(&option_carrier), option_baseline + 1);
+
+        let option_err = rewrap_return_value(
+            option_bits,
+            NativeKind::Ptr(HeapKind::Option),
+            &[wrap(&[0])],
+            &vtable,
+            &schemas,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            option_err,
+            VMError::NotImplemented(ref msg)
+                if msg.contains("legacy HeapKind::Option")
+                    && msg.contains("__Option")
+        ));
+        assert_eq!(Arc::strong_count(&option_carrier), option_baseline);
+    }
+}

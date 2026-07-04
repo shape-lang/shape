@@ -1,6 +1,6 @@
 //! Pattern checking, binding, and destructuring
 
-mod binding;
+pub(crate) mod binding;
 mod checking;
 mod destructure;
 mod helpers;

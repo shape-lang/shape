@@ -1,0 +1,9 @@
+fn main() {
+    let xs: Array<int> = [10, 20, 30];
+    let ys = xs.map(|e| e + 1);
+    for v in ys {
+        let w = v + 1.0;
+        print(w);
+    }
+}
+main();

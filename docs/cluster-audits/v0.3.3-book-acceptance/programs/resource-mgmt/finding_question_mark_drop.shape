@@ -1,0 +1,71 @@
+// FINDING PROBE -- error-propagation (`?`) drop elision.
+//
+// Book fundamentals/resource-management.mdx §"Automatic Scope-Based Drop":
+//   "Every let binding that implements the Drop trait is automatically dropped
+//    when its enclosing scope exits. This applies to normal block exit, early
+//    `return`, `break`, `continue`, AND ERROR PROPAGATION."
+//
+// So when `?` short-circuits a function by returning Err, every pending Drop
+// binding in that function MUST run, in reverse declaration order, before the
+// function returns -- exactly as for an explicit `return`.
+//
+// EXPECTED (book semantics, written before running):
+//   success path  : resource(42) acquired, ? succeeds, drop fires at fn exit -> LOG=42
+//   error path    : resource(42) acquired, ? returns Err -> drop MUST fire     -> LOG=42
+//
+// OBSERVED (VM and JIT, 2026-06): on the error-propagation path the drop is
+// ELIDED -- LOG stays 0.  Explicit `return Err(...)` in the same shape DOES
+// drop correctly, so the defect is specific to the `?` short-circuit exit.
+//
+// (Uses an int accumulator rather than an Array log: under strict typing
+//  `LOG == [42]` fails Equal inference -- the array-literal compare path is a
+//  separate strict-flip surface, irrelevant to this Drop finding.)
+
+let mut LOG: int = 0
+
+type Resource {
+  id: int
+}
+
+impl Drop for Resource {
+  method drop() {
+    LOG = LOG + self.id
+  }
+}
+
+fn inner(bad: bool) -> Result<int, string> {
+  if bad {
+    return Err("boom")
+  }
+  Ok(5)
+}
+
+fn outer(bad: bool) -> Result<int, string> {
+  let resource = Resource { id: 42 }
+  let v = inner(bad)?          // short-circuits to Err when bad==true
+  Ok(v)
+}
+
+fn main() {
+  // success path
+  LOG = 0
+  let a = outer(false)
+  // book: resource drops at fn exit -> 42
+  if LOG == 42 {
+    print("SUCCESS_PATH_DROP_OK")
+  } else {
+    print(f"CHECK_FAILED: success_path expected=42 got={LOG}")
+  }
+
+  // error-propagation path
+  LOG = 0
+  let b = outer(true)
+  // book promises drop on error propagation -> 42
+  if LOG == 42 {
+    print("ERROR_PATH_DROP_OK")
+  } else {
+    print(f"CHECK_FAILED: error_propagation_drop expected=42 got={LOG}")
+  }
+}
+
+main()

@@ -17,9 +17,9 @@ use crate::context::JITContext;
 // Higher-order array-walk FFI functions below now route to surface-and-stop
 // per ADR-006 §2.7.4 / W10 jit-playbook §5; the kinded rebuild reads the
 // receiver as `Arc<TypedArrayData>` per-element-kind arm (§2.7.6/Q8).
-use crate::ffi::value_ffi::*;
 #[allow(unused_imports)]
 use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use std::ffi::c_void;
 
 // ============================================================================
@@ -62,6 +62,13 @@ pub fn set_jit_runtime_error(message: String) {
 /// the clean VM error can be surfaced in place of a generic JIT error code.
 pub fn take_jit_runtime_error() -> Option<String> {
     JIT_RUNTIME_ERROR.with(|cell| cell.borrow_mut().take())
+}
+
+fn raise_trampoline_error(jit_ctx: *mut JITContext, message: String) {
+    set_jit_runtime_error(message);
+    if !jit_ctx.is_null() {
+        unsafe { (*jit_ctx).pending_call_error = 1 };
+    }
 }
 
 /// Register the trampoline VM for use during JIT execution.
@@ -130,20 +137,6 @@ fn dispatch_call_via_trampoline_vm(
 ) -> u64 {
     use shape_value::NativeKind;
 
-    // r5c-2-bz-b-jit-err-surface: a VM-trampoline value-call that surfaces an
-    // `Err` must NOT continue with a value-shaped placeholder — the same
-    // SIGSEGV class as `jit_call_method` (`TAG_NULL` flowing into a heap-
-    // kinded refcount-retain). Record the error + raise `pending_call_error`
-    // so the MIR-emitted post-call check deopts the JIT frame. The closure
-    // captures the raw `jit_ctx` pointer; it is non-null on every real call
-    // path (the MIR emitter always passes `self.ctx_ptr`).
-    let raise_trampoline_error = |message: String| {
-        set_jit_runtime_error(message);
-        if !jit_ctx.is_null() {
-            unsafe { (*jit_ctx).pending_call_error = 1 };
-        }
-    };
-
     // §2.7.5 stable-FFI raw-pair shape: each arg / capture pair is
     // `(u64, NativeKind)`. The JIT MIR emitter widened every arg to
     // I64 at terminators.rs:651-671 without an associated kind track;
@@ -183,7 +176,7 @@ fn dispatch_call_via_trampoline_vm(
                 match vm.jit_trampoline_call_closure(func_id, &capture_pairs, &arg_pairs, None) {
                     Ok(bits) => bits,
                     Err(e) => {
-                        raise_trampoline_error(e.to_string());
+                        raise_trampoline_error(jit_ctx, e.to_string());
                         TAG_NULL
                     }
                 }
@@ -195,15 +188,11 @@ fn dispatch_call_via_trampoline_vm(
                 // kind for function-id-shaped callees (per
                 // `call_convention.rs:853-877` UInt64 arm).
                 use shape_value::{KindedSlot, ValueSlot};
-                let callee = KindedSlot::new(
-                    ValueSlot::from_raw(func_id as u64),
-                    NativeKind::UInt64,
-                );
+                let callee =
+                    KindedSlot::new(ValueSlot::from_raw(func_id as u64), NativeKind::UInt64);
                 let kinded_args: Vec<KindedSlot> = arg_pairs
                     .iter()
-                    .map(|(bits, kind)| {
-                        KindedSlot::new(ValueSlot::from_raw(*bits), *kind)
-                    })
+                    .map(|(bits, kind)| KindedSlot::new(ValueSlot::from_raw(*bits), *kind))
                     .collect();
                 match vm.call_value_immediate_nb(&callee, &kinded_args, None) {
                     Ok(result) => {
@@ -218,17 +207,17 @@ fn dispatch_call_via_trampoline_vm(
                         std::mem::forget(result);
                         // The callee KindedSlot was constructed with
                         // raw bits (no Arc share); its Drop is a no-op
-                        // for UInt64 kind. Same for the arg
-                        // KindedSlots — JIT pre-incremented each share
-                        // before crossing the FFI boundary, and the VM
-                        // already consumed them by transferring into
-                        // the new frame's locals.
+                        // for UInt64 kind. Same for the arg KindedSlots
+                        // in this legacy function-id path: the stable
+                        // FFI boundary carries raw I64-wide bits, and the
+                        // VM call has already copied them into the new
+                        // frame.
                         std::mem::forget(callee);
                         std::mem::forget(kinded_args);
                         bits
                     }
                     Err(e) => {
-                        raise_trampoline_error(e.to_string());
+                        raise_trampoline_error(jit_ctx, e.to_string());
                         TAG_NULL
                     }
                 }
@@ -239,21 +228,63 @@ fn dispatch_call_via_trampoline_vm(
         // `TRAMPOLINE_VM` is null — the JIT-compiled callee could not be
         // dispatched. Raise `pending_call_error` so the MIR-emitted check
         // deopts rather than continuing with a value-shaped placeholder.
-        raise_trampoline_error(format!(
-            "JIT value-call for function {} could not reach the interpreter \
+        raise_trampoline_error(
+            jit_ctx,
+            format!(
+                "JIT value-call for function {} could not reach the interpreter \
              trampoline",
-            function_id,
-        ));
+                function_id,
+            ),
+        );
         TAG_NULL
     })
 }
 
-/// Dispatch a native module function call through the trampoline VM.
-fn dispatch_module_fn_call(
-    _module_fn_id: u32,
-    _jit_args: &[u64],
-    _ctx: *mut JITContext,
+/// Dispatch a raw-Arc closure callee through the trampoline VM by borrowing
+/// its existing `OwnedClosureBlock`.
+///
+/// `jit_trampoline_call_closure` constructs a fresh owning block from raw
+/// capture bits. That is not valid for cell-storage captures:
+/// `OwnedMutable` / `Shared` slots hold transfer-only cell pointers owned by
+/// the original closure block.
+fn dispatch_borrowed_closure_via_trampoline_vm(
+    closure_block: &shape_value::v2::closure_raw::OwnedClosureBlock,
+    arg_pairs: &[(u64, shape_value::NativeKind)],
+    jit_ctx: *mut JITContext,
 ) -> u64 {
+    use shape_value::{KindedSlot, ValueSlot};
+
+    let kinded_args: Vec<KindedSlot> = arg_pairs
+        .iter()
+        .map(|(bits, kind)| KindedSlot::new(ValueSlot::from_raw(*bits), *kind))
+        .collect();
+
+    match with_trampoline_vm_mut(|vm| vm.execute_closure(closure_block, kinded_args, None)) {
+        Some(Ok(result)) => {
+            let bits = result.slot.raw();
+            // The returned share transfers to the JIT-side destination slot.
+            std::mem::forget(result);
+            bits
+        }
+        Some(Err(e)) => {
+            raise_trampoline_error(jit_ctx, e.to_string());
+            TAG_NULL
+        }
+        None => {
+            raise_trampoline_error(
+                jit_ctx,
+                "JIT closure value-call could not reach the interpreter trampoline".to_string(),
+            );
+            TAG_NULL
+        }
+    }
+}
+
+/// Dispatch a native module function call through the trampoline VM.
+// Pending phase-2c kinded-handler ABI rebuild (body is `todo!`); not yet
+// dispatched. Kept as the named landing point for that work.
+#[allow(dead_code)]
+fn dispatch_module_fn_call(_module_fn_id: u32, _jit_args: &[u64], _ctx: *mut JITContext) -> u64 {
     todo!(
         "phase-2c §2.7.10/Q11: JIT-side kinded handler ABI rebuild — \
          dispatch_module_fn_call. ModuleFunction callee construction and \
@@ -324,7 +355,7 @@ pub extern "C" fn jit_call_function(
 /// (`is_inline_function`, `is_heap_kind`) operate on the JIT's own
 /// slot encoding and are intentionally preserved.
 ///
-/// Two callee shapes flow through `jit_call_value` today:
+/// Three callee shapes flow through `jit_call_value` today:
 ///
 ///   1. **Inline function** (`box_function(fn_id)` → `TAG_FUNCTION_BITS`
 ///      tag): classified by `is_inline_function(callee_bits)`, function-
@@ -332,62 +363,40 @@ pub extern "C" fn jit_call_function(
 ///      emitter pushes this shape when the callee operand is a bare
 ///      `FunctionRef` constant.
 ///
-///   2. **Deprecated `unified_box(HK_CLOSURE, JITClosure)` callees**:
-///      classified by `is_heap_kind(callee_bits, HK_CLOSURE)`. This is
-///      the legacy `jit_make_closure` FFI return shape. New code goes
-///      through `jit_finalize_heap_closure` which returns a raw
-///      `Arc::into_raw(Arc<HeapValue::ClosureRaw>)` (no NaN-box) — see
-///      "kind-source gap" below.
+///   2. **Raw-Arc closure** (`NativeKind::Ptr(HeapKind::Closure)`):
+///      the producing site stamps the callee kind in the JIT stack kind
+///      track. The bits are `Arc::into_raw(Arc<HeapValue::ClosureRaw>)`;
+///      this path borrows the existing `OwnedClosureBlock` into the
+///      trampoline VM.
 ///
-/// ## Kind-source gap (§2.7.5 surface)
+///   3. **Deprecated `unified_box(HK_CLOSURE, JITClosure)` callees**:
+///      classified by `is_heap_kind(callee_bits, HK_CLOSURE)`. This is
+///      the legacy `jit_make_closure` FFI return shape.
+///
+/// ## Raw-Arc closure kind sourcing (§2.7.5)
 ///
 /// `jit_finalize_heap_closure` (the current preferred closure path)
 /// returns `Arc::into_raw(Arc::new(HeapValue::ClosureRaw(owned))) as u64`
 /// — a raw Arc pointer, not a NaN-boxed value. There is no tag-bit
 /// signature on the bits themselves; the callee's `NativeKind::Ptr(
 /// HeapKind::Closure)` is supplied by the producing site at JIT compile
-/// time and lives in a separate side-table the MIR emitter would have
-/// to thread through the call signature.
+/// time and lives in the `JITContext.stack_kinds` lockstep side track.
 ///
-/// Under the current `extern "C" fn(*mut JITContext)` signature, the
-/// callee kind is NOT recoverable from `callee_bits` alone — and per
-/// §2.7.7 #4 / #7 / CLAUDE.md "Forbidden Patterns" we MUST NOT probe
-/// `is_heap()` / `is_tagged()` on the bits to classify (those predicates
-/// are JIT-internal NaN-box checks, valid for the *NaN-boxed* shapes
-/// above, but NOT for raw Arc pointers — a heap pointer with bit-63=0
-/// reads as "not tagged" and the predicate returns false; a heap pointer
-/// that happens to alias a tag pattern is a wrong-shape match).
-///
-/// Per the §2.7.5 stamp-at-compile-time discipline, the principled fix
-/// is for the JIT MIR emitter to extend the call signature to carry a
-/// parallel kind track (or per-callee kind side-table) — that is an
-/// ADR-006 §2.7.5 follow-up and an architectural extension beyond this
-/// sub-cluster's scope. For raw-Arc closure callees today, we
-/// surface-and-stop: return TAG_NULL after popping the stack frame, so
-/// the calling MIR continues with a null result rather than crashing
-/// via `extern "C" todo!()` SIGABRT. The shape mirrors the W11-round-1
-/// close's `jit_join_init` surface — graceful surface, audible via
-/// `--trace-jit=shape_jit=debug` (cluster-2 closure-wave-F tracing-crate
-/// migration 2026-05-16), no silent leak (the Arc share remains owned by
-/// the stack slot per the §2.7.7 retain-on-read discipline).
+/// The callee kind is intentionally NOT recovered from `callee_bits` via
+/// `is_heap()` / `is_tagged()` probes. Those predicates are valid for the
+/// JIT-internal NaN-boxed shapes above, but not for raw Arc pointers.
+/// Dispatch follows the compile-time kind stamp, then only uses the
+/// inline-function predicate as the documented zero-capture dual-carrier
+/// check before dereferencing raw-Arc bits.
 ///
 /// ## Argument kind sourcing
 ///
-/// JIT MIR widens args to I64 at terminators.rs:651-671 without an
-/// associated kind track — the same §2.7.5 gap. We pass raw `u64` bits
-/// through to `jit_trampoline_call_closure` paired with `NativeKind::
-/// UInt64` companions (the §2.7.11 callee-classification kind for
-/// function-id callees) ONLY when we can prove the callee is a function
-/// (case 1 above). The VM-side trampoline does not currently consume
-/// per-arg kinds beyond function dispatch; per `call_convention.rs:
-/// jit_trampoline_call_closure` the args are wrapped as
-/// `KindedSlot::new(ValueSlot::from_raw(bits), kind)` and threaded into
-/// the new frame's locals without inspecting kind on the read side. For
-/// heap-bearing args, the W11-round-1 retain-on-read discipline on the
-/// runtime tier handles refcount; the JIT side has already retained
-/// each share before pushing per the §2.7.7 retain semantics. No
-/// fabrication: `NativeKind::UInt64` is the documented function-id
-/// classification kind, not a Bool-default fallback.
+/// Indirect-call lowering writes each argument's producing-site
+/// `NativeKind` into `JITContext.stack_kinds` beside the raw `u64` bits.
+/// Raw-Arc closure dispatch preserves those pairs into
+/// `VirtualMachine::execute_closure`; legacy bare-function / `JITClosure`
+/// fallback still uses `NativeKind::UInt64` at the stable FFI boundary
+/// because that path has only raw function-id-class bits.
 ///
 /// ## Forbidden alternatives (refuse on sight)
 ///
@@ -403,9 +412,9 @@ pub extern "C" fn jit_call_function(
 /// - **Resurrecting `ValueWord::clone_from_bits` /
 ///   `value_word_drop::vw_drop`** — CLAUDE.md "Forbidden Patterns" #1.
 pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
+    use crate::context::JITClosure;
     use crate::ffi::jit_kinds::unified_unbox;
     use crate::ffi::stack_kind_code;
-    use crate::context::JITClosure;
     use shape_value::{HeapKind, NativeKind, heap_value::HeapValue};
     use std::sync::Arc;
 
@@ -506,9 +515,10 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // - `Ptr(HeapKind::Closure)`: raw `Arc::into_raw(Arc<HeapValue::
         //   ClosureRaw>)` slot bits (the `jit_finalize_heap_closure`
         //   return shape). Recover the `OwnedClosureBlock` via the
-        //   `Arc<HeapValue>` slot-tier convention and pass through to
-        //   `jit_trampoline_call_closure`, which decodes the closure
-        //   captures kinded.
+        //   `Arc<HeapValue>` slot-tier convention and borrow that block
+        //   directly into the trampoline VM. Re-materializing an owning
+        //   block from raw captures is unsound for cell-storage captures
+        //   (`OwnedMutable` / `Shared`).
         //
         // - `UInt64` / `Int64` / `IntSize` / `UIntSize`: function-id
         //   class kind (the §2.7.5 I64-wide raw bits carrier kind also
@@ -587,92 +597,32 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         && (function_id as usize) < ctx_ref.function_table_len
                     {
                         let raw_fn_ptr =
-                            *(ctx_ref.function_table as *const *const u8)
-                                .add(function_id as usize);
+                            *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
                         if !raw_fn_ptr.is_null() {
                             ctx_ref.stack_ptr = 0;
                             let _signal = call_jit_fn_with_args(raw_fn_ptr, ctx, &args);
                             if ctx_ref.stack_ptr > 0 {
                                 ctx_ref.stack_ptr -= 1;
                                 let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-                                ctx_ref.stack_kinds[ctx_ref.stack_ptr] =
-                                    stack_kind_code::SENTINEL;
+                                ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
                                 return ret_bits;
                             }
                             return TAG_NULL;
                         }
                     }
                     // Fall through to trampoline VM for the bare-fn case.
-                    return dispatch_call_via_trampoline_vm(
-                        function_id as u32,
-                        None,
-                        &args,
-                        ctx,
-                    );
+                    return dispatch_call_via_trampoline_vm(function_id as u32, None, &args, ctx);
                 }
-                // Borrow the `Arc<HeapValue>` (use `from_raw` + `into_raw`
-                // to avoid taking the share — the share stays in the
-                // stack slot per §2.7.11 / Q12 the dispatch shell borrow
-                // contract).
+                // Take ownership of the callee share that was pushed onto
+                // the JIT stack. `compile_operand` retained for Copy
+                // operands and transferred for Move operands; after the
+                // call this dispatch frame retires that share. Holding the
+                // Arc local across `execute_closure` keeps the borrowed
+                // `OwnedClosureBlock` live for the VM call.
                 let arc = Arc::<HeapValue>::from_raw(callee_bits as *const HeapValue);
-                let extracted: Option<(u16, Vec<u64>)> = match &*arc {
+                let result = match &*arc {
                     HeapValue::ClosureRaw(block) => {
-                        // §2.7.11/Q12: read the function_id from the
-                        // TypedClosureHeader prefix at offset 8 (per
-                        // `closure_raw.rs` `TypedClosureHeader` layout).
-                        let fid = shape_value::v2::closure_raw::typed_closure_function_id(
-                            block.as_ptr(),
-                        );
-                        let cap_count = block.layout().capture_count();
-                        let mut caps: Vec<u64> = Vec::with_capacity(cap_count);
-                        for idx in 0..cap_count {
-                            // §2.7.8/Q10 read_capture_kinded returns
-                            // `(bits, kind)`. `read_capture_kinded` is a
-                            // RAW bit read — it does NOT bump the
-                            // capture's refcount.
-                            //
-                            // γ-CP5 7b (jit-typedarray-ptr,
-                            // v2-raw-heap-aliasing class): retain each
-                            // heap-typed capture before handing it to
-                            // `jit_trampoline_call_closure`. That
-                            // trampoline builds a FRESH `OwnedClosureBlock`
-                            // from these bits (`write_capture_raw_u64` —
-                            // no bump) and the fresh block's `Drop`
-                            // (`release_typed_closure`) WILL release each
-                            // heap capture via the layout's capture masks.
-                            // Its doc-comment states the contract
-                            // explicitly: "the JIT pre-incremented each
-                            // share before crossing the FFI boundary."
-                            // Without this retain every closure call
-                            // retires one share of each captured heap
-                            // value — the original binding's + the
-                            // closure block's shares are consumed within
-                            // a few calls and the next access
-                            // dereferences freed memory (`malloc():
-                            // unaligned tcache chunk` SIGABRT).
-                            //
-                            // The retain is the §2.7.8/Q10 kind-driven
-                            // bump via `KindedSlot::clone` — same dispatch
-                            // table as the VM's per-capture
-                            // `clone_with_kind` at frame setup
-                            // (`executor/call_convention.rs:776`). Inline
-                            // scalars are a no-op (`KindedSlot::clone`'s
-                            // scalar arms). `mem::forget` hands the bumped
-                            // share to the fresh block; the borrow-view
-                            // `KindedSlot` must NOT run its `Drop` (that
-                            // would cancel the bump) so it is forgotten
-                            // too.
-                            let (cap_bits, cap_kind) = block.read_capture_kinded(idx);
-                            let borrow_view = shape_value::KindedSlot::new(
-                                shape_value::ValueSlot::from_raw(cap_bits),
-                                cap_kind,
-                            );
-                            let retained = borrow_view.clone();
-                            std::mem::forget(borrow_view);
-                            std::mem::forget(retained);
-                            caps.push(cap_bits);
-                        }
-                        Some((fid, caps))
+                        dispatch_borrowed_closure_via_trampoline_vm(block, &arg_pairs, ctx)
                     }
                     other => {
                         // Wrong HeapValue arm under the stamped kind —
@@ -686,20 +636,11 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                              arm is not ClosureRaw. Producing site \
                              mislabeled the slot kind.",
                         );
-                        None
+                        TAG_NULL
                     }
                 };
-                // Restore the `Arc` raw pointer — the slot share is
-                // still owned by whoever pushed it (the call signature
-                // borrow contract leaves the share with the producer).
-                let _ = Arc::into_raw(arc);
-                match extracted {
-                    Some((f, c)) => {
-                        function_id = f;
-                        vm_captures = Some(c);
-                    }
-                    None => return TAG_NULL,
-                }
+                drop(arc);
+                return result;
             }
             NativeKind::Ptr(HeapKind::ModuleFn) => {
                 // ModuleFn callees flow through the comptime dispatch —
@@ -829,12 +770,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         //   - Raw-Arc HeapKind::Closure callees (Case 3 closed via the
         //     §2.7.11/Q12 kind dispatch above).
         let upvalues: Option<&[u64]> = vm_captures.as_deref();
-        dispatch_call_via_trampoline_vm(
-            function_id as u32,
-            upvalues,
-            &args,
-            ctx,
-        )
+        dispatch_call_via_trampoline_vm(function_id as u32, upvalues, &args, ctx)
     }
 }
 
@@ -866,19 +802,33 @@ pub(crate) unsafe fn call_jit_fn_with_args(
     type F7 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64, u64, u64) -> i32;
     type F8 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64, u64, u64, u64) -> i32;
 
-    let result = match args.len() {
-        0 => std::mem::transmute::<_, F0>(fn_ptr)(ctx),
-        1 => std::mem::transmute::<_, F1>(fn_ptr)(ctx, args[0]),
-        2 => std::mem::transmute::<_, F2>(fn_ptr)(ctx, args[0], args[1]),
-        3 => std::mem::transmute::<_, F3>(fn_ptr)(ctx, args[0], args[1], args[2]),
-        4 => std::mem::transmute::<_, F4>(fn_ptr)(ctx, args[0], args[1], args[2], args[3]),
-        5 => std::mem::transmute::<_, F5>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4]),
-        6 => std::mem::transmute::<_, F6>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5]),
-        7 => std::mem::transmute::<_, F7>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
-        8 => std::mem::transmute::<_, F8>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]),
-        _ => {
-            // Too many args for direct dispatch — fall back to trampoline
-            -1
+    // SAFETY: callers pass a non-null JIT function-table entry compiled with
+    // the Cranelift ABI shape selected by `args.len()`: `ctx` plus exactly
+    // that many `u64` native arguments. Unsupported arities do not call
+    // through the pointer.
+    let result = unsafe {
+        match args.len() {
+            0 => std::mem::transmute::<_, F0>(fn_ptr)(ctx),
+            1 => std::mem::transmute::<_, F1>(fn_ptr)(ctx, args[0]),
+            2 => std::mem::transmute::<_, F2>(fn_ptr)(ctx, args[0], args[1]),
+            3 => std::mem::transmute::<_, F3>(fn_ptr)(ctx, args[0], args[1], args[2]),
+            4 => std::mem::transmute::<_, F4>(fn_ptr)(ctx, args[0], args[1], args[2], args[3]),
+            5 => std::mem::transmute::<_, F5>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4],
+            ),
+            6 => std::mem::transmute::<_, F6>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4], args[5],
+            ),
+            7 => std::mem::transmute::<_, F7>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+            ),
+            8 => std::mem::transmute::<_, F8>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+            ),
+            _ => {
+                // Too many args for direct dispatch — fall back to trampoline
+                -1
+            }
         }
     };
     result
@@ -947,6 +897,8 @@ pub extern "C" fn jit_control_find(_ctx: *mut JITContext) -> u64 {
     )
 }
 
+// Closure-invoker trampoline staged ahead of its JIT call site.
+#[allow(dead_code)]
 unsafe fn jit_callable_invoker(
     _ctx: *mut c_void,
     _callable: &u64,

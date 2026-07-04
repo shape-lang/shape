@@ -419,6 +419,22 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 14 — HeapKind wildcard dispatch guard
+# -----------------------------------------------------------------------------
+# New `HeapKind` variants must not disappear into broad heap-pointer /
+# legacy-HK wildcard arms. This non-cargo guard has an audited baseline for
+# current residual surfaces and fails on newly introduced wildcard absorbers.
+echo "=== CHECK 14: HeapKind wildcard dispatch guard ==="
+if bash scripts/check-heapkind-wildcards.sh; then
+  record_pass "HeapKind wildcard dispatch guard"
+  echo "  -> clean"
+else
+  record_fail "HeapKind wildcard dispatch guard" "new wildcard HeapKind dispatch pattern"
+  echo "  -> FAILED (new wildcard HeapKind dispatch pattern)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="

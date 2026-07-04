@@ -2,6 +2,7 @@
 //!
 //! Covers: integer literals, float literals, negative, hex, binary, underscore separators.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 #[test]

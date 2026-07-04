@@ -226,7 +226,7 @@ fn test_array_reverse_length_preserved() {
 fn test_array_empty_length() {
     ShapeTest::new(
         r#"
-        let a = []
+        let a: Array<int> = []
         a.length
     "#,
     )
@@ -390,12 +390,161 @@ fn test_hashmap_is_empty_false() {
 fn test_hashmap_in_function() {
     ShapeTest::new(
         r#"
-        fn make_config() {
-            HashMap().set("host", "localhost").set("port", 8080)
+        fn make_config() -> HashMap<string, string> {
+            return HashMap().set("host", "localhost").set("port", "8080")
         }
         let cfg = make_config()
         cfg.get("host")
     "#,
     )
     .expect_string("localhost");
+}
+
+// =========================================================================
+// ROOT-1 (F2, strict-flip 2026-06-18): arr[i] INDEX-READ element-type
+// erasure for a method-returned array (split) and a nested-array loop var.
+// Pre-fix, `let parts = "a,b,c".split(","); parts[0] + parts[1]` and
+// `for p in [[1,2],[3,4]] { p[0]*10 + p[1] }` surfaced "Cannot infer ... :
+// operand types are `unknown` and ..." because the binding never recorded
+// the array element ConcreteType (split's monomorphic Array<string> return
+// was lost; the nested-array literal recorded a phantom placeholder element).
+// =========================================================================
+
+#[test]
+fn test_index_read_split_returned_array_element_concat() {
+    // finding 2: a `.split()`-returned `Array<string>` keeps its element
+    // type at the index read, so `parts[0] + parts[1]` is `string` concat.
+    ShapeTest::new(
+        r#"
+        let parts = "a,b,c".split(",")
+        parts[0] + parts[1]
+    "#,
+    )
+    .expect_string("ab");
+}
+
+#[test]
+fn test_index_read_split_chain_method_on_element() {
+    // `m.split(",")[0].toUpperCase()` — split -> Array<string>, index-read
+    // unwraps to string, the method resolves on the recovered element.
+    ShapeTest::new(
+        r#"
+        let m = "hello,world"
+        m.split(",")[0].toUpperCase()
+    "#,
+    )
+    .expect_string("HELLO");
+}
+
+#[test]
+fn test_index_read_nested_int_array_loop_var_arithmetic() {
+    // finding 4: a nested-array literal's loop var binds the inner
+    // `Array<int>`; `p[0]` / `p[1]` index-reads recover `int`, so the
+    // arithmetic `p[0]*10 + p[1]` is well-typed.
+    ShapeTest::new(
+        r#"
+        let pairs = [[1, 2], [3, 4]]
+        let mut total = 0
+        for p in pairs {
+            total = total + (p[0] * 10 + p[1])
+        }
+        total
+    "#,
+    )
+    .expect_number(46.0);
+}
+
+#[test]
+fn test_index_read_map_returned_array_element_concat() {
+    // A `.map()`-returned array keeps its element type at the index read.
+    ShapeTest::new(
+        r#"
+        let xs = [1, 2, 3].map(|x| x * 2)
+        xs[0] + xs[1]
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn test_index_read_nested_number_array_no_int_coercion() {
+    // int != number must not unify: a nested `number` array stays `number`.
+    ShapeTest::new(
+        r#"
+        let pairs = [[1.0, 2.0], [3.0, 4.0]]
+        let mut total = 0.0
+        for p in pairs {
+            total = total + (p[0] + p[1])
+        }
+        total
+    "#,
+    )
+    .expect_number(10.0);
+}
+
+// =========================================================================
+// STAGE F1 (strict-flip, 2026-06-20): re-tighten the T1 any-sink.
+// A field read off an element whose type is known ONLY from a `push` into an
+// UNANNOTATED empty array (`[]`) is unprovable WITHOUT an annotation, so it is
+// a CLEAN compile-error — NOT an `any`-typed result that would accept an
+// ill-typed program or let `int`/`number` silently unify.
+// =========================================================================
+
+#[test]
+fn stage_f1_unannotated_empty_push_accumulator_field_read_is_compile_error() {
+    // The element type of `rs` is known only from the push into an UNANNOTATED
+    // `[]`; `rs[0].n` must be a clean compile-error, not `any`.
+    ShapeTest::new(
+        r#"
+        type Run { n: int }
+        let mut rs = []
+        rs = rs.push(Run { n: 1 })
+        rs[0].n + 1
+    "#,
+    )
+    .expect_run_err_contains("annotate the array");
+}
+
+#[test]
+fn stage_f1_unannotated_empty_push_accumulator_field_read_not_any_sink() {
+    // Before STAGE F1 this was accepted (the field resolved to `any`):
+    // `bool := rs[0].n` where `n: int`. It must now be rejected.
+    ShapeTest::new(
+        r#"
+        type Run { n: int }
+        let mut rs = []
+        rs = rs.push(Run { n: 1 })
+        let bad: bool = rs[0].n
+        bad
+    "#,
+    )
+    .expect_run_err();
+}
+
+#[test]
+fn stage_f1_annotated_empty_push_accumulator_field_read_works() {
+    // The SAME accumulator with a DECLARED `Array<Run>` annotation has a proven
+    // element type — the field read resolves and arithmetic works.
+    ShapeTest::new(
+        r#"
+        type Run { n: int }
+        let mut rs: Array<Run> = []
+        rs = rs.push(Run { n: 4 })
+        rs[0].n + 1
+    "#,
+    )
+    .expect_number(5.0);
+}
+
+#[test]
+fn stage_f1_nonempty_struct_literal_array_field_read_works() {
+    // The non-empty literal form proves the element STRUCTURALLY — stays accepted.
+    ShapeTest::new(
+        r#"
+        type Run { n: int }
+        let rs = [Run { n: 4 }]
+        rs[0].n + 1
+    "#,
+    )
+    .expect_number(5.0);
 }

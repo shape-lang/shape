@@ -31,8 +31,12 @@ use shape_ast::Program;
 use shape_runtime::context::ExecutionContext;
 use shape_runtime::engine::{ExecutionType, ProgramExecutor, ShapeEngine};
 use shape_runtime::error::Result;
+use shape_runtime::type_schema::builtin_schemas::{
+    OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE,
+};
+use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_runtime::wire_conversion;
-use shape_value::KindedSlot;
+use shape_value::{HeapKind, KindedSlot, NativeKind};
 
 impl BytecodeExecutor {
     /// Compile a program to bytecode without executing it.
@@ -86,23 +90,21 @@ impl BytecodeExecutor {
         // strict-typing `unknown + unknown` reject path. The kind is read
         // off the persisted `KindedSlot` — no fabrication, the producer
         // stamped it (ADR-006 §2.7.5).
-        let known_binding_types: Vec<(String, String)> =
-            if let Some(ctx) = runtime.persistent_context() {
-                known_bindings
-                    .iter()
-                    .filter_map(|name| {
-                        let value = ctx.get_variable(name).ok().flatten()?;
-                        let type_name = binding_type_name_for_kind(
-                            value.kind(),
-                            value.raw(),
-                            &schema_id_to_name,
-                        )?;
-                        Some((name.clone(), type_name))
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let known_binding_types: Vec<(String, String)> = if let Some(ctx) =
+            runtime.persistent_context()
+        {
+            known_bindings
+                .iter()
+                .filter_map(|name| {
+                    let value = ctx.get_variable(name).ok().flatten()?;
+                    let type_name =
+                        binding_type_name_for_kind(value.kind(), value.raw(), &schema_id_to_name)?;
+                    Some((name.clone(), type_name))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut root_program = program.clone();
         crate::module_resolution::annotate_program_native_abi_package_key(
@@ -110,9 +112,10 @@ impl BytecodeExecutor {
             self.root_package_key.as_deref(),
         );
 
-        let mut loader = self.module_loader.take().unwrap_or_else(
-            shape_runtime::module_loader::ModuleLoader::new,
-        );
+        let mut loader = self
+            .module_loader
+            .take()
+            .unwrap_or_else(shape_runtime::module_loader::ModuleLoader::new);
         let (graph, stdlib_names, prelude_imports) =
             crate::module_resolution::build_graph_and_stdlib_names(
                 &root_program,
@@ -352,10 +355,7 @@ impl BytecodeExecutor {
     /// occupied the slot before. No tag synthesis: `KindedSlot` already
     /// carries the `NativeKind`, so the slot's bits and kind transfer
     /// directly per ADR-006 §2.7.8 / Q10.
-    fn load_module_bindings_from_context(
-        vm: &mut VirtualMachine,
-        ctx: &ExecutionContext,
-    ) {
+    fn load_module_bindings_from_context(vm: &mut VirtualMachine, ctx: &ExecutionContext) {
         let names = vm.program.module_binding_names.clone();
         for (idx, name) in names.iter().enumerate() {
             if name.is_empty() {
@@ -449,6 +449,13 @@ impl ProgramExecutor for BytecodeExecutor {
         // themselves; the host-boundary persistence + completion-value
         // synthesis is what's deferred to Phase-2c.
         let mut vm = VirtualMachine::new(VMConfig::default());
+        // Install resource limits (if configured) so a runaway program fails
+        // in-process via the dispatch-loop tick_instruction / record_allocation
+        // caps rather than exhausting the host. `None` (default) = unlimited,
+        // preserving trusted CLI semantics.
+        if let Some(limits) = self.resource_limits.clone() {
+            vm = vm.with_resource_limits(limits);
+        }
         vm.set_interrupt(self.interrupt.clone());
         vm.load_program(bytecode);
         for ext in &self.extensions {
@@ -520,6 +527,7 @@ impl ProgramExecutor for BytecodeExecutor {
         };
 
         let runtime = engine.get_runtime_mut();
+        runtime.clear_last_runtime_error();
         let mut owned_ctx_fallback;
         let ctx_borrow: &mut ExecutionContext = match runtime.persistent_context_mut() {
             Some(ctx) => ctx,
@@ -541,12 +549,36 @@ impl ProgramExecutor for BytecodeExecutor {
             Self::load_module_bindings_from_context(&mut vm, ctx_borrow);
         }
 
-        let completion: KindedSlot = vm.execute(Some(ctx_borrow)).map_err(|e| {
-            shape_runtime::error::ShapeError::RuntimeError {
-                message: e.to_string(),
-                location: None,
+        // Install the per-execution heap-growth budget (if a memory cap is
+        // configured) for the duration of this VM run. The doubling-realloc
+        // growth paths (TypedArray, etc.) charge against it, so an unbounded
+        // allocating loop fails in-process at the cap rather than climbing RSS
+        // until the host OOM-killer reaps the process. The guard restores the
+        // prior budget on drop, so nested/sequential executions are isolated.
+        // No memory cap configured (CLI default) => unlimited, no-op.
+        let _alloc_budget_guard = shape_value::v2::alloc_budget::BudgetGuard::new(
+            self.resource_limits
+                .as_ref()
+                .and_then(|l| l.max_memory_bytes),
+        );
+
+        let completion: KindedSlot = match vm.execute(Some(ctx_borrow)) {
+            Ok(completion) => completion,
+            Err(e) => {
+                let payload = vm.take_last_uncaught_exception().map(|payload| {
+                    uncaught_exception_payload_to_wire(
+                        payload,
+                        vm.builtin_schemas.any_error as u64,
+                        ctx_borrow,
+                    )
+                });
+                runtime.set_last_runtime_error(payload);
+                return Err(shape_runtime::error::ShapeError::RuntimeError {
+                    message: e.to_string(),
+                    location: None,
+                });
             }
-        })?;
+        };
 
         // REPL save-side: copy this cell's value bindings back into the
         // context so the next cell can reference them.
@@ -564,8 +596,16 @@ impl ProgramExecutor for BytecodeExecutor {
         let kind = completion.kind();
 
         let envelope = wire_conversion::slot_to_envelope(bits, kind, "", ctx_borrow);
-        let (content_json, content_html, content_terminal) =
+        let (content_json, content_html, mut content_terminal) =
             wire_conversion::slot_extract_content(bits, kind);
+        if content_terminal.is_none() {
+            content_terminal = completion_shape_terminal_rendering(
+                &completion,
+                &vm.program.type_schema_registry,
+                program,
+                &vm.program,
+            );
+        }
 
         // The `ctx_borrow` reborrow of `engine.runtime` ends at its last
         // use above (NLL), freeing `engine` for the persistence
@@ -607,8 +647,127 @@ impl ProgramExecutor for BytecodeExecutor {
     }
 }
 
+fn completion_shape_terminal_rendering(
+    completion: &KindedSlot,
+    schema_registry: &TypeSchemaRegistry,
+    source_program: &Program,
+    bytecode: &BytecodeProgram,
+) -> Option<String> {
+    if completion_is_option_none_carrier(completion, schema_registry) {
+        let formatter = crate::executor::printing::ValueFormatter::new(schema_registry);
+        return Some(formatter.format_kinded(completion));
+    }
+
+    if completion.kind() == NativeKind::Null
+        && top_level_null_completion_is_shape_none(source_program, bytecode)
+    {
+        return Some("None".to_string());
+    }
+
+    None
+}
+
+fn completion_is_option_none_carrier(
+    completion: &KindedSlot,
+    schema_registry: &TypeSchemaRegistry,
+) -> bool {
+    match completion.kind() {
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            let Some(storage) = completion.as_typed_object_storage() else {
+                return false;
+            };
+            let Some(schema) = schema_registry.get_by_id(storage.schema_id as u32) else {
+                return false;
+            };
+            if schema.name != "__Option"
+                || storage.slots().len() <= OPTION_PAYLOAD
+                || storage.field_kinds.len() <= OPTION_PAYLOAD
+                || storage.field_kinds[OPTION_VARIANT] != NativeKind::Int64
+            {
+                return false;
+            }
+            storage.slots()[OPTION_VARIANT].as_i64() == OPTION_VARIANT_NONE
+        }
+        _ => false,
+    }
+}
+
+fn top_level_null_completion_is_shape_none(
+    source_program: &Program,
+    bytecode: &BytecodeProgram,
+) -> bool {
+    let Some(expr) = top_level_tail_expr(source_program) else {
+        return false;
+    };
+    match expr {
+        shape_ast::ast::Expr::Literal(shape_ast::ast::Literal::None, _) => true,
+        shape_ast::ast::Expr::FunctionCall { name, .. } => {
+            bytecode_function_returns_option(bytecode, name)
+        }
+        shape_ast::ast::Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            ..
+        } => {
+            let name = format!("{}::{}", namespace, function);
+            bytecode_function_returns_option(bytecode, &name)
+        }
+        _ => false,
+    }
+}
+
+fn top_level_tail_expr(source_program: &Program) -> Option<&shape_ast::ast::Expr> {
+    use shape_ast::ast::{Item, Statement};
+    source_program
+        .items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            Item::Expression(expr, _) => Some(expr),
+            Item::Statement(Statement::Expression(expr, _), _) => Some(expr),
+            _ => None,
+        })
+}
+
+fn bytecode_function_returns_option(bytecode: &BytecodeProgram, name: &str) -> bool {
+    bytecode
+        .functions
+        .iter()
+        .find(|func| func.name == name)
+        .and_then(|func| func.frame_descriptor.as_ref())
+        .is_some_and(|frame| {
+            frame.effective_return_wrapper() == crate::type_tracking::FrameReturnWrapper::Option
+        })
+}
+
+fn uncaught_exception_payload_to_wire(
+    payload: KindedSlot,
+    any_error_schema_id: u64,
+    ctx: &ExecutionContext,
+) -> shape_wire::WireValue {
+    let is_any_error = payload
+        .as_typed_object_storage()
+        .is_some_and(|obj| obj.schema_id == any_error_schema_id);
+
+    let mut wire = wire_conversion::slot_to_wire(payload.raw(), payload.kind(), ctx);
+    if is_any_error {
+        if let shape_wire::WireValue::Object(ref mut obj) = wire {
+            obj.insert(
+                "category".to_string(),
+                shape_wire::WireValue::String("AnyError".to_string()),
+            );
+        }
+    }
+    wire
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::bytecode::Function;
+    use crate::type_tracking::{FrameDescriptor, FrameReturnWrapper};
+    use shape_wire::WireValue;
+
     // The snapshot-resume integration tests (snapshot_resume_keeps_…,
     // snapshot_resumed_variant_matches_without_resume_flow,
     // stdlib_json_value_methods_can_use_internal_json_builtins,
@@ -623,4 +782,96 @@ mod tests {
     // the integration coverage lives in
     // `crates/shape-vm/src/lib_tests_parts/` once the kinded host-API
     // returns.
+
+    fn parse_program(source: &str) -> Program {
+        shape_ast::parser::parse_program(source).expect("test source parses")
+    }
+
+    fn empty_bytecode() -> BytecodeProgram {
+        BytecodeProgram::default()
+    }
+
+    fn option_returning_function(name: &str) -> Function {
+        let mut frame = FrameDescriptor::new();
+        frame.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
+        frame.return_wrapper = FrameReturnWrapper::Option;
+        Function {
+            name: name.to_string(),
+            arity: 0,
+            param_names: Vec::new(),
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: Vec::new(),
+            ref_mutates: Vec::new(),
+            mutable_captures: Vec::new(),
+            frame_descriptor: Some(frame),
+            osr_entry_points: Vec::new(),
+            mir_data: None,
+        }
+    }
+
+    #[test]
+    fn schema_backed_none_completion_renders_none_but_wire_stays_null() {
+        let (registry, ids) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let completion = crate::executor::result_option_carrier::build_none(&ids);
+        let source_program = parse_program("1");
+        let bytecode = empty_bytecode();
+
+        assert_eq!(
+            completion_shape_terminal_rendering(&completion, &registry, &source_program, &bytecode),
+            Some("None".to_string())
+        );
+
+        let ctx = shape_runtime::Context::new_empty();
+        assert_eq!(
+            wire_conversion::slot_to_wire(completion.raw(), completion.kind(), &ctx),
+            WireValue::Null
+        );
+    }
+
+    #[test]
+    fn plain_null_completion_without_option_context_stays_silent() {
+        let registry = TypeSchemaRegistry::new();
+        let completion = KindedSlot::none();
+        let source_program = parse_program("print(1)");
+        let bytecode = empty_bytecode();
+
+        assert_eq!(
+            completion_shape_terminal_rendering(&completion, &registry, &source_program, &bytecode),
+            None
+        );
+    }
+
+    #[test]
+    fn direct_top_level_none_null_completion_renders_none() {
+        let registry = TypeSchemaRegistry::new();
+        let completion = KindedSlot::none();
+        let source_program = parse_program("None");
+        let bytecode = empty_bytecode();
+
+        assert_eq!(
+            completion_shape_terminal_rendering(&completion, &registry, &source_program, &bytecode),
+            Some("None".to_string())
+        );
+    }
+
+    #[test]
+    fn null_completion_from_static_option_returning_call_renders_none() {
+        let registry = TypeSchemaRegistry::new();
+        let completion = KindedSlot::none();
+        let source_program = parse_program("maybe()");
+        let bytecode = BytecodeProgram {
+            functions: vec![option_returning_function("maybe")],
+            ..BytecodeProgram::default()
+        };
+
+        assert_eq!(
+            completion_shape_terminal_rendering(&completion, &registry, &source_program, &bytecode),
+            Some("None".to_string())
+        );
+    }
 }

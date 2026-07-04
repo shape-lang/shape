@@ -48,11 +48,13 @@
 // dispatch tables (lines ~690 / ~1045 pre-edit) stay until V3-S5 ckpt-5
 // per supervisor 2026-05-15 partition (ckpt-5 territory: 4-table lockstep
 // deletion + U64 relabel + A1 fold).
+#[cfg(miri)]
+use crate::heap_value::MiriSlotProvenance;
 use crate::heap_value::{
-    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
-    IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, OptionData,
-    PriorityQueueData, RangeData, ResultData, TableViewData, TaskGroupData, TemporalData,
-    TraitObjectStorage, TypedObjectStorage,
+    AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue, IoHandleData, LazyData,
+    MatrixData, MatrixSliceData, MutexData, NativeViewData, OptionData, PriorityQueueData,
+    RangeData, ResultData, TableViewData, TaskGroupData, TemporalData, TraitObjectStorage,
+    TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -70,6 +72,8 @@ use std::sync::Arc;
 pub struct KindedSlot {
     pub slot: ValueSlot,
     pub kind: NativeKind,
+    #[cfg(miri)]
+    provenance: MiriSlotProvenance,
 }
 
 impl KindedSlot {
@@ -78,7 +82,44 @@ impl KindedSlot {
     /// for heap kinds, one strong-count share owned by this `KindedSlot`).
     #[inline]
     pub fn new(slot: ValueSlot, kind: NativeKind) -> Self {
-        Self { slot, kind }
+        Self {
+            slot,
+            kind,
+            #[cfg(miri)]
+            provenance: MiriSlotProvenance::None,
+        }
+    }
+
+    /// Construct with a provenance sidecar for Miri strict-provenance runs.
+    /// Normal builds keep the original two-field carrier and call `new`.
+    #[cfg(miri)]
+    #[inline]
+    pub fn new_with_miri_provenance(
+        slot: ValueSlot,
+        kind: NativeKind,
+        provenance: MiriSlotProvenance,
+    ) -> Self {
+        Self {
+            slot,
+            kind,
+            provenance,
+        }
+    }
+
+    #[cfg(miri)]
+    #[inline]
+    pub fn miri_provenance(&self) -> MiriSlotProvenance {
+        self.provenance
+    }
+
+    #[inline]
+    fn copy_without_refcount(&self) -> Self {
+        Self {
+            slot: self.slot,
+            kind: self.kind,
+            #[cfg(miri)]
+            provenance: self.provenance,
+        }
     }
 
     /// Convenience: a numeric `Int64`-kind slot.
@@ -101,10 +142,7 @@ impl KindedSlot {
     /// Drop is a no-op (inline scalar, no `Arc<T>` payload).
     #[inline]
     pub fn from_f32(f: f32) -> Self {
-        Self::new(
-            ValueSlot::from_raw(f.to_bits() as u64),
-            NativeKind::Float32,
-        )
+        Self::new(ValueSlot::from_raw(f.to_bits() as u64), NativeKind::Float32)
     }
 
     /// Convenience: a `Bool`-kind slot.
@@ -116,7 +154,19 @@ impl KindedSlot {
     /// Convenience: a `String`-kind slot from an `Arc<String>`.
     #[inline]
     pub fn from_string_arc(s: Arc<String>) -> Self {
-        Self::new(ValueSlot::from_string_arc(s), NativeKind::String)
+        #[cfg(miri)]
+        {
+            let ptr = Arc::into_raw(s);
+            Self::new_with_miri_provenance(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::String,
+                MiriSlotProvenance::String(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(ValueSlot::from_string_arc(s), NativeKind::String)
+        }
     }
 
     /// Convenience: a `Ptr(HeapKind::TypedObject)`-kind slot from an
@@ -142,10 +192,21 @@ impl KindedSlot {
     /// for the full call-site migration pattern.
     #[inline]
     pub fn from_typed_object_raw(ptr: *const TypedObjectStorage) -> Self {
-        Self::new(
-            ValueSlot::from_typed_object_raw(ptr),
-            NativeKind::Ptr(HeapKind::TypedObject),
-        )
+        #[cfg(miri)]
+        {
+            Self::new_with_miri_provenance(
+                ValueSlot::from_typed_object_raw(ptr),
+                NativeKind::Ptr(HeapKind::TypedObject),
+                MiriSlotProvenance::TypedObject(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(
+                ValueSlot::from_typed_object_raw(ptr),
+                NativeKind::Ptr(HeapKind::TypedObject),
+            )
+        }
     }
 
     // V3-S5 ckpt-4 (2026-05-15): `from_typed_array(a: Arc<TypedArrayData>)`
@@ -189,10 +250,7 @@ impl KindedSlot {
     /// `HeapValue::Deque(Arc<DequeData>)` arm, not pure-discriminator.
     #[inline]
     pub fn from_deque(d: Arc<DequeData>) -> Self {
-        Self::new(
-            ValueSlot::from_deque(d),
-            NativeKind::Ptr(HeapKind::Deque),
-        )
+        Self::new(ValueSlot::from_deque(d), NativeKind::Ptr(HeapKind::Deque))
     }
 
     /// Convenience: a `Ptr(HeapKind::Channel)`-kind slot. Mirror of
@@ -251,10 +309,7 @@ impl KindedSlot {
     /// `HeapValue::Mutex(Arc<MutexData>)` arm.
     #[inline]
     pub fn from_mutex(m: Arc<MutexData>) -> Self {
-        Self::new(
-            ValueSlot::from_mutex(m),
-            NativeKind::Ptr(HeapKind::Mutex),
-        )
+        Self::new(ValueSlot::from_mutex(m), NativeKind::Ptr(HeapKind::Mutex))
     }
 
     /// Convenience: a `Ptr(HeapKind::Atomic)`-kind slot. Mirror of
@@ -263,10 +318,7 @@ impl KindedSlot {
     /// `HeapValue::Atomic(Arc<AtomicData>)` arm. i64-only at landing.
     #[inline]
     pub fn from_atomic(a: Arc<AtomicData>) -> Self {
-        Self::new(
-            ValueSlot::from_atomic(a),
-            NativeKind::Ptr(HeapKind::Atomic),
-        )
+        Self::new(ValueSlot::from_atomic(a), NativeKind::Ptr(HeapKind::Atomic))
     }
 
     /// Convenience: a `Ptr(HeapKind::Lazy)`-kind slot. Mirror of
@@ -275,10 +327,7 @@ impl KindedSlot {
     /// `HeapValue::Lazy(Arc<LazyData>)` arm.
     #[inline]
     pub fn from_lazy(l: Arc<LazyData>) -> Self {
-        Self::new(
-            ValueSlot::from_lazy(l),
-            NativeKind::Ptr(HeapKind::Lazy),
-        )
+        Self::new(ValueSlot::from_lazy(l), NativeKind::Ptr(HeapKind::Lazy))
     }
 
     /// Convenience: a `Ptr(HeapKind::Temporal)`-kind slot. ADR-006
@@ -355,10 +404,7 @@ impl KindedSlot {
     /// per ADR-005 §1 single-discriminator.
     #[inline]
     pub fn from_range(r: Arc<RangeData>) -> Self {
-        Self::new(
-            ValueSlot::from_range(r),
-            NativeKind::Ptr(HeapKind::Range),
-        )
+        Self::new(ValueSlot::from_range(r), NativeKind::Ptr(HeapKind::Range))
     }
 
     /// Convenience: a `Ptr(HeapKind::Content)`-kind slot. Stores the
@@ -385,20 +431,14 @@ impl KindedSlot {
     /// `from_iterator` typed-Arc dispatch shape.
     #[inline]
     pub fn from_result(r: Arc<ResultData>) -> Self {
-        Self::new(
-            ValueSlot::from_result(r),
-            NativeKind::Ptr(HeapKind::Result),
-        )
+        Self::new(ValueSlot::from_result(r), NativeKind::Ptr(HeapKind::Result))
     }
 
     /// Convenience: a `Ptr(HeapKind::Option)`-kind slot. ADR-006 §2.7.17 /
     /// Q18 amendment (Wave 14 W14-variant-codegen).
     #[inline]
     pub fn from_option(o: Arc<OptionData>) -> Self {
-        Self::new(
-            ValueSlot::from_option(o),
-            NativeKind::Ptr(HeapKind::Option),
-        )
+        Self::new(ValueSlot::from_option(o), NativeKind::Ptr(HeapKind::Option))
     }
 
     /// Convenience: a `Ptr(HeapKind::Decimal)`-kind slot.
@@ -562,10 +602,7 @@ impl KindedSlot {
     /// `invoke_module_fn_id_stub` at `CallValue` time.
     #[inline]
     pub fn from_module_fn_id(id: u64) -> Self {
-        Self::new(
-            ValueSlot::from_raw(id),
-            NativeKind::Ptr(HeapKind::ModuleFn),
-        )
+        Self::new(ValueSlot::from_raw(id), NativeKind::Ptr(HeapKind::ModuleFn))
     }
 
     /// Convenience: a `String`-kind slot from a `&str`. Allocates a fresh
@@ -610,6 +647,38 @@ impl KindedSlot {
     #[inline]
     pub fn raw(&self) -> u64 {
         self.slot.raw()
+    }
+
+    /// Borrow a `Ptr(HeapKind::TypedObject)` carrier without open-coded
+    /// integer-to-pointer reconstruction at the call site.
+    #[inline]
+    pub fn as_typed_object_storage(&self) -> Option<&TypedObjectStorage> {
+        if !matches!(self.kind, NativeKind::Ptr(HeapKind::TypedObject)) {
+            return None;
+        }
+        let bits = self.slot.raw();
+        if bits == 0 {
+            return None;
+        }
+        #[cfg(miri)]
+        {
+            match self.provenance {
+                MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => {
+                    // SAFETY: the provenance sidecar is the original pointer
+                    // passed to `from_typed_object_raw`; this slot owns one
+                    // live refcount share for the borrow duration.
+                    Some(unsafe { &*ptr })
+                }
+                _ => None,
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            // SAFETY: kind == Ptr(TypedObject); the slot owns a live `_new`
+            // TypedObjectStorage share. This is a read-only borrow bounded by
+            // `&self`.
+            Some(unsafe { &*(bits as *const TypedObjectStorage) })
+        }
     }
 
     // ── Scalar accessors (ADR-006 §2.7.6 / Q8) ────────────────────────────
@@ -714,8 +783,21 @@ impl KindedSlot {
                 // `KindedSlot` owns one strong-count share (so the inner
                 // `String` is alive). The returned `&str` borrows from
                 // `&self`; lifetime is bounded by the slot's ownership.
-                let s: &String = unsafe { &*(bits as *const String) };
-                Some(s.as_str())
+                #[cfg(miri)]
+                {
+                    match self.provenance {
+                        MiriSlotProvenance::String(ptr) if !ptr.is_null() => {
+                            let s: &String = unsafe { &*ptr };
+                            Some(s.as_str())
+                        }
+                        _ => None,
+                    }
+                }
+                #[cfg(not(miri))]
+                {
+                    let s: &String = unsafe { &*(bits as *const String) };
+                    Some(s.as_str())
+                }
             }
             NativeKind::StringV2 => {
                 let bits = self.slot.raw();
@@ -731,9 +813,7 @@ impl KindedSlot {
                 // `&self`; `StringObj::as_str(ptr)` borrows the inner UTF-8
                 // bytes — lifetime is bounded by the slot's ownership.
                 let ptr = bits as *const crate::v2::string_obj::StringObj;
-                Some(unsafe {
-                    crate::v2::string_obj::StringObj::as_str(ptr)
-                })
+                Some(unsafe { crate::v2::string_obj::StringObj::as_str(ptr) })
             }
             _ => None,
         }
@@ -770,7 +850,21 @@ impl Drop for KindedSlot {
         unsafe {
             match self.kind {
                 NativeKind::String => {
-                    Arc::decrement_strong_count(bits as *const String);
+                    #[cfg(miri)]
+                    match self.provenance {
+                        MiriSlotProvenance::String(ptr) if !ptr.is_null() => {
+                            Arc::decrement_strong_count(ptr);
+                        }
+                        _ => {
+                            panic!(
+                                "KindedSlot::drop: missing Miri provenance for String carrier"
+                            );
+                        }
+                    }
+                    #[cfg(not(miri))]
+                    {
+                        Arc::decrement_strong_count(bits as *const String);
+                    }
                 }
                 // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
                 // StringV2 / DecimalV2 are v2-raw heap-pointer carriers per
@@ -824,9 +918,21 @@ impl Drop for KindedSlot {
                     // above.
                     HeapKind::TypedObject => {
                         use crate::v2::heap_element::HeapElement;
-                        TypedObjectStorage::release_elem(
-                            bits as *const TypedObjectStorage,
-                        );
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => {
+                                TypedObjectStorage::release_elem(ptr);
+                            }
+                            _ => {
+                                panic!(
+                                    "KindedSlot::drop: missing Miri provenance for TypedObject carrier"
+                                );
+                            }
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            TypedObjectStorage::release_elem(bits as *const TypedObjectStorage);
+                        }
                     }
                     HeapKind::HashMap => {
                         // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
@@ -1139,17 +1245,28 @@ impl Clone for KindedSlot {
     fn clone(&self) -> Self {
         let bits = self.slot.raw();
         if bits == 0 {
-            return Self {
-                slot: self.slot,
-                kind: self.kind,
-            };
+            return self.copy_without_refcount();
         }
         // SAFETY: same construction-side contract as Drop. We bump exactly
         // one strong-count share and let Rust copy the slot bits.
         unsafe {
             match self.kind {
                 NativeKind::String => {
-                    Arc::increment_strong_count(bits as *const String);
+                    #[cfg(miri)]
+                    match self.provenance {
+                        MiriSlotProvenance::String(ptr) if !ptr.is_null() => {
+                            Arc::increment_strong_count(ptr);
+                        }
+                        _ => {
+                            panic!(
+                                "KindedSlot::clone: missing Miri provenance for String carrier"
+                            );
+                        }
+                    }
+                    #[cfg(not(miri))]
+                    {
+                        Arc::increment_strong_count(bits as *const String);
+                    }
                 }
                 // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
                 // StringV2 / DecimalV2 retain via `v2_retain` against the
@@ -1185,9 +1302,22 @@ impl Clone for KindedSlot {
                     // the v2-raw carrier. Mirror of the §2.7.5 StringV2
                     // / DecimalV2 retain arms above (Agent B precedent).
                     HeapKind::TypedObject => {
-                        let hdr =
-                            &(*(bits as *const TypedObjectStorage)).header;
-                        crate::v2::refcount::v2_retain(hdr);
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => {
+                                crate::v2::refcount::v2_retain(&(*ptr).header);
+                            }
+                            _ => {
+                                panic!(
+                                    "KindedSlot::clone: missing Miri provenance for TypedObject carrier"
+                                );
+                            }
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            let hdr = &(*(bits as *const TypedObjectStorage)).header;
+                            crate::v2::refcount::v2_retain(hdr);
+                        }
                     }
                     HeapKind::HashMap => {
                         // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
@@ -1450,14 +1580,13 @@ impl Clone for KindedSlot {
                 | NativeKind::Null => {}
             }
         }
-        Self {
-            slot: self.slot,
-            kind: self.kind,
-        }
+        self.copy_without_refcount()
     }
 }
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 
@@ -1517,7 +1646,11 @@ mod tests {
 
             assert_eq!(header_refcount(ptr), 1, "_new starts at refcount 1");
             let slot1 = KindedSlot::from_typed_object_raw(ptr);
-            assert_eq!(header_refcount(ptr), 1, "from_typed_object_raw transfers existing share");
+            assert_eq!(
+                header_refcount(ptr),
+                1,
+                "from_typed_object_raw transfers existing share"
+            );
             let slot2 = slot1.clone();
             assert_eq!(header_refcount(ptr), 2, "Clone bumped refcount");
             drop(slot1);

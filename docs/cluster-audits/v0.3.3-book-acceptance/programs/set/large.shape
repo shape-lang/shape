@@ -1,0 +1,446 @@
+// large.shape — set slice, book-primary real-world application.
+//
+// APPLICATION: a deterministic role-based access-control (RBAC) + tag/label
+// reconciliation engine. It models users, roles, permission grants, and
+// resource label policies entirely in terms of SET ALGEBRA — the core of the
+// `std::core::set` chapter:
+//
+//   - effective permissions  = union over a user's role permission sets
+//   - required-but-missing    = difference(required, granted)
+//   - policy conflicts        = intersection(allow, deny)
+//   - capability dedup        = from_array(...) deduplication
+//   - membership audits       = includes(...)
+//   - report rendering        = to_array(...) + len(...)
+//
+// Every set element is a STRING (the book notes non-string keys are rejected
+// at HEAD), so all identities/permissions/labels are strings.
+//
+// MACHINE-PROOFABLE: each scenario computes a result and compares against an
+// EXPECTED value derived from book set semantics, written before first run.
+// On all-pass: "ALL_CHECKS_PASSED". On mismatch: "CHECK_FAILED: <which> ...".
+//
+// Import: the assigned chapter (set.mdx) documents
+//   from std::core::set use { ... }
+// but that form yields "Undefined function" in this build; the working form
+// (collections page / reference) is `use std::core::set` with qualified calls.
+// We use the working form and record the chapter discrepancy as BOOK-WRONG.
+
+use std::core::set
+
+// ---------------------------------------------------------------------------
+// Test harness (assert is not resolvable in CLI script mode here, so we
+// hand-roll a pass/fail tally with explicit CHECK_FAILED diagnostics).
+// ---------------------------------------------------------------------------
+
+var FAILED = 0
+
+fn check(name: string, cond: bool) {
+  if !cond {
+    print(f"CHECK_FAILED: {name}")
+    FAILED = FAILED + 1
+  }
+}
+
+fn check_eq_int(name: string, got: int, expected: int) {
+  if got != expected {
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    FAILED = FAILED + 1
+  }
+}
+
+fn check_eq_bool(name: string, got: bool, expected: bool) {
+  if got != expected {
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    FAILED = FAILED + 1
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Section 1: permission sets per role (from_array dedup + len + includes)
+// ---------------------------------------------------------------------------
+
+fn role_viewer() -> Array<string> {
+  ["read:doc", "read:comment", "read:doc"]   // dup read:doc
+}
+
+fn role_editor() -> Array<string> {
+  ["read:doc", "write:doc", "read:comment", "write:comment"]
+}
+
+fn role_admin() -> Array<string> {
+  ["read:doc", "write:doc", "delete:doc", "manage:users", "read:comment"]
+}
+
+fn section_roles() {
+  let viewer = set::from_array(role_viewer())
+  // dedup: {"read:doc","read:comment"} -> len 2
+  check_eq_int("viewer_len", set::len(viewer), 2)
+  check_eq_bool("viewer_has_read_doc", set::includes(viewer, "read:doc"), true)
+  check_eq_bool("viewer_no_write", set::includes(viewer, "write:doc"), false)
+
+  let editor = set::from_array(role_editor())
+  check_eq_int("editor_len", set::len(editor), 4)
+
+  let admin = set::from_array(role_admin())
+  check_eq_int("admin_len", set::len(admin), 5)
+  check_eq_bool("admin_can_delete", set::includes(admin, "delete:doc"), true)
+  check_eq_bool("admin_manage_users", set::includes(admin, "manage:users"), true)
+}
+
+// ---------------------------------------------------------------------------
+// Section 2: effective permissions = union of role sets
+// ---------------------------------------------------------------------------
+
+fn section_effective_union() {
+  let viewer = set::from_array(role_viewer())
+  let editor = set::from_array(role_editor())
+
+  // union(viewer, editor):
+  // viewer = {read:doc, read:comment}
+  // editor = {read:doc, write:doc, read:comment, write:comment}
+  // union  = {read:doc, read:comment, write:doc, write:comment} -> 4
+  let eff = set::union(viewer, editor)
+  check_eq_int("union_viewer_editor_len", set::len(eff), 4)
+  check_eq_bool("eff_has_write_comment", set::includes(eff, "write:comment"), true)
+
+  // chained union with admin adds delete:doc + manage:users -> 6 distinct
+  let admin = set::from_array(role_admin())
+  let eff2 = set::union(eff, admin)
+  // union members:
+  // {read:doc, read:comment, write:doc, write:comment} ∪
+  // {read:doc, write:doc, delete:doc, manage:users, read:comment}
+  // = {read:doc, read:comment, write:doc, write:comment,
+  //    delete:doc, manage:users} -> 6
+  check_eq_int("union_all_len", set::len(eff2), 6)
+  check_eq_bool("eff2_delete", set::includes(eff2, "delete:doc"), true)
+}
+
+// ---------------------------------------------------------------------------
+// Section 3: required-but-missing = difference(required, granted)
+// ---------------------------------------------------------------------------
+
+fn section_missing_difference() {
+  let required = set::from_array([
+    "read:doc", "write:doc", "delete:doc", "manage:users"
+  ])
+  let granted_editor = set::from_array(role_editor())
+  // granted_editor = {read:doc, write:doc, read:comment, write:comment}
+  // difference(required, granted) = required minus granted
+  //   read:doc      -> granted, drop
+  //   write:doc     -> granted, drop
+  //   delete:doc    -> NOT granted, keep
+  //   manage:users  -> NOT granted, keep
+  // => {delete:doc, manage:users} -> 2
+  let missing = set::difference(required, granted_editor)
+  check_eq_int("missing_editor_len", set::len(missing), 2)
+  check_eq_bool("missing_delete", set::includes(missing, "delete:doc"), true)
+  check_eq_bool("missing_manage", set::includes(missing, "manage:users"), true)
+  check_eq_bool("missing_not_read", set::includes(missing, "read:doc"), false)
+
+  // admin satisfies all required => difference empty
+  let granted_admin = set::from_array(role_admin())
+  let missing_admin = set::difference(required, granted_admin)
+  // admin = {read:doc, write:doc, delete:doc, manage:users, read:comment}
+  // required all present => {} -> 0
+  check_eq_int("missing_admin_len", set::len(missing_admin), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Section 4: policy conflicts = intersection(allow, deny)
+// ---------------------------------------------------------------------------
+
+fn section_conflicts_intersection() {
+  let allow = set::from_array([
+    "read:doc", "write:doc", "read:comment", "share:doc"
+  ])
+  let deny = set::from_array([
+    "write:doc", "delete:doc", "share:doc"
+  ])
+  // intersection(allow, deny):
+  //   write:doc  -> in both, keep
+  //   share:doc  -> in both, keep
+  //   read:doc   -> allow only, drop
+  //   read:comment -> allow only, drop
+  //   delete:doc -> deny only, drop
+  // => {write:doc, share:doc} -> 2
+  let conflicts = set::intersection(allow, deny)
+  check_eq_int("conflicts_len", set::len(conflicts), 2)
+  check_eq_bool("conflict_write", set::includes(conflicts, "write:doc"), true)
+  check_eq_bool("conflict_share", set::includes(conflicts, "share:doc"), true)
+  check_eq_bool("conflict_not_read", set::includes(conflicts, "read:doc"), false)
+
+  // disjoint allow/deny => empty intersection
+  let allow2 = set::from_array(["a", "b", "c"])
+  let deny2 = set::from_array(["x", "y", "z"])
+  let none = set::intersection(allow2, deny2)
+  check_eq_int("disjoint_inter_len", set::len(none), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Section 5: incremental add/remove (immutability of source sets)
+// ---------------------------------------------------------------------------
+
+fn section_add_remove_immutability() {
+  let base = set::from_array(["read:doc", "write:doc"])
+  let with_share = set::add(base, "share:doc")
+  // base must be unchanged (sets immutable, set.mdx final note)
+  check_eq_int("base_unchanged_len", set::len(base), 2)
+  check_eq_bool("base_no_share", set::includes(base, "share:doc"), false)
+  check_eq_int("with_share_len", set::len(with_share), 3)
+  check_eq_bool("with_share_has", set::includes(with_share, "share:doc"), true)
+
+  // add existing element is idempotent (set semantics)
+  let again = set::add(with_share, "read:doc")
+  check_eq_int("add_existing_len", set::len(again), 3)
+
+  // remove
+  let removed = set::remove(with_share, "write:doc")
+  check_eq_int("removed_len", set::len(removed), 2)
+  check_eq_bool("removed_no_write", set::includes(removed, "write:doc"), false)
+  check_eq_bool("removed_keeps_read", set::includes(removed, "read:doc"), true)
+  // removing absent element is a no-op
+  let noop = set::remove(removed, "nonexistent")
+  check_eq_int("remove_absent_len", set::len(noop), 2)
+}
+
+// ---------------------------------------------------------------------------
+// Section 6: to_array round-trip — membership preserved, order unspecified
+// ---------------------------------------------------------------------------
+
+fn count_arr(arr: Array<string>) -> int {
+  var n = 0
+  for _x in arr {
+    n = n + 1
+  }
+  n
+}
+
+fn count_present(arr: Array<string>, wanted: Array<string>) -> int {
+  var n = 0
+  for w in wanted {
+    for x in arr {
+      if x == w {
+        n = n + 1
+      }
+    }
+  }
+  n
+}
+
+fn section_to_array_roundtrip() {
+  let s = set::from_array(["read:doc", "write:doc", "delete:doc"])
+  let arr = set::to_array(s)
+  check_eq_int("to_array_len", count_arr(arr), 3)
+  // membership preserved regardless of order
+  let present = count_present(arr, ["read:doc", "write:doc", "delete:doc"])
+  check_eq_int("to_array_all_present", present, 3)
+  // rebuilding a set from the array yields the same cardinality
+  let rebuilt = set::from_array(arr)
+  check_eq_int("rebuilt_len", set::len(rebuilt), 3)
+}
+
+// ---------------------------------------------------------------------------
+// Section 7: multi-user RBAC scenario tying it all together
+// ---------------------------------------------------------------------------
+
+// Resource policy: which permissions a resource requires to be edited.
+fn doc_required() -> Array<string> {
+  ["read:doc", "write:doc"]
+}
+
+// Build a user's effective permission set from a list of role names.
+fn perms_for_role(role: string) -> Array<string> {
+  if role == "viewer" {
+    role_viewer()
+  } else if role == "editor" {
+    role_editor()
+  } else if role == "admin" {
+    role_admin()
+  } else {
+    []
+  }
+}
+
+fn effective_for_roles(roles: Array<string>) -> set {
+  var acc = set::new()
+  for r in roles {
+    let rp = set::from_array(perms_for_role(r))
+    acc = set::union(acc, rp)
+  }
+  acc
+}
+
+// Can the user edit the doc? (required ⊆ effective  <=>  difference empty)
+fn can_edit(roles: Array<string>) -> bool {
+  let eff = effective_for_roles(roles)
+  let required = set::from_array(doc_required())
+  let missing = set::difference(required, eff)
+  set::len(missing) == 0
+}
+
+fn section_rbac_scenarios() {
+  // viewer alone: has read:doc but not write:doc => cannot edit
+  check_eq_bool("viewer_cannot_edit", can_edit(["viewer"]), false)
+  // editor: has both read+write => can edit
+  check_eq_bool("editor_can_edit", can_edit(["editor"]), true)
+  // admin: superset => can edit
+  check_eq_bool("admin_can_edit", can_edit(["admin"]), true)
+  // viewer + editor combined => can edit (union covers write:doc)
+  check_eq_bool("viewer_plus_editor_edit", can_edit(["viewer", "editor"]), true)
+  // unknown role only => empty perms => cannot edit
+  check_eq_bool("unknown_cannot_edit", can_edit(["ghost"]), false)
+
+  // effective permission cardinalities
+  // viewer+admin union:
+  //   viewer = {read:doc, read:comment}
+  //   admin  = {read:doc, write:doc, delete:doc, manage:users, read:comment}
+  //   union  = {read:doc, read:comment, write:doc, delete:doc, manage:users}
+  //          -> 5
+  let eff_va = effective_for_roles(["viewer", "admin"])
+  check_eq_int("eff_viewer_admin_len", set::len(eff_va), 5)
+
+  // all three roles union:
+  //   editor adds write:comment to the admin/viewer union above
+  //   => {read:doc, read:comment, write:doc, delete:doc,
+  //       manage:users, write:comment} -> 6
+  let eff_all = effective_for_roles(["viewer", "editor", "admin"])
+  check_eq_int("eff_all_len", set::len(eff_all), 6)
+  check_eq_bool("eff_all_write_comment", set::includes(eff_all, "write:comment"), true)
+}
+
+// ---------------------------------------------------------------------------
+// Section 8: label reconciliation across many resources (stress: dedup + algebra)
+// ---------------------------------------------------------------------------
+
+fn labels_a() -> Array<string> {
+  ["env:prod", "team:core", "tier:1", "env:prod", "owner:alice"]
+}
+
+fn labels_b() -> Array<string> {
+  ["env:prod", "team:core", "tier:2", "owner:bob"]
+}
+
+fn section_labels() {
+  let a = set::from_array(labels_a())
+  // dedup env:prod => {env:prod, team:core, tier:1, owner:alice} -> 4
+  check_eq_int("labels_a_len", set::len(a), 4)
+  let b = set::from_array(labels_b())
+  check_eq_int("labels_b_len", set::len(b), 4)
+
+  // shared labels = intersection => {env:prod, team:core} -> 2
+  let shared = set::intersection(a, b)
+  check_eq_int("labels_shared_len", set::len(shared), 2)
+  check_eq_bool("shared_env", set::includes(shared, "env:prod"), true)
+  check_eq_bool("shared_team", set::includes(shared, "team:core"), true)
+
+  // a-only labels = difference(a, b) => {tier:1, owner:alice} -> 2
+  let a_only = set::difference(a, b)
+  check_eq_int("labels_a_only_len", set::len(a_only), 2)
+  check_eq_bool("a_only_tier1", set::includes(a_only, "tier:1"), true)
+  check_eq_bool("a_only_not_envprod", set::includes(a_only, "env:prod"), false)
+
+  // b-only labels = difference(b, a) => {tier:2, owner:bob} -> 2
+  let b_only = set::difference(b, a)
+  check_eq_int("labels_b_only_len", set::len(b_only), 2)
+
+  // total distinct labels = union => 6
+  // {env:prod, team:core, tier:1, owner:alice, tier:2, owner:bob}
+  let total = set::union(a, b)
+  check_eq_int("labels_total_len", set::len(total), 6)
+
+  // symmetric difference = union(a_only, b_only) => 4
+  let symdiff = set::union(a_only, b_only)
+  check_eq_int("labels_symdiff_len", set::len(symdiff), 4)
+  check_eq_bool("symdiff_excludes_shared", set::includes(symdiff, "env:prod"), false)
+}
+
+// ---------------------------------------------------------------------------
+// Section 9: algebraic identities (machine-proof of set laws)
+// ---------------------------------------------------------------------------
+
+fn section_identities() {
+  let a = set::from_array(["p", "q", "r", "s"])
+  let b = set::from_array(["r", "s", "t", "u"])
+  let empty = set::new()
+
+  // A ∪ ∅ = A
+  check_eq_int("union_empty_identity", set::len(set::union(a, empty)), 4)
+  // A ∩ ∅ = ∅
+  check_eq_int("inter_empty_zero", set::len(set::intersection(a, empty)), 0)
+  // A \ ∅ = A
+  check_eq_int("diff_empty_identity", set::len(set::difference(a, empty)), 4)
+  // A \ A = ∅
+  check_eq_int("diff_self_zero", set::len(set::difference(a, a)), 0)
+  // A ∩ A = A
+  check_eq_int("inter_self_identity", set::len(set::intersection(a, a)), 4)
+  // A ∪ A = A (idempotent)
+  check_eq_int("union_self_idempotent", set::len(set::union(a, a)), 4)
+
+  // |A ∪ B| = |A| + |B| - |A ∩ B|  (inclusion-exclusion)
+  // |A|=4, |B|=4, |A∩B|={r,s}=2 => |A∪B| = 4+4-2 = 6
+  let union_ab = set::len(set::union(a, b))
+  let inter_ab = set::len(set::intersection(a, b))
+  check_eq_int("incl_excl", union_ab, 4 + 4 - inter_ab)
+
+  // De Morgan over a universe U:
+  // (U \ (A ∪ B)) == ((U \ A) ∩ (U \ B))
+  let u = set::from_array(["p", "q", "r", "s", "t", "u", "v", "w"])
+  let comp_union = set::difference(u, set::union(a, b))
+  let comp_a = set::difference(u, a)
+  let comp_b = set::difference(u, b)
+  let demorgan = set::intersection(comp_a, comp_b)
+  // U has 8, A∪B has 6 ({p,q,r,s,t,u}) => comp_union = {v,w} -> 2
+  check_eq_int("demorgan_lhs_len", set::len(comp_union), 2)
+  check_eq_int("demorgan_rhs_len", set::len(demorgan), 2)
+  check_eq_bool("demorgan_v", set::includes(demorgan, "v"), true)
+  check_eq_bool("demorgan_w", set::includes(demorgan, "w"), true)
+}
+
+// ---------------------------------------------------------------------------
+// Section 10: empty-set and single-element edge cases
+// ---------------------------------------------------------------------------
+
+fn section_edge_cases() {
+  let e = set::new()
+  check_eq_int("new_empty_len", set::len(e), 0)
+  check_eq_bool("empty_includes_false", set::includes(e, "anything"), false)
+  check_eq_int("empty_to_array_len", count_arr(set::to_array(e)), 0)
+
+  let one = set::add(set::new(), "solo")
+  check_eq_int("single_len", set::len(one), 1)
+  check_eq_bool("single_includes", set::includes(one, "solo"), true)
+
+  // remove last element -> empty
+  let drained = set::remove(one, "solo")
+  check_eq_int("drained_len", set::len(drained), 0)
+
+  // union of empties is empty
+  check_eq_int("union_two_empties", set::len(set::union(set::new(), set::new())), 0)
+
+  // from_array of empty array
+  let fe = set::from_array([])
+  check_eq_int("from_empty_array_len", set::len(fe), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Driver
+// ---------------------------------------------------------------------------
+
+fn main() {
+  section_roles()
+  section_effective_union()
+  section_missing_difference()
+  section_conflicts_intersection()
+  section_add_remove_immutability()
+  section_to_array_roundtrip()
+  section_rbac_scenarios()
+  section_labels()
+  section_identities()
+  section_edge_cases()
+
+  if FAILED == 0 {
+    print("ALL_CHECKS_PASSED")
+  } else {
+    print(f"FAILURES: {FAILED}")
+  }
+}

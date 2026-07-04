@@ -1,0 +1,206 @@
+// large.shape — A 3D vector-geometry pipeline built ONLY on math::linalg.
+// Source chapter: stdlib/math/linalg.mdx
+//
+// Real-world rooting: a non-interactive geometry processor that builds a
+// small triangle mesh, computes per-face normals, areas, centroids, edge
+// lengths, angles, and a bounding sphere — all expressed purely through the
+// eight documented linalg primitives (dot, cross, norm, normalize, distance,
+// scale, add, sub). Deterministic: fixed fixture geometry, every result
+// asserted against a hand-computed expected value derived from BOOK SEMANTICS
+// BEFORE the first run.
+//
+// All vectors are Array<number> (f64) per the chapter's stated domain.
+
+use std::math::linalg
+
+// ---------- numeric helpers (no library beyond linalg) ----------
+
+fn approx(a: number, b: number) -> bool {
+    let d: number = a - b
+    if d < 0.0 { (0.0 - d) < 0.00001 } else { d < 0.00001 }
+}
+
+fn fail(name: string, e: number, g: number) {
+    print(f"CHECK_FAILED: {name} expected={e} got={g}\n")
+}
+
+// triangle area via cross product: 0.5 * |(b-a) x (c-a)|
+fn tri_area(a: Array<number>, b: Array<number>, c: Array<number>) -> number {
+    let ab: Array<number> = linalg::sub(b, a)
+    let ac: Array<number> = linalg::sub(c, a)
+    let n: Array<number> = linalg::cross(ab, ac)
+    0.5 * linalg::norm(n)
+}
+
+// face normal (unit), right-handed
+fn face_normal(a: Array<number>, b: Array<number>, c: Array<number>) -> Array<number> {
+    let ab: Array<number> = linalg::sub(b, a)
+    let ac: Array<number> = linalg::sub(c, a)
+    linalg::normalize(linalg::cross(ab, ac))
+}
+
+// centroid of 3 points: (a+b+c)/3
+fn centroid(a: Array<number>, b: Array<number>, c: Array<number>) -> Array<number> {
+    let s: Array<number> = linalg::add(linalg::add(a, b), c)
+    linalg::scale(s, 1.0 / 3.0)
+}
+
+// angle at vertex a between edges (b-a) and (c-a), in radians,
+// via cos = dot(u,v)/(|u||v|). Returned as cosine to avoid trig dep.
+fn cos_angle(a: Array<number>, b: Array<number>, c: Array<number>) -> number {
+    let u: Array<number> = linalg::sub(b, a)
+    let v: Array<number> = linalg::sub(c, a)
+    linalg::dot(u, v) / (linalg::norm(u) * linalg::norm(v))
+}
+
+fn main() {
+    let mut failed: bool = false
+
+    // ----- Fixture: a right triangle in the z=0 plane -----
+    // A=(0,0,0) B=(3,0,0) C=(0,4,0)
+    let a: Array<number> = [0.0, 0.0, 0.0]
+    let b: Array<number> = [3.0, 0.0, 0.0]
+    let c: Array<number> = [0.0, 4.0, 0.0]
+
+    // Edge lengths (book §distance): AB=3, AC=4, BC=5
+    let ab: number = linalg::distance(a, b)
+    if !approx(ab, 3.0) { fail("AB", 3.0, ab); failed = true }
+    let ac: number = linalg::distance(a, c)
+    if !approx(ac, 4.0) { fail("AC", 4.0, ac); failed = true }
+    let bc: number = linalg::distance(b, c)
+    if !approx(bc, 5.0) { fail("BC", 5.0, bc); failed = true }
+
+    // Area = 0.5*3*4 = 6
+    let area: number = tri_area(a, b, c)
+    if !approx(area, 6.0) { fail("area", 6.0, area); failed = true }
+
+    // Face normal = +z = [0,0,1]
+    let nrm: Array<number> = face_normal(a, b, c)
+    if !approx(nrm[0], 0.0) || !approx(nrm[1], 0.0) || !approx(nrm[2], 1.0) {
+        fail("normal_z", 1.0, nrm[2]); failed = true
+    }
+    // unit length
+    if !approx(linalg::norm(nrm), 1.0) { fail("normal_len", 1.0, linalg::norm(nrm)); failed = true }
+
+    // Centroid = (1,4/3,0)
+    let ctr: Array<number> = centroid(a, b, c)
+    if !approx(ctr[0], 1.0) { fail("ctr_x", 1.0, ctr[0]); failed = true }
+    if !approx(ctr[1], 4.0 / 3.0) { fail("ctr_y", 4.0 / 3.0, ctr[1]); failed = true }
+    if !approx(ctr[2], 0.0) { fail("ctr_z", 0.0, ctr[2]); failed = true }
+
+    // Right angle at A: cos = 0
+    let cosA: number = cos_angle(a, b, c)
+    if !approx(cosA, 0.0) { fail("cosA", 0.0, cosA); failed = true }
+
+    // Angle at B between BA and BC: BA=(-3,0,0), BC=(-3,4,0)
+    // cos = (9)/(3*5) = 0.6
+    let cosB: number = cos_angle(b, a, c)
+    if !approx(cosB, 0.6) { fail("cosB", 0.6, cosB); failed = true }
+
+    // Angle at C between CA and CB: CA=(0,-4,0), CB=(3,-4,0)
+    // cos = (16)/(4*5) = 0.8
+    let cosC: number = cos_angle(c, a, b)
+    if !approx(cosC, 0.8) { fail("cosC", 0.8, cosC); failed = true }
+
+    // ----- A second fixture: unit basis cross products -----
+    let ex: Array<number> = [1.0, 0.0, 0.0]
+    let ey: Array<number> = [0.0, 1.0, 0.0]
+    let ez: Array<number> = [0.0, 0.0, 1.0]
+    // ex x ey = ez, ey x ez = ex, ez x ex = ey
+    let r1: Array<number> = linalg::cross(ex, ey)
+    if !approx(r1[2], 1.0) { fail("exey_z", 1.0, r1[2]); failed = true }
+    let r2: Array<number> = linalg::cross(ey, ez)
+    if !approx(r2[0], 1.0) { fail("eyez_x", 1.0, r2[0]); failed = true }
+    let r3: Array<number> = linalg::cross(ez, ex)
+    if !approx(r3[1], 1.0) { fail("ezex_y", 1.0, r3[1]); failed = true }
+    // anti-commutative: ey x ex = -ez
+    let r4: Array<number> = linalg::cross(ey, ex)
+    if !approx(r4[2], 0.0 - 1.0) { fail("eyex_z", 0.0 - 1.0, r4[2]); failed = true }
+
+    // ----- dot-product identities -----
+    // ortho basis: dot(ex,ey)=0, dot(ex,ex)=1
+    if !approx(linalg::dot(ex, ey), 0.0) { fail("dot_exey", 0.0, linalg::dot(ex, ey)); failed = true }
+    if !approx(linalg::dot(ex, ex), 1.0) { fail("dot_exex", 1.0, linalg::dot(ex, ex)); failed = true }
+
+    // ----- scale / add / sub algebra -----
+    // 2*[1,2,3] - [1,2,3] = [1,2,3]
+    let w: Array<number> = [1.0, 2.0, 3.0]
+    let dbl: Array<number> = linalg::scale(w, 2.0)
+    let back: Array<number> = linalg::sub(dbl, w)
+    if !approx(back[0], 1.0) || !approx(back[1], 2.0) || !approx(back[2], 3.0) {
+        fail("scale_sub", 3.0, back[2]); failed = true
+    }
+    // add then sub round-trips
+    let added: Array<number> = linalg::add(w, w)
+    if !approx(added[0], 2.0) || !approx(added[2], 6.0) {
+        fail("add_self", 6.0, added[2]); failed = true
+    }
+
+    // ----- normalize idempotence: normalize(normalize(v)) length 1 -----
+    let g: Array<number> = [2.0, 3.0, 6.0]   // norm = 7
+    if !approx(linalg::norm(g), 7.0) { fail("norm7", 7.0, linalg::norm(g)); failed = true }
+    let gn: Array<number> = linalg::normalize(g)
+    if !approx(linalg::norm(gn), 1.0) { fail("normalize_unit", 1.0, linalg::norm(gn)); failed = true }
+    let gnn: Array<number> = linalg::normalize(gn)
+    if !approx(linalg::norm(gnn), 1.0) { fail("normalize_idem", 1.0, linalg::norm(gnn)); failed = true }
+    // direction preserved: gn[0]/g[0] == gn[2]/g[2]
+    if !approx(gn[0] * g[2], gn[2] * g[0]) { fail("dir_preserve", 0.0, gn[0]*g[2]-gn[2]*g[0]); failed = true }
+
+    // ----- normalize zero vector returns input unchanged (book §normalize) -----
+    let zero: Array<number> = [0.0, 0.0, 0.0]
+    let zn: Array<number> = linalg::normalize(zero)
+    if !approx(zn[0], 0.0) || !approx(zn[1], 0.0) || !approx(zn[2], 0.0) {
+        fail("normalize_zero", 0.0, zn[0]); failed = true
+    }
+
+    // ----- a polyline length accumulation (distance chain) -----
+    // path (0,0,0)->(1,0,0)->(1,1,0)->(1,1,1): lengths 1,1,1 total 3
+    let p0: Array<number> = [0.0, 0.0, 0.0]
+    let p1: Array<number> = [1.0, 0.0, 0.0]
+    let p2: Array<number> = [1.0, 1.0, 0.0]
+    let p3: Array<number> = [1.0, 1.0, 1.0]
+    let total: number = linalg::distance(p0, p1) + linalg::distance(p1, p2) + linalg::distance(p2, p3)
+    if !approx(total, 3.0) { fail("polyline", 3.0, total); failed = true }
+
+    // straight-line distance corner-to-corner of unit cube = sqrt(3)
+    let diag: number = linalg::distance(p0, p3)
+    if !approx(diag, 1.7320508) { fail("cube_diag", 1.7320508, diag); failed = true }
+
+    // ----- projection of vector onto axis via dot -----
+    // proj of (3,4,0) onto ex = 3
+    let vec: Array<number> = [3.0, 4.0, 0.0]
+    let projx: number = linalg::dot(vec, ex)
+    if !approx(projx, 3.0) { fail("projx", 3.0, projx); failed = true }
+    let projy: number = linalg::dot(vec, ey)
+    if !approx(projy, 4.0) { fail("projy", 4.0, projy); failed = true }
+    // |v|^2 == dot(v,v)
+    if !approx(linalg::dot(vec, vec), 25.0) { fail("vsq", 25.0, linalg::dot(vec, vec)); failed = true }
+    if !approx(linalg::norm(vec), 5.0) { fail("vnorm", 5.0, linalg::norm(vec)); failed = true }
+
+    // ----- reflect (3,4,0) across x-axis: v - 2*(v.ey)*ey = (3,-4,0) -----
+    let refl: Array<number> = linalg::sub(vec, linalg::scale(ey, 2.0 * projy))
+    if !approx(refl[0], 3.0) || !approx(refl[1], 0.0 - 4.0) || !approx(refl[2], 0.0) {
+        fail("reflect", 0.0 - 4.0, refl[1]); failed = true
+    }
+
+    // ----- triangle inequality on the fixture: AB+AC >= BC -----
+    if !(ab + ac >= bc) { fail("tri_ineq", 1.0, 0.0); failed = true }
+
+    // ----- bounding sphere center=centroid, radius = max dist to a vertex -----
+    let cen: Array<number> = centroid(a, b, c)
+    let da: number = linalg::distance(cen, a)
+    let db: number = linalg::distance(cen, b)
+    let dc: number = linalg::distance(cen, c)
+    let mut radius: number = da
+    if db > radius { radius = db }
+    if dc > radius { radius = dc }
+    // hand: cen=(1,4/3,0); da=sqrt(1+16/9)=sqrt(25/9)=5/3≈1.666667
+    // db=sqrt(4+16/9)=sqrt(52/9)≈2.403701; dc=sqrt(1+(4-4/3)^2)=sqrt(1+(8/3)^2)
+    //   =sqrt(1+64/9)=sqrt(73/9)≈2.847001 -> radius≈2.847001
+    if !approx(radius, 2.8470011) { fail("bsphere_r", 2.8470011, radius); failed = true }
+
+    if failed {
+        return
+    }
+    print("ALL_CHECKS_PASSED\n")
+}

@@ -22,17 +22,36 @@ pub mod context;
 mod core;
 pub mod error;
 pub mod executor;
+// JIT FFI trampolines are deliberate raw-pointer entry points called from
+// Cranelift-generated machine code. They take/deref raw pointers by ABI
+// necessity; marking them `unsafe` would change the JIT-callable signatures
+// the codegen layer relies on. The deref contract is upheld by the codegen
+// site, not the Rust type system, so the lint is allowed module-wide here.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub mod ffi;
 pub(crate) mod ffi_refs;
+// FFI symbol-table entry points for series/vector/time intrinsics. Registered
+// by name via the JIT symbol registry; many are staged ahead of their codegen
+// call sites, so dead_code is expected and intentional here.
+#[allow(dead_code)]
 mod ffi_symbols;
+// Foreign-function bridge scaffolding staged ahead of its JIT call sites.
+#[allow(dead_code)]
 mod foreign_bridge;
 pub mod jit_array;
 pub mod jit_cache;
 pub mod jit_matrix;
 pub mod loop_analysis;
-pub mod mixed_table;
+// v2 JIT codegen scaffolding (typed MIR→IR, struct/string/int lowering, call
+// ABI). Staged ahead of full v2 wiring; dead_code is expected WIP here.
+#[allow(dead_code)]
 pub mod mir_compiler;
+pub mod mixed_table;
 mod numeric_compiler;
+// Optimization-plan analysis passes (escape analysis, LICM, HOF inlining,
+// vectorization, loop lowering, typed MIR, call-path, table-queryable). These
+// are phased WIP infra wired up ahead of their drive sites; dead_code expected.
+#[allow(dead_code)]
 mod optimizer;
 pub mod osr_compiler;
 pub mod worker;

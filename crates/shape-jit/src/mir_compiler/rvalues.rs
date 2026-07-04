@@ -11,6 +11,7 @@
 use cranelift::prelude::*;
 
 use super::MirToIR;
+use shape_ast::ast::operators::{FuzzyOp, FuzzyTolerance};
 use shape_vm::mir::types::*;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
@@ -84,9 +85,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // mod.rs::compact_int_checked_binop`); the JIT matches by
                 // operating at the narrow Cranelift width — `iadd`/`isub`/
                 // `imul` on `I8`/`I16`/`I32` wrap natively at that width.
-                if let Some(nw) =
-                    Self::narrow_int_binop_kind(lhs_kind, rhs_kind, lhs, rhs)
-                {
+                if let Some(nw) = Self::narrow_int_binop_kind(lhs_kind, rhs_kind, lhs, rhs) {
                     return self.compile_binop_narrow_int(op, l, r, nw);
                 }
 
@@ -116,8 +115,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                             self.compile_binop_i32_native(op, l, r)
                         }
-                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le
-                        | BinOp::Gt | BinOp::Ge => {
+                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                             self.compile_cmp_i32_native(op, l, r)
                         }
                         _ => self.compile_binop(op, l, r),
@@ -134,6 +132,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.compile_binop(op, l, r)
                 }
             }
+
+            Rvalue::FuzzyComparison {
+                op,
+                lhs,
+                rhs,
+                tolerance,
+            } => self.compile_fuzzy_comparison(*op, lhs, rhs, tolerance),
 
             Rvalue::UnaryOp(op, operand) => {
                 let val = self.compile_operand(operand)?;
@@ -163,12 +168,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     | shape_vm::mir::types::Operand::Move(p)
                     | shape_vm::mir::types::Operand::MoveExplicit(p) => p,
                     shape_vm::mir::types::Operand::Constant(_) => {
-                        return Err(
-                            "MirToIR: Rvalue::Clone(Constant) — Clone is \
+                        return Err("MirToIR: Rvalue::Clone(Constant) — Clone is \
                              defined on place-rooted operands per ADR-006 \
                              §2.7.5; emitter contract violated. SURFACE."
-                                .to_string(),
-                        );
+                            .to_string());
                     }
                 };
                 if self.refcount_disposition_for_place(place)? {
@@ -196,9 +199,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // path below.
                 if let Place::Local(slot) = place {
                     if self.ref_param_slots.contains(slot) {
-                        let var = *self.locals.get(slot).ok_or_else(|| {
-                            format!("MirToIR: unknown local slot {}", slot)
-                        })?;
+                        let var = *self
+                            .locals
+                            .get(slot)
+                            .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                         // Slot variable carries the caller's cell address
                         // (pointer-width I64); forward as-is. Skip the
                         // `ref_stack_slots` insertion — there is no JIT-
@@ -334,8 +338,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // unknown element kinds") the correct response is
                 // surface-and-stop; falling back to a kind-blind allocator
                 // would resurrect the deleted UnifiedArray heap layout.
-                Err(
-                    "Route A surface-and-stop: SURFACE — Rvalue::Aggregate \
+                Err("Route A surface-and-stop: SURFACE — Rvalue::Aggregate \
                      reached the kind-blind fallback. The v2 typed-array \
                      fast path in statements.rs requires the destination \
                      `Place::Local` to carry a `ConcreteType::Array<scalar>`; \
@@ -343,8 +346,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                      from the producing call signature. Tracked as \
                      W11-jit-new-array per phase-3-kickoff-prompt.md. \
                      ADR-006 §2.7.14 / §2.7.5."
-                        .to_string(),
-                )
+                    .to_string())
             }
 
             Rvalue::EnumTest { operand, variant } => {
@@ -390,16 +392,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     VariantTag::Ok | VariantTag::Err => self.ffi.arc_result_payload,
                     VariantTag::Some_ => self.ffi.arc_option_payload,
                     VariantTag::None_ => {
-                        return Err(
-                            "EnumPayload: SURFACE — VariantTag::None_ has no \
+                        return Err("EnumPayload: SURFACE — VariantTag::None_ has no \
                              payload to extract per ADR-006 §2.7.17 \
                              `OptionData::none()` (placeholder Bool slot). \
                              The MIR producer in \
                              `lower_constructor_bindings_from_place_opt` \
                              must not emit `EnumPayload { variant: None_ }`. \
                              Producer-site contract violated."
-                                .to_string(),
-                        );
+                            .to_string());
                     }
                 };
                 let bits = self.compile_operand_raw(operand)?;
@@ -408,7 +408,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.inst_results(inst)[0])
             }
 
-            Rvalue::TypePatternTest { type_annotation, .. } => {
+            Rvalue::TypePatternTest {
+                type_annotation, ..
+            } => {
                 // W15.2-LANG-5 (Phase 4b, 2026-05-18). The MIR producer
                 // emits `Rvalue::TypePatternTest` for every `Pattern::Typed`
                 // arm in a match expression (e.g. `match x { n: int => ...,
@@ -510,6 +512,39 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     enum_name, variant_name
                 ))
             }
+            Rvalue::PrimitiveCast { target, .. } => {
+                // f-string bool-as-int VM!=JIT divergence fix (2026-06).
+                // The MIR producer emits `Rvalue::PrimitiveCast` for a
+                // primitive infallible `as`-cast whose result kind differs
+                // from the source (`true as int`, `1 as number`, …). The
+                // JIT has no typed convert body — the bytecode
+                // `OpCode::ConvertTo*` family is VM-only per
+                // `vm_only_opcode_reason`, and the opcode-FFI trampoline
+                // passes operand bits through UNCHANGED (rendering `true`
+                // instead of `1`). The preflight at `mir_compiler::preflight`
+                // rejects this Rvalue at the program-level gate, so the W12
+                // fall-through routes the program to the bytecode
+                // interpreter (which restamps the cast result kind via
+                // `ConvertTo*`). This arm is defense in depth: if a future
+                // caller invokes `compile_rvalue` without running preflight,
+                // surface-and-stop here rather than emitting the kind-blind
+                // pass-through the MIR lowering used to (CLAUDE.md
+                // "Forbidden rationalizations" — the W4-δ "value passes
+                // through, executor reads the tag" shape refused on sight).
+                // NOT a Bool-default — the target type name IS the
+                // producer-side classification (ADR-006 §2.7.5). Native
+                // typed convert codegen lands as a v0.4 follow-up.
+                Err(format!(
+                    "Route A surface-and-stop: NotImplemented(SURFACE) — \
+                     `Rvalue::PrimitiveCast` (`expr as {}`) codegen not yet \
+                     wired (the bytecode `OpCode::ConvertTo*` family is \
+                     VM-only). W12 fall-through to the interpreter is the \
+                     canonical path today; preflight should have already \
+                     rejected this MIR before reaching `compile_rvalue`. \
+                     Native typed convert codegen lands as a v0.4 follow-up.",
+                    target
+                ))
+            }
         }
     }
 
@@ -563,7 +598,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// carrier" sentinel at the §2.7.5 stable-FFI boundary). Method-name
     /// constants are heap String pointers (kind = `NativeKind::String`).
     /// String and StringId constants are likewise heap String pointers.
-    pub(crate) fn operand_slot_kind(&self, operand: &Operand) -> Option<shape_vm::type_tracking::NativeKind> {
+    pub(crate) fn operand_slot_kind(
+        &self,
+        operand: &Operand,
+    ) -> Option<shape_vm::type_tracking::NativeKind> {
         use shape_vm::type_tracking::NativeKind;
         match operand {
             Operand::Constant(MirConstant::Int(_)) => Some(NativeKind::Int64),
@@ -605,9 +643,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // for closures whose function_id is patched later. The slot
             // it lowers to carries `Arc<HeapValue::ClosureRaw>` bits per
             // §2.7.11/Q12.
-            Operand::Constant(MirConstant::ClosurePlaceholder) => Some(NativeKind::Ptr(
-                shape_value::heap_value::HeapKind::Closure,
-            )),
+            Operand::Constant(MirConstant::ClosurePlaceholder) => {
+                Some(NativeKind::Ptr(shape_value::heap_value::HeapKind::Closure))
+            }
             Operand::Constant(MirConstant::None) => None,
             Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
                 // Centralized projection: `place_native_kind` handles
@@ -657,11 +695,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// not the base struct/array's heap kind. This closes the segfault
     /// where `Copy(Field(p_TypedObject, x_Int64))` previously routed
     /// through the base's heap retain and called `arc_retain(i64_3)`.
-    pub(crate) fn place_native_kind(&self, place: &Place) -> Option<shape_vm::type_tracking::NativeKind> {
+    pub(crate) fn place_native_kind(
+        &self,
+        place: &Place,
+    ) -> Option<shape_vm::type_tracking::NativeKind> {
         match place {
-            Place::Local(slot) => {
-                super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
-            }
+            Place::Local(slot) => super::types::slot_kind_for_local(&self.slot_kinds, slot.0),
             Place::Field(_, field_idx) => {
                 let name = self.mir.field_name_table.get(field_idx)?;
                 self.field_native_kinds.get(name).copied()
@@ -746,14 +785,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Both operands the same narrow kind.
             (Some(lk), Some(rk)) if lk == rk && is_narrow(lk) => Some(lk),
             // One operand narrow, the other a bare width-polymorphic literal.
-            (Some(lk), Some(NativeKind::Int64))
-                if is_narrow(lk) && is_int_literal(rhs_op) =>
-            {
+            (Some(lk), Some(NativeKind::Int64)) if is_narrow(lk) && is_int_literal(rhs_op) => {
                 Some(lk)
             }
-            (Some(NativeKind::Int64), Some(rk))
-                if is_narrow(rk) && is_int_literal(lhs_op) =>
-            {
+            (Some(NativeKind::Int64), Some(rk)) if is_narrow(rk) && is_int_literal(lhs_op) => {
                 Some(rk)
             }
             _ => None,
@@ -915,27 +950,164 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         use crate::ffi::stack_kind_code;
         let a = self.to_i64_bits(lhs);
         let b = self.to_i64_bits(rhs);
-        let a_code = lhs_kind.map(stack_kind_code::encode).unwrap_or(stack_kind_code::SENTINEL);
-        let b_code = rhs_kind.map(stack_kind_code::encode).unwrap_or(stack_kind_code::SENTINEL);
+        let a_code = lhs_kind
+            .map(stack_kind_code::encode)
+            .unwrap_or(stack_kind_code::SENTINEL);
+        let b_code = rhs_kind
+            .map(stack_kind_code::encode)
+            .unwrap_or(stack_kind_code::SENTINEL);
         let a_code_val = self.builder.ins().iconst(types::I8, a_code as i64);
         let b_code_val = self.builder.ins().iconst(types::I8, b_code as i64);
-        let inst = self.builder.ins().call(
-            self.ffi.string_concat,
-            &[a, a_code_val, b, b_code_val],
-        );
+        let inst = self
+            .builder
+            .ins()
+            .call(self.ffi.string_concat, &[a, a_code_val, b, b_code_val]);
         Ok(self.builder.inst_results(inst)[0])
+    }
+
+    // ── Fuzzy comparisons ───────────────────────────────────────────
+
+    /// Compile Shape fuzzy comparison (`~=` / `~>` / `~<`) using the same
+    /// tolerance arithmetic as the bytecode VM's fuzzy desugaring. Operand
+    /// conversion is driven only by producer-stamped `NativeKind`; unsupported
+    /// non-numeric kinds surface instead of probing runtime tags.
+    fn compile_fuzzy_comparison(
+        &mut self,
+        op: FuzzyOp,
+        lhs: &Operand,
+        rhs: &Operand,
+        tolerance: &FuzzyTolerance,
+    ) -> Result<Value, String> {
+        let lhs_kind = self.operand_slot_kind(lhs);
+        let rhs_kind = self.operand_slot_kind(rhs);
+        let lhs_val = self.compile_operand(lhs)?;
+        let rhs_val = self.compile_operand(rhs)?;
+        let lhs_f64 = self.compile_numeric_operand_as_f64(lhs, lhs_val, lhs_kind)?;
+        let rhs_f64 = self.compile_numeric_operand_as_f64(rhs, rhs_val, rhs_kind)?;
+
+        let within = self.compile_fuzzy_within(lhs_f64, rhs_f64, tolerance);
+        match op {
+            FuzzyOp::Equal => Ok(within),
+            FuzzyOp::Greater => {
+                let gt = self
+                    .builder
+                    .ins()
+                    .fcmp(FloatCC::GreaterThan, lhs_f64, rhs_f64);
+                Ok(self.builder.ins().bor(gt, within))
+            }
+            FuzzyOp::Less => {
+                let lt = self.builder.ins().fcmp(FloatCC::LessThan, lhs_f64, rhs_f64);
+                Ok(self.builder.ins().bor(lt, within))
+            }
+        }
+    }
+
+    fn compile_fuzzy_within(
+        &mut self,
+        lhs: Value,
+        rhs: Value,
+        tolerance: &FuzzyTolerance,
+    ) -> Value {
+        let diff = self.builder.ins().fsub(lhs, rhs);
+        let abs_diff = self.compile_f64_abs(diff);
+        let tolerance_value = match tolerance {
+            FuzzyTolerance::Absolute(tol) => *tol,
+            FuzzyTolerance::Percentage(tol) => *tol,
+        };
+        let tol = self.builder.ins().f64const(tolerance_value);
+        let compare_value = match tolerance {
+            FuzzyTolerance::Absolute(_) => abs_diff,
+            FuzzyTolerance::Percentage(_) => {
+                let abs_lhs = self.compile_f64_abs(lhs);
+                let abs_rhs = self.compile_f64_abs(rhs);
+                let sum = self.builder.ins().fadd(abs_lhs, abs_rhs);
+                let two = self.builder.ins().f64const(2.0);
+                let denominator = self.builder.ins().fdiv(sum, two);
+                self.builder.ins().fdiv(abs_diff, denominator)
+            }
+        };
+        self.builder
+            .ins()
+            .fcmp(FloatCC::LessThanOrEqual, compare_value, tol)
+    }
+
+    fn compile_f64_abs(&mut self, value: Value) -> Value {
+        let zero = self.builder.ins().f64const(0.0);
+        let is_negative = self.builder.ins().fcmp(FloatCC::LessThan, value, zero);
+        let negated = self.builder.ins().fneg(value);
+        self.builder.ins().select(is_negative, negated, value)
+    }
+
+    fn compile_numeric_operand_as_f64(
+        &mut self,
+        operand: &Operand,
+        value: Value,
+        kind: Option<shape_vm::type_tracking::NativeKind>,
+    ) -> Result<Value, String> {
+        use shape_vm::type_tracking::NativeKind;
+        let ty = self.builder.func.dfg.value_type(value);
+        match kind {
+            Some(NativeKind::Float64) => {
+                if ty == types::F64 {
+                    Ok(value)
+                } else if ty == types::I64 {
+                    Ok(self
+                        .builder
+                        .ins()
+                        .bitcast(types::F64, MemFlags::new(), value))
+                } else {
+                    Err(format!(
+                        "compile_fuzzy_comparison: Float64 operand {:?} lowered to \
+                         unexpected Cranelift type {:?}; producer kind/SSA type mismatch",
+                        operand, ty
+                    ))
+                }
+            }
+            Some(NativeKind::Float32) => {
+                let f32_val = if ty == types::F32 {
+                    value
+                } else if ty == types::I32 {
+                    self.builder
+                        .ins()
+                        .bitcast(types::F32, MemFlags::new(), value)
+                } else {
+                    return Err(format!(
+                        "compile_fuzzy_comparison: Float32 operand {:?} lowered to \
+                         unexpected Cranelift type {:?}; producer kind/SSA type mismatch",
+                        operand, ty
+                    ));
+                };
+                Ok(self.builder.ins().fpromote(types::F64, f32_val))
+            }
+            Some(
+                NativeKind::Int8
+                | NativeKind::Int16
+                | NativeKind::Int32
+                | NativeKind::Int64
+                | NativeKind::IntSize,
+            ) => Ok(self.builder.ins().fcvt_from_sint(types::F64, value)),
+            Some(
+                NativeKind::UInt8
+                | NativeKind::UInt16
+                | NativeKind::UInt32
+                | NativeKind::UInt64
+                | NativeKind::UIntSize
+                | NativeKind::Char,
+            ) => Ok(self.builder.ins().fcvt_from_uint(types::F64, value)),
+            other => Err(format!(
+                "compile_fuzzy_comparison: unsupported operand kind {:?} for \
+                 {:?}; fuzzy comparison is numeric-only and must be lowered \
+                 from compile-time NativeKind facts, not runtime tag probes",
+                other, operand
+            )),
+        }
     }
 
     // ── Inline Float64 arithmetic and comparisons ──────────────────
 
     /// Compile a binary op on native F64 operands — direct Cranelift float instructions.
     /// ~100x faster per operation vs FFI generic_add/etc.
-    fn compile_binop_f64(
-        &mut self,
-        op: &BinOp,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, String> {
+    fn compile_binop_f64(&mut self, op: &BinOp, lhs: Value, rhs: Value) -> Result<Value, String> {
         match op {
             BinOp::Add => Ok(self.builder.ins().fadd(lhs, rhs)),
             BinOp::Sub => Ok(self.builder.ins().fsub(lhs, rhs)),
@@ -1000,18 +1172,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Honest surface-and-stop per W10 playbook §5 — no
             // `f64::to_bits | other_bits` rationalization (that's the
             // deleted W-series tag-bit dispatch shape).
-            BinOp::BitAnd
-            | BinOp::BitOr
-            | BinOp::BitXor
-            | BinOp::BitShl
-            | BinOp::BitShr => Err(format!(
-                "compile_binop_f64: SURFACE — bitwise {:?} on Float64 operands \
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::BitShl | BinOp::BitShr => {
+                Err(format!(
+                    "compile_binop_f64: SURFACE — bitwise {:?} on Float64 operands \
                  has no semantic in Shape (`int`-only per `BitAndInt`/etc. at \
                  opcode_defs.rs:1860-1873). Reaching here means the §2.7.5 \
                  producing-MIR kind-tracker stamped Float64 where Int64 was \
                  expected. Producer-site gap; surface per W10 playbook §5.",
-                op
-            )),
+                    op
+                ))
+            }
         }
     }
 
@@ -1031,12 +1201,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // r5c-2-gz-cp2-jit-div: VM-equivalent trap-free i32 div/mod —
             // div-by-zero → clean `Division by zero`; `i32::MIN / -1` →
             // wrapping `i32::MIN` (mod → 0). See `compile_int_divmod_guarded`.
-            BinOp::Div => {
-                self.compile_int_divmod_guarded(lhs, rhs, types::I32, true, false)
-            }
-            BinOp::Mod => {
-                self.compile_int_divmod_guarded(lhs, rhs, types::I32, true, true)
-            }
+            BinOp::Div => self.compile_int_divmod_guarded(lhs, rhs, types::I32, true, false),
+            BinOp::Mod => self.compile_int_divmod_guarded(lhs, rhs, types::I32, true, true),
             // W11-fup-A (Phase 3d, 2026-05-18): bitwise on native I32 use
             // Cranelift's native bitwise instructions (`band`/`bor`/`bxor`/
             // `ishl`/`sshr`). Mirrors the bytecode VM's `BitAndInt`/etc.
@@ -1184,12 +1350,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // trapping operand pair. Unsigned narrow widths have no overflow
             // case. The narrow `INT_MIN`/`-1` constants are derived from
             // `cl_ty.bits()` inside the helper.
-            BinOp::Div => {
-                self.compile_int_divmod_guarded(l, r, cl_ty, !unsigned, false)
-            }
-            BinOp::Mod => {
-                self.compile_int_divmod_guarded(l, r, cl_ty, !unsigned, true)
-            }
+            BinOp::Div => self.compile_int_divmod_guarded(l, r, cl_ty, !unsigned, false),
+            BinOp::Mod => self.compile_int_divmod_guarded(l, r, cl_ty, !unsigned, true),
             // Bitwise — native Cranelift bitwise ops at the narrow width.
             BinOp::BitAnd => Ok(self.builder.ins().band(l, r)),
             BinOp::BitOr => Ok(self.builder.ins().bor(l, r)),
@@ -1392,12 +1554,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// stamped on the parallel JitFfiCarrier companion — Int64 slots hold
     /// raw i64 values, not `tag_bits` payloads. Inputs and the output flow
     /// through unchanged: no payload extraction, no re-box.
-    fn compile_binop_int64(
-        &mut self,
-        op: &BinOp,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, String> {
+    fn compile_binop_int64(&mut self, op: &BinOp, lhs: Value, rhs: Value) -> Result<Value, String> {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 let result = match op {
@@ -1408,20 +1565,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // div-by-zero → clean `Division by zero`; `i64::MIN / -1`
                     // → wrapping `i64::MIN` (mod → 0). See
                     // `compile_int_divmod_guarded`.
-                    BinOp::Div => self.compile_int_divmod_guarded(
-                        lhs,
-                        rhs,
-                        types::I64,
-                        true,
-                        false,
-                    )?,
-                    BinOp::Mod => self.compile_int_divmod_guarded(
-                        lhs,
-                        rhs,
-                        types::I64,
-                        true,
-                        true,
-                    )?,
+                    BinOp::Div => {
+                        self.compile_int_divmod_guarded(lhs, rhs, types::I64, true, false)?
+                    }
+                    BinOp::Mod => {
+                        self.compile_int_divmod_guarded(lhs, rhs, types::I64, true, true)?
+                    }
                     _ => unreachable!(),
                 };
                 Ok(result)
@@ -1521,18 +1670,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // return (matching the VM's `compact_int_divmod_u64`
             // `VMError::DivisionByZero`). `is_signed = false` skips the
             // signed `INT_MIN / -1` substitution.
-            BinOp::Div => {
-                self.compile_int_divmod_guarded(lhs, rhs, types::I64, false, false)
-            }
-            BinOp::Mod => {
-                self.compile_int_divmod_guarded(lhs, rhs, types::I64, false, true)
-            }
+            BinOp::Div => self.compile_int_divmod_guarded(lhs, rhs, types::I64, false, false),
+            BinOp::Mod => self.compile_int_divmod_guarded(lhs, rhs, types::I64, false, true),
             BinOp::Eq => Ok(self.builder.ins().icmp(IntCC::Equal, lhs, rhs)),
             BinOp::Ne => Ok(self.builder.ins().icmp(IntCC::NotEqual, lhs, rhs)),
-            BinOp::Lt => Ok(self
-                .builder
-                .ins()
-                .icmp(IntCC::UnsignedLessThan, lhs, rhs)),
+            BinOp::Lt => Ok(self.builder.ins().icmp(IntCC::UnsignedLessThan, lhs, rhs)),
             BinOp::Le => Ok(self
                 .builder
                 .ins()
@@ -1567,12 +1709,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     // ── Native Bool operations ──────────────────────────────────────
 
     /// Compile a binary op on native I8 (Bool) operands.
-    fn compile_binop_bool(
-        &mut self,
-        op: &BinOp,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, String> {
+    fn compile_binop_bool(&mut self, op: &BinOp, lhs: Value, rhs: Value) -> Result<Value, String> {
         match op {
             BinOp::Eq => Ok(self.builder.ins().icmp(IntCC::Equal, lhs, rhs)),
             BinOp::Ne => Ok(self.builder.ins().icmp(IntCC::NotEqual, lhs, rhs)),
@@ -1611,12 +1748,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// error-signal return that the caller observes via the deopt
     /// pathway. This preserves `no generic_* FFI` while keeping
     /// closure-return-arith JIT-compilable.
-    fn compile_binop(
-        &mut self,
-        op: &BinOp,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value, String> {
+    fn compile_binop(&mut self, op: &BinOp, lhs: Value, rhs: Value) -> Result<Value, String> {
         // Widen native-typed operands into their NaN-boxed I64 bit-pattern so
         // the dynamic dispatch helpers can treat both uniformly. This handles
         // the mixed cases (e.g. F64 literal vs I64 NaN-boxed heap handle)
@@ -1624,46 +1756,29 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let l = self.to_i64_bits(lhs);
         let r = self.to_i64_bits(rhs);
         match op {
-            BinOp::Add
-            | BinOp::Sub
-            | BinOp::Mul
-            | BinOp::Div
-            | BinOp::Mod => self.compile_binop_dynamic_arith(op, l, r),
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                self.compile_binop_dynamic_arith(op, l, r)
+            }
 
-            BinOp::Eq
-            | BinOp::Ne
-            | BinOp::Lt
-            | BinOp::Le
-            | BinOp::Gt
-            | BinOp::Ge => self.compile_binop_dynamic_cmp(op, l, r),
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                self.compile_binop_dynamic_cmp(op, l, r)
+            }
 
             // v2-boundary: logical ops on NaN-boxed values use TAG_BOOL_TRUE/FALSE
             BinOp::And => {
-                let tag_true = self.builder.ins().iconst(
-                    types::I64,
-                    1i64,
-                );
+                let tag_true = self.builder.ins().iconst(types::I64, 1i64);
                 let l_is_true = self.builder.ins().icmp(IntCC::Equal, l, tag_true);
                 let r_is_true = self.builder.ins().icmp(IntCC::Equal, r, tag_true);
                 let both = self.builder.ins().band(l_is_true, r_is_true);
-                let false_val = self.builder.ins().iconst(
-                    types::I64,
-                    0i64,
-                );
+                let false_val = self.builder.ins().iconst(types::I64, 0i64);
                 Ok(self.builder.ins().select(both, tag_true, false_val))
             }
             BinOp::Or => {
-                let tag_true = self.builder.ins().iconst(
-                    types::I64,
-                    1i64,
-                );
+                let tag_true = self.builder.ins().iconst(types::I64, 1i64);
                 let l_is_true = self.builder.ins().icmp(IntCC::Equal, l, tag_true);
                 let r_is_true = self.builder.ins().icmp(IntCC::Equal, r, tag_true);
                 let either = self.builder.ins().bor(l_is_true, r_is_true);
-                let false_val = self.builder.ins().iconst(
-                    types::I64,
-                    0i64,
-                );
+                let false_val = self.builder.ins().iconst(types::I64, 0i64);
                 Ok(self.builder.ins().select(either, tag_true, false_val))
             }
             // W11-fup-A (Phase 3d, 2026-05-18): kind-untyped Pow / bitwise
@@ -1724,7 +1839,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             v
         }
     }
-
 
     /// Compile a dynamic-operand arithmetic binop (Add/Sub/Mul/Div/Mod).
     ///
@@ -1850,14 +1964,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     Ok(self.builder.ins().bxor(val, one))
                 } else {
                     // v2-boundary: NaN-boxed bool uses TAG_BOOL_TRUE/FALSE tags
-                    let tag_true = self.builder.ins().iconst(
-                        types::I64,
-                        1i64,
-                    );
-                    let false_val = self.builder.ins().iconst(
-                        types::I64,
-                        0i64,
-                    );
+                    let tag_true = self.builder.ins().iconst(types::I64, 1i64);
+                    let false_val = self.builder.ins().iconst(types::I64, 0i64);
                     let is_true = self.builder.ins().icmp(IntCC::Equal, val, tag_true);
                     Ok(self.builder.ins().select(is_true, false_val, tag_true))
                 }

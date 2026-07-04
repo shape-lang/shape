@@ -94,10 +94,7 @@ pub async fn run_add(name: String, version: Option<String>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // 4. Cache bundle
-    let cache_dir = config_dir
-        .join("registry")
-        .join("cache")
-        .join(&name);
+    let cache_dir = config_dir.join("registry").join("cache").join(&name);
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("failed to create cache directory: {}", cache_dir.display()))?;
     let bundle_path = cache_dir.join(format!("{}.shapec", resolved_version));

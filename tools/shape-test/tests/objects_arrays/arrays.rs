@@ -38,15 +38,13 @@ fn array_indexing_last_element_by_index() {
 #[test]
 fn array_negative_indexing_last() {
     ShapeTest::new("let nums = [1, 2, 3, 4]\nprint(nums[-1])")
-        .expect_run_ok()
-        .expect_output("4");
+        .expect_run_err_contains("Index -1 out of bounds");
 }
 
 #[test]
 fn array_negative_indexing_second_last() {
     ShapeTest::new("let nums = [1, 2, 3, 4]\nprint(nums[-2])")
-        .expect_run_ok()
-        .expect_output("3");
+        .expect_run_err_contains("Index -2 out of bounds");
 }
 
 // =====================================================================
@@ -360,7 +358,7 @@ print(nums.length)"#;
 
 #[test]
 fn empty_array() {
-    let code = r#"let a = []
+    let code = r#"let a: Array<int> = []
 print(a)"#;
     ShapeTest::new(code).expect_run_ok();
 }
@@ -401,11 +399,14 @@ print(matrix[1][1])"#;
 // Mixed Types in Arrays
 // =====================================================================
 
+// Strict typing forbids heterogeneous array literals: `[1, "hello", true]`
+// mixes int/string/bool, which no longer share a proven element type, so the
+// literal is a compile-time rejection (no `any`, no runtime coercion).
 #[test]
 fn array_of_mixed_types() {
     let code = r#"let mixed = [1, "hello", true]
 print(mixed)"#;
-    ShapeTest::new(code).expect_run_ok();
+    ShapeTest::new(code).expect_run_err_contains("not compatible");
 }
 
 #[test]
@@ -434,39 +435,44 @@ print(users[1].age)"#;
 
 #[test]
 fn array_negative_index_first_element() {
-    // [-4] on a 4-element array should give the first element
     let code = r#"let nums = [1, 2, 3, 4]
 print(nums[-4])"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("1");
+    ShapeTest::new(code).expect_run_err_contains("Index -4 out of bounds");
 }
 
 #[test]
 fn array_out_of_bounds_positive_returns_none() {
-    // Array out-of-bounds returns None in Shape (runtime prints "None").
     let code = r#"let nums = [1, 2, 3]
 print(nums[5])"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("None");
+    ShapeTest::new(code).expect_run_err_contains("Index 5 out of bounds");
 }
 
 #[test]
 fn array_out_of_bounds_negative_returns_none() {
-    // Array out-of-bounds returns None in Shape (runtime prints "None").
     let code = r#"let nums = [1, 2, 3]
 print(nums[-5])"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("None");
+    ShapeTest::new(code).expect_run_err_contains("Index -5 out of bounds");
 }
 
 // =====================================================================
 // Array Concatenation
 // =====================================================================
 
+// Strict typing: `+` requires the `Numeric` trait, which `Array` does not
+// implement. Concatenating arrays with `+` is a compile-time rejection;
+// USER RULING 2026-06-17: numeric-array `+` is CONCATENATION, uniform with
+// string/struct arrays and the book spec — NOT element-wise add. (Previously
+// this asserted a "Numeric" run error because `+` routed to a non-working SIMD
+// vector-add stub; that classification no longer claims `+`.)
 #[test]
 fn array_concatenation_with_plus() {
     let code = r#"let a = [1, 2]
 let b = [3, 4]
 let c = a + b
 print(c)"#;
-    ShapeTest::new(code).expect_run_ok();
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("[1, 2, 3, 4]");
 }
 
 // =====================================================================
@@ -482,7 +488,7 @@ print(nums.len())"#;
 
 #[test]
 fn empty_array_len() {
-    let code = r#"let a = []
+    let code = r#"let a: Array<int> = []
 print(a.len())"#;
     ShapeTest::new(code).expect_run_ok().expect_output("0");
 }
@@ -514,9 +520,7 @@ print(names[1])"#;
 fn array_of_strings_negative_index() {
     let code = r#"let names = ["Alice", "Bob", "Charlie"]
 print(names[-1])"#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output("Charlie");
+    ShapeTest::new(code).expect_run_err_contains("Index -1 out of bounds");
 }
 
 // =====================================================================
@@ -593,4 +597,108 @@ fn array_destructuring_in_function_param() {
 }
 print(sum_pair([10, 20]))"#;
     ShapeTest::new(code).expect_run_ok().expect_output("30");
+}
+
+// =====================================================================
+// `clone` keyword (ownership modifier) — deep copy, not alias
+// =====================================================================
+// Regression: `let b = clone a` previously fell through every lowering
+// path that consults `OwnershipModifier` only in the MIR/JIT tier while
+// the live bytecode-interpreter `Statement::VariableDecl` path ignored
+// ownership entirely, so it produced a shallow Arc alias — mutating `b`
+// mutated `a`. The book documents `clone a` and `a.clone()` as identical.
+
+#[test]
+fn clone_keyword_array_is_independent_copy() {
+    // Mutating the clone must NOT affect the source.
+    let code =
+        "let mut a = [1, 2, 3]\nlet mut b = clone a\nb.push(4)\nprint(a.len())\nprint(b.len())";
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output_contains("3")
+        .expect_output_contains("4");
+}
+
+#[test]
+fn clone_keyword_array_matches_clone_method() {
+    // `clone a` and `a.clone()` must produce the same independent-copy
+    // semantics.
+    let code = "let mut a = [10, 20]\nlet mut b = clone a\nlet mut c = a.clone()\nb.push(30)\nc.push(40)\nprint(a.len())\nprint(b.len())\nprint(c.len())";
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output_contains("2")
+        .expect_output_contains("3");
+}
+
+#[test]
+fn clone_keyword_string_produces_value() {
+    let code = "let s = \"hello\"\nlet s2 = clone s\nprint(s2)";
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output_contains("hello");
+}
+
+// ── var-copy mutate-independence (S1b 2026-06-21) ──────────────────────
+//
+// A `var copy = data` auto-clone of a still-live PROVEN-heap source must
+// produce an INDEPENDENT deep value. Pre-fix the solver recorded
+// `OwnershipDecision::Clone` and codegen emitted a SHALLOW refcount share
+// (`clone_with_kind` / `CloneLocal`), so `copy.push(99)` mutated the
+// SOURCE's TypedArray in place (the array push has no copy-on-write
+// write-barrier). The fix routes a `var`-still-live heap rebind through a
+// DEEP clone (`OwnershipDecision::DeepClone` → `LoadLocalDeepClone` /
+// `DeepCloneTop`), the same per-kind primitives as an explicit `.clone()`.
+
+#[test]
+fn var_copy_array_push_does_not_mutate_source() {
+    // Mutating the var copy via push must NOT touch the source.
+    let code = "var data = [1, 2, 3]\nvar copy = data\ncopy.push(99)\nprint(data)\nprint(copy)";
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+}
+
+#[test]
+fn var_copy_array_index_assign_does_not_mutate_source() {
+    // Mutating the var copy via index-assign must NOT touch the source.
+    let code = "var data = [1, 2, 3]\nvar copy = data\ncopy[0] = 9\nprint(data)\nprint(copy)";
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[9, 2, 3]");
+}
+
+#[test]
+fn var_copy_array_push_in_function_is_independent() {
+    // Same independence inside a function body (the local-slot ownership
+    // path, distinct from the top-level module-binding path).
+    let code = "fn main() {\n  var data = [1, 2, 3]\n  var copy = data\n  copy.push(99)\n  print(data)\n  print(copy)\n}\nmain()";
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+}
+
+#[test]
+fn var_copy_struct_field_assign_does_not_mutate_source() {
+    // Struct var-copy: field-assign on the copy must NOT touch the source.
+    let code = "type Point { x: int, y: int }\nvar p = Point { x: 1, y: 2 }\nvar q = p\nq.x = 99\nprint(p.x)\nprint(q.x)";
+    ShapeTest::new(code).expect_output("1\n99");
+}
+
+#[test]
+fn var_copy_scalar_is_copy_not_shared() {
+    // Scalars are Copy: the `var b = a` rebind must not alias, and mutating
+    // `b` must leave `a` unchanged (no DeepClone heap path for scalars).
+    let code = "var a = 5\nvar b = a\nb = b + 1\nprint(a)\nprint(b)";
+    ShapeTest::new(code).expect_output("5\n6");
+}
+
+#[test]
+fn var_copy_explicit_clone_still_independent() {
+    // Explicit `.clone()` must remain an independent copy (unchanged).
+    let code =
+        "var data = [1, 2, 3]\nvar copy = data.clone()\ncopy.push(99)\nprint(data)\nprint(copy)";
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+}
+
+#[test]
+fn let_rebind_of_heap_still_moves_b0005() {
+    // `let q = p` MOVES a heap source; the still-live read of `p` is a
+    // compile-time use-after-move (B0005). The var-copy DeepClone path must
+    // NOT relax this — only `var` destinations auto-clone.
+    let code = "let p = [1, 2, 3]\nlet q = p\nprint(p)";
+    ShapeTest::new(code).expect_run_err_contains("after it was moved");
 }

@@ -1,0 +1,13 @@
+// F6 — struct move-then-read ownership fixture.
+//
+// `let q = p` moves the struct value out of `p`. The subsequent projected
+// field read `print(p.x)` is a B0005 use-after-move under the current
+// ownership/book semantics.
+//
+// This fixture is retained in the fallback CLI matrix as regression coverage
+// for the stale expectation that VM mode succeeds or that JIT emits a fallback
+// line. Both modes should fail before execution with B0005.
+type P { x: int, name: string }
+let p = P { x: 1, name: "a" }
+let q = p
+print(p.x)

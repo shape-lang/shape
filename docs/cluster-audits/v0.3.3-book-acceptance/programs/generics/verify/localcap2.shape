@@ -1,0 +1,6 @@
+fn f() -> int {
+  let base = 100
+  let add = |x| x + base
+  add(5)
+}
+print(f())

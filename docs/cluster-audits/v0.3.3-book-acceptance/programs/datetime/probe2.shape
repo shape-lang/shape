@@ -1,0 +1,39 @@
+from std::core::intrinsics use { DateTime }
+
+// Day info — book says 2024-01-06 is Saturday
+let sat = DateTime.parse("2024-01-06T12:00:00+00:00")
+print(sat.day_of_week())   // expect 5
+print(sat.is_weekend())    // expect true
+print(sat.is_weekday())    // expect false
+print(sat.day_of_year())   // expect 6
+print(sat.week_of_year())  // expect 1
+
+// Timezone
+let utc_time = DateTime.parse("2024-06-15T12:00:00+00:00")
+let nyc = utc_time.to_timezone("America/New_York")
+print(nyc.hour())          // expect 8
+let back = nyc.to_utc()
+print(back.hour())         // expect 12
+
+let dt = DateTime.parse("2024-01-15T10:00:00+05:30")
+print(dt.timezone())       // expect "UTC+5:30"
+print(dt.offset())         // expect "+05:30"
+
+// Arithmetic
+let d = DateTime.parse("2024-01-30T12:00:00+00:00")
+print(d.add_days(1).day())     // expect 31
+print(d.add_hours(5).hour())   // expect 17
+let jan31 = DateTime.parse("2024-01-31T00:00:00+00:00")
+print(jan31.add_months(1).day())  // expect 29
+
+// Operators
+let a = DateTime.parse("2024-06-15T12:00:00+00:00")
+print((a + 3d).day())     // expect 18
+print((a - 1w).day())     // expect 8
+
+// Comparisons
+let morning = DateTime.parse("2024-03-15T08:00:00+00:00")
+let evening = DateTime.parse("2024-03-15T22:30:00+00:00")
+print(morning.is_before(evening))    // true
+print(evening.is_after(morning))     // true
+print(morning.is_same_day(evening))  // true

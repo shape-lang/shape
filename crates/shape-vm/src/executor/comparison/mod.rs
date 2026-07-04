@@ -12,12 +12,16 @@
 //! substep-1 and read-as-u64 cannot detect kind without the parallel
 //! kinds track, which is queried via `pop_kinded` here).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::{
     bytecode::{Instruction, OpCode},
-    executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
+    executor::vm_impl::stack::drop_with_kind,
 };
-use shape_value::{NativeKind, VMError, heap_value::{HeapKind, HeapValue}, ValueSlot};
+use shape_value::{
+    NativeKind, VMError, ValueSlot,
+    heap_value::{HeapKind, HeapValue, TypedObjectStorage},
+};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -172,12 +176,18 @@ impl VirtualMachine {
             EqInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
                 let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) == (b_bits as i64)) as u64, NativeKind::Bool)?;
+                self.push_kinded(
+                    ((a_bits as i64) == (b_bits as i64)) as u64,
+                    NativeKind::Bool,
+                )?;
             }
             NeqInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
                 let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) != (b_bits as i64)) as u64, NativeKind::Bool)?;
+                self.push_kinded(
+                    ((a_bits as i64) != (b_bits as i64)) as u64,
+                    NativeKind::Bool,
+                )?;
             }
             // ===== Number family — kind-aware coercion (Float64 fast, Int promote) =====
             //
@@ -202,6 +212,7 @@ impl VirtualMachine {
             GteString => self.cmp_string_kinded(|a, b| a >= b)?,
             LteString => self.cmp_string_kinded(|a, b| a <= b)?,
             EqString => self.cmp_string_eq_kinded()?,
+            EqTypedObject => self.cmp_typed_object_kinded()?,
             // ===== Stage 2.6.5.1: typed absence check (IsNull) =====
             //
             // Wave 6.5: pops one slot, releases its share via
@@ -310,6 +321,32 @@ impl VirtualMachine {
         drop_with_kind(b_bits, b_kind);
         self.push_kinded(eq as u64, NativeKind::Bool)
     }
+
+    /// Typed object equality for compiler-proven same-schema operands.
+    #[inline(always)]
+    fn cmp_typed_object_kinded(&mut self) -> Result<(), VMError> {
+        let (b_bits, b_kind) = self.pop_kinded()?;
+        let (a_bits, a_kind) = self.pop_kinded()?;
+        let result = match (a_kind, b_kind) {
+            (NativeKind::Ptr(HeapKind::TypedObject), NativeKind::Ptr(HeapKind::TypedObject)) => {
+                typed_object_storage_eq(
+                    a_bits as *const TypedObjectStorage,
+                    b_bits as *const TypedObjectStorage,
+                )
+            }
+            _ => {
+                drop_with_kind(a_bits, a_kind);
+                drop_with_kind(b_bits, b_kind);
+                return Err(VMError::TypeError {
+                    expected: "typed object",
+                    got: "non-typed-object operand",
+                });
+            }
+        };
+        drop_with_kind(a_bits, a_kind);
+        drop_with_kind(b_bits, b_kind);
+        self.push_kinded(result as u64, NativeKind::Bool)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -335,6 +372,117 @@ impl VirtualMachine {
 fn int_cmp_is_unsigned(a_kind: NativeKind, b_kind: NativeKind) -> bool {
     matches!(a_kind, NativeKind::UInt64 | NativeKind::NullableUInt64)
         || matches!(b_kind, NativeKind::UInt64 | NativeKind::NullableUInt64)
+}
+
+#[inline]
+fn typed_object_storage_eq(a: *const TypedObjectStorage, b: *const TypedObjectStorage) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.is_null() || b.is_null() {
+        return false;
+    }
+
+    // SAFETY: EqTypedObject is emitted only for expressions proven to be typed
+    // objects. Slots own live shares until drop_with_kind runs after compare.
+    let (a, b) = unsafe { (&*a, &*b) };
+    let (a_slots, b_slots) = (a.slots(), b.slots());
+    a.schema_id == b.schema_id
+        && a.heap_mask == b.heap_mask
+        && a.field_kinds.as_ref() == b.field_kinds.as_ref()
+        && a_slots.len() == b_slots.len()
+        && a.field_kinds.len() == a_slots.len()
+        && a_slots
+            .iter()
+            .zip(b_slots)
+            .zip(a.field_kinds.iter())
+            .all(|((a, b), kind)| typed_object_field_eq(a.raw(), b.raw(), *kind))
+}
+
+#[inline]
+fn typed_object_field_eq(a_bits: u64, b_bits: u64, kind: NativeKind) -> bool {
+    match kind {
+        NativeKind::Null => true,
+        NativeKind::String | NativeKind::StringV2 => {
+            match (str_ref(a_bits, kind), str_ref(b_bits, kind)) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        NativeKind::DecimalV2 | NativeKind::Ptr(HeapKind::Decimal) => {
+            match (decimal_ref(a_bits, kind), decimal_ref(b_bits, kind)) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        NativeKind::Ptr(HeapKind::TypedObject) => typed_object_storage_eq(
+            a_bits as *const TypedObjectStorage,
+            b_bits as *const TypedObjectStorage,
+        ),
+        NativeKind::Ptr(HeapKind::Char) => a_bits == b_bits,
+        NativeKind::Ptr(
+            HeapKind::String
+            | HeapKind::Closure
+            | HeapKind::BigInt
+            | HeapKind::DataTable
+            | HeapKind::Future
+            | HeapKind::TaskGroup
+            | HeapKind::TypedArray
+            | HeapKind::Temporal
+            | HeapKind::TableView
+            | HeapKind::Content
+            | HeapKind::Instant
+            | HeapKind::IoHandle
+            | HeapKind::NativeScalar
+            | HeapKind::NativeView
+            | HeapKind::HashMap
+            | HeapKind::FilterExpr
+            | HeapKind::Reference
+            | HeapKind::SharedCell
+            | HeapKind::HashSet
+            | HeapKind::Iterator
+            | HeapKind::Deque
+            | HeapKind::Channel
+            | HeapKind::PriorityQueue
+            | HeapKind::Range
+            | HeapKind::Result
+            | HeapKind::Option
+            | HeapKind::TraitObject
+            | HeapKind::Mutex
+            | HeapKind::Atomic
+            | HeapKind::Lazy
+            | HeapKind::ModuleFn
+            | HeapKind::Matrix
+            | HeapKind::MatrixSlice,
+        ) => a_bits == b_bits,
+        NativeKind::Float64
+        | NativeKind::NullableFloat64
+        | NativeKind::Float32
+        | NativeKind::Char
+        | NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8
+        | NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16
+        | NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32
+        | NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64
+        | NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize
+        | NativeKind::Bool => a_bits == b_bits,
+    }
 }
 
 /// Read a `KindedSlot`-style operand as `i128` if it is integer-family
@@ -384,21 +532,38 @@ fn numeric_as_f64(bits: u64, kind: NativeKind) -> Option<f64> {
     }
 }
 
-/// Read a `KindedSlot`-style operand as a borrowed `&Decimal` if the kind
-/// is `Ptr(HeapKind::Decimal)`. Dispatches via `HeapValue` per ADR-005 §1
-/// (no per-heap-variant accessor on the carrier).
+/// Read a `KindedSlot`-style operand as a borrowed `&Decimal` from either
+/// decimal carrier. Mirrors `arithmetic::decimal_ref` — see that function's
+/// doc for the two statically-distinct, compile-time-stamped carriers:
+///
+///   - `NativeKind::Ptr(HeapKind::Decimal)` — `Arc<Decimal>`, `Decimal` at
+///     offset 0 (the stack stores the `Arc::into_raw` pointer directly;
+///     matches `KindedSlot::from_decimal`). NOT a `*const HeapValue` —
+///     slots store `Arc::into_raw(Arc<rust_decimal::Decimal>)`.
+///   - `NativeKind::DecimalV2` — `*const DecimalObj`, `Decimal` inline at
+///     `DecimalObj::OFFSET_VALUE` (8). Produced by typed-array element reads.
+///
+/// Recognizing both keeps decimal comparison correct when an operand comes
+/// from a typed-array element. Recognizes the proven carrier by its stamped
+/// kind; does NOT reinterpret scalar bits as a pointer.
 #[inline]
 fn decimal_ref<'a>(bits: u64, kind: NativeKind) -> Option<&'a rust_decimal::Decimal> {
-    if !matches!(kind, NativeKind::Ptr(HeapKind::Decimal)) || bits == 0 {
+    if bits == 0 {
         return None;
     }
-    // The Wave-6 stack stores the `Arc::into_raw` pointer for `Decimal`
-    // directly (matching `KindedSlot::from_decimal`'s `Arc::into_raw`
-    // bits). This is NOT a `*const HeapValue` on the Decimal arm —
-    // `Decimal` slots store `Arc::into_raw(Arc<rust_decimal::Decimal>)`,
-    // not a `Box<HeapValue>` carrier.
-    let ptr = bits as *const rust_decimal::Decimal;
-    Some(unsafe { &*ptr })
+    match kind {
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let ptr = bits as *const rust_decimal::Decimal;
+            Some(unsafe { &*ptr })
+        }
+        NativeKind::DecimalV2 => {
+            let value_ptr = (bits as *const u8)
+                .wrapping_add(shape_value::v2::decimal_obj::DecimalObj::OFFSET_VALUE)
+                as *const rust_decimal::Decimal;
+            Some(unsafe { &*value_ptr })
+        }
+        _ => None,
+    }
 }
 
 /// Borrowed-decimal helper consumed by `nb_compare_numeric_kinded`.
@@ -448,6 +613,49 @@ fn char_value(bits: u64, kind: NativeKind) -> Option<char> {
     char::from_u32(bits as u32)
 }
 
+/// Exhaustive HeapKind sink for pointer-null checks.
+#[inline]
+fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits == 0,
+    }
+}
+
 /// Test whether a `(bits, kind)` pair encodes the null/unit sentinel.
 ///
 /// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9,
@@ -470,7 +678,8 @@ fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
         // R5b-2 disposition: Bool slots carry only `{0, 1}` bit
         // patterns for real bool values — `false` is NOT null.
         NativeKind::Bool => false,
-        NativeKind::String | NativeKind::Ptr(_) => bits == 0,
+        NativeKind::String => bits == 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_null(bits, heap_kind),
         NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
         NativeKind::NullableInt8
         | NativeKind::NullableInt16
@@ -597,12 +806,7 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
 // (Kept unused as a stable internal symbol for downstream wave migrations
 // that need cross-numeric ordering at the body site.)
 #[allow(dead_code)]
-fn _expose(
-    a_bits: u64,
-    a_kind: NativeKind,
-    b_bits: u64,
-    b_kind: NativeKind,
-) -> Option<Ordering> {
+fn _expose(a_bits: u64, a_kind: NativeKind, b_bits: u64, b_kind: NativeKind) -> Option<Ordering> {
     VirtualMachine::nb_compare_numeric_kinded(a_bits, a_kind, b_bits, b_kind)
 }
 
@@ -624,7 +828,10 @@ mod tests {
     }
 
     fn run_typed_cmp(vm: &mut VirtualMachine, opcode: OpCode) -> bool {
-        let instr = Instruction { opcode, operand: None };
+        let instr = Instruction {
+            opcode,
+            operand: None,
+        };
         vm.exec_typed_comparison(&instr).unwrap();
         // Wave 6.5: comparison handlers push `NativeKind::Bool` — read via
         // pop_kinded.
@@ -684,24 +891,30 @@ mod tests {
     #[test]
     fn typed_number_eq() {
         let mut vm = make_vm();
-        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
     #[test]
     fn typed_number_lt() {
         let mut vm = make_vm();
-        vm.push_kinded((-1.0f64).to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(0.5f64.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded((-1.0f64).to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(0.5f64.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::LtNumber));
     }
 
     #[test]
     fn typed_number_gt() {
         let mut vm = make_vm();
-        vm.push_kinded(3.14f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(2.71f64.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(3.14f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(2.71f64.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::GtNumber));
     }
 
@@ -710,47 +923,60 @@ mod tests {
     #[test]
     fn typed_number_eq_nan_is_false() {
         let mut vm = make_vm();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
     #[test]
     fn typed_number_neq_nan_is_true() {
         let mut vm = make_vm();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::NeqNumber));
     }
 
     #[test]
     fn typed_number_lt_nan_is_false() {
         let mut vm = make_vm();
-        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::LtNumber));
     }
 
     #[test]
     fn typed_number_gt_nan_is_false() {
         let mut vm = make_vm();
-        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::GtNumber));
     }
 
     #[test]
     fn typed_number_eq_treats_neg_zero_as_zero() {
         let mut vm = make_vm();
-        vm.push_kinded((-0.0f64).to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded((0.0f64).to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded((-0.0f64).to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded((0.0f64).to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
     // ----- IsNull -----
 
     fn run_is_null(vm: &mut VirtualMachine) -> bool {
-        let instr = Instruction { opcode: OpCode::IsNull, operand: None };
+        let instr = Instruction {
+            opcode: OpCode::IsNull,
+            operand: None,
+        };
         vm.exec_typed_comparison(&instr).unwrap();
         let (bits, kind) = vm.pop_kinded().unwrap();
         assert_eq!(kind, NativeKind::Bool);

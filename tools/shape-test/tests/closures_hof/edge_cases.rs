@@ -96,7 +96,7 @@ fn test_closure_edge_inside_else() {
 fn test_closure_edge_inside_loop_body() {
     ShapeTest::new(
         r#"
-        let mut results = []
+        let mut results: Array<int> = []
         for i in [1, 2, 3] {
             let f = |x| x * i
             results = results + [f(10)]
@@ -299,7 +299,6 @@ fn edge_immediately_invoked_lambda_pipe_multiply() {
     .expect_number(42.0);
 }
 
-// BUG: Chained closure calls fail -- see hof_adder_chained_call
 #[test]
 fn edge_closure_three_deep() {
     ShapeTest::new(
@@ -315,6 +314,62 @@ fn edge_closure_three_deep() {
     "#,
     )
     .expect_number(6.0);
+}
+
+// Memory-safety regression pin (closures_hof transitive-capture SIGSEGV fix,
+// 2026-06-22). This shape used to crash when an innermost closure captured a
+// transitively-proven scalar through an opaque heap layout stamp. The contract
+// pinned here is MEMORY SAFETY: a clean, statically proven result, never a
+// segfault or heap corruption.
+#[test]
+fn edge_transitive_scalar_capture_is_memory_safe_not_segv() {
+    ShapeTest::new(
+        r#"
+        fn level1(a) {
+            |b| {
+                |c| a + b + c
+            }
+        }
+        level1(1)(2)(3)
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn edge_closure_three_deep_accepts_numeric_annotations() {
+    ShapeTest::new(
+        r#"
+        fn level1(a: int) {
+            |b: int| {
+                |c: int| { a + b + c }
+            }
+        }
+        level1(1)(2)(3)
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+// Companion to the guard pin: the sibling shape where the inner closure
+// captures the transitive `a` but NOT the un-provable `b` (`|c| a + c`) has
+// only a single proven-scalar capture, so no heap-drop-masked slot is
+// mis-stamped — it computes the correct value. This guards against the fix
+// over-rejecting: the guard fires ONLY on the genuine scalar-into-heap-slot
+// mismatch, never on a well-typed transitive capture.
+#[test]
+fn edge_transitive_scalar_capture_single_capture_computes() {
+    ShapeTest::new(
+        r#"
+        fn level1(a) {
+            |b| {
+                |c| a + c
+            }
+        }
+        level1(1)(2)(3)
+    "#,
+    )
+    .expect_number(4.0);
 }
 
 // BUG: Chained closure calls `f(10)(32)` fail -- see hof_adder_chained_call
@@ -473,10 +528,11 @@ fn edge_closure_with_print_side_effect() {
 fn edge_higher_order_with_closure_and_default() {
     ShapeTest::new(
         r#"
-        fn apply_with_default(f, x, default_val = 0) {
+        fn apply_with_default(f: (int) -> int, x: int, default_val: int = 0) -> int {
             if x > 0 { f(x) } else { default_val }
         }
-        apply_with_default(|x| x * 2, 5)
+        let double = |x: int| { x * 2 }
+        apply_with_default(double, 5)
     "#,
     )
     .expect_number(10.0);

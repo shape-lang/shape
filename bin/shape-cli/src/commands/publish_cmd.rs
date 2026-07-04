@@ -6,8 +6,7 @@ use crate::registry_client::RegistryClient;
 
 /// Find the first `.key` file in the keys directory.
 fn find_default_signing_key() -> Result<PathBuf> {
-    let config_dir =
-        config::shape_config_dir().context("could not determine config directory")?;
+    let config_dir = config::shape_config_dir().context("could not determine config directory")?;
     let keys_dir = config_dir.join("keys");
     if !keys_dir.is_dir() {
         anyhow::bail!(
@@ -66,8 +65,7 @@ fn sign_bundle(
 fn create_source_tarball(project_root: &std::path::Path) -> Result<Vec<u8>> {
     let mut archive = Vec::new();
     {
-        let encoder =
-            flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
+        let encoder = flate2::write::GzEncoder::new(&mut archive, flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
 
         let src_dir = project_root.join("src");

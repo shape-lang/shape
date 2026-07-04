@@ -1,14 +1,30 @@
 //! Helper methods for bytecode compilation
 
 use super::BorrowMode;
-use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
-use crate::type_tracking::{NumericType, StorageHint, TypeTracker, VariableTypeInfo};
+use crate::bytecode::{BuiltinFunction, Constant, Instruction, NumericWidth, OpCode, Operand};
+use crate::type_tracking::{
+    FrameReturnWrapper, NumericType, StorageHint, TypeTracker, VariableTypeInfo,
+};
 use shape_ast::ast::{Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 use super::{BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope};
+
+/// T1 sub-case (a) helper: a `ConcreteType` carries a source-level NAME (so a
+/// field read can resolve the struct/enum schema) when it is a named
+/// `Struct`/`Enum`. A placeholder (`name: None`) does not. Used by
+/// `record_pushed_element_concrete_type` to prefer a named element over a
+/// name-less placeholder previously stamped by the empty-accumulator finalizer.
+fn elem_ct_carries_name(ct: &shape_value::v2::ConcreteType) -> bool {
+    use shape_value::v2::ConcreteType;
+    match ct {
+        ConcreteType::Struct(layout) => layout.name.is_some(),
+        ConcreteType::Enum(layout) => layout.name.is_some(),
+        _ => false,
+    }
+}
 
 /// Phase V1.1D: default-on ownership-aware local opcodes.
 ///
@@ -89,6 +105,7 @@ thread_local! {
 /// on panic). This is the compile-time-gated test path; production code
 /// reads the env var exclusively via `ownership_moves_enabled()`.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn with_ownership_moves_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Guard(Option<bool>);
     impl Drop for Guard {
@@ -169,6 +186,7 @@ thread_local! {
 /// panic). Production code reads the env var exclusively via
 /// `promote_to_shared_enabled()`.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn with_promote_to_shared_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Guard(Option<bool>);
     impl Drop for Guard {
@@ -248,6 +266,7 @@ thread_local! {
 /// Production code reads the env var exclusively via
 /// `box_by_default_enabled()`.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn with_box_by_default_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Guard(Option<bool>);
     impl Drop for Guard {
@@ -283,6 +302,7 @@ pub(crate) fn with_box_by_default_flag<R>(enabled: bool, f: impl FnOnce() -> R) 
 /// For unit-test determinism, a `#[cfg(test)]` thread-local override
 /// (`with_typed_bitwise_flag`) lets a single test force the flag on/off
 /// without touching the env-var cache.
+#[allow(dead_code)]
 pub(super) fn typed_bitwise_enabled() -> bool {
     #[cfg(test)]
     {
@@ -348,6 +368,7 @@ pub(crate) fn with_typed_bitwise_flag<R>(enabled: bool, f: impl FnOnce() -> R) -
 /// For unit-test determinism, a `#[cfg(test)]` thread-local override
 /// (`with_typed_string_coerce_concat_flag`) lets a single test force the
 /// flag on/off without touching the env-var cache.
+#[allow(dead_code)]
 pub(super) fn typed_string_coerce_concat_enabled() -> bool {
     #[cfg(test)]
     {
@@ -436,6 +457,7 @@ pub(crate) fn with_typed_string_coerce_concat_flag<R>(enabled: bool, f: impl FnO
 /// destinations stay `Void` when this entry point is used; the resolver-
 /// aware variant `infer_top_level_concrete_types_from_mir_with_returns`
 /// stamps them from the callee's declared return type.
+#[allow(dead_code)]
 pub(crate) fn infer_top_level_concrete_types_from_mir(
     mir: &crate::mir::MirFunction,
 ) -> Vec<shape_value::v2::ConcreteType> {
@@ -458,17 +480,12 @@ pub(crate) fn infer_top_level_concrete_types_from_mir(
 ///
 /// Wrapper for the trait-method-aware variant — preserves existing
 /// callers that don't have access to a method-return resolver.
+#[allow(dead_code)]
 pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
 ) -> Vec<shape_value::v2::ConcreteType> {
-    infer_top_level_concrete_types_from_mir_with_resolvers(
-        mir,
-        callee_returns,
-        None,
-        None,
-        None,
-    )
+    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None, None, None)
 }
 
 /// Trait-method-aware variant of the conduit producer.
@@ -500,9 +517,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
 pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
-    method_returns: Option<
-        &dyn Fn(&str, &str) -> Option<shape_value::v2::ConcreteType>,
-    >,
+    method_returns: Option<&dyn Fn(&str, &str) -> Option<shape_value::v2::ConcreteType>>,
     // ADR-006 §2.7.5 V3-S6b conduit consumer.
     //
     // `monomorph_method_returns(call_site_span) -> Option<ConcreteType>`
@@ -575,8 +590,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     // first, then the array's `ArrayStore` moves the temp. We probe the
     // pre-assigned temps' constant kinds so the array-element inference
     // can prove the typed-array kind from the indirect operand shape.
-    let mut slot_scalar_kind: Vec<Option<shape_value::v2::ConcreteType>> =
-        vec![None; n];
+    let mut slot_scalar_kind: Vec<Option<shape_value::v2::ConcreteType>> = vec![None; n];
     for block in mir.iter_blocks() {
         for stmt in &block.statements {
             if let StatementKind::Assign(
@@ -656,14 +670,8 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     // array architectural-gap signal).
     for (slot, elem) in &mir.local_typed_array_element_types {
         let idx = slot.0 as usize;
-        if idx < n
-            && matches!(
-                concrete_types[idx],
-                shape_value::v2::ConcreteType::Void
-            )
-        {
-            concrete_types[idx] =
-                shape_value::v2::ConcreteType::Array(Box::new(elem.clone()));
+        if idx < n && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void) {
+            concrete_types[idx] = shape_value::v2::ConcreteType::Array(Box::new(elem.clone()));
         }
     }
 
@@ -749,10 +757,9 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if idx < n {
                         // MIR-shape inference has no source-level type name
                         // here — placeholder struct id (v0.3 WS-6).
-                        concrete_types[idx] =
-                            shape_value::v2::ConcreteType::placeholder_struct(
-                                shape_value::v2::concrete_type::StructLayoutId(0),
-                            );
+                        concrete_types[idx] = shape_value::v2::ConcreteType::placeholder_struct(
+                            shape_value::v2::concrete_type::StructLayoutId(0),
+                        );
                     }
                 }
                 StatementKind::EnumStore {
@@ -798,31 +805,21 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             None
                         };
                         match (variant_tag, inner_concrete) {
-                            (
-                                Some(crate::mir::types::VariantTag::Ok),
-                                Some(inner),
-                            ) => {
+                            (Some(crate::mir::types::VariantTag::Ok), Some(inner)) => {
                                 concrete_types[idx] = shape_value::v2::ConcreteType::Result(
                                     Box::new(inner),
                                     Box::new(shape_value::v2::ConcreteType::Void),
                                 );
                             }
-                            (
-                                Some(crate::mir::types::VariantTag::Err),
-                                Some(inner),
-                            ) => {
+                            (Some(crate::mir::types::VariantTag::Err), Some(inner)) => {
                                 concrete_types[idx] = shape_value::v2::ConcreteType::Result(
                                     Box::new(shape_value::v2::ConcreteType::Void),
                                     Box::new(inner),
                                 );
                             }
-                            (
-                                Some(crate::mir::types::VariantTag::Some_),
-                                Some(inner),
-                            ) => {
-                                concrete_types[idx] = shape_value::v2::ConcreteType::Option(
-                                    Box::new(inner),
-                                );
+                            (Some(crate::mir::types::VariantTag::Some_), Some(inner)) => {
+                                concrete_types[idx] =
+                                    shape_value::v2::ConcreteType::Option(Box::new(inner));
                             }
                             (Some(crate::mir::types::VariantTag::None_), _) => {
                                 // None has no payload — inner is unknown.
@@ -922,16 +919,10 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if let crate::mir::types::Place::Local(dst) = destination {
                         let idx = dst.0 as usize;
                         if idx < n
-                            && matches!(
-                                concrete_types[idx],
-                                shape_value::v2::ConcreteType::Void
-                            )
+                            && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                         {
                             if let Some(ct) = resolver(name.as_str()) {
-                                if !matches!(
-                                    ct,
-                                    shape_value::v2::ConcreteType::Void
-                                ) {
+                                if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                     concrete_types[idx] = ct;
                                 }
                             }
@@ -1020,17 +1011,11 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if let crate::mir::types::Place::Local(dst) = destination {
                         let idx = dst.0 as usize;
                         if idx < n
-                            && matches!(
-                                concrete_types[idx],
-                                shape_value::v2::ConcreteType::Void
-                            )
+                            && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                         {
                             let span = block.terminator.span;
                             if let Some(ct) = monomorph_resolver(span) {
-                                if !matches!(
-                                    ct,
-                                    shape_value::v2::ConcreteType::Void
-                                ) {
+                                if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                     concrete_types[idx] = ct;
                                 }
                             }
@@ -1098,18 +1083,11 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                 }
                 if let crate::mir::types::Place::Local(dst) = destination {
                     let idx = dst.0 as usize;
-                    if idx < n
-                        && matches!(
-                            concrete_types[idx],
-                            shape_value::v2::ConcreteType::Void
-                        )
+                    if idx < n && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                     {
                         let span = block.terminator.span;
                         if let Some(ct) = value_call_resolver(span) {
-                            if !matches!(
-                                ct,
-                                shape_value::v2::ConcreteType::Void
-                            ) {
+                            if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                 concrete_types[idx] = ct;
                             }
                         }
@@ -1215,10 +1193,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if let crate::mir::types::Place::Local(dst) = destination {
                         let idx = dst.0 as usize;
                         if idx < n
-                            && matches!(
-                                concrete_types[idx],
-                                shape_value::v2::ConcreteType::Void
-                            )
+                            && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                         {
                             // Receiver is `args[0]` per the MIR lowering
                             // convention at `mir/lowering/expr.rs::Expr::MethodCall`
@@ -1226,20 +1201,18 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             let receiver_slot = match args.first() {
                                 Some(Operand::Move(crate::mir::types::Place::Local(s)))
                                 | Some(Operand::Copy(crate::mir::types::Place::Local(s)))
-                                | Some(Operand::MoveExplicit(crate::mir::types::Place::Local(s))) => s.0 as usize,
+                                | Some(Operand::MoveExplicit(crate::mir::types::Place::Local(s))) => {
+                                    s.0 as usize
+                                }
                                 _ => continue,
                             };
                             if receiver_slot >= n {
                                 continue;
                             }
                             if let Some(type_name) = struct_names[receiver_slot].clone() {
-                                if let Some(ct) =
-                                    method_resolver(&type_name, method_name.as_str())
+                                if let Some(ct) = method_resolver(&type_name, method_name.as_str())
                                 {
-                                    if !matches!(
-                                        ct,
-                                        shape_value::v2::ConcreteType::Void
-                                    ) {
+                                    if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                         concrete_types[idx] = ct;
                                         continue;
                                     }
@@ -1271,10 +1244,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             // `function_return_concrete_types` for the
                             // specialized return type.
                             let receiver_ct = &concrete_types[receiver_slot];
-                            let inferred = match (
-                                method_name.as_str(),
-                                receiver_ct,
-                            ) {
+                            let inferred = match (method_name.as_str(), receiver_ct) {
                                 // V3-S6a resolver-extension follow-up:
                                 // Array element-typed accessors. The
                                 // VM-side `array_basic.rs` /
@@ -1295,10 +1265,9 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                                     "sum" | "mean" | "min" | "max",
                                     shape_value::v2::ConcreteType::Array(elem),
                                 ) => Some((**elem).clone()),
-                                (
-                                    "get",
-                                    shape_value::v2::ConcreteType::Array(elem),
-                                ) => Some((**elem).clone()),
+                                ("get", shape_value::v2::ConcreteType::Array(elem)) => {
+                                    Some((**elem).clone())
+                                }
                                 _ => None,
                             };
                             if let Some(ct) = inferred {
@@ -1316,72 +1285,102 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     concrete_types
 }
 
-/// Infer a homogeneous element `ConcreteType` from a slice of MIR
-/// operands. Resolves `Move(Local(slot))` operands through
-/// `slot_scalar_kind`, the pre-pass map of `Assign(slot, Use(Const))`
-/// scalar kinds.
-///
-/// Returns `None` for empty / heterogeneous / unresolved operand vectors
-/// — the caller leaves the slot's `ConcreteType` as `Void` (the "no
-/// information" sentinel per §2.7.5.1, NOT a Bool-default fallback).
-/// Project an `Operand` to a scalar `ConcreteType` via the same
-/// constant + pre-pass scalar-slot lookup that
-/// `infer_array_elem_from_operands` uses. Used by the EnumStore Result/
-/// PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): translate a
-/// function's registered return-type string into a `NativeKind`
-/// suitable for `FrameDescriptor.return_kind`. Today only the
-/// Result/Option discriminator is recognized — the `op_try_unwrap`
-/// None-arm uses this stamp to discriminate Result-returning frames
-/// (LIFT None to `Err(AnyError{OPTION_NONE,...})`) vs Option-returning
-/// frames (propagate None verbatim).
-///
-/// Returns `None` for any other return type (scalar, struct, etc.) —
-/// the frame-descriptor `return_kind` field is left `None`, preserving
-/// the §2.7.5.1 "kind not yet stamped" sentinel. The opcode handler
-/// must treat `None` as "unknown frame return kind" and propagate None
-/// verbatim (pre-PB1 behavior — no behavioral change for non-fallible
-/// fn returns).
-///
-/// Returns `NativeKind::Ptr(HeapKind::Result)` for any return type
-/// whose head is `Result` (e.g. `Result<int>`, `Result<int, string>`).
-/// Returns `NativeKind::Ptr(HeapKind::Option)` for any return type
-/// whose head is `Option`. The match is on the head identifier — the
-/// generic arguments are not parsed here (the discriminator is just
-/// the variant-carrier shape).
-fn classify_fn_return_kind(return_type: &str) -> Option<shape_value::NativeKind> {
-    let trimmed = return_type.trim();
-    let head_end = trimmed
-        .find(|c: char| !c.is_alphanumeric() && c != '_')
-        .unwrap_or(trimmed.len());
-    let head = &trimmed[..head_end];
+/// Return metadata stamped into `FrameDescriptor` for a function.
+/// `return_kind` is ABI-only; `wrapper` carries source-level
+/// Option/Result early-return semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameReturnMetadata {
+    return_kind: Option<shape_value::NativeKind>,
+    wrapper: FrameReturnWrapper,
+}
+
+impl FrameReturnMetadata {
+    fn unknown() -> Self {
+        Self {
+            return_kind: None,
+            wrapper: FrameReturnWrapper::Unknown,
+        }
+    }
+
+    fn needs_descriptor(self) -> bool {
+        self.return_kind.is_some() || self.wrapper != FrameReturnWrapper::Unknown
+    }
+}
+
+fn wrapper_from_return_head(head: &str) -> Option<FrameReturnWrapper> {
     match head {
-        "Result" => Some(shape_value::NativeKind::Ptr(
-            shape_value::HeapKind::Result,
-        )),
-        "Option" => Some(shape_value::NativeKind::Ptr(
-            shape_value::HeapKind::Option,
-        )),
+        "Result" => Some(FrameReturnWrapper::Result),
+        "Option" => Some(FrameReturnWrapper::Option),
         _ => None,
     }
 }
 
-/// PB1 Wave-1-extension companion to `classify_fn_return_kind`:
-/// classify directly off the `TypeAnnotation` AST. Used when the
-/// FunctionDef is available so generic `Result<T>` / `Option<T>` heads
-/// classify correctly (the string-fallback via `as_simple_name()`
-/// misses generic types — `Generic { name, args }` returns `None` from
-/// `as_simple_name`).
-fn classify_type_annotation_kind(
+fn return_metadata_from_concrete_type(ct: &shape_value::v2::ConcreteType) -> FrameReturnMetadata {
+    use shape_value::v2::ConcreteType;
+
+    let wrapper = match ct {
+        ConcreteType::Result(..) => FrameReturnWrapper::Result,
+        ConcreteType::Option(_) => FrameReturnWrapper::Option,
+        _ => FrameReturnWrapper::Plain,
+    };
+    let return_kind = match ct {
+        ConcreteType::Void => None,
+        _ => Some(shape_value::v2::closure_layout::native_kind_from_concrete_type(ct)),
+    };
+
+    FrameReturnMetadata {
+        return_kind,
+        wrapper,
+    }
+}
+
+fn typed_object_wrapper_metadata(wrapper: FrameReturnWrapper) -> FrameReturnMetadata {
+    FrameReturnMetadata {
+        return_kind: Some(shape_value::NativeKind::Ptr(
+            shape_value::HeapKind::TypedObject,
+        )),
+        wrapper,
+    }
+}
+
+/// Classify return metadata directly off the `TypeAnnotation` AST.
+/// Resolved concrete types provide the ABI kind for scalars and structs;
+/// a head-only fallback preserves Option/Result wrapper metadata even
+/// when generic arguments are not fully resolvable.
+fn classify_type_annotation_metadata(
+    compiler: &BytecodeCompiler,
     return_type: &shape_ast::ast::TypeAnnotation,
-) -> Option<shape_value::NativeKind> {
+) -> FrameReturnMetadata {
+    if let Some(concrete) =
+        crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+            compiler,
+            return_type,
+        )
+    {
+        return return_metadata_from_concrete_type(&concrete);
+    }
+
     use shape_ast::ast::TypeAnnotation;
     let head: &str = match return_type {
         TypeAnnotation::Basic(name) => name.as_str(),
         TypeAnnotation::Reference(path) => path.as_str(),
         TypeAnnotation::Generic { name, .. } => name.as_str(),
-        _ => return None,
+        _ => return FrameReturnMetadata::unknown(),
     };
-    classify_fn_return_kind(head)
+    match wrapper_from_return_head(head) {
+        Some(wrapper @ (FrameReturnWrapper::Option | FrameReturnWrapper::Result)) => {
+            typed_object_wrapper_metadata(wrapper)
+        }
+        _ => FrameReturnMetadata::unknown(),
+    }
+}
+
+/// U4-5b: classify the Result/Option return-frame discriminator directly off
+/// the recorded return `ConcreteType` (the structural source that replaced the
+/// deleted stringly return map). Mirrors `classify_type_annotation_metadata` but
+/// matches the `ConcreteType` variant rather than a return-NAME string head.
+fn classify_concrete_return_metadata(ct: &shape_value::v2::ConcreteType) -> FrameReturnMetadata {
+    return_metadata_from_concrete_type(ct)
 }
 
 /// Option inference to stamp the inner type of `Ok(v)` / `Err(e)` /
@@ -1399,8 +1398,7 @@ fn operand_concrete_type(
         Operand::Constant(MirConstant::Int(_)) => Some(shape_value::v2::ConcreteType::I64),
         Operand::Constant(MirConstant::Float(_)) => Some(shape_value::v2::ConcreteType::F64),
         Operand::Constant(MirConstant::Bool(_)) => Some(shape_value::v2::ConcreteType::Bool),
-        Operand::Constant(MirConstant::Str(_))
-        | Operand::Constant(MirConstant::StringId(_)) => {
+        Operand::Constant(MirConstant::Str(_)) | Operand::Constant(MirConstant::StringId(_)) => {
             Some(shape_value::v2::ConcreteType::String)
         }
         Operand::Move(Place::Local(s))
@@ -1459,15 +1457,9 @@ fn infer_array_elem_from_operands(
     let mut elem: Option<shape_value::v2::ConcreteType> = None;
     for op in operands {
         let here = match op {
-            Operand::Constant(MirConstant::Int(_)) => {
-                Some(shape_value::v2::ConcreteType::I64)
-            }
-            Operand::Constant(MirConstant::Float(_)) => {
-                Some(shape_value::v2::ConcreteType::F64)
-            }
-            Operand::Constant(MirConstant::Bool(_)) => {
-                Some(shape_value::v2::ConcreteType::Bool)
-            }
+            Operand::Constant(MirConstant::Int(_)) => Some(shape_value::v2::ConcreteType::I64),
+            Operand::Constant(MirConstant::Float(_)) => Some(shape_value::v2::ConcreteType::F64),
+            Operand::Constant(MirConstant::Bool(_)) => Some(shape_value::v2::ConcreteType::Bool),
             // Move/Copy of a local slot — consult two kind sources in
             // order:
             //
@@ -1536,6 +1528,7 @@ fn infer_array_elem_from_operands(
 /// reserved for the future when an `EqBool` typed opcode lands (no such
 /// opcode exists in V3, so bool equality falls back to `EqDynamic`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(in crate::compiler) enum BinOperandKind {
     /// Resolved to a specific numeric type (Int, Number, Decimal, IntWidth).
     Numeric(NumericType),
@@ -1552,6 +1545,7 @@ pub(in crate::compiler) enum BinOperandKind {
 impl BinOperandKind {
     /// Build a `BinOperandKind` from an `Option<NumericType>` — the most
     /// common shape used by existing binary-op emission sites.
+    #[allow(dead_code)]
     pub(in crate::compiler) fn from_numeric(nt: Option<NumericType>) -> Self {
         match nt {
             Some(n) => BinOperandKind::Numeric(n),
@@ -1571,6 +1565,7 @@ impl BinOperandKind {
 /// additionally handles `IntWidth` coercions which V3.1 intentionally does
 /// NOT generalize (width handling stays in `emit_numeric_binary_with_coercion`
 /// until V3.2+ tranches migrate those callers).
+#[allow(dead_code)]
 fn typed_numeric_opcode(op: shape_ast::ast::BinaryOp, nt: NumericType) -> Option<OpCode> {
     use shape_ast::ast::BinaryOp;
     // V3.1 shim: handle only scalar Int/Number/Decimal paths. IntWidth is
@@ -1627,6 +1622,7 @@ fn typed_numeric_opcode(op: shape_ast::ast::BinaryOp, nt: NumericType) -> Option
 /// so this helper just selects which BinaryOps the typed-emission shim
 /// handles. Previously this was `dynamic_opcode_for` returning the
 /// `*Dynamic` opcode; the same set of ops is the shim's responsibility.
+#[allow(dead_code)]
 fn is_arith_or_cmp_op(op: shape_ast::ast::BinaryOp) -> bool {
     use shape_ast::ast::BinaryOp;
     matches!(
@@ -1690,12 +1686,11 @@ fn is_arith_or_cmp_op(op: shape_ast::ast::BinaryOp) -> bool {
 ///
 /// See V3.6 commit body for the full audit.
 ///
-/// Side effects: on emit (typed or dynamic), resets
-/// `last_expr_schema` / `last_expr_type_info` / `last_expr_numeric_type`.
-/// Typed-numeric emissions additionally restore
-/// `last_expr_numeric_type = Some(nt)` for arithmetic so downstream
-/// numeric-propagation logic keeps working. Comparisons always clear the
-/// numeric hint because the result is a `bool`.
+/// Side effects: on emit (typed or string-concat), resets
+/// `last_expr_schema` / `last_expr_type_info`. U4-4: the
+/// `last_expr_numeric_type` register writeback is deleted; a downstream
+/// consumer derives the result's numeric kind from the one resolved Type.
+#[allow(dead_code)]
 pub(in crate::compiler) fn emit_binary_op(
     compiler: &mut BytecodeCompiler,
     op: shape_ast::ast::BinaryOp,
@@ -1719,15 +1714,6 @@ pub(in crate::compiler) fn emit_binary_op(
                 compiler.last_expr_schema = None;
                 compiler.last_expr_type_info = None;
                 // Arithmetic preserves the numeric kind; comparison collapses to bool.
-                compiler.last_expr_numeric_type = match op {
-                    BinaryOp::Add
-                    | BinaryOp::Sub
-                    | BinaryOp::Mul
-                    | BinaryOp::Div
-                    | BinaryOp::Mod
-                    | BinaryOp::Pow => Some(lnt),
-                    _ => None,
-                };
                 return Ok(true);
             }
         }
@@ -1747,7 +1733,6 @@ pub(in crate::compiler) fn emit_binary_op(
         compiler.emit(Instruction::simple(OpCode::StringConcatTyped));
         compiler.last_expr_schema = None;
         compiler.last_expr_type_info = None;
-        compiler.last_expr_numeric_type = None;
         return Ok(true);
     }
 
@@ -1895,11 +1880,25 @@ impl BytecodeCompiler {
     pub(super) fn tracker_type_name_is_primitive(name: &str) -> bool {
         matches!(
             name,
-            "int" | "i8" | "i16" | "i32" | "i64"
-            | "u8" | "u16" | "u32" | "u64"
-            | "number" | "f32" | "f64"
-            | "bool" | "string" | "decimal" | "bigint"
-            | "DateTime" | "Duration" | "TimeSpan"
+            "int"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "number"
+                | "f32"
+                | "f64"
+                | "bool"
+                | "string"
+                | "decimal"
+                | "bigint"
+                | "DateTime"
+                | "Duration"
+                | "TimeSpan"
         )
     }
 
@@ -1922,6 +1921,80 @@ impl BytecodeCompiler {
             }
             _ => None,
         }
+    }
+
+    pub(super) fn emit_comptime_field_constant(
+        &mut self,
+        type_name: &str,
+        field_name: &str,
+        slot: &shape_value::KindedSlot,
+        span: shape_ast::ast::Span,
+    ) -> Result<()> {
+        use shape_value::NativeKind;
+
+        let constant = match slot.kind() {
+            NativeKind::Int64 => Some(Constant::Int(slot.raw() as i64)),
+            NativeKind::UInt64 => Some(Constant::UInt(slot.raw())),
+            NativeKind::Float64 => Some(Constant::Number(f64::from_bits(slot.raw()))),
+            NativeKind::Bool => Some(Constant::Bool(slot.raw() != 0)),
+            NativeKind::String => {
+                let value = slot.as_str().ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "comptime field '{}.{}' has a null string payload",
+                        type_name, field_name
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                })?;
+                let value = value.to_string();
+                Some(Constant::String(value))
+            }
+            NativeKind::Null => None,
+            other => {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "comptime field '{}.{}' has unsupported constant kind {:?}",
+                        type_name, field_name, other
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        };
+
+        if let Some(constant) = constant {
+            let idx = self.program.add_constant(constant);
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(idx)),
+            ));
+        } else {
+            self.emit(Instruction::simple(OpCode::PushNull));
+        }
+
+        self.last_expr_schema = None;
+        self.last_expr_type_info = match slot.kind() {
+            NativeKind::Int64 => Some(VariableTypeInfo::with_storage(
+                "int".to_string(),
+                NativeKind::Int64,
+            )),
+            NativeKind::UInt64 => Some(VariableTypeInfo::with_storage(
+                "int".to_string(),
+                NativeKind::UInt64,
+            )),
+            NativeKind::Float64 => Some(VariableTypeInfo::with_storage(
+                "number".to_string(),
+                NativeKind::Float64,
+            )),
+            NativeKind::Bool => Some(VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                NativeKind::Bool,
+            )),
+            NativeKind::String => Some(VariableTypeInfo::with_storage(
+                "string".to_string(),
+                NativeKind::String,
+            )),
+            _ => None,
+        };
+        Ok(())
     }
 
     /// Resolve a type name through the module scope stack and imports.
@@ -2203,6 +2276,7 @@ impl BytecodeCompiler {
                         | OpCode::NeqNumber
                         | OpCode::EqString
                         | OpCode::EqDecimal
+                        | OpCode::EqTypedObject
                         | OpCode::IsNull
                         | OpCode::Not
                 )
@@ -2304,23 +2378,11 @@ impl BytecodeCompiler {
             | OpCode::BitShlInt
             | OpCode::BitShrInt
             | OpCode::BitNotInt
-            // Typed local / module-binding load (Wave E+3) — push raw i64.
+            // Typed i64 local / module-binding loads. Narrow and unsigned
+            // typed loads are split below so return proof sees their exact
+            // producer kind instead of collapsing to Int64.
             | OpCode::LoadLocalI64
-            | OpCode::LoadLocalU64
-            | OpCode::LoadLocalI32
-            | OpCode::LoadLocalU32
-            | OpCode::LoadLocalI16
-            | OpCode::LoadLocalU16
-            | OpCode::LoadLocalI8
-            | OpCode::LoadLocalU8
             | OpCode::LoadModuleBindingI64
-            | OpCode::LoadModuleBindingU64
-            | OpCode::LoadModuleBindingI32
-            | OpCode::LoadModuleBindingU32
-            | OpCode::LoadModuleBindingI16
-            | OpCode::LoadModuleBindingU16
-            | OpCode::LoadModuleBindingI8
-            | OpCode::LoadModuleBindingU8
             // Typed array length / map length / string length helpers all
             // push raw i64 (see arithmetic mod tests for these).
             | OpCode::ArrayLenTyped
@@ -2328,37 +2390,38 @@ impl BytecodeCompiler {
             | OpCode::StringLenTyped
             // v2 sized-integer (i32) arithmetic — post-Wave-E+5 the
             // `exec_v2_sized_int` handler pushes raw native i64 bits
-            // (sign-extended from i32 result) onto the kinded VM stack
-            // via `push_kinded(bits, NativeKind::Int64)`, matching the
-            // surrounding typed transport for `LoadLocalI32` /
-            // `PushConst` / `AddInt`. Mirrors the `AddInt`/`SubInt`/…
-            // family above for the i32 variants.
+            // (sign-extended from i32 result) onto the kinded VM stack via
+            // `push_kinded(bits, NativeKind::Int64)`. Mirrors the
+            // `AddInt`/`SubInt`/… family above for the i32 variants.
             | OpCode::AddI32
             | OpCode::SubI32
             | OpCode::MulI32
             | OpCode::DivI32
             | OpCode::ModI32
-            // Compact-typed (sub-i64 width-parameterised) arithmetic — post-
-            // Wave-E+5.5 the `compact_int_*` family in
-            // `executor/arithmetic/mod.rs:651` pops native i64 inputs and
-            // pushes raw native i64 bits onto the kinded VM stack via
-            // `push_kinded(bits, NativeKind::Int64)`, matching the
-            // surrounding typed transport. `CmpTyped` returns a -1/0/1
-            // ordinal as native i64 (NOT a bool — see compact_int_cmp). The
-            // compact-int width truncation happens before push; the deleted
-            // `synthesize_value_word_from_raw` decoder (ADR-006 §2.7.7) is
-            // gone — kind declaration on the parallel-kind track at push
-            // time replaces its sub-i64 sign-extend path.
-            | OpCode::AddTyped
-            | OpCode::SubTyped
-            | OpCode::MulTyped
-            | OpCode::DivTyped
-            | OpCode::ModTyped
+            // Compact comparison returns a -1/0/1 ordinal as native i64
+            // (NOT a bool — see compact_int_cmp). Width-typed arithmetic
+            // producers are split below and classified from their
+            // `Operand::Width` so return proof sees the declared arithmetic
+            // width instead of collapsing to Int64.
             | OpCode::CmpTyped
             // CastWidth pops native i64, truncates per the declared width,
             // and pushes native i64 bits — mirrors the producer side of the
             // compact-int family.
             | OpCode::CastWidth => Some(StorageHint::Int64),
+
+            OpCode::LoadLocalU64 | OpCode::LoadModuleBindingU64 => Some(StorageHint::UInt64),
+            OpCode::LoadLocalI32 | OpCode::LoadModuleBindingI32 => Some(StorageHint::Int32),
+            OpCode::LoadLocalU32 | OpCode::LoadModuleBindingU32 => Some(StorageHint::UInt32),
+            OpCode::LoadLocalI16 | OpCode::LoadModuleBindingI16 => Some(StorageHint::Int16),
+            OpCode::LoadLocalU16 | OpCode::LoadModuleBindingU16 => Some(StorageHint::UInt16),
+            OpCode::LoadLocalI8 | OpCode::LoadModuleBindingI8 => Some(StorageHint::Int8),
+            OpCode::LoadLocalU8 | OpCode::LoadModuleBindingU8 => Some(StorageHint::UInt8),
+
+            OpCode::AddTyped
+            | OpCode::SubTyped
+            | OpCode::MulTyped
+            | OpCode::DivTyped
+            | OpCode::ModTyped => self.compact_typed_arithmetic_native_kind(instr),
 
             // ===== Raw f64 producers =====
             OpCode::AddNumber
@@ -2386,6 +2449,7 @@ impl BytecodeCompiler {
             | OpCode::GteNumber
             | OpCode::EqString
             | OpCode::EqDecimal
+            | OpCode::EqTypedObject
             | OpCode::LtDecimal
             | OpCode::LteDecimal
             | OpCode::GtDecimal
@@ -2633,9 +2697,7 @@ impl BytecodeCompiler {
             // If `pos` is inside a nested function's range, jump past it.
             // `nested_ranges` is sorted; advance the cursor past any range
             // we've stepped over.
-            while nested_cursor < nested_ranges.len()
-                && nested_ranges[nested_cursor].1 <= pos
-            {
+            while nested_cursor < nested_ranges.len() && nested_ranges[nested_cursor].1 <= pos {
                 nested_cursor += 1;
             }
             if nested_cursor < nested_ranges.len() {
@@ -2647,14 +2709,14 @@ impl BytecodeCompiler {
             }
             let instr = &self.program.instructions[pos];
             let kind = match instr.opcode {
-                OpCode::ReturnValueI64
-                | OpCode::ReturnValueU64
-                | OpCode::ReturnValueI32
-                | OpCode::ReturnValueU32
-                | OpCode::ReturnValueI16
-                | OpCode::ReturnValueU16
-                | OpCode::ReturnValueI8
-                | OpCode::ReturnValueU8 => Some(StorageHint::Int64),
+                OpCode::ReturnValueI64 => Some(StorageHint::Int64),
+                OpCode::ReturnValueU64 => Some(StorageHint::UInt64),
+                OpCode::ReturnValueI32 => Some(StorageHint::Int32),
+                OpCode::ReturnValueU32 => Some(StorageHint::UInt32),
+                OpCode::ReturnValueI16 => Some(StorageHint::Int16),
+                OpCode::ReturnValueU16 => Some(StorageHint::UInt16),
+                OpCode::ReturnValueI8 => Some(StorageHint::Int8),
+                OpCode::ReturnValueU8 => Some(StorageHint::UInt8),
                 OpCode::ReturnValueF64 => Some(StorageHint::Float64),
                 OpCode::ReturnValueBool => Some(StorageHint::Bool),
                 // Legacy / pointer / generic typed-return — disqualify.
@@ -2708,6 +2770,35 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Resolve the compile-time producer kind for compact typed arithmetic.
+    ///
+    /// The bytecode producer already carries the declared arithmetic width in
+    /// `Operand::Width`; the strict return proof must use that width rather
+    /// than collapsing every `AddTyped`/`SubTyped`/... producer to `Int64`.
+    /// `CmpTyped` is intentionally excluded by the caller because it returns
+    /// an i64 ordinal, not a width-typed arithmetic value.
+    fn compact_typed_arithmetic_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        let Some(Operand::Width(width)) = instr.operand else {
+            return None;
+        };
+        Some(Self::storage_hint_for_numeric_width(width))
+    }
+
+    fn storage_hint_for_numeric_width(width: NumericWidth) -> StorageHint {
+        match width {
+            NumericWidth::I8 => StorageHint::Int8,
+            NumericWidth::I16 => StorageHint::Int16,
+            NumericWidth::I32 => StorageHint::Int32,
+            NumericWidth::I64 => StorageHint::Int64,
+            NumericWidth::U8 => StorageHint::UInt8,
+            NumericWidth::U16 => StorageHint::UInt16,
+            NumericWidth::U32 => StorageHint::UInt32,
+            NumericWidth::U64 => StorageHint::UInt64,
+            NumericWidth::F32 => StorageHint::Float32,
+            NumericWidth::F64 => StorageHint::Float64,
+        }
+    }
+
     /// Resolve the raw-native kind of a `LoadLocalTrusted` instruction
     /// by consulting the slot's type-tracker entry. The trusted handler
     /// reads raw bits directly (`variables/mod.rs:2520`) and pushes them
@@ -2737,14 +2828,11 @@ impl BytecodeCompiler {
         };
         // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
         // `Option<StorageHint>` ("not yet proven" carried in the Option).
-        // Match through `Some(..)` and forward only the proven primitive
-        // kinds; `None` (or any non-primitive proven kind) falls through.
-        match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
-                Some(kind)
-            }
-            _ => None,
-        }
+        // Forward only hints with a typed field-kind carrier; `None` (or any
+        // non-carriered proven kind) falls through.
+        self.type_tracker
+            .get_module_binding_storage_hint(*idx)
+            .filter(|kind| storage_hint_to_field_kind(*kind).is_some())
     }
 
     fn load_local_trusted_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
@@ -2758,13 +2846,11 @@ impl BytecodeCompiler {
         //
         // Post-§2.7.5.1: `get_local_storage_hint` returns
         // `Option<StorageHint>` ("not yet proven" lives in the Option).
-        // The `Some(...)` arm gates on a proven primitive; `None` (or any
-        // non-primitive) falls through to the recovery path below.
+        // The `Some(...)` arm gates on a proven typed field-kind carrier;
+        // `None` (or any non-carriered proven kind) falls through to the
+        // recovery path below.
         let hint = self.type_tracker.get_local_storage_hint(*idx);
-        if matches!(
-            hint,
-            Some(StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)
-        ) {
+        if hint.is_some_and(|kind| storage_hint_to_field_kind(kind).is_some()) {
             return hint;
         }
         // Fallback: when this `LoadLocalTrusted` was emitted inside a
@@ -2775,27 +2861,22 @@ impl BytecodeCompiler {
         // `LoadLocalTrusted` is "push the slot's raw bits" — and the
         // proof that the bits ARE native-kinded came from the typed
         // `StoreLocal<Kind>` emitted earlier in the same block. The
-        // compiler also propagates the slot's type up through
-        // `last_expr_numeric_type` / `last_expr_type_info`, which
-        // SURVIVE scope-pop. Use them to recover the kind here.
-        if let Some(nt) = self.last_expr_numeric_type {
-            return Some(match nt {
-                crate::type_tracking::NumericType::Number => StorageHint::Float64,
-                crate::type_tracking::NumericType::Int => StorageHint::Int64,
-                crate::type_tracking::NumericType::IntWidth(_) => StorageHint::Int64,
-                crate::type_tracking::NumericType::Decimal => return None,
-            });
-        }
+        // compiler propagates the slot's type up through
+        // `last_expr_type_info`, which SURVIVES scope-pop. Use it to
+        // recover the kind here.
+        //
+        // U4-4: the parallel `last_expr_numeric_type` register fallback is
+        // DELETED — it was redundant with the `last_expr_type_info`
+        // storage-hint below (both recover the same proven scalar kind), and
+        // it was the SB-7 second source of truth. Exact scalar recovery is
+        // preserved by `last_expr_type_info.storage_hint`.
         if let Some(info) = &self.last_expr_type_info {
             // `info.storage_hint: Option<StorageHint>` post-§2.7.5.1 —
-            // match through `Some(..)` and forward only the proven
-            // primitive kinds.
-            return match info.storage_hint {
-                Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
-                    Some(kind)
-                }
-                _ => None,
-            };
+            // match through `Some(..)` and forward only typed field-kind
+            // carriers.
+            return info
+                .storage_hint
+                .filter(|kind| storage_hint_to_field_kind(*kind).is_some());
         }
         None
     }
@@ -2807,10 +2888,7 @@ impl BytecodeCompiler {
         use crate::executor::typed_object_ops::{
             FIELD_TAG_BOOL, FIELD_TAG_F64, FIELD_TAG_I64, FIELD_TAG_TIMESTAMP,
         };
-        let Some(Operand::TypedField {
-            field_type_tag, ..
-        }) = &instr.operand
-        else {
+        let Some(Operand::TypedField { field_type_tag, .. }) = &instr.operand else {
             return None;
         };
         match *field_type_tag {
@@ -2842,13 +2920,10 @@ impl BytecodeCompiler {
         };
         // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
         // `Option<StorageHint>`. Match through `Some(..)` and forward
-        // only the proven primitive kinds.
-        match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
-                Some(kind)
-            }
-            _ => None,
-        }
+        // only typed field-kind carriers.
+        self.type_tracker
+            .get_module_binding_storage_hint(*idx)
+            .filter(|kind| storage_hint_to_field_kind(*kind).is_some())
     }
 
     /// Wave E+5-cleanup task #92: resolve the raw-native kind of a
@@ -2888,10 +2963,7 @@ impl BytecodeCompiler {
         if make_field_ref.opcode != OpCode::MakeFieldRef {
             return None;
         }
-        let Some(Operand::TypedField {
-            field_type_tag, ..
-        }) = &make_field_ref.operand
-        else {
+        let Some(Operand::TypedField { field_type_tag, .. }) = &make_field_ref.operand else {
             return None;
         };
         match *field_type_tag {
@@ -2914,6 +2986,7 @@ impl BytecodeCompiler {
     /// host-boundary synthesizer falls through to passthrough, which
     /// is correct because the executor's matching `op_get_prop` flip
     /// also leaves those tagged.
+    #[allow(dead_code)]
     fn get_prop_native_kind(&self) -> Option<StorageHint> {
         let idx = self.program.instructions.len().checked_sub(1)?;
         self.get_prop_native_kinds.get(&idx).copied()
@@ -2974,6 +3047,62 @@ impl BytecodeCompiler {
         args: &[shape_ast::ast::Expr],
         expected_param_modes: Option<&[ParamPassMode]>,
     ) -> Result<Vec<(u16, u16)>> {
+        self.compile_call_args_with_param_types(args, expected_param_modes, None)
+    }
+
+    pub(super) fn compile_expr_with_expected_call_return(
+        &mut self,
+        expr: &shape_ast::ast::Expr,
+        expected_return: Option<&TypeAnnotation>,
+    ) -> Result<()> {
+        let saved = self.pending_expected_call_return_type.clone();
+        self.pending_expected_call_return_type = expected_return.cloned();
+        let result = self.compile_expr(expr);
+        self.pending_expected_call_return_type = saved;
+        result
+    }
+
+    /// STAGE F4: is this annotation an `Array<T>` / `T[]` shape (the only param
+    /// shape for which a bare `[]` argument is type-correct)? Used to decide
+    /// whether an unprovable-element bare-`[]` arg gets a clean array-construction
+    /// compile-error vs. falls through to the generic empty-array handling.
+    pub(crate) fn annotation_is_array_shaped(ann: &TypeAnnotation) -> bool {
+        matches!(ann, TypeAnnotation::Array(_))
+            || matches!(
+                ann,
+                TypeAnnotation::Generic { name, args }
+                    if name.as_str() == "Array" && args.len() == 1
+            )
+    }
+
+    /// STAGE F4 (strict-flip, 2026-06-20): variant of [`Self::compile_call_args`]
+    /// that ALSO threads the callee's declared parameter type-annotations so a
+    /// bare empty-array argument (`[]`) in CALL-ARGUMENT position can construct a
+    /// valid typed empty `TypedArray<T>` for the param's declared `Array<T>`
+    /// element type.
+    ///
+    /// Background: a bare `[]` literal carries no element type of its own. In a
+    /// `let arr: Array<int> = []` binding the element kind is threaded from the
+    /// annotation via `pending_variable_typed_array_kind`, which the empty-array
+    /// branch of `compile_expr_array` consumes (collections.rs typed_kind path)
+    /// to emit the typed allocator (`NewTypedArrayI64(0)`). In CALL-ARGUMENT
+    /// position there was no such hand-off, so `compile_expr([])` fell through to
+    /// the placeholder `NewArray(0)` which SURFACEs `op_new_array(0)`
+    /// NotImplemented at runtime. Here we set the same producer-side stamp
+    /// (`pending_variable_typed_array_kind`, ADR-006 §2.7.5) from the param's
+    /// `Array<T>` annotation for exactly the bare-`[]` arg, restoring it after
+    /// the arg compiles. When the param element type is unprovable
+    /// (`resolve_typed_array_kind_from_annotation` returns `None`, e.g. a generic
+    /// type var, `Array<string>` non-typed-scalar carrier, etc.) the bare `[]`
+    /// falls through to the empty-array branch, which surface-and-stops with a
+    /// CLEAN compile-error — never a mid-program `op_new_array` SURFACE. No
+    /// bit-reinterpret, no TypedArrayData, no Bool-default.
+    pub(super) fn compile_call_args_with_param_types(
+        &mut self,
+        args: &[shape_ast::ast::Expr],
+        expected_param_modes: Option<&[ParamPassMode]>,
+        expected_param_annotations: Option<&[Option<TypeAnnotation>]>,
+    ) -> Result<Vec<(u16, u16)>> {
         self.call_arg_module_binding_ref_writebacks.push(Vec::new());
 
         let mut first_error: Option<ShapeError> = None;
@@ -3011,7 +3140,59 @@ impl BytecodeCompiler {
                         })
                     } else {
                         self.plan_flexible_binding_escape_from_expr(arg);
-                        self.compile_expr(arg)
+                        // STAGE F4: a bare empty-array arg (`[]`) gets its element
+                        // kind from the callee's declared `Array<T>` param
+                        // annotation (producer-side stamp, ADR-006 §2.7.5). Save /
+                        // restore so the hand-off does not leak into a sibling arg.
+                        let is_bare_empty_array = matches!(
+                            arg,
+                            shape_ast::ast::Expr::Array(elements, _) if elements.is_empty()
+                        );
+                        let param_ann = expected_param_annotations
+                            .and_then(|anns| anns.get(idx))
+                            .and_then(|ann| ann.as_ref());
+                        if is_bare_empty_array {
+                            let param_kind = param_ann
+                                .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
+                            if let Some(kind) = param_kind {
+                                let saved = self.pending_variable_typed_array_kind;
+                                self.pending_variable_typed_array_kind = Some(kind);
+                                let r = self.compile_expr_with_expected_call_return(arg, param_ann);
+                                self.pending_variable_typed_array_kind = saved;
+                                r
+                            } else if param_ann
+                                .map(Self::annotation_is_array_shaped)
+                                .unwrap_or(false)
+                            {
+                                // The param IS `Array<T>` (so the bare `[]` is
+                                // type-correct) but the element kind has no
+                                // typed-array carrier the compiler can construct
+                                // here (e.g. `Array<Array<int>>`, an
+                                // unregistered element type). The empty-array
+                                // branch of `compile_expr` would otherwise emit a
+                                // placeholder `NewArray(0)` that SURFACEs
+                                // `op_new_array(0)` mid-program. Surface-and-stop
+                                // with a CLEAN compile-error instead (binders:
+                                // never a runtime SURFACE, never a Bool-default).
+                                Err(ShapeError::SemanticError {
+                                    message: format!(
+                                        "cannot construct an empty array for parameter #{} \
+                                         (`{}`): its element type has no typed-array carrier \
+                                         the compiler can construct from a bare `[]`. Bind the \
+                                         argument to an annotated local first \
+                                         (`let xs: Array<T> = []`) and pass `xs`, or pass a \
+                                         non-empty literal.",
+                                        idx + 1,
+                                        param_ann.map(|a| a.to_type_string()).unwrap_or_default(),
+                                    ),
+                                    location: Some(self.span_to_source_location(arg.span())),
+                                })
+                            } else {
+                                self.compile_expr_with_expected_call_return(arg, param_ann)
+                            }
+                        } else {
+                            self.compile_expr_with_expected_call_return(arg, param_ann)
+                        }
                     }
                 }
             };
@@ -3327,6 +3508,41 @@ impl BytecodeCompiler {
         self.type_tracker.set_binding_type(slot, info);
     }
 
+    /// Guard for the WS-6b GAP A `set_*_type_info(tn)` stamps.
+    ///
+    /// `concrete_type_tracker_name` projects a `ConcreteType::Struct` to its
+    /// BASE name (`Box`), dropping the generic arguments. For a generic
+    /// struct the construction path has already stamped the slot with the
+    /// precise MONOMORPHIZED schema (`Box<int>`, whose `value` field is the
+    /// concrete `FieldType::I64`). Re-stamping the base name would resolve
+    /// `tn` back to the BASE schema (`Box`, whose `value` field is the
+    /// unsound `FieldType::Object("T")`), and a downstream typed field read
+    /// would stamp `FIELD_TAG_OBJECT` on a slot holding an inline scalar —
+    /// `clone_with_kind` then dereferences the scalar bits as a
+    /// `*const TypedObjectStorage` (ADR-006 §2.7.5 producer-side stamp
+    /// violation → SIGSEGV). This returns `true` exactly when the slot's
+    /// existing tracker entry is `tn` itself or a monomorphization `tn<...>`
+    /// carrying a concrete `schema_id`, so the WS-6b base-name stamp must be
+    /// skipped rather than downgrade the precise schema.
+    pub(super) fn ws6b_name_would_downgrade(
+        existing: Option<&VariableTypeInfo>,
+        base_name: &str,
+    ) -> bool {
+        let Some(info) = existing else {
+            return false;
+        };
+        if info.schema_id.is_none() {
+            return false;
+        }
+        match info.type_name.as_deref() {
+            // A monomorphized name `Box<int>` for base `Box` — keep it.
+            Some(existing_name) => {
+                existing_name == base_name || existing_name.starts_with(&format!("{base_name}<"))
+            }
+            None => false,
+        }
+    }
+
     /// Capture local storage hints for a compiled function.
     ///
     /// Must be called before the function scope is popped so the type tracker still
@@ -3379,46 +3595,56 @@ impl BytecodeCompiler {
         } else {
             instr_len
         };
-        let has_trusted = if func.entry_point <= code_end && code_end <= instr_len {
-            self.program.instructions[func.entry_point..code_end]
-                .iter()
-                .any(|i| i.opcode.is_trusted())
+        let (has_trusted, has_v2_typed) = if func.entry_point <= code_end && code_end <= instr_len {
+            let slice = &self.program.instructions[func.entry_point..code_end];
+            (
+                slice.iter().any(|i| i.opcode.is_trusted()),
+                // U4-4: a function emitting V2 typed opcodes (e.g.
+                // `NewTypedArrayString` for a `-> Array<string>` body that
+                // returns `[]`) REQUIRES a FrameDescriptor — the bytecode
+                // verifier rejects a V2 typed opcode in a descriptor-less
+                // function (`verifier.rs:243`). Detect it here so the
+                // descriptor is created even when no scalar local slot is
+                // proven (the function may have only heap/enum locals). This
+                // restores the descriptor that the deleted
+                // `last_expr_numeric_type` register's slot-typing side effects
+                // previously kept alive for such functions.
+                slice.iter().any(|i| i.opcode.is_v2_typed()),
+            )
         } else {
-            false
+            (false, false)
         };
 
-        // PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): infer the
-        // function's return-value `NativeKind` from its return-type
-        // annotation. Used by `op_try_unwrap`'s None arm to discriminate
-        // Result-returning frames (LIFT None to
-        // `Err(AnyError{OPTION_NONE,...})`) vs Option-returning frames
-        // (propagate None verbatim) — the target-fn-return-type contract
-        // per audit 14b sub-root #1 + supervisor binder. Only the
-        // Result/Option discriminator is stamped here; other return
-        // kinds are left None today (callers can extend as needed).
+        // Infer the function return metadata. `return_kind` is now
+        // ABI-only: Option/Result wrappers use the canonical
+        // Ptr(TypedObject) carrier and stamp wrapper semantics separately
+        // for `op_try_unwrap`'s None arm.
         //
         // Source priority: (1) FunctionDef AST when available (handles
         // generic `Result<T>` / `Option<T>` types whose head name isn't
         // captured by `TypeAnnotation::as_simple_name()`). (2)
-        // registered `function_return_types` map fallback for simple
-        // names (and call sites that didn't pass a FunctionDef).
-        let return_kind: Option<shape_value::NativeKind> = func_def
+        // registered concrete return type fallback.
+        let return_metadata = func_def
             .and_then(|fd| fd.return_type.as_ref())
-            .and_then(classify_type_annotation_kind)
+            .map(|ann| classify_type_annotation_metadata(self, ann))
             .or_else(|| {
+                // U4-5b: classify the Result/Option discriminator off the
+                // recorded return `ConcreteType` — no return-NAME string head
+                // match.
                 let func_name = self.program.functions[func_idx].name.clone();
                 self.type_tracker
-                    .get_function_return_type(&func_name)
-                    .and_then(|rt| classify_fn_return_kind(rt))
-            });
+                    .get_function_return_concrete_type(&func_name)
+                    .map(classify_concrete_return_metadata)
+            })
+            .unwrap_or_else(FrameReturnMetadata::unknown);
 
         // Populate FrameDescriptor when (a) every slot's kind is proven
-        // and we have hints/trusted-opcode coverage, OR (b) we have a
-        // Result/Option return-kind that the `op_try_unwrap` None-arm
-        // depends on. Case (b) preserves the §2.7.5.1 "no Unknown
-        // placeholders" invariant by leaving `slots` empty when the
-        // per-slot proof is incomplete — the descriptor still carries
-        // `return_kind` for the opcode-handler discriminator. Per
+        // and we have hints/trusted-opcode coverage, OR (b) we have
+        // return metadata that the `op_try_unwrap` None-arm or ABI
+        // consumers depend on. Case (b) preserves the §2.7.5.1 "no
+        // Unknown placeholders" invariant by leaving `slots` empty when
+        // the per-slot proof is incomplete — the descriptor still
+        // carries return metadata. Per
         // ADR-006 §2.7.5.1, `slots: Vec<NativeKind>` is wire-format and
         // every entry must be proven; an empty vec is the documented
         // "no proven slot info" signal.
@@ -3426,15 +3652,18 @@ impl BytecodeCompiler {
             Some(h) => !h.is_empty() || has_trusted,
             None => false,
         };
-        let needs_descriptor_for_return = return_kind.is_some();
+        let needs_descriptor_for_return = return_metadata.needs_descriptor();
+        // U4-4: V2 typed opcodes in the body force a descriptor (verifier rule).
+        let needs_descriptor_for_v2 = has_v2_typed;
 
-        if needs_descriptor_for_slots || needs_descriptor_for_return {
+        if needs_descriptor_for_slots || needs_descriptor_for_return || needs_descriptor_for_v2 {
             let slots = match &proven_hints {
                 Some(h) if needs_descriptor_for_slots => h.clone(),
                 _ => Vec::new(),
             };
             let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
-            frame.return_kind = return_kind;
+            frame.return_kind = return_metadata.return_kind;
+            frame.return_wrapper = return_metadata.wrapper;
             self.program.functions[func_idx].frame_descriptor = Some(frame);
         }
 
@@ -3452,8 +3681,9 @@ impl BytecodeCompiler {
     /// `NativeKind` from the last compiled expression's tracked type metadata.
     ///
     /// Source of truth (in priority order):
-    ///   1. `self.last_expr_numeric_type` — set by literals, var loads, and
-    ///      arithmetic; reliable signal for primitive numerics.
+    ///   1. the tail expression's one resolved Type (`numeric_type_of`,
+    ///      threaded by the caller) — reliable signal for primitive numerics
+    ///      (U4-4: replaces the deleted `last_expr_numeric_type` register).
     ///   2. `self.last_expr_type_info.storage_hint` — covers Bool, String,
     ///      and any nullable / sub-i64 widths the type-tracker has resolved.
     ///
@@ -3486,18 +3716,41 @@ impl BytecodeCompiler {
     /// boundary, preserving pre-E+4 semantics) — per ADR-006 §2.7.5.1
     /// the deleted `StorageHint::Unknown` sentinel is replaced by
     /// `Option<StorageHint>` at the compiler-tier intermediate state.
+    /// U4-4: extract the trailing expression of a top-level item, if any.
+    /// Used to thread the program's final expression into
+    /// `infer_top_level_return_kind` so the return numeric kind derives from
+    /// the one resolved Type (`numeric_type_of`) rather than the deleted
+    /// `last_expr_numeric_type` register.
+    pub(super) fn top_level_item_tail_expr(
+        item: &shape_ast::ast::Item,
+    ) -> Option<&shape_ast::ast::Expr> {
+        use shape_ast::ast::{Item, Statement};
+        match item {
+            Item::Expression(expr, _) => Some(expr),
+            Item::Statement(Statement::Expression(expr, _), _) => Some(expr),
+            _ => None,
+        }
+    }
+
     pub(super) fn infer_top_level_return_kind_from_item(
         &self,
         item: &shape_ast::ast::Item,
-    ) -> Option<StorageHint> {
+    ) -> shape_ast::error::Result<Option<StorageHint>> {
         use shape_ast::ast::{Expr, Item, Statement};
 
         // Extract the trailing expression of a top-level item, if any.
         let expr: &Expr = match item {
             Item::Expression(expr, _) => expr,
             Item::Statement(Statement::Expression(expr, _), _) => expr,
-            _ => return None,
+            _ => return Ok(None),
         };
+
+        if let Some(kind) = self.exact_top_level_metadata_return_kind_for_expr(
+            "infer_top_level_return_kind_from_item",
+            Some(expr),
+        ) {
+            return Ok(Some(kind));
+        }
 
         // Walk into a call-shape: function-call / qualified-namespace-call
         // expressions are the dominant case for top-level program shapes
@@ -3508,9 +3761,11 @@ impl BytecodeCompiler {
         // but the producer-side check (`last_emitted_native_kind` →
         // `call_native_kind`) inspects the compiled callee body and
         // picks up the typed-return kind directly when the callee uses
-        // `ReturnValue<Kind>` opcodes uniformly.
+        // `ReturnValue<Kind>` opcodes uniformly. Without a structural
+        // `ConcreteType` for the receiver-method expression, though, we do not
+        // stamp a top-level scalar return kind.
         if let Expr::MethodCall { .. } = expr {
-            return self.last_emitted_native_kind();
+            return Ok(None);
         }
 
         // Wave E+5.5 cluster R5: top-level match expressions where every
@@ -3529,7 +3784,7 @@ impl BytecodeCompiler {
         // wrongly promote to Int64 even though the matched arm could
         // be the polymorphic one.
         if let Expr::Match(match_expr, _) = expr {
-            return Self::match_arms_uniform_literal_kind(match_expr);
+            return Ok(Self::match_arms_uniform_literal_kind(match_expr));
         }
 
         let owned_qualified;
@@ -3546,7 +3801,7 @@ impl BytecodeCompiler {
                 owned_qualified = format!("{}::{}", namespace, function);
                 owned_qualified.as_str()
             }
-            _ => return None,
+            _ => return Ok(None),
         };
 
         // Resolve callee return annotation. Try regular function defs
@@ -3561,65 +3816,42 @@ impl BytecodeCompiler {
                     .get(call_name)
                     .and_then(|def| def.return_type.as_ref())
             });
-        let ann = return_ann?;
+        let Some(ann) = return_ann else {
+            return Ok(None);
+        };
 
-        // Map primitive type-annotation names to `NativeKind` (handles
-        // both `Basic("bool")` and `Reference("Bool")`-style entries).
-        // Also resolve through `type_aliases` so a callee declaring a
-        // typed return like `fn make() -> MyInt { 42 }; type MyInt = int`
-        // surfaces the right `NativeKind` on the parallel-kind track at
-        // the host boundary (per ADR-006 §2.7.7 — the deleted
-        // `synthesize_value_word_from_raw` decoder is gone).
-        let name = ann.as_type_name_str()?;
-        let inferred = primitive_type_name_to_storage_hint(name)
-            .or_else(|| {
-                self.type_aliases
-                    .get(name)
-                    .and_then(|aliased| primitive_type_name_to_storage_hint(aliased.as_str()))
-            })
-            .or_else(|| {
-                // Try qualified alias name `<namespace>::<name>` if the
-                // call was qualified — module-scoped `type Alias = int`
-                // is registered as `m::Alias` in the alias map.
-                if let shape_ast::ast::Expr::QualifiedFunctionCall { namespace, .. } = expr {
-                    let q = format!("{}::{}", namespace, name);
-                    self.type_aliases
-                        .get(&q)
-                        .and_then(|aliased| primitive_type_name_to_storage_hint(aliased.as_str()))
-                } else {
-                    None
-                }
-            })?;
+        let Some(proven) =
+            crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, ann,
+            )
+        else {
+            return Ok(None);
+        };
 
-        // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
+        // Producer/return-kind metadata gate (Wave E+5 / task #98 fix,
+        // refined by W83A return-kind repair). Top-level metadata is not a
+        // typed-opcode emission site: a stale walkback kind that contradicts
+        // the structural return annotation means "do not stamp metadata", not
+        // "reject compilation". Real typed `ReturnValue<Kind>` emission still
+        // routes through the strict helper and surfaces proof gaps.
+        //
         // Top-level `name()` calls compile to polymorphic `Call*` opcodes
         // whose pushed kind is the callee's `FrameDescriptor.return_kind`
         // (read off the parallel-kind track at the call site per
         // ADR-006 §2.7.7); `last_emitted_native_kind` returns `None` for
         // these, which correctly steers the program return kind to
-        // `None` rather than overriding the call-site declaration.
-        let native_kind = self.last_emitted_native_kind()?;
-
-        if matches!(
-            inferred,
-            StorageHint::Int8
-                | StorageHint::UInt8
-                | StorageHint::Int16
-                | StorageHint::UInt16
-                | StorageHint::Int32
-                | StorageHint::UInt32
-                | StorageHint::Int64
-                | StorageHint::UInt64
-        ) && native_kind == StorageHint::Int64
-        {
-            return Some(inferred);
-        }
-
-        if native_kind == inferred {
-            Some(inferred)
-        } else {
-            None
-        }
+        // `None` rather than overriding the call-site declaration. When
+        // a producer kind is present, stamp metadata only if the U2 proof
+        // gate confirms exact agreement between the proven static type and
+        // the producer-declared `NativeKind`.
+        let Some(native_kind) = self.last_emitted_native_kind() else {
+            return Ok(None);
+        };
+        Ok(Self::top_level_metadata_return_kind_from_proof(
+            "infer_top_level_return_kind_from_item",
+            &proven,
+            native_kind,
+        ))
     }
 
     /// Wave E+5.5 cluster R5: examine each arm of a top-level match
@@ -3687,90 +3919,24 @@ impl BytecodeCompiler {
         uniform
     }
 
-    pub(super) fn infer_top_level_return_kind(&self) -> Option<StorageHint> {
-        // Inferred kind from compile-time numeric / type-info tracking.
-        // This is the *intended* program return kind. We must still verify
-        // the producer-side stack discipline matches before declaring it
-        // (see `last_emitted_native_kind` and the gating below). Per
-        // ADR-006 §2.7.5.1, "kind not yet proven" is carried as `None`.
-        let inferred: StorageHint = self
-            .last_expr_numeric_type
-            .and_then(|nt| match nt {
-                crate::type_tracking::NumericType::Number => Some(StorageHint::Float64),
-                crate::type_tracking::NumericType::Int => Some(StorageHint::Int64),
-                crate::type_tracking::NumericType::IntWidth(w) => {
-                    use shape_ast::IntWidth;
-                    Some(match w {
-                        IntWidth::I8 => StorageHint::Int8,
-                        IntWidth::U8 => StorageHint::UInt8,
-                        IntWidth::I16 => StorageHint::Int16,
-                        IntWidth::U16 => StorageHint::UInt16,
-                        IntWidth::I32 => StorageHint::Int32,
-                        IntWidth::U32 => StorageHint::UInt32,
-                        IntWidth::U64 => StorageHint::UInt64,
-                    })
-                }
-                // Decimal isn't a `NativeKind` variant — fall through to
-                // None so synthesis stays in passthrough.
-                crate::type_tracking::NumericType::Decimal => None,
-            })
-            .or_else(|| {
-                // Post-§2.7.5.1: `info.storage_hint` is itself
-                // `Option<StorageHint>`, so `.and_then(|info| info.storage_hint)`
-                // collapses both Option layers.
-                self.last_expr_type_info
-                    .as_ref()
-                    .and_then(|info| info.storage_hint)
-            })?;
-
-        // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
-        //
-        // Many expression compilers (property access, method/function call,
-        // typed-object construction, …) propagate `last_expr_numeric_type`
-        // from the AST-level type so binary-op typed dispatch (`MulInt`
-        // etc.) still emits the right opcode for them. But the producer
-        // opcodes for those expressions remain polymorphic — they declare
-        // a `NativeKind` on the parallel-kind track at push time per
-        // ADR-006 §2.7.7 (the deleted ValueWord-tagged transport is gone),
-        // and that kind may not match the AST-inferred kind. Overriding
-        // `top_level_frame.return_kind` for such producers would steer
-        // the host boundary away from the producer-declared kind.
-        //
-        // We only declare the kind when the LAST emitted opcode is on the
-        // known raw-native producer list. Otherwise we fall through to
-        // `None` so the host boundary reads the producer-declared kind
-        // off the parallel-kind track unchanged.
-        let native_kind = self.last_emitted_native_kind()?;
-
-        // Width-aware check: if the inferred kind is a sub-i64 width
-        // (Int8/U8/…/U32) and the producer is `Int64` (the catch-all for
-        // all integer arithmetic / load opcodes), prefer the inferred
-        // narrow kind. The synthesizer reads raw i64 bits identically for
-        // all signed-int widths, so this is safe.
-        if matches!(
-            inferred,
-            StorageHint::Int8
-                | StorageHint::UInt8
-                | StorageHint::Int16
-                | StorageHint::UInt16
-                | StorageHint::Int32
-                | StorageHint::UInt32
-                | StorageHint::Int64
-                | StorageHint::UInt64
-        ) && native_kind == StorageHint::Int64
-        {
-            return Some(inferred);
-        }
-
-        if native_kind == inferred {
-            Some(inferred)
-        } else {
-            None
-        }
+    pub(super) fn infer_top_level_return_kind(
+        &mut self,
+        tail_expr: Option<&shape_ast::ast::Expr>,
+    ) -> shape_ast::error::Result<Option<StorageHint>> {
+        // A stamped top-level return kind requires the final expression's
+        // structural `ConcreteType` plus an exact producer-kind proof. When the
+        // producer walkback is stale or non-authoritative, proof gaps collapse
+        // to `None` so the host boundary uses the stack's parallel-kind track
+        // instead of rejecting compilation. Typed `ReturnValue<Kind>` emission
+        // keeps the strict hard-error policy via `exact_scalar_return_kind_for_expr`.
+        Ok(self.exact_top_level_metadata_return_kind_for_expr(
+            "infer_top_level_return_kind",
+            tail_expr,
+        ))
     }
 
     /// Populate program-level storage hints for top-level locals and module bindings.
-    pub(super) fn populate_program_storage_hints(&mut self) {
+    pub(super) fn populate_program_storage_hints(&mut self) -> shape_ast::error::Result<()> {
         // Per ADR-006 §2.7.5.1, the compiler-tier intermediate state is
         // `Option<StorageHint>`. The wire-format `top_level_local_storage_hints`
         // (and `FrameDescriptor.slots`) is `Vec<NativeKind>` — every slot
@@ -3799,9 +3965,14 @@ impl BytecodeCompiler {
         // post-Unit-A/B native arithmetic flip.
         //
         // Per ADR-006 §2.7.5.1, "kind not yet stamped" is `None`.
-        let return_kind: Option<StorageHint> = self
-            .top_level_program_return_kind
-            .or_else(|| self.infer_top_level_return_kind());
+        // U4-4: the primary capture (compiler_impl_reference_model.rs) already
+        // threaded the program's tail expr through `infer_top_level_return_kind`.
+        // This secondary fallback has no tail expr in hand → `None`; it relies
+        // on `last_expr_type_info` + the producer-opcode kind gate.
+        let return_kind: Option<StorageHint> = match self.top_level_program_return_kind {
+            Some(kind) => Some(kind),
+            None => self.infer_top_level_return_kind(None)?,
+        };
         let has_trusted = self
             .program
             .instructions
@@ -3820,7 +3991,6 @@ impl BytecodeCompiler {
             frame.return_kind = return_kind;
             self.program.top_level_frame = Some(frame);
         }
-
 
         // Per ADR-006 §2.7.5.1, the wire-format
         // `module_binding_storage_hints: Vec<NativeKind>` requires every
@@ -3843,6 +4013,7 @@ impl BytecodeCompiler {
                 .function_local_storage_hints
                 .truncate(self.program.functions.len());
         }
+        Ok(())
     }
 
     /// Propagate the current expression's inferred type metadata to a target slot.
@@ -3854,6 +4025,14 @@ impl BytecodeCompiler {
         slot: u16,
         is_local: bool,
         allow_number_hint: bool,
+        // U4-4: the value expression whose type is being stamped onto `slot`.
+        // Its NumericType is derived from the one resolved Type
+        // (`numeric_type_of` → `infer_expr_type`), replacing the deleted
+        // ambient `last_expr_numeric_type` register. `None` at call sites
+        // where no single value expr is available (e.g. destructure / match
+        // scrutinee bindings) — those fall back to `last_expr_type_info`,
+        // exactly as before for non-numeric carriers.
+        value_expr: Option<&shape_ast::ast::Expr>,
     ) {
         if let Some(ref info) = self.last_expr_type_info {
             if info.is_indexed()
@@ -3914,7 +4093,7 @@ impl BytecodeCompiler {
             return;
         }
 
-        if let Some(numeric_type) = self.last_expr_numeric_type {
+        if let Some(numeric_type) = value_expr.and_then(|e| self.numeric_type_of(e)) {
             let (type_name, hint) = match numeric_type {
                 crate::type_tracking::NumericType::Int => ("int", StorageHint::Int64),
                 crate::type_tracking::NumericType::IntWidth(w) => {
@@ -3977,12 +4156,16 @@ impl BytecodeCompiler {
     /// Propagate current expression type metadata to an identifier target.
     ///
     /// Reference locals are skipped because assignment writes through to a pointee.
-    pub(super) fn propagate_assignment_type_to_identifier(&mut self, name: &str) {
+    pub(super) fn propagate_assignment_type_to_identifier(
+        &mut self,
+        name: &str,
+        value_expr: Option<&shape_ast::ast::Expr>,
+    ) {
         if let Some(local_idx) = self.resolve_local(name) {
             if self.local_binding_is_reference_value(local_idx) {
                 return;
             }
-            self.propagate_assignment_type_to_slot(local_idx, true, true);
+            self.propagate_assignment_type_to_slot(local_idx, true, true, value_expr);
             return;
         }
 
@@ -3990,10 +4173,116 @@ impl BytecodeCompiler {
             .resolve_scoped_module_binding_name(name)
             .unwrap_or_else(|| name.to_string());
         let binding_idx = self.get_or_create_module_binding(&scoped_name);
-        self.propagate_assignment_type_to_slot(binding_idx, false, true);
+        self.propagate_assignment_type_to_slot(binding_idx, false, true, value_expr);
     }
 
-    /// Get the type tracker (for external configuration)
+    /// T1 sub-case (a) (strict-flip, 2026-06-20): record the whole-binding
+    /// `ConcreteType::Array(elem)` of an array accumulator `name` from the value pushed into
+    /// it (`name = name.push(value)`), so a later `name[i].field + 1`
+    /// (struct-array element field read in arithmetic) can prove the element —
+    /// and hence the field — type. The unannotated `let mut rs = []` records no
+    /// element type at the let site; this fills it in from the FIRST pushed
+    /// value's producer-side proof (`concrete_type_for_expr`), the same proof
+    /// the annotated `let mut rs: Array<Run> = []` path already records via
+    /// `declared_annotation_concrete_type`. The whole-binding `Array(elem)` +
+    /// the `Vec<elem>` tracker name are what `identifier_concrete_type` and
+    /// `tracker_schema_id_for_expr` consult.
+    ///
+    /// Best-effort: an unprovable pushed value records nothing (surface-and-stop
+    /// preserved). Never overwrites an existing recorded element type (the
+    /// annotated path already won; a subsequent push of the same kind is a
+    /// no-op, and we do NOT let a differently-typed push silently re-stamp).
+    /// PER-SITE-ARM, int != number preserved (the element kind is the pushed
+    /// value's own proven kind, never widened).
+    pub(super) fn record_pushed_element_concrete_type(
+        &mut self,
+        name: &str,
+        pushed: &shape_ast::ast::Expr,
+    ) {
+        let elem_ct =
+            match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, pushed,
+            ) {
+                Some(ct) => ct,
+                None => return,
+            };
+        let tracker_name = crate::compiler::patterns::binding::concrete_type_tracker_name(&elem_ct)
+            .map(|inner| format!("Vec<{inner}>"));
+        // The empty-array accumulator finalizer may already have stamped a
+        // NAME-LESS placeholder struct element (`Struct(name: None)`) from the
+        // first-push lowering. A placeholder erases the source-level struct
+        // identity, so a `rs[0].len` field read can't resolve. Overwrite with
+        // our NAMED element ConcreteType — strictly more informative — rather
+        // than leaving the placeholder in place (the named struct IS the proof,
+        // ADR-006 §2.7.5). For a non-named element we keep the existing entry.
+        use shape_value::v2::ConcreteType;
+        let more_informative = elem_ct_carries_name(&elem_ct);
+        // Whether an existing `Array(_)` binding fact should be upgraded: it is
+        // a name-less placeholder struct/enum array from an already-proven
+        // non-empty source and our element carries a name. A missing fact is
+        // not a proof source, and an `EmptyArrayAccumulator` fact is only a
+        // carrier proof for an unannotated `[]` first push; it must not become
+        // a named element proof for field reads.
+        let should_record_array =
+            |existing: Option<&crate::compiler::BindingConcreteFact>| -> bool {
+                match existing {
+                    None => false,
+                    Some(fact)
+                        if matches!(
+                            fact.source,
+                            crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator
+                        ) =>
+                    {
+                        false
+                    }
+                    Some(fact) => match &fact.concrete_type {
+                        ConcreteType::Array(existing_elem) => {
+                            more_informative && !elem_ct_carries_name(existing_elem)
+                        }
+                        _ => false,
+                    },
+                }
+            };
+        if let Some(local_idx) = self.resolve_local(name) {
+            let should_record =
+                should_record_array(self.current_function_local_concrete_facts.get(&local_idx));
+            if should_record {
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                    ConcreteType::Array(Box::new(elem_ct.clone())),
+                    crate::compiler::BindingConcreteFactSource::ArrayPushElement,
+                );
+            }
+            if should_record {
+                if let Some(ref tn) = tracker_name {
+                    self.set_local_type_info(local_idx, tn);
+                }
+            }
+            return;
+        }
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+            let should_record =
+                should_record_array(self.module_binding_concrete_facts.get(&binding_idx));
+            if should_record {
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                    ConcreteType::Array(Box::new(elem_ct.clone())),
+                    crate::compiler::BindingConcreteFactSource::ArrayPushElement,
+                );
+            }
+            if should_record {
+                if let Some(ref tn) = tracker_name {
+                    self.set_module_binding_type_info(binding_idx, tn);
+                }
+            }
+        }
+    }
+
     /// Resolve a local namespace name to its canonical module path.
     ///
     /// Checks `graph_namespace_map` first (populated by graph-driven compilation),
@@ -4003,6 +4292,34 @@ impl BytecodeCompiler {
             .get(local_name)
             .or_else(|| self.module_scope_sources.get(local_name))
             .cloned()
+    }
+
+    /// Privacy gate for namespace-qualified calls (`module::member(..)`).
+    ///
+    /// A namespace call may only reach a Shape-source dependency function when
+    /// `member` is in that module's PUBLIC interface (`pub fn` / `pub`
+    /// re-export). The compiled function table (`find_function`) is name-keyed
+    /// and contains every dep function — public AND private — under its
+    /// canonical path, so routing on `find_function` alone over-exposes
+    /// non-`pub` functions (e.g. `util::secret(..)`). The module graph's
+    /// `interface.exports` is built from `collect_exported_symbols`, which only
+    /// walks `Item::Export`, so it is the authoritative privacy boundary.
+    ///
+    /// Returns:
+    ///   * `Some(true)`  — `member` is a public export of `canonical_module`.
+    ///   * `Some(false)` — the module is known to the graph but `member` is NOT
+    ///     a public export (private fn / type / nonexistent) → caller must NOT
+    ///     route through the compiled function table.
+    ///   * `None`        — the module is not in the graph (legacy AST-inlining
+    ///     path or native module); caller preserves prior resolution behavior.
+    pub(crate) fn module_member_is_exported(
+        &self,
+        canonical_module: &str,
+        member: &str,
+    ) -> Option<bool> {
+        let graph = self.module_graph.as_ref()?;
+        let id = graph.id_for_path(canonical_module)?;
+        Some(graph.node(id).interface.exports.contains_key(member))
     }
 
     pub fn type_tracker(&self) -> &TypeTracker {
@@ -4192,22 +4509,25 @@ impl BytecodeCompiler {
     /// Resolve the receiver's type name for extend method dispatch.
     ///
     /// Determines the Shape type name from all available compiler state:
+    /// - the receiver's one resolved Type (`numeric_type_of`) for numeric
+    ///   receivers → "Int", "Number", "Decimal" (U4-4: replaces the deleted
+    ///   `last_expr_numeric_type` register)
     /// - `last_expr_type_info.type_name` for TypedObjects (e.g., "Point", "Candle")
-    /// - `last_expr_numeric_type` for numeric types → "Int", "Number", "Decimal"
     /// - Receiver expression analysis for arrays, strings, booleans
     ///
     /// Returns the base type name (e.g., "Vec" not "Vec<int>") suitable for
     /// extend method lookup as "Type.method".
     pub(super) fn resolve_receiver_extend_type(
-        &self,
+        &mut self,
         receiver: &shape_ast::ast::Expr,
         receiver_type_info: &Option<crate::type_tracking::VariableTypeInfo>,
         _receiver_schema: Option<u32>,
     ) -> Option<String> {
-        // 1. Numeric type from typed opcode tracking — checked first because
-        //    the type tracker stores lowercase names ("int", "number") while
-        //    extend blocks use capitalized TypeName ("Int", "Number", "Decimal").
-        if let Some(numeric) = self.last_expr_numeric_type {
+        // 1. Numeric type from the receiver's resolved Type — checked first
+        //    because the type tracker stores lowercase names ("int", "number")
+        //    while extend blocks use capitalized TypeName ("Int", "Number",
+        //    "Decimal").
+        if let Some(numeric) = self.numeric_type_of(receiver) {
             return Some(
                 match numeric {
                     crate::type_tracking::NumericType::Int
@@ -4219,16 +4539,48 @@ impl BytecodeCompiler {
             );
         }
 
-        // 2. TypedObject type name (user-defined types like Point, Candle)
+        // 2. Static concrete return proof for nested method-call receivers.
+        // A successful extend-method specialization records its substituted
+        // return annotation at the call site; consume that compile-time proof
+        // here so chained calls like `x.add(1).multiply(2)` keep resolving via
+        // direct UFCS instead of falling through to runtime method dispatch.
+        if let Some(concrete) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, receiver,
+            )
+        {
+            use shape_value::v2::ConcreteType;
+            let receiver_name = match concrete {
+                ConcreteType::F64 | ConcreteType::F32 => Some("Number"),
+                ConcreteType::I64
+                | ConcreteType::I32
+                | ConcreteType::I16
+                | ConcreteType::I8
+                | ConcreteType::U64
+                | ConcreteType::U32
+                | ConcreteType::U16
+                | ConcreteType::U8 => Some("Int"),
+                ConcreteType::Bool => Some("Bool"),
+                ConcreteType::String => Some("String"),
+                ConcreteType::Decimal => Some("Decimal"),
+                ConcreteType::Array(_) => Some("Vec"),
+                _ => None,
+            };
+            if let Some(receiver_name) = receiver_name {
+                return Some(receiver_name.to_string());
+            }
+        }
+
+        // 3. TypedObject type name (user-defined types like Point, Candle)
         if let Some(info) = receiver_type_info {
             if let Some(type_name) = &info.type_name {
                 // Strip generic params: "Vec<int>" → "Vec"
                 let base = type_name.split('<').next().unwrap_or(type_name);
-                return Some(base.to_string());
+                return Some(Self::extend_receiver_symbol_name(base).to_string());
             }
         }
 
-        // 3. Infer from receiver expression shape
+        // 4. Infer from receiver expression shape
         match receiver {
             shape_ast::ast::Expr::Literal(lit, _) => match lit {
                 shape_ast::ast::Literal::String(_)
@@ -4238,6 +4590,23 @@ impl BytecodeCompiler {
             },
             shape_ast::ast::Expr::Array(..) => Some("Vec".to_string()),
             _ => None,
+        }
+    }
+
+    fn extend_receiver_symbol_name(type_name: &str) -> &str {
+        // The type tracker stores builtin scalar aliases in script form
+        // (`string`, `bool`, ...), while extend functions are registered from
+        // source TypeName syntax (`String.echo`, `Bool.foo`). Normalize before
+        // static UFCS lookup so proven receivers do not fall through to runtime
+        // method dispatch.
+        match type_name {
+            "string" => "String",
+            "bool" => "Bool",
+            "int" => "Int",
+            "number" => "Number",
+            "decimal" => "Decimal",
+            "Array" => "Vec",
+            other => other,
         }
     }
 
@@ -4650,6 +5019,8 @@ impl BytecodeCompiler {
                 | BuiltinFunction::ErrCtor
                 | BuiltinFunction::HashMapCtor
                 | BuiltinFunction::SetCtor
+                | BuiltinFunction::SetCtorString
+                | BuiltinFunction::SetCtorI64
                 | BuiltinFunction::DequeCtor
                 | BuiltinFunction::PriorityQueueCtor
                 | BuiltinFunction::MutexCtor
@@ -4809,6 +5180,8 @@ impl BytecodeCompiler {
             "toUpperCase" | "toLowerCase" | "trim" | "contains" | "startsWith"
             | "endsWith" | "split" | "replace" | "substring" | "charAt"
             | "padStart" | "padEnd" | "repeat" | "toString"
+            // snake_case aliases (book strings.mdx §Methods)
+            | "to_upper_case" | "to_lower_case" | "trim_start" | "trim_end"
         )
         // Object methods handled by handle_object_method
         || matches!(method, "keys" | "values" | "has" | "get" | "set" | "len")
@@ -4951,18 +5324,19 @@ impl BytecodeCompiler {
     /// Determine the appropriate LoadCol opcode for a RowView field.
     ///
     /// Looks up the field's FieldType and maps it to the corresponding opcode.
-    /// Falls back to LoadColF64 if the type can't be determined.
-    pub(super) fn row_view_field_opcode(&self, var_name: &str, field_name: &str) -> OpCode {
+    /// Returns a compile-time error when the schema proof is absent or the
+    /// field type has no typed column-load opcode.
+    pub(super) fn row_view_field_opcode(&self, var_name: &str, field_name: &str) -> Result<OpCode> {
         use shape_runtime::type_schema::FieldType;
 
         let type_name = if let Some(local_idx) = self.resolve_local(var_name) {
             self.type_tracker
                 .get_local_type(local_idx)
-                .and_then(|info| info.type_name.clone())
+                .and_then(|info| info.is_row_view().then(|| info.type_name.clone()).flatten())
         } else if let Some(&binding_idx) = self.module_bindings.get(var_name) {
             self.type_tracker
                 .get_binding_type(binding_idx)
-                .and_then(|info| info.type_name.clone())
+                .and_then(|info| info.is_row_view().then(|| info.type_name.clone()).flatten())
         } else {
             None
         };
@@ -4970,54 +5344,51 @@ impl BytecodeCompiler {
         if let Some(type_name) = type_name {
             if let Some(schema) = self.type_tracker.schema_registry().get(&type_name) {
                 if let Some(field) = schema.get_field(field_name) {
-                    return match field.field_type {
+                    return Ok(match &field.field_type {
                         FieldType::F64 => OpCode::LoadColF64,
                         FieldType::I64 | FieldType::Timestamp => OpCode::LoadColI64,
                         FieldType::Bool => OpCode::LoadColBool,
                         FieldType::String => OpCode::LoadColStr,
-                        _ => OpCode::LoadColF64, // default
-                    };
+                        unsupported => {
+                            return Err(ShapeError::SemanticError {
+                                message: format!(
+                                    "Field '{}' on Row<{}> has unsupported column load type '{}'",
+                                    field_name, type_name, unsupported
+                                ),
+                                location: None,
+                            });
+                        }
+                    });
                 }
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Field '{}' does not exist on Row<{}>",
+                        field_name, type_name
+                    ),
+                    location: None,
+                });
             }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot prove RowView field '{}' because schema '{}' is not registered",
+                    field_name, type_name
+                ),
+                location: None,
+            });
         }
-        OpCode::LoadColF64 // default
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Cannot prove RowView field '{}' because '{}' has no RowView schema type",
+                field_name, var_name
+            ),
+            location: None,
+        })
     }
 
-    /// Resolve the NumericType for a RowView field (used for typed opcode emission).
-    pub(super) fn resolve_row_view_field_numeric_type(
-        &self,
-        var_name: &str,
-        field_name: &str,
-    ) -> Option<crate::type_tracking::NumericType> {
-        use crate::type_tracking::NumericType;
-        use shape_runtime::type_schema::FieldType;
-
-        let type_name = if let Some(local_idx) = self.resolve_local(var_name) {
-            self.type_tracker
-                .get_local_type(local_idx)
-                .and_then(|info| info.type_name.clone())
-        } else if let Some(&binding_idx) = self.module_bindings.get(var_name) {
-            self.type_tracker
-                .get_binding_type(binding_idx)
-                .and_then(|info| info.type_name.clone())
-        } else {
-            None
-        };
-
-        if let Some(type_name) = type_name {
-            if let Some(schema) = self.type_tracker.schema_registry().get(&type_name) {
-                if let Some(field) = schema.get_field(field_name) {
-                    return match field.field_type {
-                        FieldType::F64 => Some(NumericType::Number),
-                        FieldType::I64 | FieldType::Timestamp => Some(NumericType::Int),
-                        FieldType::Decimal => Some(NumericType::Decimal),
-                        _ => None,
-                    };
-                }
-            }
-        }
-        None
-    }
+    // U4-4: `resolve_row_view_field_numeric_type` is DELETED — it projected a
+    // RowView field's schema type to a `NumericType` only to stamp the deleted
+    // `last_expr_numeric_type` register. A downstream binop on a row-view field
+    // read derives the operand kind from the one resolved Type.
 
     /// Convert a TypeAnnotation to a FieldType for TypeSchema registration.
     ///
@@ -5075,6 +5446,12 @@ impl BytecodeCompiler {
                 other => FieldType::Object(other.to_string()),
             },
             TypeAnnotation::Reference(s) => FieldType::Object(s.to_string()),
+            // Borrow `&T` / `&mut T` (R1) — references are not yet valid
+            // struct-field slot storage (escape semantics land in R2/R3).
+            // Intermediate-tier Any with the post_inference_verify E0900
+            // safety net, same disposition as the other non-storage arms
+            // below per audit §4.D.8 explicit-per-variant discipline.
+            TypeAnnotation::Borrow { .. } => FieldType::Any,
             TypeAnnotation::Array(inner) => {
                 FieldType::Array(Box::new(Self::type_annotation_to_field_type(inner)))
             }
@@ -5084,9 +5461,9 @@ impl BytecodeCompiler {
                 // (W17.2-B close commit e316e171). Single-arg shape only;
                 // malformed Option<...> annotations route through the
                 // residual TRANSITIONAL fallback below.
-                "Option" if args.len() == 1 => FieldType::Option(Box::new(
-                    Self::type_annotation_to_field_type(&args[0]),
-                )),
+                "Option" if args.len() == 1 => {
+                    FieldType::Option(Box::new(Self::type_annotation_to_field_type(&args[0])))
+                }
                 // W17.3-4.1 (v0.3 Round 7, supervisor ratify 2026-05-22):
                 // HashMap<K, V> and Map<K, V> PROPAGATE through the
                 // `FieldType::HashMap { key, value }` variant introduced
@@ -5107,9 +5484,9 @@ impl BytecodeCompiler {
                 // 1. Slot storage points to `HeapKind::HashSet` (ordinal
                 // 21 — Wave 13 W13-hashset-rebuild, already at HEAD; the
                 // audit §6.A surface-and-stop is stale — HashSet exists).
-                "Set" if args.len() == 1 => FieldType::Set(Box::new(
-                    Self::type_annotation_to_field_type(&args[0]),
-                )),
+                "Set" if args.len() == 1 => {
+                    FieldType::Set(Box::new(Self::type_annotation_to_field_type(&args[0])))
+                }
                 // §4.D.7 RESIDUAL TRANSITIONAL fallback per §9.B.3
                 // supervisor ratify 2026-05-19. `Result<T, E>` continues
                 // to lower to `FieldType::Any` pending its own per-
@@ -5461,6 +5838,23 @@ impl BytecodeCompiler {
 
     /// Emit drops for all scopes being exited (used by return/break/continue).
     /// `scopes_to_exit` is the number of drop scopes to emit drops for.
+    /// True when at least one in-scope `DropCall`-tracked local (any active
+    /// drop scope) is a Drop-bearing local OTHER than `skip_local`. Drives
+    /// the `?` lowering's failure-path drop branch: if there is nothing to
+    /// release on the Err/None short-circuit, we skip the
+    /// `Dup; IsTryFailure; JumpIfFalse; ...` guard entirely and emit a bare
+    /// `TryUnwrap` (byte-identical to the pre-fix lowering).
+    ///
+    /// `self.drop_locals` holds exactly the user-`impl Drop` slots that
+    /// `emit_drops_for_early_exit` would emit a `DropCall` for (the
+    /// `track_drop_local` push happens only for Drop-bearing bindings).
+    pub(super) fn has_failure_drop_locals(&self, skip_local: Option<u16>) -> bool {
+        self.drop_locals
+            .iter()
+            .flatten()
+            .any(|&(local_idx, _)| Some(local_idx) != skip_local)
+    }
+
     pub(super) fn emit_drops_for_early_exit(&mut self, scopes_to_exit: usize) -> Result<()> {
         let total = self.drop_locals.len();
         if scopes_to_exit > total {
@@ -5547,6 +5941,15 @@ impl BytecodeCompiler {
         // Now emit DropCall instructions
         for locals in scopes {
             for (local_idx, is_async) in locals.into_iter().rev() {
+                // ADR-006 §2.7.30 (escape-Drop-deferral): skip the local
+                // being returned by-value (`return r`) — its `Drop`
+                // ownership moves to the caller; a `DropCall` here would run
+                // the user `Drop::drop` body a second time (bind-then-return
+                // double-drop). Set/cleared around the return's drop-emission
+                // in the `Statement::Return` arm.
+                if self.return_escape_drop_skip_local == Some(local_idx) {
+                    continue;
+                }
                 self.emit_drop_call_for_local(local_idx, is_async);
             }
         }
@@ -5632,9 +6035,7 @@ pub(crate) fn owned_mutable_typed_store_opcode(
 /// (recorded in `shared_capture_inner_kinds`) instead of the legacy
 /// polymorphic `LoadSharedCapture` (0x134).
 #[inline]
-pub(crate) fn shared_typed_load_opcode(
-    kind: shape_value::v2::struct_layout::FieldKind,
-) -> OpCode {
+pub(crate) fn shared_typed_load_opcode(kind: shape_value::v2::struct_layout::FieldKind) -> OpCode {
     use shape_value::v2::struct_layout::FieldKind;
     match kind {
         FieldKind::I64 => OpCode::LoadSharedCaptureI64,
@@ -5655,9 +6056,7 @@ pub(crate) fn shared_typed_load_opcode(
 /// `StoreSharedCapture<Kind>` opcode (D.2 codes 0x161-0x16B). Mirrors
 /// `owned_mutable_typed_store_opcode`.
 #[inline]
-pub(crate) fn shared_typed_store_opcode(
-    kind: shape_value::v2::struct_layout::FieldKind,
-) -> OpCode {
+pub(crate) fn shared_typed_store_opcode(kind: shape_value::v2::struct_layout::FieldKind) -> OpCode {
     use shape_value::v2::struct_layout::FieldKind;
     match kind {
         FieldKind::I64 => OpCode::StoreSharedCaptureI64,
@@ -5883,6 +6282,7 @@ pub(crate) mod typed_emit_metrics {
 
     /// Snapshot the per-category counters. Sorted by category. Used by
     /// Wave E+4 tests and Wave G's cleanup audit.
+    #[allow(dead_code)]
     pub fn snapshot() -> Vec<(&'static str, u64)> {
         let counters = CATEGORY_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
         let g = counters.lock().expect("typed_emit_metrics lock poisoned");
@@ -5895,15 +6295,19 @@ pub(crate) mod typed_emit_metrics {
     /// (category, hint). Useful for "what hints are driving the residual
     /// fallback" — `Dynamic`/`Unknown` are genuinely-unproven, anything
     /// else suggests a design gap.
+    #[allow(dead_code)]
     pub fn snapshot_joint() -> Vec<((&'static str, &'static str), u64)> {
         let counters = JOINT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
-        let g = counters.lock().expect("typed_emit_metrics joint lock poisoned");
+        let g = counters
+            .lock()
+            .expect("typed_emit_metrics joint lock poisoned");
         let mut v: Vec<_> = g.iter().map(|(k, v)| (*k, *v)).collect();
         v.sort_by_key(|(k, _)| *k);
         v
     }
 
     /// Reset both counters for use across test iterations.
+    #[allow(dead_code)]
     pub fn reset() {
         let cat = CATEGORY_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
         if let Ok(mut g) = cat.lock() {
@@ -6008,6 +6412,7 @@ pub(crate) fn typed_store_local_opcode(hint: StorageHint) -> Option<OpCode> {
 /// Map a `StorageHint` to its typed `LoadModuleBinding<Kind>` opcode
 /// (E+3 codes 0x182-0x18C). Returns `None` for unproven hints.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn typed_load_module_binding_opcode(hint: StorageHint) -> Option<OpCode> {
     use shape_value::v2::struct_layout::FieldKind;
     Some(match storage_hint_to_field_kind(hint)? {
@@ -6028,6 +6433,7 @@ pub(crate) fn typed_load_module_binding_opcode(hint: StorageHint) -> Option<OpCo
 /// Map a `StorageHint` to its typed `StoreModuleBinding<Kind>` opcode
 /// (E+3 codes 0x18D-0x197). Returns `None` for unproven hints.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn typed_store_module_binding_opcode(hint: StorageHint) -> Option<OpCode> {
     use shape_value::v2::struct_layout::FieldKind;
     Some(match storage_hint_to_field_kind(hint)? {
@@ -6113,6 +6519,7 @@ impl BytecodeCompiler {
     /// proven `StorageHint` maps to a `FieldKind`, otherwise fall back to
     /// the polymorphic legacy `LoadModuleBinding` (0x52). Per-Ptr ownership
     /// rules mirror `emit_load_local_for_hint`.
+    #[allow(dead_code)]
     pub(super) fn emit_load_module_binding_for_hint(
         &mut self,
         binding_idx: u16,
@@ -6132,6 +6539,7 @@ impl BytecodeCompiler {
     /// proven `StorageHint` maps to a `FieldKind`, otherwise fall back to
     /// the polymorphic legacy `StoreModuleBinding` (0x53). Per-Ptr
     /// ownership rules mirror `emit_store_local_for_hint`.
+    #[allow(dead_code)]
     pub(super) fn emit_store_module_binding_for_hint(
         &mut self,
         binding_idx: u16,
@@ -6182,10 +6590,50 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use super::super::BytecodeCompiler;
+    use crate::bytecode::{Instruction, NumericWidth, OpCode, Operand};
     use crate::compiler::ParamPassMode;
-    use crate::type_tracking::BindingStorageClass;
-    use shape_ast::ast::{Expr, Span, TypeAnnotation};
-    use shape_runtime::type_schema::FieldType;
+    use crate::type_tracking::{BindingStorageClass, StorageHint, VariableTypeInfo};
+    use shape_ast::IntWidth;
+    use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
+    use shape_runtime::type_schema::{FieldType, TypeSchemaBuilder};
+
+    #[test]
+    fn compact_typed_arithmetic_walkback_preserves_width() {
+        let cases = [
+            (NumericWidth::I8, IntWidth::I8, StorageHint::Int8),
+            (NumericWidth::I16, IntWidth::I16, StorageHint::Int16),
+            (NumericWidth::I32, IntWidth::I32, StorageHint::Int32),
+            (NumericWidth::U8, IntWidth::U8, StorageHint::UInt8),
+            (NumericWidth::U16, IntWidth::U16, StorageHint::UInt16),
+            (NumericWidth::U32, IntWidth::U32, StorageHint::UInt32),
+            (NumericWidth::U64, IntWidth::U64, StorageHint::UInt64),
+        ];
+
+        for (width, int_width, expected) in cases {
+            let span = Span::new(30, 31);
+            let mut compiler = BytecodeCompiler::new();
+            compiler.program.instructions.push(Instruction::new(
+                OpCode::AddTyped,
+                Some(Operand::Width(width)),
+            ));
+            let expr = Expr::BinaryOp {
+                left: Box::new(Expr::Literal(Literal::TypedInt(1, int_width), span)),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal(Literal::TypedInt(2, int_width), span)),
+                span,
+            };
+            assert_eq!(
+                compiler
+                    .exact_scalar_return_kind_for_expr(
+                        "test_compact_typed_arithmetic_return",
+                        Some(&expr),
+                    )
+                    .unwrap(),
+                Some(expected),
+                "{width:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_type_annotation_to_field_type_array_recursive() {
@@ -6223,7 +6671,11 @@ mod tests {
             ],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_ne!(ft, FieldType::Any, "HashMap<string,int> must resolve structurally");
+        assert_ne!(
+            ft,
+            FieldType::Any,
+            "HashMap<string,int> must resolve structurally"
+        );
     }
 
     #[test]
@@ -6234,6 +6686,77 @@ mod tests {
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_eq!(ft, FieldType::Object("MyContainer".to_string()));
+    }
+
+    #[test]
+    fn row_view_field_opcode_maps_supported_schema_types() {
+        let mut compiler = BytecodeCompiler::new();
+        let schema_id = TypeSchemaBuilder::new("Candle")
+            .f64_field("open")
+            .i64_field("volume")
+            .timestamp_field("ts")
+            .bool_field("active")
+            .string_field("symbol")
+            .register(compiler.type_tracker.schema_registry_mut());
+        let slot = compiler.declare_local("row").unwrap();
+        compiler
+            .type_tracker
+            .set_local_type(slot, VariableTypeInfo::row_view(schema_id, "Candle".into()));
+
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "open").unwrap(),
+            OpCode::LoadColF64
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "volume").unwrap(),
+            OpCode::LoadColI64
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "ts").unwrap(),
+            OpCode::LoadColI64
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "active").unwrap(),
+            OpCode::LoadColBool
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "symbol").unwrap(),
+            OpCode::LoadColStr
+        );
+    }
+
+    #[test]
+    fn row_view_field_opcode_rejects_unsupported_schema_type() {
+        let mut compiler = BytecodeCompiler::new();
+        let schema_id = TypeSchemaBuilder::new("Trade")
+            .decimal_field("amount")
+            .register(compiler.type_tracker.schema_registry_mut());
+        let slot = compiler.declare_local("row").unwrap();
+        compiler
+            .type_tracker
+            .set_local_type(slot, VariableTypeInfo::row_view(schema_id, "Trade".into()));
+
+        let err = compiler.row_view_field_opcode("row", "amount").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("amount"), "{message}");
+        assert!(message.contains("Row<Trade>"), "{message}");
+        assert!(message.contains("decimal"), "{message}");
+    }
+
+    #[test]
+    fn row_view_field_opcode_rejects_missing_schema_proof() {
+        let mut compiler = BytecodeCompiler::new();
+        let slot = compiler.declare_local("row").unwrap();
+        compiler.type_tracker.set_local_type(
+            slot,
+            VariableTypeInfo::row_view(999_999, "MissingSchema".into()),
+        );
+
+        let err = compiler.row_view_field_opcode("row", "value").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("value"), "{message}");
+        assert!(message.contains("MissingSchema"), "{message}");
+        assert!(message.contains("not registered"), "{message}");
     }
 
     #[test]
@@ -6592,11 +7115,7 @@ mod tests {
                 BinOperandKind::Numeric(NumericType::Int),
                 BinOperandKind::Numeric(NumericType::Number),
             ),
-            (
-                BinaryOp::Equal,
-                BinOperandKind::Bool,
-                BinOperandKind::Bool,
-            ),
+            (BinaryOp::Equal, BinOperandKind::Bool, BinOperandKind::Bool),
         ];
         for (op, lhs, rhs) in cases {
             let mut compiler = BytecodeCompiler::new();
@@ -6610,7 +7129,9 @@ mod tests {
             assert!(
                 compiler.program.instructions.is_empty(),
                 "no instruction must be emitted for {:?} with {:?},{:?}",
-                op, lhs, rhs
+                op,
+                lhs,
+                rhs
             );
         }
     }
@@ -6670,33 +7191,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn emit_binary_op_preserves_numeric_hint_for_arithmetic_only() {
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Int),
-        )
-        .expect("ok");
-        assert_eq!(compiler.last_expr_numeric_type, Some(NumericType::Int));
-
-        let mut compiler = BytecodeCompiler::new();
-        compiler.last_expr_numeric_type = Some(NumericType::Number);
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Less,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Int),
-        )
-        .expect("ok");
-        assert_eq!(compiler.last_expr_numeric_type, None);
-    }
+    // U4-4: `emit_binary_op_preserves_numeric_hint_for_arithmetic_only`
+    // deleted — it asserted on the deleted `last_expr_numeric_type` register
+    // writeback. The result's numeric kind is now derived from the one
+    // resolved Type at the consumer, so there is no register state to assert.
 
     #[test]
     fn from_numeric_maps_none_to_unknown() {
@@ -6934,11 +7432,33 @@ mod tests {
         })
     }
 
+    // Strict no-coercion ruling (user 2026-06-14): `string + non-string` is a
+    // COMPILE ERROR. The former R5.5 typed string+scalar concat
+    // (`StringConcatInt`/`Number`/`Bool` auto-stringify) is rejected at type
+    // check. These tests are rebaselined from "emits the typed concat opcode"
+    // /"produces the concatenated string at runtime" to "is a TP-rejection at
+    // compile time". The original programs (the actual user intent we are
+    // ruling on) are preserved verbatim; only the expectation flips. The
+    // diagnostic must name f-string interpolation as the alternative.
+    fn compile_err_with_string_coerce_concat(code: &str) -> String {
+        use shape_ast::parser::parse_program;
+        super::super::helpers::with_typed_string_coerce_concat_flag(true, || {
+            let program = parse_program(code).expect("parse program");
+            let mut compiler = BytecodeCompiler::new();
+            compiler.allow_internal_builtins = true;
+            match compiler.compile(&program) {
+                Ok(_) => panic!(
+                    "expected `string + non-string` to be a compile error under \
+                     strict no-coercion, but compilation succeeded"
+                ),
+                Err(e) => e.to_string(),
+            }
+        })
+    }
+
     #[test]
-    fn r55_string_plus_int_emits_string_concat_int() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
+    fn r55_string_plus_int_is_compile_error() {
+        let msg = compile_err_with_string_coerce_concat(
             r#"
             fn concat_test() {
                 let s: string = "Cash: "
@@ -6949,17 +7469,14 @@ mod tests {
             "#,
         );
         assert!(
-            ops.contains(&OpCode::StringConcatInt),
-            "expected StringConcatInt for string + int, got ops: {:?}",
-            ops
+            msg.contains("f-string") || msg.contains("f\""),
+            "string + int rejection must name f-string interpolation, got: {msg}"
         );
     }
 
     #[test]
-    fn r55_string_plus_number_emits_string_concat_number() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
+    fn r55_string_plus_number_is_compile_error() {
+        let msg = compile_err_with_string_coerce_concat(
             r#"
             fn concat_test() {
                 let n: number = 3.14
@@ -6969,17 +7486,14 @@ mod tests {
             "#,
         );
         assert!(
-            ops.contains(&OpCode::StringConcatNumber),
-            "expected StringConcatNumber for string + number, got ops: {:?}",
-            ops
+            msg.contains("f-string") || msg.contains("f\""),
+            "string + number rejection must name f-string interpolation, got: {msg}"
         );
     }
 
     #[test]
-    fn r55_string_plus_bool_emits_string_concat_bool() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
+    fn r55_string_plus_bool_is_compile_error() {
+        let msg = compile_err_with_string_coerce_concat(
             r#"
             fn concat_test() {
                 let s: string = "flag: "
@@ -6990,15 +7504,16 @@ mod tests {
             "#,
         );
         assert!(
-            ops.contains(&OpCode::StringConcatBool),
-            "expected StringConcatBool for string + bool, got ops: {:?}",
-            ops
+            msg.contains("f-string") || msg.contains("f\""),
+            "string + bool rejection must name f-string interpolation, got: {msg}"
         );
     }
 
     #[test]
-    fn r55_string_plus_string_does_not_emit_r55_scalar_opcodes() {
+    fn r55_string_plus_string_still_compiles_and_concats() {
         use crate::bytecode::OpCode;
+        // string + string remains valid: emits StringConcatTyped, no scalar
+        // auto-stringify opcode.
         let ops = compile_opcodes_with_string_coerce_concat(
             true,
             r#"
@@ -7010,105 +7525,82 @@ mod tests {
             "#,
         );
         assert!(
+            ops.contains(&OpCode::StringConcatTyped),
+            "string + string must emit StringConcatTyped, ops: {:?}",
+            ops
+        );
+        assert!(
             !ops.contains(&OpCode::StringConcatInt)
                 && !ops.contains(&OpCode::StringConcatNumber)
                 && !ops.contains(&OpCode::StringConcatBool),
-            "string+string must not emit any R5.5 typed scalar opcode, ops: {:?}",
+            "string+string must not emit any scalar concat opcode, ops: {:?}",
             ops
         );
     }
 
     #[test]
-    fn r55_string_plus_scalar_runtime_values() {
-        // End-to-end. Migrated from `ValueWordExt::as_str` to
-        // `KindedSlot::as_str` per §2.7.6 / Q8 — the kind-threaded
-        // accessor reads UTF-8 bytes off both `NativeKind::String` (Arc<String>
-        // carrier) and `NativeKind::StringV2` (v2-raw `*const StringObj`)
-        // labels.
+    fn r55_string_plus_scalar_rejected_fstring_is_the_alternative() {
+        // The scalar concat that previously ran at runtime ("Cash: " + c, etc.)
+        // is now a compile error. The intent — producing a formatted string —
+        // is achieved with f-string interpolation, which still compiles and
+        // runs. This pins both halves of the ruling end-to-end.
         use crate::VMConfig;
         use crate::executor::VirtualMachine;
         use shape_ast::parser::parse_program;
 
-        let eval_str = |code: &str| -> String {
-            super::super::helpers::with_typed_string_coerce_concat_flag(true, || {
-                let program = parse_program(code).expect("parse");
-                let mut compiler = BytecodeCompiler::new();
-                compiler.allow_internal_builtins = true;
-                let bc = compiler.compile(&program).expect("compile");
-                let mut vm = VirtualMachine::new(VMConfig::default());
-                vm.load_program(bc);
-                vm.execute(None)
-                    .expect("execute")
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .expect("string result")
-            })
-        };
+        // (a) string + scalar: all four forms reject at compile time.
+        for code in [
+            r#"fn f() { let c: int = 42; "Cash: " + c } f()"#,
+            r#"fn f() { let n: number = 3.14; "X: " + n } f()"#,
+            r#"fn f() { let b: bool = true; "flag: " + b } f()"#,
+            r#"fn f() { let b: bool = false; "flag: " + b } f()"#,
+        ] {
+            let msg = compile_err_with_string_coerce_concat(code);
+            assert!(
+                msg.contains("f-string") || msg.contains("f\""),
+                "expected string+scalar to reject naming f-string, code={code}, got: {msg}"
+            );
+        }
 
+        // (b) f-string interpolation is the working alternative.
+        let eval_str = |code: &str| -> String {
+            let program = parse_program(code).expect("parse");
+            let mut compiler = BytecodeCompiler::new();
+            compiler.allow_internal_builtins = true;
+            let bc = compiler.compile(&program).expect("compile f-string");
+            let mut vm = VirtualMachine::new(VMConfig::default());
+            vm.load_program(bc);
+            vm.execute(None)
+                .expect("execute")
+                .as_str()
+                .map(|s| s.to_string())
+                .expect("string result")
+        };
         assert_eq!(
             eval_str(
                 r#"
                 fn f() {
                     let c: int = 42
-                    "Cash: " + c
+                    f"Cash: {c}"
                 }
                 f()
                 "#,
             ),
             "Cash: 42",
-            "string + int"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let n: number = 3.14
-                    "X: " + n
-                }
-                f()
-                "#,
-            ),
-            "X: 3.14",
-            "string + number"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let n: number = 2.0
-                    "whole: " + n
-                }
-                f()
-                "#,
-            ),
-            "whole: 2",
-            "string + whole number formats without decimal"
+            "f-string int interpolation"
         );
         assert_eq!(
             eval_str(
                 r#"
                 fn f() {
                     let b: bool = true
-                    "flag: " + b
+                    f"flag: {b}"
                 }
                 f()
                 "#,
             ),
             "flag: true",
-            "string + bool true"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let b: bool = false
-                    "flag: " + b
-                }
-                f()
-                "#,
-            ),
-            "flag: false",
-            "string + bool false"
+            "f-string bool interpolation"
         );
     }
 
@@ -7203,25 +7695,28 @@ mod tests {
             );
         }
 
-        // Per-category fallback totals: 2 String/NullableInt64 fallbacks for
-        // load_local + store_local each; 0 for module bindings (we no
-        // longer exercise unproven module-binding hints); 1 for return_value.
+        // The metric counters are process-global debug telemetry, so other
+        // parallel tests may add unrelated fallback records between our reset
+        // and snapshot. The emitted opcode sequence above is the exact
+        // behavioral assertion; metrics are checked as lower bounds for this
+        // test's own fallback-producing calls.
         let snap: std::collections::HashMap<&'static str, u64> =
             typed_emit_metrics::snapshot().into_iter().collect();
-        assert_eq!(snap.get("load_local").copied().unwrap_or(0), 2);
-        assert_eq!(snap.get("store_local").copied().unwrap_or(0), 2);
-        assert_eq!(snap.get("load_module_binding").copied().unwrap_or(0), 0);
-        assert_eq!(snap.get("store_module_binding").copied().unwrap_or(0), 0);
-        assert_eq!(snap.get("return_value").copied().unwrap_or(0), 1);
+        assert!(snap.get("load_local").copied().unwrap_or(0) >= 2);
+        assert!(snap.get("store_local").copied().unwrap_or(0) >= 2);
+        assert!(snap.get("return_value").copied().unwrap_or(0) >= 1);
 
         let joint: std::collections::HashMap<(&'static str, &'static str), u64> =
             typed_emit_metrics::snapshot_joint().into_iter().collect();
-        assert_eq!(joint.get(&("load_local", "string")).copied().unwrap_or(0), 1);
-        assert_eq!(
-            joint.get(&("load_local", "nullable_i64")).copied().unwrap_or(0),
-            1
+        assert!(joint.get(&("load_local", "string")).copied().unwrap_or(0) >= 1);
+        assert!(
+            joint
+                .get(&("load_local", "nullable_i64"))
+                .copied()
+                .unwrap_or(0)
+                >= 1
         );
-        assert_eq!(joint.get(&("return_value", "string")).copied().unwrap_or(0), 1);
+        assert!(joint.get(&("return_value", "string")).copied().unwrap_or(0) >= 1);
     }
 
     #[test]
@@ -7229,29 +7724,160 @@ mod tests {
         use crate::type_tracking::StorageHint;
         use shape_value::v2::struct_layout::FieldKind;
 
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Float64), Some(FieldKind::F64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int64), Some(FieldKind::I64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt64), Some(FieldKind::U64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int32), Some(FieldKind::I32));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt32), Some(FieldKind::U32));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int16), Some(FieldKind::I16));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt16), Some(FieldKind::U16));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int8), Some(FieldKind::I8));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt8), Some(FieldKind::U8));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Bool), Some(FieldKind::Bool));
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Float64),
+            Some(FieldKind::F64)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int64),
+            Some(FieldKind::I64)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt64),
+            Some(FieldKind::U64)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int32),
+            Some(FieldKind::I32)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt32),
+            Some(FieldKind::U32)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int16),
+            Some(FieldKind::I16)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt16),
+            Some(FieldKind::U16)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int8),
+            Some(FieldKind::I8)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt8),
+            Some(FieldKind::U8)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Bool),
+            Some(FieldKind::Bool)
+        );
 
         // Post-strict-typing (ADR-006 §2.7.7): `Dynamic`/`Unknown` are
         // deleted from `NativeKind`. The polymorphic-fallback path is now
         // driven by heap/null sentinel hints only (String, IntSize,
         // UIntSize, the Nullable* family).
         assert_eq!(super::storage_hint_to_field_kind(StorageHint::String), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::IntSize), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UIntSize), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableFloat64), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt64), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt32), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableUInt8), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableIntSize), None);
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::IntSize),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UIntSize),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableFloat64),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableInt64),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableInt32),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableUInt8),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableIntSize),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_return_metadata_tests {
+    use super::*;
+    use crate::type_tracking::FrameReturnWrapper;
+    use shape_value::{HeapKind, NativeKind};
+
+    fn compile(source: &str) -> crate::bytecode::BytecodeProgram {
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+        BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile frame metadata fixture")
+    }
+
+    fn frame_for<'a>(
+        program: &'a crate::bytecode::BytecodeProgram,
+        name: &str,
+    ) -> &'a crate::type_tracking::FrameDescriptor {
+        program
+            .functions
+            .iter()
+            .find(|func| func.name == name)
+            .and_then(|func| func.frame_descriptor.as_ref())
+            .unwrap_or_else(|| panic!("missing frame descriptor for {name}"))
+    }
+
+    #[test]
+    fn result_return_stamps_typed_object_abi_and_result_wrapper() {
+        let program = compile(
+            r#"
+            fn result_value() -> Result<int> {
+                Ok(1)
+            }
+            "#,
+        );
+        let frame = frame_for(&program, "result_value");
+
+        assert_eq!(
+            frame.return_kind,
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Result);
+        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Result);
+    }
+
+    #[test]
+    fn option_return_stamps_typed_object_abi_and_option_wrapper() {
+        let program = compile(
+            r#"
+            fn option_value() -> Option<int> {
+                Some(1)
+            }
+            "#,
+        );
+        let frame = frame_for(&program, "option_value");
+
+        assert_eq!(
+            frame.return_kind,
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Option);
+        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Option);
+    }
+
+    #[test]
+    fn scalar_return_stamps_plain_wrapper_and_scalar_abi() {
+        let program = compile(
+            r#"
+            fn scalar_value() -> int {
+                1
+            }
+            "#,
+        );
+        let frame = frame_for(&program, "scalar_value");
+
+        assert_eq!(frame.return_kind, Some(NativeKind::Int64));
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
+        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Plain);
     }
 }
 
@@ -7266,9 +7892,8 @@ mod tests {
 mod call_return_kind_tests {
     use super::*;
     use crate::mir::types::{
-        BasicBlock, BasicBlockId, MirConstant, MirFunction, Operand,
-        Place, Point, Rvalue, SlotId, StatementKind, Terminator,
-        TerminatorKind,
+        BasicBlock, BasicBlockId, MirConstant, MirFunction, Operand, Place, Point, Rvalue, SlotId,
+        StatementKind, Terminator, TerminatorKind,
     };
     use shape_value::v2::ConcreteType;
 
@@ -7293,9 +7918,7 @@ mod call_return_kind_tests {
             statements: vec![],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Function(
-                        callee_name.to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Function(callee_name.to_string())),
                     args: vec![],
                     destination: Place::Local(SlotId(dst_slot)),
                     next: BasicBlockId(1),
@@ -7310,15 +7933,14 @@ mod call_return_kind_tests {
             num_locals: n_locals,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                n_locals as usize
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; n_locals as usize],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         }
     }
 
@@ -7339,16 +7961,10 @@ mod call_return_kind_tests {
                 None
             }
         };
-        let result = infer_top_level_concrete_types_from_mir_with_returns(
-            &mir,
-            Some(&resolver),
-        );
+        let result = infer_top_level_concrete_types_from_mir_with_returns(&mir, Some(&resolver));
         assert_eq!(
             result[3],
-            ConcreteType::Result(
-                Box::new(ConcreteType::I64),
-                Box::new(ConcreteType::String),
-            ),
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String),),
             "Call destination slot 3 should be stamped Result(I64,String)"
         );
         // Other slots stay Void.
@@ -7372,10 +7988,7 @@ mod call_return_kind_tests {
         // forbidden #9).
         let mir = mk_mir_with_call("unknown_callee", 2);
         let resolver = |_name: &str| -> Option<ConcreteType> { None };
-        let result = infer_top_level_concrete_types_from_mir_with_returns(
-            &mir,
-            Some(&resolver),
-        );
+        let result = infer_top_level_concrete_types_from_mir_with_returns(&mir, Some(&resolver));
         assert_eq!(result[2], ConcreteType::Void);
     }
 
@@ -7407,9 +8020,7 @@ mod call_return_kind_tests {
             statements: vec![],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Function(
-                        "divide".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Function("divide".to_string())),
                     args: vec![],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7423,15 +8034,14 @@ mod call_return_kind_tests {
             num_locals: 6,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                6
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 6],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let resolver = |name: &str| -> Option<ConcreteType> {
             if name == "divide" {
@@ -7443,14 +8053,9 @@ mod call_return_kind_tests {
                 None
             }
         };
-        let result = infer_top_level_concrete_types_from_mir_with_returns(
-            &mir,
-            Some(&resolver),
-        );
-        let expected = ConcreteType::Result(
-            Box::new(ConcreteType::I64),
-            Box::new(ConcreteType::String),
-        );
+        let result = infer_top_level_concrete_types_from_mir_with_returns(&mir, Some(&resolver));
+        let expected =
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String));
         assert_eq!(result[3], expected, "Call destination slot stamped");
         assert_eq!(result[5], expected, "Move destination propagated");
     }
@@ -7484,10 +8089,7 @@ mod call_return_kind_tests {
             id: BasicBlockId(0),
             statements: vec![
                 crate::mir::types::MirStatement {
-                    kind: StatementKind::Assign(
-                        Place::Local(SlotId(2)),
-                        Rvalue::Aggregate(vec![]),
-                    ),
+                    kind: StatementKind::Assign(Place::Local(SlotId(2)), Rvalue::Aggregate(vec![])),
                     span,
                     point: Point(0),
                 },
@@ -7513,15 +8115,14 @@ mod call_return_kind_tests {
             num_locals: 4,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                4
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 4],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let result = infer_top_level_concrete_types_from_mir(&mir);
         assert!(
@@ -7573,9 +8174,7 @@ mod call_return_kind_tests {
             }],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(2)))],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7599,24 +8198,22 @@ mod call_return_kind_tests {
             num_locals: 5,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                5
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 5],
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
-        let method_returns =
-            |type_name: &str, method_name: &str| -> Option<ConcreteType> {
-                if type_name == "X" && method_name == "name" {
-                    Some(ConcreteType::String)
-                } else {
-                    None
-                }
-            };
+        let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
+            if type_name == "X" && method_name == "name" {
+                Some(ConcreteType::String)
+            } else {
+                None
+            }
+        };
         let result = infer_top_level_concrete_types_from_mir_with_resolvers(
             &mir,
             None,
@@ -7673,9 +8270,7 @@ mod call_return_kind_tests {
             ],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(3)))],
                     destination: Place::Local(SlotId(4)),
                     next: BasicBlockId(1),
@@ -7699,24 +8294,22 @@ mod call_return_kind_tests {
             num_locals: 6,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                6
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 6],
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
-        let method_returns =
-            |type_name: &str, method_name: &str| -> Option<ConcreteType> {
-                if type_name == "X" && method_name == "name" {
-                    Some(ConcreteType::String)
-                } else {
-                    None
-                }
-            };
+        let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
+            if type_name == "X" && method_name == "name" {
+                Some(ConcreteType::String)
+            } else {
+                None
+            }
+        };
         let result = infer_top_level_concrete_types_from_mir_with_resolvers(
             &mir,
             None,
@@ -7755,9 +8348,7 @@ mod call_return_kind_tests {
             }],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(2)))],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7779,15 +8370,14 @@ mod call_return_kind_tests {
             num_locals: 5,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                5
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 5],
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         // No method_returns resolver — destination stays Void.
         let result =
@@ -7813,9 +8403,7 @@ mod call_return_kind_tests {
             statements: vec![],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(2)))],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7837,15 +8425,14 @@ mod call_return_kind_tests {
             num_locals: 5,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                5
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 5],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let method_returns = |_type_name: &str, _method_name: &str| -> Option<ConcreteType> {
             // Resolver would return String, but it's unreachable
@@ -7947,9 +8534,7 @@ mod w17_3_4_2_type_annotation_lowering_tests {
             name: shape_ast::ast::type_path::TypePath::simple("HashMap"),
             args: vec![
                 TypeAnnotation::Basic("string".to_string()),
-                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                    "int".to_string(),
-                ))),
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string()))),
             ],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
@@ -7981,9 +8566,7 @@ mod w17_3_4_2_type_annotation_lowering_tests {
     /// TypeAnnotation variant, not Generic-wrapped).
     #[test]
     fn type_annotation_array_threads_elem() {
-        let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-            "int".to_string(),
-        )));
+        let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_eq!(ft, FieldType::Array(Box::new(FieldType::I64)));
     }

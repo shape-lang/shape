@@ -93,20 +93,12 @@ pub extern "C" fn jit_mul_i64(a: i64, b: i64) -> i64 {
 
 #[inline]
 pub extern "C" fn jit_div_i64(a: i64, b: i64) -> i64 {
-    if b == 0 {
-        0
-    } else {
-        a.wrapping_div(b)
-    }
+    if b == 0 { 0 } else { a.wrapping_div(b) }
 }
 
 #[inline]
 pub extern "C" fn jit_mod_i64(a: i64, b: i64) -> i64 {
-    if b == 0 {
-        0
-    } else {
-        a.wrapping_rem(b)
-    }
+    if b == 0 { 0 } else { a.wrapping_rem(b) }
 }
 
 #[inline]
@@ -169,20 +161,12 @@ pub extern "C" fn jit_mul_i32(a: i32, b: i32) -> i32 {
 
 #[inline]
 pub extern "C" fn jit_div_i32(a: i32, b: i32) -> i32 {
-    if b == 0 {
-        0
-    } else {
-        a.wrapping_div(b)
-    }
+    if b == 0 { 0 } else { a.wrapping_div(b) }
 }
 
 #[inline]
 pub extern "C" fn jit_mod_i32(a: i32, b: i32) -> i32 {
-    if b == 0 {
-        0
-    } else {
-        a.wrapping_rem(b)
-    }
+    if b == 0 { 0 } else { a.wrapping_rem(b) }
 }
 
 #[inline]

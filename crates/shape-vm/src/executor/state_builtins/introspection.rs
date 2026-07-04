@@ -89,7 +89,10 @@ pub(crate) fn state_capture_stub(
              called from within a function body. ADR-006 §2.7.4."
         ));
     }
-    Err(marshal_return_surface("state.capture", "FrameState typed-object"))
+    Err(marshal_return_surface(
+        "state.capture",
+        "FrameState typed-object",
+    ))
 }
 
 /// `state.capture_all() -> VmState`
@@ -108,7 +111,10 @@ pub(crate) fn state_capture_all_stub(
     let _frames = vm_state.all_frames();
     let _bindings = vm_state.module_bindings();
     let _icount = vm_state.instruction_count();
-    Err(marshal_return_surface("state.capture_all", "VmState typed-object"))
+    Err(marshal_return_surface(
+        "state.capture_all",
+        "VmState typed-object",
+    ))
 }
 
 /// `state.capture_module() -> ModuleState`

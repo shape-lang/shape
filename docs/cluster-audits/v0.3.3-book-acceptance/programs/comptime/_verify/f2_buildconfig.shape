@@ -1,0 +1,2 @@
+let cfg = comptime { build_config() }
+print("got here")

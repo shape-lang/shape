@@ -1,0 +1,9 @@
+enum Color { Red, Green, Blue }
+fn g(v: int) -> Result<int, string> { Ok(v) }
+fn use_it(v: int) -> int {
+  match g(v) {
+    Ok(Red) => Red + 1000,
+    _ => 99,
+  }
+}
+print(use_it(7))

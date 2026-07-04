@@ -18,7 +18,6 @@ use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, NativeKind};
-use std::collections::HashMap;
 
 // Module declarations
 pub mod array;
@@ -26,7 +25,6 @@ pub mod duration;
 pub mod matrix;
 pub mod number;
 pub mod object;
-pub mod result;
 pub mod string;
 pub mod time;
 
@@ -36,9 +34,54 @@ pub use duration::call_duration_method;
 pub use matrix::call_matrix_method;
 pub use number::call_number_method;
 pub use object::call_object_method;
-pub use result::call_result_method;
 pub use string::call_string_method;
 pub use time::call_time_method;
+
+/// Kinded `NativeKind::Ptr(HeapKind::*)` receivers are not JIT-format
+/// NaN-boxed heap objects. Current JIT method dispatch keeps every such
+/// label on the legacy fallback/surface path; this exhaustive classifier
+/// prevents new HeapKind labels from inheriting that policy silently.
+#[inline]
+fn classify_kinded_ptr_receiver_for_jit_format_surface(hk: HeapKind) {
+    match hk {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => {}
+    }
+}
 
 // ============================================================================
 // User-Defined Method Support
@@ -202,7 +245,12 @@ unsafe fn receiver_type_name(
             if receiver_bits == 0 || receiver_bits == TAG_NULL || receiver_bits == TAG_NONE {
                 return None;
             }
-            match read_heap_kind(receiver_bits) {
+            // SAFETY: the `NativeKind::UInt64` arm is the documented
+            // JIT-format opaque-bits carrier. Callers of this unsafe helper
+            // must only reach this branch with `receiver_bits` pointing at a
+            // live JitAlloc / UnifiedValue allocation whose first field is
+            // the heap-kind prefix.
+            match unsafe { read_heap_kind(receiver_bits) } {
                 HK_STRING => Some("string".to_string()),
                 HK_ARRAY => Some("Array".to_string()),
                 HK_TYPED_OBJECT => {
@@ -239,6 +287,8 @@ unsafe fn find_function_by_name(ctx_ref: &JITContext, ufcs_name: &str) -> Option
     if ctx_ref.function_names_ptr.is_null() || ctx_ref.function_names_len == 0 {
         return None;
     }
+    // SAFETY: the caller provides a live JITContext; the null/len guard above
+    // ensures the raw names table is present before constructing the slice.
     let names = unsafe {
         std::slice::from_raw_parts(ctx_ref.function_names_ptr, ctx_ref.function_names_len)
     };
@@ -279,21 +329,29 @@ unsafe fn try_call_user_method(
 ) -> Option<u64> {
     use crate::ffi::stack_kind_code;
 
+    // SAFETY: callers only invoke this from the live `jit_call_method`
+    // dispatch frame after checking the JITContext pointer for null.
     let ctx_ref = unsafe { &*ctx };
 
     // Need execution context to access the type schema registry
     if ctx_ref.exec_context_ptr.is_null() {
         return None;
     }
+    // SAFETY: the null guard above proves `exec_context_ptr` is present for
+    // the duration of this dispatch.
     let exec_ctx = unsafe { &*(ctx_ref.exec_context_ptr as *const ExecutionContext) };
 
     // Determine the receiver's type name
+    // SAFETY: `receiver_bits` and `receiver_kind` are the pair popped from the
+    // JIT stack's lockstep kind track by `jit_call_method`.
     let type_name = unsafe { receiver_type_name(receiver_bits, receiver_kind, exec_ctx) }?;
 
     // Construct UFCS function name: "TypeName::method_name"
     let ufcs_name = format!("{}::{}", type_name, method_name);
 
     // Look up the function index in the JIT function table
+    // SAFETY: `ctx_ref` is the live context borrowed above; the helper
+    // validates the raw names table before reading it.
     let func_idx = unsafe { find_function_by_name(ctx_ref, &ufcs_name) }?;
 
     // Check that we have a valid function table entry
@@ -303,6 +361,8 @@ unsafe fn try_call_user_method(
 
     // Read the raw pointer from the function table. A null entry means the
     // function was not JIT-compiled (interpreted only).
+    // SAFETY: `function_table` is non-null and `func_idx` is proven in-bounds
+    // by the guard above.
     let raw_fn_ptr = unsafe { *(ctx_ref.function_table as *const *const u8).add(func_idx) };
     if raw_fn_ptr.is_null() {
         return None;
@@ -350,6 +410,8 @@ unsafe fn try_call_user_method(
     // to 1 (see `mir_compiler/terminators.rs::TerminatorKind::Return` at
     // line 1714-1718). Matches the §2.7.11/Q12 bare-function dispatch
     // contract at `ffi/control/mod.rs:716`.
+    // SAFETY: this dispatch owns the active JIT frame; no other mutable access
+    // to the context is live while resetting the callee stack frame.
     let ctx_mut = unsafe { &mut *(ctx as *mut JITContext) };
     let _ = stack_kind_code::SENTINEL; // silence unused-import warning in this fn
     ctx_mut.stack_ptr = 0;
@@ -372,9 +434,10 @@ unsafe fn try_call_user_method(
     // helper. The signal value is ignored — error-path deopt is not yet
     // routed through this trait-method surface (the bare-function path
     // ignores it identically at `ffi/control/mod.rs:535,:717`).
-    let _result_code = unsafe {
-        crate::ffi::control::call_jit_fn_with_args(raw_fn_ptr, ctx_mut, &native_args)
-    };
+    // SAFETY: `raw_fn_ptr` came from the validated JIT function table entry
+    // above, and `native_args` matches the UFCS receiver-plus-args ABI.
+    let _result_code =
+        unsafe { crate::ffi::control::call_jit_fn_with_args(raw_fn_ptr, ctx_mut, &native_args) };
 
     // Pop result from stack. The callee stored the return value at
     // `ctx.stack[0]` and set `stack_ptr = 1` per the §2.7.5 typed-return
@@ -640,6 +703,12 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // W10 jit-playbook §5 / §2.7.4 territory; until it lands,
             // VM delegation is the correct (non-garbage) behaviour.
             | NativeKind::Ptr(HeapKind::TypedArray)
+            // Wave 1b SEAM B (2026-06-15): `Ptr(HeapKind::Iterator)`
+            // receivers are handled by the surface-and-stop deopt ABOVE
+            // (they never reach this delegation match) — a mid-JIT-frame VM
+            // trampoline delegation is unsound for the iterator carrier
+            // (closure-arg carrier mismatch + share-crossing race). See the
+            // `Ptr(Iterator)` surface block above the `delegated` match.
             | NativeKind::Float64
             | NativeKind::NullableFloat64
             | NativeKind::Int8
@@ -696,7 +765,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // (heap), Closure, TraitObject, etc. — fall through to
             // legacy JIT-format dispatch. The kinded path for these
             // is W10 jit-playbook §5 / §2.7.4 territory.
-            NativeKind::Ptr(_) => false,
+            NativeKind::Ptr(hk) => {
+                classify_kinded_ptr_receiver_for_jit_format_surface(hk);
+                false
+            }
             // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
             // §2.7.7/Q9, 2026-05-19): null receivers delegate to VM
             // which surfaces a TypeError uniformly.
@@ -779,12 +851,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // contract docstring).
             let receiver_pair = (receiver_bits, receiver_kind);
             let result = super::control::with_trampoline_vm_mut(|vm| {
-                vm.jit_trampoline_call_method(
-                    &method_name,
-                    receiver_pair,
-                    &arg_pairs,
-                    None,
-                )
+                vm.jit_trampoline_call_method(&method_name, receiver_pair, &arg_pairs, None)
             });
             match result {
                 Some(Ok(bits)) => return bits,
@@ -893,8 +960,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                 _ => {}
             }
             match method_name.as_str() {
-                "find" | "findIndex" | "some" | "every" | "filter" | "map"
-                | "reduce" => {
+                "find" | "findIndex" | "some" | "every" | "filter" | "map" | "reduce" => {
                     if args.is_empty() {
                         return TAG_NULL;
                     }
@@ -978,7 +1044,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // registries for these kinds. The W10 jit-playbook §5
             // kinded-array migration will fill this surface in a
             // future cluster.
-            NativeKind::Ptr(_) => TAG_NULL,
+            NativeKind::Ptr(hk) => {
+                classify_kinded_ptr_receiver_for_jit_format_surface(hk);
+                TAG_NULL
+            }
             // UInt64 carrier — discriminate via the heap-prefix
             // `kind: u16` field-load. This is the canonical path for
             // legacy JIT-format kinds (HK_ARRAY / HK_JIT_OBJECT /
@@ -1041,8 +1110,28 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                     return TAG_NULL;
                 } else {
                     match read_heap_kind(receiver_bits) {
-                        HK_OK | HK_ERR => {
-                            call_result_method(receiver_bits, &method_name, &args)
+                        HK_OK | HK_ERR | HK_SOME => {
+                            tracing::debug!(
+                                target: "shape_jit",
+                                method_name = %method_name,
+                                receiver_bits,
+                                "jit-call-method SURFACE: legacy Result/Option \
+                                 carrier (HK_OK/HK_ERR/HK_SOME) reached the \
+                                 UInt64 JIT-format dispatch path. Strict \
+                                 Result/Option receivers must be stamped as \
+                                 Ptr(HeapKind::Result) / Ptr(HeapKind::Option) \
+                                 and delegated to the VM trampoline; deopting \
+                                 to interpreter instead of using the retired \
+                                 UnifiedValue<u64> method helper.",
+                            );
+                            super::control::set_jit_runtime_error(format!(
+                                "JIT method dispatch for `.{}()` reached a \
+                                 legacy Result/Option carrier — deopting to \
+                                 interpreter",
+                                method_name,
+                            ));
+                            ctx_ref.pending_call_error = 1;
+                            return TAG_NULL;
                         }
                         HK_ARRAY => call_array_method(receiver_bits, &method_name, &args),
                         HK_STRING => call_string_method(receiver_bits, &method_name, &args),
@@ -1106,13 +1195,9 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // `receiver_type_name` so dispatch classifies on the producing
         // call's stamp, not on tag-bit decode.
         if builtin_result == TAG_NULL {
-            if let Some(user_result) = try_call_user_method(
-                ctx,
-                receiver_bits,
-                receiver_kind,
-                &method_name,
-                &arg_pairs,
-            ) {
+            if let Some(user_result) =
+                try_call_user_method(ctx, receiver_bits, receiver_kind, &method_name, &arg_pairs)
+            {
                 return user_result;
             }
         }

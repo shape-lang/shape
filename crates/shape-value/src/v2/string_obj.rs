@@ -11,7 +11,7 @@
 //!  20       4   _pad (u32)
 //! ```
 
-use super::heap_header::{HeapHeader, HEAP_KIND_V2_STRING};
+use super::heap_header::{HEAP_KIND_V2_STRING, HeapHeader};
 
 /// Refcounted, repr(C) string for v2 runtime.
 /// Total: 24 bytes (header 8 + data ptr 8 + len 4 + pad 4).
@@ -191,8 +191,16 @@ mod tests {
             let data_offset = &(*ptr).data as *const _ as usize - base;
             let len_offset = &(*ptr).len as *const _ as usize - base;
 
-            assert_eq!(data_offset, StringObj::OFFSET_DATA, "data must be at offset 8");
-            assert_eq!(len_offset, StringObj::OFFSET_LEN, "len must be at offset 16");
+            assert_eq!(
+                data_offset,
+                StringObj::OFFSET_DATA,
+                "data must be at offset 8"
+            );
+            assert_eq!(
+                len_offset,
+                StringObj::OFFSET_LEN,
+                "len must be at offset 16"
+            );
 
             StringObj::drop(ptr);
         }

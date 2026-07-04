@@ -255,10 +255,7 @@ pub struct Program {
     /// wire shape.
     #[serde(skip, default)]
     pub value_call_return_concrete_types:
-        HashMap<
-            (shape_ast::ast::span::Span, Option<usize>),
-            shape_value::v2::ConcreteType,
-        >,
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), shape_value::v2::ConcreteType>,
 
     /// ADR-006 §2.7.5 conduit (W10 jit-call-method-user-trait-fix close,
     /// 2026-05-17): content-addressed mirror of
@@ -268,8 +265,7 @@ pub struct Program {
     /// trait-dispatch as method-call IR. Not serialised — Spans carry
     /// source-position offsets that aren't a stable wire shape.
     #[serde(skip, default)]
-    pub operator_trait_dispatch_sites:
-        HashMap<shape_ast::ast::span::Span, (String, u16)>,
+    pub operator_trait_dispatch_sites: HashMap<shape_ast::ast::span::Span, (String, u16)>,
 
     /// DataFrame schema for column name resolution.
     pub data_schema: Option<DataFrameSchema>,
@@ -314,10 +310,8 @@ pub struct Program {
     /// is not a stable wire shape; in cached-program-load mode the
     /// vtables are rebuilt at link time from `trait_method_symbols`.
     #[serde(skip, default)]
-    pub trait_vtables: std::collections::HashMap<
-        String,
-        std::sync::Arc<shape_value::value::VTable>,
-    >,
+    pub trait_vtables:
+        std::collections::HashMap<String, std::sync::Arc<shape_value::value::VTable>>,
 
     /// R8 W8 Cluster A surface-and-stop flag (2026-05-25). Mirror of
     /// `BytecodeProgram::has_imported_const_inline` for the content-
@@ -359,6 +353,21 @@ pub struct Program {
     /// NOT serialised — compile-time state.
     #[serde(skip, default)]
     pub has_try_unwrap_residual: bool,
+
+    /// ADR-006 §2.7.30 (GapA): mirror of
+    /// `BytecodeProgram::has_reference_escape_promotion` — forces JIT deopt for
+    /// programs whose functions return a reference via the `PromotedCell`
+    /// escape carrier (no JIT lowering; VM is correct). NOT serialised.
+    #[serde(skip, default)]
+    pub has_reference_escape_promotion: bool,
+
+    /// v0.3.3 book-gate `??` fix: mirror of
+    /// `BytecodeProgram::has_null_coalesce_residual` — forces JIT deopt for
+    /// programs that compile a null-coalescing `??` (the VM unwraps an
+    /// `Option<T>` `Some(v) -> v` via `CoalesceProbe`; the JIT has no
+    /// Option-unwrap lowering). NOT serialised.
+    #[serde(skip, default)]
+    pub has_null_coalesce_residual: bool,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -504,10 +513,7 @@ pub struct LinkedProgram {
     /// serialised — same rationale.
     #[serde(skip, default)]
     pub value_call_return_concrete_types:
-        HashMap<
-            (shape_ast::ast::span::Span, Option<usize>),
-            shape_value::v2::ConcreteType,
-        >,
+        HashMap<(shape_ast::ast::span::Span, Option<usize>), shape_value::v2::ConcreteType>,
 
     /// ADR-006 §2.7.5 conduit (W10 jit-call-method-user-trait-fix close,
     /// 2026-05-17): LinkedProgram mirror of
@@ -515,8 +521,7 @@ pub struct LinkedProgram {
     /// linker so the JIT consumer can re-emit user-type binary/unary
     /// trait-dispatch as method-call IR. Not serialised — same rationale.
     #[serde(skip, default)]
-    pub operator_trait_dispatch_sites:
-        HashMap<shape_ast::ast::span::Span, (String, u16)>,
+    pub operator_trait_dispatch_sites: HashMap<shape_ast::ast::span::Span, (String, u16)>,
 
     /// Trait method dispatch registry.
     pub trait_method_symbols: HashMap<String, String>,
@@ -551,10 +556,8 @@ pub struct LinkedProgram {
     /// handler can look up the vtable to build `Arc<TraitObjectStorage>`.
     /// Not serialised (Arc<VTable> is not a stable wire shape).
     #[serde(skip, default)]
-    pub trait_vtables: std::collections::HashMap<
-        String,
-        std::sync::Arc<shape_value::value::VTable>,
-    >,
+    pub trait_vtables:
+        std::collections::HashMap<String, std::sync::Arc<shape_value::value::VTable>>,
 
     /// R8 W8 Cluster A surface-and-stop flag (2026-05-25).
     ///
@@ -595,4 +598,19 @@ pub struct LinkedProgram {
     /// NOT serialised — compile-time state.
     #[serde(skip, default)]
     pub has_try_unwrap_residual: bool,
+
+    /// ADR-006 §2.7.30 (GapA): mirror of
+    /// `BytecodeProgram::has_reference_escape_promotion` — forces JIT deopt for
+    /// programs whose functions return a reference via the `PromotedCell`
+    /// escape carrier (no JIT lowering; VM is correct). NOT serialised.
+    #[serde(skip, default)]
+    pub has_reference_escape_promotion: bool,
+
+    /// v0.3.3 book-gate `??` fix: mirror of
+    /// `BytecodeProgram::has_null_coalesce_residual` — forces JIT deopt for
+    /// programs that compile a null-coalescing `??` (the VM unwraps an
+    /// `Option<T>` `Some(v) -> v` via `CoalesceProbe`; the JIT has no
+    /// Option-unwrap lowering). NOT serialised.
+    #[serde(skip, default)]
+    pub has_null_coalesce_residual: bool,
 }

@@ -175,6 +175,10 @@ fn collect_rvalue_field_reads(rvalue: &Rvalue, reads: &mut HashSet<FieldKey>) {
             collect_operand_field_reads(lhs, reads);
             collect_operand_field_reads(rhs, reads);
         }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+            collect_operand_field_reads(lhs, reads);
+            collect_operand_field_reads(rhs, reads);
+        }
         Rvalue::Aggregate(ops) => {
             for op in ops {
                 collect_operand_field_reads(op, reads);
@@ -183,7 +187,8 @@ fn collect_rvalue_field_reads(rvalue: &Rvalue, reads: &mut HashSet<FieldKey>) {
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
-        | Rvalue::EnumDiscriminantTest { operand, .. } => {
+        | Rvalue::EnumDiscriminantTest { operand, .. }
+        | Rvalue::PrimitiveCast { operand, .. } => {
             collect_operand_field_reads(operand, reads);
         }
     }
@@ -569,10 +574,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At entry of bb0, nothing is initialized (correct: writes happen inside).
         let init_at_entry = result
@@ -649,10 +659,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At bb3 entry, _0.0 should NOT be definitely initialized (missing from bb2 path).
         let init_at_bb3 = result
@@ -739,10 +754,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At bb3 entry, _0.0 SHOULD be definitely initialized.
         let init_at_bb3 = result
@@ -813,10 +833,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // _0.0 is read → not dead.
         assert!(!result.dead_fields.contains(&(SlotId(0), FieldIdx(0))));
@@ -867,10 +892,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // _0.0 should be live at entry of bb1 (read there).
         let live_bb1 = result
@@ -961,10 +991,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At bb3 entry (after loop exit), _0.0 is NOT definitely initialized
         // because the path bb0 → bb1 → bb3 never writes _0.0.
@@ -1006,10 +1041,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         assert!(result.dead_fields.is_empty());
         assert!(result.conditionally_initialized.is_empty());
@@ -1067,10 +1107,15 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // Both fields are read → not dead.
         assert!(!result.dead_fields.contains(&(SlotId(0), FieldIdx(0))));

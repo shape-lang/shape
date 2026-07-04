@@ -6,6 +6,13 @@
 //! directly to the cached handler/offset/type specialization.
 //!
 //! IC state transitions: Uninitialized → Monomorphic → Polymorphic (2-4) → Megamorphic (>4)
+//!
+//! Intentional-future: the method / arithmetic / dyn-method / closure-call IC
+//! fast paths are scaffolding awaiting the MethodFnV2 IC wiring tracked in
+//! `V2_METHOD_DISPATCH_AUDIT.md`. The property IC fast paths are already live
+//! (see `typed_object_ops.rs`). Allow dead_code module-wide for the un-wired
+//! halves rather than churning per-item annotations.
+#![allow(dead_code)]
 
 use crate::executor::VirtualMachine;
 use crate::executor::objects::method_registry::{MethodFnV2, MethodHandler};
@@ -306,10 +313,7 @@ pub struct ClosureCallIcHit {
 /// Closure spec Phase G §5.4: shared between `CallClosure` and
 /// `CallFunctionIndirect`; the underlying feedback representation is
 /// the existing `FeedbackSlot::Call(CallFeedback)`.
-pub fn closure_call_ic_check(
-    vm: &VirtualMachine,
-    ip: usize,
-) -> Option<ClosureCallIcHit> {
+pub fn closure_call_ic_check(vm: &VirtualMachine, ip: usize) -> Option<ClosureCallIcHit> {
     let func_id = vm.call_stack.last()?.function_id? as usize;
     let fv = vm.feedback_vectors.get(func_id)?.as_ref()?;
     let slot = fv.get_slot(ip)?;

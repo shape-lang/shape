@@ -3,7 +3,7 @@
 //! Covers distributions, stochastic processes, Monte Carlo, ODE, physics, and
 //! multi-asset backtesting wrappers.
 
-use crate::common::{eval_to_bool, eval_to_number, init_runtime};
+use crate::common::{eval, eval_to_bool, eval_to_number, init_runtime};
 use std::path::Path;
 
 fn read_stdlib_module(path: &str) -> String {
@@ -39,6 +39,24 @@ fn with_modules(module_paths: &[&str], code: &str) -> String {
     merged
 }
 
+fn with_prelude_and_modules(prelude: &str, module_paths: &[&str], code: &str) -> String {
+    let mut merged = String::new();
+    merged.push_str(prelude);
+    merged.push('\n');
+    for path in module_paths {
+        merged.push_str(&strip_import_lines(&read_stdlib_module(path)));
+        merged.push('\n');
+    }
+    merged.push_str(code);
+    merged
+}
+
+fn assert_internal_intrinsic_scope_error(code: &str) {
+    let err =
+        eval(code).expect_err("inlined stdlib source cannot call internal intrinsics as user code");
+    assert!(err.contains("internal intrinsic scope"), "{err}");
+}
+
 #[test]
 fn test_distributions_wrappers() {
     init_runtime();
@@ -51,7 +69,7 @@ fn test_distributions_wrappers() {
          let p = dist_poisson(3);\n\
          (u >= 0 && u < 1) && (s.len() == 5) && (p >= 0)",
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -65,7 +83,7 @@ fn test_stochastic_wrappers() {
          let o = ou_process(5, 0.1, 0.5, 1.0, 0.3, 2.0);\n\
          (b.len() == 5) && (g.len() == 5) && (o.len() == 5)",
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -74,10 +92,17 @@ fn test_monte_carlo_and_stats() {
 
     // Simplified monte_carlo — always collects results (avoids if-inside-for scope issue)
     let code = r#"
-        fn monte_carlo(n_sims, sim_fn) {
-            let mut results = [];
-            for i in range(0, n_sims) {
+        type MonteCarloIntResult {
+            simulations: int,
+            results: Array<int>
+        }
+
+        fn monte_carlo(n_sims: int, sim_fn: (int) => int) -> MonteCarloIntResult {
+            let mut results: Array<int> = [];
+            var i: int = 0;
+            while i < n_sims {
                 results = results.push(sim_fn(i));
+                i = i + 1;
             }
             return { simulations: n_sims, results: results };
         }
@@ -102,28 +127,6 @@ fn test_ode_integrators() {
 }
 
 #[test]
-#[ignore = "Generic-function inference loss (NOT op_new_array). Round 6 WS-1 \
-            W16.2-C re-classified 2026-05-21: the queryable.shape parse defect \
-            (TypeScript-style `filter(...): Self,` at line 37) is FIXED, the \
-            W16.2-C op_new_array / spread / list-comprehension construction is \
-            rebuilt (WS-1), and the W16.2-C bare empty-array accumulator \
-            (`let mut results = []` resolved from downstream `.push(...)`) is \
-            rebuilt (WS-1b) — all op_new_array construction paths now work. \
-            The residual blocker is a distinct class: `core/ode.shape`'s \
-            unannotated helpers `vec_add(a, b)` / `vec_sub` / `vec_scale` do \
-            `a[i] + b[i]` on unannotated params, and `rk4_system(f, y0_vec, \
-            ...)` is itself an unannotated generic function — the \
-            closure-result + generic-helper return types resolve to \
-            `unknown`, so strict-typing inference fails on `unknown + \
-            unknown` (Add/Sub/Mul). That same `unknown` then defeats the \
-            WS-1b bare-accumulator element-kind resolution (`results.push(f \
-            (...))` — `f(...)` is `unknown`), so the accumulator surfaces a \
-            clean `cannot determine the element type` error: a DOWNSTREAM \
-            symptom of the inference loss, not an op_new_array gap. This is \
-            the generic-function-call-return-type / unannotated-generic-param \
-            inference-loss class (epsilon-4 / round-6 WS-2/WS-6/WS-9 \
-            follow-up family) — NOT resolved at this branch's HEAD. Tracked \
-            as the generic-inference follow-up, distinct from W16.2-C."]
 fn test_harmonic_oscillator_rk4_system() {
     init_runtime();
 
@@ -139,12 +142,23 @@ fn test_harmonic_oscillator_rk4_system() {
 fn test_physics_projectile_range() {
     init_runtime();
 
-    let code = with_modules(
-        &[
-            "physics/types.shape",
-            "physics/mechanics.shape",
-            "physics/simulation.shape",
-        ],
+    let physics_state_types = r#"
+        type ProjectileState {
+            x: number,
+            y: number,
+            vx: number,
+            vy: number,
+            t: number
+        }
+
+        type OscillatorState {
+            x: number,
+            v: number
+        }
+    "#;
+    let code = with_prelude_and_modules(
+        physics_state_types,
+        &["physics/mechanics.shape", "physics/simulation.shape"],
         "let vx = 7.0710678118654755;\n\
          let vy = 7.0710678118654755;\n\
          let res = simulate_projectile({ x: 0.0, y: 0.0, vx: vx, vy: vy, t: 0.0 }, 5.0, 0.01, 9.81);\n\
@@ -192,17 +206,6 @@ fn test_rk45_uses_fewer_steps_on_smooth_ode() {
 }
 
 #[test]
-#[ignore = "Generic-function inference loss (NOT op_new_array). Round 6 WS-1 \
-            W16.2-C re-classified 2026-05-21: same residual class as \
-            test_harmonic_oscillator_rk4_system — the queryable.shape parse \
-            defect is FIXED and W16.2-C op_new_array / spread / \
-            list-comprehension construction is rebuilt, but `core/ode.shape`'s \
-            unannotated `vec_*` helpers + the unannotated generic \
-            `rk45_system(f, y0_vec, ...)` resolve closure-result / \
-            generic-helper return types to `unknown`, failing strict-typing \
-            inference on `unknown + unknown` (Add/Sub/Mul). \
-            Generic-function-call-return-type inference-loss class, distinct \
-            from W16.2-C — NOT resolved at this branch's HEAD."]
 fn test_rk45_system_harmonic_oscillator() {
     // Harmonic oscillator: y'' + y = 0, y(0) = 1, y'(0) = 0
     // Exact: y(t) = cos(t), y(2π) ≈ 1.0
@@ -274,7 +277,7 @@ fn test_monte_carlo_antithetic() {
         result.simulations == 200 && result.results.len() == 100
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -305,7 +308,7 @@ fn test_monte_carlo_antithetic_reduces_variance() {
         anti_std < plain_std
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -324,7 +327,7 @@ fn test_monte_carlo_control_variate() {
         result.results.len() == 500 && result.variance_reduction >= 0.0
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -346,7 +349,7 @@ fn test_monte_carlo_stratified() {
         ok
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -360,14 +363,14 @@ fn test_monte_carlo_stratified_estimates_mean() {
         let strat_n = 1000;
         let mut strat_results = [];
         for i in range(0, strat_n) {
-            let u = (i + random()) / strat_n;
+            let u = ((i as number) + random()) / (strat_n as number);
             strat_results.push(u * u);
         }
         let m = __intrinsic_mean(strat_results);
         abs(m - 0.333333) < 0.02
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 // ===== K4: Collision Detection Tests =====
@@ -446,7 +449,10 @@ fn test_aabb_separation() {
         let b = aabb(2.0, 0.0, 5.0, 3.0);
         let sep = aabb_separation(a, b);
         // Minimum separation is 1.0 in x-direction
-        sep != None && abs(abs(sep.x) - 1.0) < 0.001
+        match sep {
+            Some(s) => abs(abs(s.x) - 1.0) < 0.001,
+            None => false,
+        }
         "#,
     );
     assert!(eval_to_bool(&code));
@@ -470,18 +476,6 @@ fn test_aabb_centered_and_union() {
 }
 
 #[test]
-#[ignore = "Generic-function inference loss (NOT op_new_array / op_new_object). \
-            Round 6 WS-1 W16.2-C re-classified 2026-05-21: the queryable.shape \
-            parse defect is FIXED and the W16.2-C op_new_array / spread / \
-            list-comprehension construction is rebuilt. The residual blocker \
-            is a distinct class: `physics/collision.shape`'s unannotated \
-            functions (`aabb(min_x, min_y, ...)`, `aabb_overlaps(a, b)`, \
-            `find_collisions_brute(boxes)`) do arithmetic on unannotated \
-            params, and the generic-call return types resolve to `unknown` — \
-            strict-typing inference fails on `unknown` operands (Add/Sub/Mul). \
-            Generic-function-call-return-type / unannotated-param inference- \
-            loss class, distinct from W16.2-C — NOT resolved at this branch's \
-            HEAD."]
 fn test_find_collisions_brute() {
     init_runtime();
 
@@ -503,15 +497,6 @@ fn test_find_collisions_brute() {
 }
 
 #[test]
-#[ignore = "Generic-function inference loss (NOT op_new_array / op_new_object). \
-            Round 6 WS-1 W16.2-C re-classified 2026-05-21: same residual class \
-            as test_find_collisions_brute — the queryable.shape parse defect \
-            is FIXED and W16.2-C op_new_array / spread / list-comprehension \
-            construction is rebuilt, but `physics/collision.shape`'s \
-            unannotated functions resolve generic-call return types to \
-            `unknown`, failing strict-typing inference on `unknown` operands \
-            (Add/Sub/Mul). Generic-function-call-return-type inference-loss \
-            class, distinct from W16.2-C — NOT resolved at this branch's HEAD."]
 fn test_find_collisions_sweep() {
     init_runtime();
 

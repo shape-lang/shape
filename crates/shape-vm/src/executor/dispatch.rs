@@ -64,6 +64,7 @@ impl VirtualMachine {
     /// state). The deleted `NativeKind::Unknown` sentinel is no longer
     /// observable here per ADR-006 §2.7.5.1 (wire-format is post-proof).
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn program_top_level_return_kind(&self) -> Option<NativeKind> {
         // `FrameDescriptor.return_kind` is `Option<NativeKind>` (single-slot
         // §2.7.8 / Q10 cell-storage shape — `None` ≡ "kind not stamped").
@@ -85,8 +86,7 @@ impl VirtualMachine {
         // pattern for TypeSchemaRegistry. The guard restores any outer
         // scope (e.g. a host-installed async scope) on drop, so nested
         // or re-entrant VM execution composes correctly.
-        let _shape_scope =
-            shape_value::SyncShapeTableScope::enter(self.shape_table.clone());
+        let _shape_scope = shape_value::SyncShapeTableScope::enter(self.shape_table.clone());
 
         self.clear_last_uncaught_exception();
 
@@ -591,7 +591,7 @@ impl VirtualMachine {
             GtInt | GtNumber | GtDecimal | LtInt | LtNumber | LtDecimal | GteInt | GteNumber
             | GteDecimal | LteInt | LteNumber | LteDecimal | EqInt | EqNumber | NeqInt
             | NeqNumber | EqString | EqDecimal | IsNull | GtString | LtString | GteString
-            | LteString => {
+            | LteString | EqTypedObject => {
                 return self.exec_typed_comparison(instruction);
             }
 
@@ -614,6 +614,8 @@ impl VirtualMachine {
             | LoadLocalTrusted
             | LoadLocalMove
             | LoadLocalClone
+            | LoadLocalDeepClone
+            | DeepCloneTop
             | StoreLocal
             | StoreLocalTyped
             | StoreLocalDrop
@@ -772,8 +774,8 @@ impl VirtualMachine {
             TryConvertToChar => return self.op_try_convert_to_char(),
 
             // Exception handling
-            SetupTry | PopHandler | Throw | TryUnwrap | UnwrapOption | ErrorContext | IsOk
-            | IsErr | UnwrapOk | UnwrapErr => {
+            SetupTry | PopHandler | Throw | TryUnwrap | IsTryFailure | UnwrapOption
+            | CoalesceProbe | ErrorContext | IsOk | IsErr | UnwrapOk | UnwrapErr => {
                 return self.exec_exceptions(instruction);
             }
 
@@ -784,7 +786,7 @@ impl VirtualMachine {
 
             // Loop control
             LoopStart | LoopEnd | Break | Continue | IterNext | IterDone => {
-                return self.exec_loops(instruction);
+                return self.exec_loops(instruction, ctx);
             }
 
             // Method calls on values
@@ -959,6 +961,27 @@ impl VirtualMachine {
             | TypedArrayGetTypedObject
             | TypedArrayPushTypedObject
             | TypedArraySetTypedObject
+            // Construction strict-typing close (USER RULING 2026-06-05) —
+            // nested-array `TypedArray<*const TypedArrayElem>` carrier.
+            | NewTypedArrayNested
+            | TypedArrayGetNested
+            | TypedArrayPushNested
+            | TypedArraySetNested
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // v2-raw TypedArray<*const TraitObjectStorage> heap-element carrier per
+            // ADR-006 §2.7.5 + §2.7.24 Q25.C. Mirror of the W16.2-A TypedObject
+            // arms above; element values produced by `BoxTraitObject`.
+            | NewTypedArrayTraitObject
+            | TypedArrayGetTraitObject
+            | TypedArrayPushTraitObject
+            | TypedArraySetTraitObject
+            // W22 callable-array element carrier (2026-06-27) —
+            // `TypedArray<CallableArrayElem>` stores per-element callable
+            // descriptors for closure shares and inline function ids.
+            | NewTypedArrayCallable
+            | TypedArrayGetCallable
+            | TypedArrayPushCallable
+            | TypedArraySetCallable
             // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
             // v2-raw String/Decimal literal constructors (closes the literal-element
             // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>
@@ -992,39 +1015,11 @@ impl VirtualMachine {
                 return self.exec_typed_string_access(instruction);
             }
 
-            // v2 typed map operations
-            NewTypedMapStringF64
-            | NewTypedMapStringI64
-            | NewTypedMapStringPtr
-            | NewTypedMapI64F64
-            | NewTypedMapI64I64
-            | NewTypedMapI64Ptr
-            | TypedMapStringF64Get
-            | TypedMapStringI64Get
-            | TypedMapStringPtrGet
-            | TypedMapI64F64Get
-            | TypedMapI64I64Get
-            | TypedMapI64PtrGet
-            | TypedMapStringF64Set
-            | TypedMapStringI64Set
-            | TypedMapStringPtrSet
-            | TypedMapI64F64Set
-            | TypedMapI64I64Set
-            | TypedMapI64PtrSet
-            | TypedMapStringF64Has
-            | TypedMapStringI64Has
-            | TypedMapStringPtrHas
-            | TypedMapI64F64Has
-            | TypedMapI64I64Has
-            | TypedMapI64PtrHas
-            | TypedMapStringF64Delete
-            | TypedMapStringI64Delete
-            | TypedMapStringPtrDelete
-            | TypedMapI64F64Delete
-            | TypedMapI64I64Delete
-            | TypedMapI64PtrDelete => {
-                return self.exec_v2_typed_map(instruction);
-            }
+            // U3 (SB-9 deletion): the v2 `TypedMap<K,V>` opcode family and its
+            // `exec_v2_typed_map` handler were deleted. The single honest
+            // `HashMapData` carrier (HeapKind::HashMap) dispatches through the
+            // generic CallMethod path and the local-slot MapGetStr*/MapHasStr/
+            // MapSetStr*/MapLenTyped fast path above.
 
             // Special
             Nop => {}

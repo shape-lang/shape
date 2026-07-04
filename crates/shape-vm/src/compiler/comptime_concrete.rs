@@ -75,7 +75,7 @@
 //! the strict-typing-sweep build clean.
 
 #![allow(dead_code)]
-
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::compiler::v2_map_emission::concrete_type_from_annotation;
 use shape_ast::ast::TypeAnnotation;
 use shape_value::v2::ConcreteType;
@@ -319,8 +319,7 @@ mod tests {
     #[test]
     fn annotation_int_resolves_to_typed_string() {
         let ann = TypeAnnotation::Basic("int".into());
-        let v = type_annotation_to_constant_value(&ann)
-            .expect("int annotation should resolve");
+        let v = type_annotation_to_constant_value(&ann).expect("int annotation should resolve");
         assert_eq!(v.concrete_type(), ConcreteType::String);
         assert_eq!(v.as_str(), Some("int"));
     }

@@ -583,7 +583,7 @@ fn t86_let_array_rest() {
         test()
     "#,
     )
-    .expect_number(10.0);
+    .expect_run_err_contains("array rest-pattern (`[a, ...rest]`) is not supported");
 }
 
 /// Let destructure from function.
@@ -679,7 +679,7 @@ fn t92_let_array_destructure_mixed_types() {
         test()
     "#,
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("int is not compatible with string");
 }
 
 // =============================================================================
@@ -761,6 +761,47 @@ fn t97_lambda_array_destructure() {
     "#,
     )
     .expect_number(300.0);
+}
+
+/// Lambda array destructure proof must not stamp a shadowed comprehension binder.
+#[test]
+fn t97_lambda_array_destructure_list_comprehension_shadow() {
+    ShapeTest::new(
+        r#"
+        function test() {
+            let xs = [true]
+            let f = |[x]| [x + 1 for x in xs]
+            return f([10])
+        }
+        test()
+    "#,
+    )
+    .expect_run_err_contains_any(&[
+        "Numeric",
+        "Cannot infer",
+        "trait bound not satisfied",
+        "binary operation",
+    ]);
+}
+
+/// Duplicate destructure binders are not guessed by name when element proofs differ.
+#[test]
+fn t97_lambda_array_destructure_duplicate_binder_not_guessed() {
+    ShapeTest::new(
+        r#"
+        function test() {
+            let f = |[[x], x]| x + 1
+            return f([[10], [20]])
+        }
+        test()
+    "#,
+    )
+    .expect_run_err_contains_any(&[
+        "Numeric",
+        "Cannot infer",
+        "trait bound not satisfied",
+        "binary operation",
+    ]);
 }
 
 /// For loop object destructure.

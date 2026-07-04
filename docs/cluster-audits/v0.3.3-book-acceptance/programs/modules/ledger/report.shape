@@ -1,0 +1,63 @@
+// ledger/report.shape  -> importable as "ledger::report"
+//
+// Top-of-library composition module. It pulls in money formatting, the
+// posting engine, and stats — three sibling modules — and produces
+// human-readable report lines. This is the "namespace + member call"
+// pattern from the book combined with named imports.
+
+from ledger::model use { Txn, Account, Category }
+from ledger::money use { format }
+from ledger::engine use { closing_balance, total_credits, total_debits, sum_in }
+from ledger::stats use { count, max_amount, min_amount, spread }
+
+// Human label for a category.
+pub fn cat_label(c: Category) -> string {
+    match c {
+        Category::Food => "Food",
+        Category::Rent => "Rent",
+        Category::Transport => "Transport",
+        Category::Fun => "Fun",
+        Category::Income => "Income",
+    }
+}
+
+// One summary line for the account header.
+pub fn header_line(acct: Account, txns: Array<Txn>) -> string {
+    let n = count(txns)
+    let close = closing_balance(acct, txns)
+    f"{acct.name}: {n} txns, closing {format(close)}"
+}
+
+// One line for a category bucket: "Food: $-20.00".
+pub fn category_line(txns: Array<Txn>, c: Category) -> string {
+    let s = sum_in(txns, c)
+    f"{cat_label(c)}: {format(s)}"
+}
+
+// Credits/debits summary line.
+pub fn flow_line(txns: Array<Txn>) -> string {
+    let cr = total_credits(txns)
+    let db = total_debits(txns)
+    f"in {format(cr)} / out {format(db)}"
+}
+
+// Extremes line built from the stats module.
+pub fn extremes_line(txns: Array<Txn>) -> string {
+    let hi = max_amount(txns)
+    let lo = min_amount(txns)
+    let sp = spread(txns)
+    f"hi {format(hi)} lo {format(lo)} spread {format(sp)}"
+}
+
+// Assemble the full report as an array of lines (one bucket per category).
+pub fn build(acct: Account, txns: Array<Txn>) -> Array<string> {
+    let mut lines: Array<string> = [header_line(acct, txns)]
+    lines.push(flow_line(txns))
+    lines.push(category_line(txns, Category::Income))
+    lines.push(category_line(txns, Category::Food))
+    lines.push(category_line(txns, Category::Rent))
+    lines.push(category_line(txns, Category::Transport))
+    lines.push(category_line(txns, Category::Fun))
+    lines.push(extremes_line(txns))
+    lines
+}

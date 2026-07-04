@@ -1,0 +1,63 @@
+// small.shape -- Resource Management slice (fundamentals/resource-management.mdx)
+// Exercises chapter core: impl Drop, automatic scope-based drop, reverse drop
+// order, block-scoped lifetimes, drop in loops. Determinism = pure: assert RAII
+// scope-exit ORDER via a side-effect log. Expected sequence derived from book
+// semantics (reverse declaration order, block-end drop, per-iteration loop drop),
+// written BEFORE first run.
+
+let mut log: Array<string> = []
+fn record(s: string) { log.push(s) }
+
+type Guard { name: string }
+impl Drop for Guard {
+  method drop() { record(f"drop:{self.name}") }
+}
+
+// Reverse declaration order (book: "Multiple Resources and Reverse Drop Order").
+fn pipeline() {
+  let a = Guard { name: "a" }
+  let b = Guard { name: "b" }
+  let c = Guard { name: "c" }
+  record("body:pipeline")
+}
+
+// Block scoping (book: "Block Scoping"): inner drops at block end, before outer.
+fn blocks() {
+  let outer = Guard { name: "outer" }
+  {
+    let inner = Guard { name: "inner" }
+    record("body:block")
+  }
+  record("body:after-block")
+}
+
+// Drop in loops (book: "Drop in Loops"): per-iteration cleanup.
+fn loopdrops() {
+  for i in [1, 2] {
+    let conn = Guard { name: f"conn{i}" }
+    record(f"body:iter{i}")
+  }
+}
+
+pipeline()
+blocks()
+loopdrops()
+
+let expected: Array<string> = ["body:pipeline","drop:c","drop:b","drop:a","body:block","drop:inner","body:after-block","drop:outer","body:iter1","drop:conn1","body:iter2","drop:conn2"]
+
+let mut ok = true
+let got_len: int = log.len()
+let exp_len: int = expected.len()
+if got_len != exp_len {
+  ok = false
+  print(f"CHECK_FAILED: length expected={exp_len} got={got_len}")
+}
+for idx in 0..got_len {
+  let lv: string = log[idx]
+  let ev: string = expected[idx]
+  if lv != ev {
+    ok = false
+    print(f"CHECK_FAILED: idx{idx} expected={ev} got={lv}")
+  }
+}
+if ok { print("ALL_CHECKS_PASSED") }

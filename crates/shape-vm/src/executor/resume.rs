@@ -68,6 +68,7 @@
 //!   (`HeapKind::HashSet` / `HeapKind::Result` / `HeapKind::Option`
 //!   arms).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::VirtualMachine;
@@ -81,8 +82,7 @@ use super::VirtualMachine;
 /// playbook §3 W17-snapshot-resume entry tracking it by name) but the
 /// body now cites the precise downstream follow-up rather than the
 /// broad "deleted carriers" list — T1 already replaced those.
-const PHASE_2C_SNAPSHOT_SURFACE: &str =
-    "W17-snapshot-resume residual surface — `apply_pending_resume` \
+const PHASE_2C_SNAPSHOT_SURFACE: &str = "W17-snapshot-resume residual surface — `apply_pending_resume` \
      requires the VmState typed-object field-decode path that lands \
      with W17-marshal-return-arms. T1 (R8 W1, c125aeb3) made \
      `slot_to_serializable` / `serializable_to_slot` / \
@@ -174,6 +174,8 @@ impl VirtualMachine {
                 let snapshot = decode_vmstate_typed_object(
                     bits,
                     &self.program.type_schema_registry,
+                    &self.program,
+                    &store,
                 )
                 .map_err(VMError::RuntimeError)?;
 
@@ -202,9 +204,7 @@ impl VirtualMachine {
                 // a caller-side type violation, not an in-flight
                 // restore state, so surface-and-stop is the right
                 // response.
-                let projection = shape_runtime::snapshot::slot_to_serializable(
-                    bits, kind, &store,
-                );
+                let projection = shape_runtime::snapshot::slot_to_serializable(bits, kind, &store);
                 Err(VMError::NotImplemented(match projection {
                     Ok(sv) => format!(
                         "{}: pending payload kind={kind:?} projected to \
@@ -394,6 +394,8 @@ impl VirtualMachine {
 fn decode_vmstate_typed_object(
     bits: u64,
     schemas: &shape_runtime::type_schema::TypeSchemaRegistry,
+    program: &crate::bytecode::BytecodeProgram,
+    store: &shape_runtime::snapshot::SnapshotStore,
 ) -> Result<shape_runtime::snapshot::VmSnapshot, String> {
     use shape_runtime::snapshot::VmSnapshot;
     use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
@@ -426,7 +428,7 @@ fn decode_vmstate_typed_object(
 
     // Read schema + slots through the borrow.
     let schema_id = reader.schema_id;
-    let slots = &reader.slots;
+    let slots = &reader.slots();
     let field_kinds = &reader.field_kinds;
     let heap_mask = reader.heap_mask;
 
@@ -491,31 +493,217 @@ fn decode_vmstate_typed_object(
         ));
     }
     let _instruction_count = slots[icount_idx].raw() as i64;
+    let _ = heap_mask;
 
-    // Deep field round-trip for `frames` and `module_bindings`
-    // (`FieldType::Any`) is the downstream follow-up. At landing we
-    // produce empty Vec<>'s so `from_snapshot` builds a fresh VM at
-    // IP=0 with no call stack and no module bindings — structurally
-    // a valid resume target even if not yet reconstructing the
-    // captured execution context's full live state.
-    let _heap_mask = heap_mask; // future deep-arm landing reads this
+    // ── module_bindings (`FieldType::Any` → Ptr(HeapKind::HashMap)) ──
+    //
+    // The captured `module_bindings` field is a `Map<string, any>`. We
+    // read the field slot's bits + the authoritative parallel-kind track
+    // (`field_kinds[idx]`), project through the host-tier
+    // `slot_to_serializable` (the W17-snapshot-roundtrip HashMap arm), and
+    // unpack the `SV::HashMap { keys, values }` into the positional
+    // `VmSnapshot.module_bindings` carrier that `from_snapshot` consumes.
+    // The binding values restore in insertion order; an empty / absent
+    // map (Null / empty-Bool kind) projects to an empty Vec. K3
+    // heap-valued maps surface clean from the snapshot arm.
+    let module_bindings = decode_vmstate_module_bindings(schema, slots, field_kinds, store)?;
+
+    // ── frames (`FieldType::Any` → Ptr(HeapKind::TypedArray)) ──
+    //
+    // The captured `frames` field is an `Array<FrameState>`. We walk the
+    // v2-raw `TypedArray<*const TypedObjectStorage>` of FrameState objects
+    // and project each into a `SerializableCallFrame` for
+    // `from_snapshot`'s `restore_call_stack` consumer.
+    let call_stack = decode_vmstate_frames(schema, slots, field_kinds, schemas, program)?;
 
     Ok(VmSnapshot {
+        // Resume IP: the VmState schema is read-only introspection and
+        // does NOT carry a resume IP field (only `instruction_count`, a
+        // cumulative dispatch counter, not a bytecode offset). Per the
+        // task disposition we do not fabricate an IP — `from_snapshot`
+        // re-enters at the program top (ip=0) and the restored
+        // call_stack / module_bindings carry the live state. A genuine
+        // resume-IP needs a new `VmState.resume_ip` schema field; tracked
+        // as the W17-snapshot-resume-ip follow-up.
         ip: 0,
         stack: Vec::new(),
         locals: Vec::new(),
-        module_bindings: Vec::new(),
-        call_stack: Vec::new(),
+        module_bindings,
+        call_stack,
         loop_stack: Vec::new(),
         timeframe_stack: Vec::new(),
         exception_handlers: Vec::new(),
         ip_blob_hash: None,
         ip_local_offset: None,
         ip_function_id: None,
+        // STAGE-R5: VmState introspection restore carries no live stack /
+        // promoted-cell slots, so the per-slot kind tracks are empty.
+        stack_kinds: Vec::new(),
+        module_binding_kinds: Vec::new(),
     })
     // `reader` Drop runs here, retiring the read-window retain share.
     // The slot's original share remains intact for the caller's
     // upstream drop discipline.
+}
+
+/// Project the VmState `module_bindings` field (a `Map<string, any>`
+/// stored as `Ptr(HeapKind::HashMap)`) into the positional
+/// `VmSnapshot.module_bindings` carrier.
+///
+/// Reads the field slot's authoritative `field_kinds[idx]`:
+/// - `Null` / `Bool` (the empty / no-op-None sentinel) → empty Vec.
+/// - `Ptr(HeapKind::HashMap)` → route through the host-tier
+///   `slot_to_serializable` HashMap arm and unpack the values in
+///   insertion order.
+/// - anything else → surface clean (no Bool-default fabrication).
+fn decode_vmstate_module_bindings(
+    schema: &shape_runtime::type_schema::TypeSchema,
+    slots: &[shape_value::ValueSlot],
+    field_kinds: &[NativeKind],
+    store: &shape_runtime::snapshot::SnapshotStore,
+) -> Result<Vec<shape_runtime::snapshot::SerializableVMValue>, String> {
+    use shape_runtime::snapshot::SerializableVMValue as SV;
+    let field = schema.get_field("module_bindings").ok_or_else(|| {
+        "decode_vmstate_typed_object: VmState schema missing \
+         'module_bindings' field — schema registration drift. \
+         ADR-006 §2.7.5.1."
+            .to_string()
+    })?;
+    let idx = field.index as usize;
+    if idx >= slots.len() {
+        return Err(format!(
+            "decode_vmstate_typed_object: module_bindings index {idx} out \
+             of bounds (slots.len()={}). Construction-side contract \
+             violated.",
+            slots.len(),
+        ));
+    }
+    let kind = field_kinds[idx];
+    let field_bits = slots[idx].raw();
+    match kind {
+        // Empty / absent map: the stub-capture or empty-binding case.
+        NativeKind::Null | NativeKind::Bool => Ok(Vec::new()),
+        NativeKind::Ptr(shape_value::HeapKind::HashMap) => {
+            let sv = shape_runtime::snapshot::slot_to_serializable(field_bits, kind, store)
+                .map_err(|msg| {
+                    format!(
+                        "decode_vmstate_typed_object: module_bindings HashMap \
+                     projection failed: {msg}"
+                    )
+                })?;
+            match sv {
+                SV::HashMap { values, .. } => Ok(values),
+                other => Err(format!(
+                    "decode_vmstate_typed_object: module_bindings projected \
+                     to {} (expected SV::HashMap). Construction-side \
+                     contract violated. ADR-006 §2.7.5.1.",
+                    arm_name_for_diag(&other),
+                )),
+            }
+        }
+        other => Err(format!(
+            "decode_vmstate_typed_object: module_bindings field kind \
+             {other:?} is not Ptr(HeapKind::HashMap) (nor an empty \
+             Null/Bool sentinel) — only the string-keyed Map<string,any> \
+             carrier round-trips at this scope. No Bool-default \
+             fabrication. ADR-006 §2.7.5.1."
+        )),
+    }
+}
+
+/// Project the VmState `frames` field (an `Array<FrameState>` stored as
+/// `Ptr(HeapKind::TypedArray)`) into a `Vec<SerializableCallFrame>` for
+/// `from_snapshot`'s `restore_call_stack`.
+///
+/// Walks the v2-raw `TypedArray<*const TypedObjectStorage>` of FrameState
+/// objects, reading each FrameState's typed fields by name. The
+/// `FrameState` schema (`state_builtins/core.rs`) carries
+/// `{ function_name, blob_hash, ip, locals, args, upvalues }`.
+///
+/// **Structural-field gap (surface-and-stop).** `SerializableCallFrame`
+/// additionally requires `return_ip`, `locals_base`, and `locals_count`
+/// — none of which the read-only `FrameState` introspection schema
+/// carries. Per the task disposition (and CLAUDE.md surface-and-stop:
+/// "if a genuine resume needs a VmState schema field that does not
+/// exist, SURFACE it — do not fabricate"), a non-empty `frames` array
+/// surfaces the precise schema-gap follow-up rather than fabricating
+/// those structural offsets. An EMPTY frames array (the common single-
+/// top-level-frame and stub-capture cases) projects cleanly to an empty
+/// call stack.
+fn decode_vmstate_frames(
+    schema: &shape_runtime::type_schema::TypeSchema,
+    slots: &[shape_value::ValueSlot],
+    field_kinds: &[NativeKind],
+    _schemas: &shape_runtime::type_schema::TypeSchemaRegistry,
+    _program: &crate::bytecode::BytecodeProgram,
+) -> Result<Vec<shape_runtime::snapshot::SerializableCallFrame>, String> {
+    use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray, read_elem_type};
+    let field = schema.get_field("frames").ok_or_else(|| {
+        "decode_vmstate_typed_object: VmState schema missing 'frames' \
+         field — schema registration drift. ADR-006 §2.7.5.1."
+            .to_string()
+    })?;
+    let idx = field.index as usize;
+    if idx >= slots.len() {
+        return Err(format!(
+            "decode_vmstate_typed_object: frames index {idx} out of bounds \
+             (slots.len()={}). Construction-side contract violated.",
+            slots.len(),
+        ));
+    }
+    let kind = field_kinds[idx];
+    let field_bits = slots[idx].raw();
+    match kind {
+        // Empty / absent frames: stub-capture or single-top-level-frame.
+        NativeKind::Null | NativeKind::Bool => Ok(Vec::new()),
+        NativeKind::Ptr(shape_value::HeapKind::TypedArray) => {
+            if field_bits == 0 {
+                return Ok(Vec::new());
+            }
+            let ptr = field_bits as *const u8;
+            // SAFETY: the slot construction contract guarantees a live,
+            // element-type-stamped TypedArray at `field_bits`.
+            let elem = unsafe { read_elem_type(ptr) };
+            let len = unsafe { TypedArray::<*const u8>::len(ptr as *const TypedArray<*const u8>) };
+            if len == 0 {
+                return Ok(Vec::new());
+            }
+            if elem != ELEM_TYPE_TYPED_OBJECT {
+                return Err(format!(
+                    "decode_vmstate_typed_object: frames TypedArray element \
+                     type {elem} is not ELEM_TYPE_TYPED_OBJECT — \
+                     Array<FrameState> must carry TypedObject elements. \
+                     Construction-side contract violated. ADR-006 §2.7.5.1."
+                ));
+            }
+            // Non-empty frames: the FrameState introspection schema does
+            // NOT carry return_ip / locals_base / locals_count, which
+            // SerializableCallFrame structurally requires. Per surface-
+            // and-stop (no fabrication of structural offsets), this lands
+            // as the W17-snapshot-resume-frames-schema follow-up: the
+            // FrameState schema needs to grow the call-frame structural
+            // fields (or capture must serialize SerializableCallFrame
+            // directly) before a non-empty frames array round-trips.
+            Err(format!(
+                "decode_vmstate_typed_object: W17-snapshot-resume-frames-schema \
+                 surface — captured frames array has {len} FrameState \
+                 element(s), but the read-only FrameState schema carries \
+                 only {{ function_name, blob_hash, ip, locals, args, \
+                 upvalues }} and CANNOT supply the return_ip / locals_base \
+                 / locals_count fields SerializableCallFrame requires. \
+                 Fabricating those offsets is forbidden (ADR-006 §2.7.5.1 \
+                 surface-and-stop). The FrameState schema must grow the \
+                 structural call-frame fields (or `state.capture_all` must \
+                 emit SerializableCallFrame directly) before non-empty \
+                 frames round-trip. Empty frames arrays restore cleanly."
+            ))
+        }
+        other => Err(format!(
+            "decode_vmstate_typed_object: frames field kind {other:?} is \
+             not Ptr(HeapKind::TypedArray) (nor an empty Null/Bool \
+             sentinel). No Bool-default fabrication. ADR-006 §2.7.5.1."
+        )),
+    }
 }
 
 /// Brief discriminator name for `slot_to_serializable` diagnostic
@@ -542,9 +730,10 @@ fn arm_name_for_diag(sv: &shape_runtime::snapshot::SerializableVMValue) -> &'sta
         SV::IteratorOpaque => "IteratorOpaque",
         SV::DequeOpaque { .. } => "DequeOpaque",
         SV::ChannelOpaque { .. } => "ChannelOpaque",
-        SV::ReferenceOpaque => "ReferenceOpaque",
+        SV::Reference { .. } => "Reference",
+        SV::SharedCell { .. } => "SharedCell",
+        SV::SharedCellRef { .. } => "SharedCellRef",
         SV::FilterExprOpaque => "FilterExprOpaque",
-        SV::SharedCellOpaque => "SharedCellOpaque",
         SV::MutexOpaque { .. } => "MutexOpaque",
         SV::LazyOpaque { .. } => "LazyOpaque",
         SV::TypedObject { .. } => "TypedObject",
@@ -568,7 +757,6 @@ fn arm_name_for_diag(sv: &shape_runtime::snapshot::SerializableVMValue) -> &'sta
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::VMConfig;
     use crate::executor::{CallFrame, VirtualMachine};
     use shape_value::{KindedSlot, NativeKind, ValueSlot};
@@ -636,8 +824,8 @@ mod tests {
     fn apply_pending_resume_vmstate_typed_object_restores_end_to_end() {
         use crate::bytecode::BytecodeProgram;
         use shape_runtime::type_schema::{FieldType, TypeSchema};
-        use shape_value::heap_value::TypedObjectStorage;
         use shape_value::HeapKind;
+        use shape_value::heap_value::TypedObjectStorage;
 
         let mut vm = VirtualMachine::new(VMConfig::default());
 
@@ -675,8 +863,7 @@ mod tests {
             NativeKind::Int64, // FieldType::I64
         ]);
         let heap_mask: u64 = 0; // no heap-kinded slots at landing scope
-        let ptr =
-            TypedObjectStorage::_new(schema_id as u64, slots, heap_mask, field_kinds);
+        let ptr = TypedObjectStorage::_new(schema_id as u64, slots, heap_mask, field_kinds);
         let payload_slot = shape_value::ValueSlot::from_typed_object_raw(ptr);
 
         // Queue the payload as the pending resume target.
@@ -716,8 +903,8 @@ mod tests {
     fn apply_pending_resume_wrong_schema_surfaces_clean() {
         use crate::bytecode::BytecodeProgram;
         use shape_runtime::type_schema::{FieldType, TypeSchema};
-        use shape_value::heap_value::TypedObjectStorage;
         use shape_value::HeapKind;
+        use shape_value::heap_value::TypedObjectStorage;
 
         let mut vm = VirtualMachine::new(VMConfig::default());
 
@@ -845,10 +1032,7 @@ mod tests {
             ip_offset: 10,
             locals: vec![
                 KindedSlot::new(ValueSlot::from_raw(42u64), NativeKind::Int64),
-                KindedSlot::new(
-                    ValueSlot::from_raw(3.14f64.to_bits()),
-                    NativeKind::Float64,
-                ),
+                KindedSlot::new(ValueSlot::from_raw(3.14f64.to_bits()), NativeKind::Float64),
                 KindedSlot::new(ValueSlot::from_raw(1u64), NativeKind::Bool),
             ],
         });
@@ -920,8 +1104,7 @@ mod tests {
             .expect_err("expected ip_offset OOB surface");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("ip_offset")
-                && (msg.contains("exceeds") || msg.contains("body_length")),
+            msg.contains("ip_offset") && (msg.contains("exceeds") || msg.contains("body_length")),
             "expected ip_offset/body_length surface, got: {msg}"
         );
     }

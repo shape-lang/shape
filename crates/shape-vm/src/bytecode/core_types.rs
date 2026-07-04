@@ -433,11 +433,10 @@ pub struct BytecodeProgram {
     /// `function_return_concrete_types` — `ConcreteType` carries opaque
     /// per-program registry IDs that aren't a stable wire shape.
     #[serde(skip, default)]
-    pub value_call_return_concrete_types:
-        std::collections::HashMap<
-            (shape_ast::ast::span::Span, Option<usize>),
-            shape_value::v2::ConcreteType,
-        >,
+    pub value_call_return_concrete_types: std::collections::HashMap<
+        (shape_ast::ast::span::Span, Option<usize>),
+        shape_value::v2::ConcreteType,
+    >,
 
     /// ADR-006 §2.7.5 conduit — per-binop-or-unop-site operator trait
     /// dispatch side-table (W10 jit-call-method-user-trait-fix close,
@@ -535,6 +534,26 @@ pub struct BytecodeProgram {
     #[serde(skip)]
     pub top_level_mir: Option<Arc<MirFunctionData>>,
 
+    /// True when top-level code contains a `comptime { ... }` expression.
+    ///
+    /// v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14):
+    /// the borrow-solver MIR lowering of a `comptime` block
+    /// (`mir/lowering/expr.rs::lower_comptime_expr`) re-lowers the comptime
+    /// body's *statements* for borrow analysis — it does NOT carry the
+    /// compile-time-baked literal that the bytecode interpreter executes.
+    /// The JIT consumes that same MIR as its top-level program, so it
+    /// re-runs the comptime body at runtime and the body's trailing
+    /// expression value leaks into the program-return slot (`SlotId(0)`).
+    /// Symptom: `let X = comptime { 2 + 3 }` makes `--mode jit` dump
+    /// `{ "Integer": 5 }` as the program's entire stdout and skip the
+    /// program's prints, while `--mode vm` (running the baked bytecode)
+    /// correctly returns `Null`. Whole-program deopting to the bytecode
+    /// interpreter preserves VM == JIT. Root-cause fix (a JIT-consumable
+    /// top-level MIR that carries the baked comptime literal instead of the
+    /// re-lowered body) is v0.4.
+    #[serde(default)]
+    pub top_level_has_comptime: bool,
+
     /// Content-addressed program built alongside the flat bytecode.
     ///
     /// When present, this contains per-function `FunctionBlob`s with content
@@ -566,8 +585,7 @@ pub struct BytecodeProgram {
     /// end of compilation from the compiler's `ClosureRegistry`. Not
     /// serialized — programs loaded from disk fall back to the FFI path.
     #[serde(skip, default)]
-    pub closure_function_layouts:
-        Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
+    pub closure_function_layouts: Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
 
     /// ADR-006 §2.7.24 Q25.C trait-object vtable registry.
     ///
@@ -579,10 +597,7 @@ pub struct BytecodeProgram {
     /// vtables are rebuilt on cached-program reload from
     /// `trait_method_symbols`.
     #[serde(skip, default)]
-    pub trait_vtables: std::collections::HashMap<
-        String,
-        Arc<shape_value::value::VTable>,
-    >,
+    pub trait_vtables: std::collections::HashMap<String, Arc<shape_value::value::VTable>>,
 
     /// R8 W8 Cluster A surface-and-stop flag (2026-05-25).
     ///
@@ -692,6 +707,33 @@ pub struct BytecodeProgram {
     /// runtime-mutated, just compile-time state.
     #[serde(skip, default)]
     pub has_try_unwrap_residual: bool,
+
+    /// ADR-006 §2.7.30 (GapA): set when a function returns a reference via the
+    /// reference-escape→RC `PromotedCell` carrier (`return &local` consumed in
+    /// value position). The VM resolves the returned reference through the owning
+    /// `Arc<SharedCell>` share (`read_ref_target` PromotedCell arm); the JIT
+    /// models references as per-function stack-cell / field addresses only and
+    /// has no PromotedCell lowering, so it reads the raw reference pointer
+    /// instead of the referent — silent-wrong-output at module scope. Whole-
+    /// program deopt to the (correct) interpreter preserves VM == JIT semantics.
+    /// Same surface-and-stop shape as `has_try_unwrap_residual`. NOT serialised.
+    #[serde(skip, default)]
+    pub has_reference_escape_promotion: bool,
+
+    /// v0.3.3 book-gate `??` fix: set when the program compiles a
+    /// null-coalescing operator (`a ?? b`). The bytecode VM unwraps an
+    /// `Option<T>` left operand `Some(v) -> v` via the `CoalesceProbe`
+    /// opcode (`executor/exceptions/mod.rs::op_coalesce_probe`), but the
+    /// JIT MIR lowering (`mir/lowering/expr.rs::lower_null_coalesce`)
+    /// models `??` as a `BinOp::Eq` against `MirConstant::None`, which does
+    /// NOT recognise/unwrap the `Arc<OptionData>` carrier — it would leak
+    /// the whole `Some(v)` wrapper, diverging from the VM. The JIT has no
+    /// Option-unwrap lowering (the sibling `?` operator deopts via
+    /// `has_try_unwrap_residual` for the same reason). Whole-program deopt
+    /// to the (correct) interpreter preserves VM == JIT semantics. Same
+    /// surface-and-stop shape as `has_try_unwrap_residual`. NOT serialised.
+    #[serde(skip, default)]
+    pub has_null_coalesce_residual: bool,
 }
 
 /// Constants in the constant pool
@@ -820,6 +862,58 @@ impl KindedConstant {
         }
     }
 
+    /// Construct a `Matrix`-kinded constant from an `Arc<MatrixData>`.
+    ///
+    /// The Arc share is transferred into the constant. Every `PushConst`
+    /// of this value retains a stack share via `clone_with_kind`, matching
+    /// the direct `KindedSlot::from_matrix` carrier contract.
+    pub fn from_matrix(matrix: Arc<shape_value::heap_value::MatrixData>) -> Self {
+        let bits = Arc::into_raw(matrix) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::Matrix),
+        }
+    }
+
+    /// Construct a `HashSet`-kinded constant from an `Arc<HashSetData>`.
+    pub fn from_hashset(set: Arc<shape_value::heap_value::HashSetData>) -> Self {
+        let bits = Arc::into_raw(set) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::HashSet),
+        }
+    }
+
+    /// Construct a `Deque`-kinded constant from an `Arc<DequeData>`.
+    pub fn from_deque(deque: Arc<shape_value::heap_value::DequeData>) -> Self {
+        let bits = Arc::into_raw(deque) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::Deque),
+        }
+    }
+
+    /// Construct a `Channel`-kinded constant from an `Arc<ChannelData>`.
+    pub fn from_channel(channel: Arc<shape_value::heap_value::ChannelData>) -> Self {
+        let bits = Arc::into_raw(channel) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::Channel),
+        }
+    }
+
+    /// Construct a `PriorityQueue`-kinded constant from an
+    /// `Arc<PriorityQueueData>`.
+    pub fn from_priority_queue(
+        priority_queue: Arc<shape_value::heap_value::PriorityQueueData>,
+    ) -> Self {
+        let bits = Arc::into_raw(priority_queue) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::PriorityQueue),
+        }
+    }
+
     /// The raw slot bits.
     #[inline]
     pub fn bits(&self) -> u64 {
@@ -887,6 +981,84 @@ impl PartialEq for KindedConstant {
     }
 }
 
+#[cfg(test)]
+mod kinded_constant_tests {
+    use super::*;
+    use shape_value::heap_value::{ChannelData, DequeData, HashSetData, PriorityQueueData};
+
+    #[test]
+    fn hashset_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(HashSetData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_hashset(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::HashSet));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn deque_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(DequeData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_deque(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::Deque));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn channel_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(ChannelData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_channel(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::Channel));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn priority_queue_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(PriorityQueueData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_priority_queue(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::PriorityQueue));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+}
+
 /// Function definition in bytecode
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
@@ -945,6 +1117,11 @@ pub struct Function {
 pub struct CompiledAnnotation {
     pub name: String,
     pub param_names: Vec<String>,
+    /// Original annotation parameter definitions. Runtime handlers are
+    /// specialized at each function target, so the wrapper compiler needs the
+    /// declaration shape, not only the flattened names.
+    #[serde(skip, default)]
+    pub param_defs: Vec<shape_ast::ast::FunctionParameter>,
     /// Function ID for `before(args, ctx)` handler (if defined)
     pub before_handler: Option<u16>,
     /// Function ID for `after(args, result, ctx)` handler (if defined)
@@ -959,6 +1136,14 @@ pub struct CompiledAnnotation {
     /// AST for `comptime post(target, ctx) { ... }` (executed after function inference/compilation)
     #[serde(skip, default)]
     pub comptime_post_handler: Option<shape_ast::ast::AnnotationHandler>,
+    /// Runtime `before` handler template. This is compiled per annotated
+    /// target after the target's parameter/result types are statically known.
+    #[serde(skip, default)]
+    pub before_handler_template: Option<shape_ast::ast::AnnotationHandler>,
+    /// Runtime `after` handler template. This is compiled per annotated
+    /// target after the target's parameter/result types are statically known.
+    #[serde(skip, default)]
+    pub after_handler_template: Option<shape_ast::ast::AnnotationHandler>,
     /// Allowed target kinds for this annotation.
     /// Inferred from handler types: before/after → Function only;
     /// metadata/comptime only → any target.

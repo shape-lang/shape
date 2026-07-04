@@ -16,9 +16,7 @@
 //! aren't reconstructed until the shape-vm cascade provides a typed
 //! test harness, mirroring the file_ops migration in commit d716482.
 
-use crate::marshal::{
-    register_typed_fn_0, register_typed_fn_1, register_typed_fn_2_full,
-};
+use crate::marshal::{register_typed_fn_0, register_typed_fn_1, register_typed_fn_2_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::heap_value::{HeapValue, IoHandleData, IoResource};
@@ -241,10 +239,9 @@ pub fn register_process_io(module: &mut ModuleExports) {
                 .ok_or_else(|| "io.process_write(): handle is closed".to_string())?;
             match resource {
                 IoResource::ChildProcess(child) => {
-                    let stdin = child
-                        .stdin
-                        .as_mut()
-                        .ok_or_else(|| "io.process_write(): stdin pipe not available".to_string())?;
+                    let stdin = child.stdin.as_mut().ok_or_else(|| {
+                        "io.process_write(): stdin pipe not available".to_string()
+                    })?;
                     let written = stdin
                         .write(data.as_bytes())
                         .map_err(|e| format!("io.process_write(): {}", e))?;
@@ -298,10 +295,9 @@ pub fn register_process_io(module: &mut ModuleExports) {
                 .ok_or_else(|| "io.process_read(): handle is closed".to_string())?;
             let s = match resource {
                 IoResource::ChildProcess(child) => {
-                    let stdout = child
-                        .stdout
-                        .as_mut()
-                        .ok_or_else(|| "io.process_read(): stdout pipe not available".to_string())?;
+                    let stdout = child.stdout.as_mut().ok_or_else(|| {
+                        "io.process_read(): stdout pipe not available".to_string()
+                    })?;
                     let mut buf = vec![0u8; buf_size];
                     let bytes_read = stdout
                         .read(&mut buf)
@@ -321,8 +317,7 @@ pub fn register_process_io(module: &mut ModuleExports) {
                 }
                 _ => {
                     return Err(
-                        "io.process_read(): handle is not a ChildProcess or PipeReader"
-                            .to_string(),
+                        "io.process_read(): handle is not a ChildProcess or PipeReader".to_string(),
                     );
                 }
             };
@@ -454,8 +449,7 @@ pub fn register_process_io(module: &mut ModuleExports) {
                 .read(true)
                 .open("/dev/stdin")
                 .map_err(|e| format!("io.stdin(): {}", e))?;
-            let handle =
-                IoHandleData::new_file(file, "/dev/stdin".to_string(), "r".to_string());
+            let handle = IoHandleData::new_file(file, "/dev/stdin".to_string(), "r".to_string());
             Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(
                 handle,
             ))))
@@ -474,8 +468,7 @@ pub fn register_process_io(module: &mut ModuleExports) {
                 .write(true)
                 .open("/dev/stdout")
                 .map_err(|e| format!("io.stdout(): {}", e))?;
-            let handle =
-                IoHandleData::new_file(file, "/dev/stdout".to_string(), "w".to_string());
+            let handle = IoHandleData::new_file(file, "/dev/stdout".to_string(), "w".to_string());
             Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(
                 handle,
             ))))
@@ -494,8 +487,7 @@ pub fn register_process_io(module: &mut ModuleExports) {
                 .write(true)
                 .open("/dev/stderr")
                 .map_err(|e| format!("io.stderr(): {}", e))?;
-            let handle =
-                IoHandleData::new_file(file, "/dev/stderr".to_string(), "w".to_string());
+            let handle = IoHandleData::new_file(file, "/dev/stderr".to_string(), "w".to_string());
             Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(
                 handle,
             ))))
@@ -536,9 +528,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
                     line
                 }
                 IoResource::ChildProcess(child) => {
-                    let stdout = child.stdout.as_mut().ok_or_else(|| {
-                        "io.read_line(): stdout pipe not available".to_string()
-                    })?;
+                    let stdout = child
+                        .stdout
+                        .as_mut()
+                        .ok_or_else(|| "io.read_line(): stdout pipe not available".to_string())?;
                     let mut line = String::new();
                     BufReader::new(stdout)
                         .read_line(&mut line)

@@ -32,16 +32,14 @@
 //! refused on sight.
 
 use crate::bytecode::{Instruction, Operand};
+use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{
-    self, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
-    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_U16,
-    ELEM_TYPE_U32, ELEM_TYPE_U8,
-    V2ElemType,
-    V2TypedArrayView,
+    self, ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
+    ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+    ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, V2ElemType, V2TypedArrayView,
 };
 use crate::executor::vm_impl::stack::drop_with_kind;
-use crate::executor::VirtualMachine;
-use shape_value::v2::typed_array::TypedArray;
+use shape_value::v2::typed_array::{CallableArrayElem, TypedArray};
 use shape_value::{HeapKind, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -78,14 +76,9 @@ impl VirtualMachine {
                 // → re-stash.
                 match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
                     Some(view) => {
-                        match v2_array_detect::push_element(
-                            &view, value_bits, value_kind,
-                        ) {
+                        match v2_array_detect::push_element(&view, value_bits, value_kind) {
                             Ok(()) => {
-                                self.push_kinded(
-                                    array_bits,
-                                    NativeKind::Ptr(HeapKind::TypedArray),
-                                )
+                                self.push_kinded(array_bits, NativeKind::Ptr(HeapKind::TypedArray))
                             }
                             Err(msg) => {
                                 drop_with_kind(value_bits, value_kind);
@@ -139,9 +132,7 @@ impl VirtualMachine {
                 let (array_bits, _) = self.read_receiver_loc(&receiver_loc);
                 match v2_array_detect::as_v2_typed_array(array_bits, array_kind) {
                     Some(view) => {
-                        match v2_array_detect::push_element(
-                            &view, value_bits, value_kind,
-                        ) {
+                        match v2_array_detect::push_element(&view, value_bits, value_kind) {
                             Ok(()) => Ok(()),
                             Err(msg) => {
                                 drop_with_kind(value_bits, value_kind);
@@ -156,6 +147,64 @@ impl VirtualMachine {
                         drop_with_kind(value_bits, value_kind);
                         Err(VMError::NotImplemented(
                             "ArrayPushLocal: TypedArray slot did not resolve to \
+                             a v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                             header missing). ADR-006 §2.7.6 / §2.7.7."
+                                .to_string(),
+                        ))
+                    }
+                }
+            }
+            // STAGE C1 (2026-06-17): `xs.push(v)` where `xs: &mut Array<T>` is
+            // a reference PARAMETER. The receiver slot holds an
+            // `Arc::into_raw(Arc<RefTarget>)` (kind `Ptr(HeapKind::Reference)`)
+            // — not a `*mut TypedArray<T>` directly. Resolve the RefTarget to
+            // the underlying array pointer (mirror of `op_set_index_ref` /
+            // `op_deref_load`, ADR-006 §2.7.13) and push into the SHARED v2-raw
+            // `TypedArray<T>` carrier. `TypedArray::push` reallocates only the
+            // interior `data` buffer on grow; the `*mut TypedArray<T>` struct
+            // pointer the caller's slot stores is STABLE, so the in-place push
+            // grows the CALLER's array with no pointer writeback (the documented
+            // `fn append(&mut arr, value) { arr.push(value) }` contract in
+            // references-borrowing.mdx). V3-S5 Seam #2 element-carrier discipline.
+            NativeKind::Ptr(HeapKind::Reference) => {
+                let (ref_bits, _) = self.read_receiver_loc(&receiver_loc);
+                // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
+                // `Arc::into_raw::<RefTarget>` pointer; the receiver slot keeps
+                // one share live for us (we only borrow, never consume it).
+                let rt: &shape_value::reference::RefTarget =
+                    unsafe { &*(ref_bits as *const shape_value::reference::RefTarget) };
+                let (arr_bits, arr_kind) = match self.read_ref_target(rt) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        drop_with_kind(value_bits, value_kind);
+                        return Err(e);
+                    }
+                };
+                if arr_kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                    drop_with_kind(value_bits, value_kind);
+                    return Err(VMError::RuntimeError(format!(
+                        "ArrayPushLocal: &mut ref base must reference a \
+                         TypedArray; got {:?}",
+                        arr_kind
+                    )));
+                }
+                match v2_array_detect::as_v2_typed_array(arr_bits, arr_kind) {
+                    Some(view) => {
+                        match v2_array_detect::push_element(&view, value_bits, value_kind) {
+                            Ok(()) => Ok(()),
+                            Err(msg) => {
+                                drop_with_kind(value_bits, value_kind);
+                                Err(VMError::TypeError {
+                                    expected: "v2 typed-array element",
+                                    got: msg,
+                                })
+                            }
+                        }
+                    }
+                    None => {
+                        drop_with_kind(value_bits, value_kind);
+                        Err(VMError::NotImplemented(
+                            "ArrayPushLocal: &mut ref base did not resolve to \
                              a v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
                              header missing). ADR-006 §2.7.6 / §2.7.7."
                                 .to_string(),
@@ -192,9 +241,7 @@ impl VirtualMachine {
                         let result = v2_array_detect::pop_element(&view);
                         let _ = array_bits;
                         match result {
-                            Some((val_bits, val_kind)) => {
-                                self.push_kinded(val_bits, val_kind)
-                            }
+                            Some((val_bits, val_kind)) => self.push_kinded(val_bits, val_kind),
                             // R5b-2-bool-null-sentinel-cluster (ADR-006
                             // §2.7 + §2.7.7/Q9, 2026-05-19): empty-pop
                             // returns None per post-disposition kind
@@ -249,10 +296,7 @@ impl VirtualMachine {
                         let (s, e) = clamp_range(start, end, view.len as i64);
                         let new_ptr = slice_v2_typed_array(&view, s, e);
                         let _ = array_bits;
-                        self.push_kinded(
-                            new_ptr as u64,
-                            NativeKind::Ptr(HeapKind::TypedArray),
-                        )
+                        self.push_kinded(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
                     }
                     None => Err(VMError::NotImplemented(
                         "SliceAccess: TypedArray receiver did not resolve to a \
@@ -317,11 +361,7 @@ fn clamp_range(start: i64, end: i64, len: i64) -> (usize, usize) {
 /// `TypedArray<T>` of the same element type. Returns the raw pointer
 /// (slot carrier shape — `NativeKind::Ptr(HeapKind::TypedArray)` per
 /// r5c-2-β-CKPT-C).
-fn slice_v2_typed_array(
-    view: &V2TypedArrayView,
-    s: usize,
-    e: usize,
-) -> *mut u8 {
+fn slice_v2_typed_array(view: &V2TypedArrayView, s: usize, e: usize) -> *mut u8 {
     use crate::executor::v2_handlers::v2_array_detect::stamp_elem_type;
     let (s, e) = if s <= e { (s, e) } else { (s, s) };
     match view.elem_type {
@@ -499,13 +539,12 @@ fn slice_v2_typed_array(
         // mirror of the String/Decimal slice arms above. Retain per-element so
         // both source and slice arrays own valid shares of each TypedObjectStorage.
         V2ElemType::TypedObject => unsafe {
+            use crate::executor::v2_handlers::v2_array_detect::ELEM_TYPE_TYPED_OBJECT;
             use shape_value::heap_value::TypedObjectStorage;
             use shape_value::v2::refcount::v2_retain;
-            use crate::executor::v2_handlers::v2_array_detect::ELEM_TYPE_TYPED_OBJECT;
             let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
             let count = e.saturating_sub(s);
-            let new_ptr =
-                TypedArray::<*const TypedObjectStorage>::with_capacity(count as u32);
+            let new_ptr = TypedArray::<*const TypedObjectStorage>::with_capacity(count as u32);
             if count > 0 {
                 let src_data = (*src).data;
                 let dst_data = (*new_ptr).data;
@@ -517,6 +556,68 @@ fn slice_v2_typed_array(
                 (*new_ptr).len = count as u32;
             }
             stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+            new_ptr as *mut u8
+        },
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // slice of an `Array<dyn Trait>`. Retain per-element so both source and
+        // slice arrays own valid shares of each TraitObjectStorage.
+        V2ElemType::TraitObject => unsafe {
+            use crate::executor::v2_handlers::v2_array_detect::ELEM_TYPE_TRAIT_OBJECT;
+            use shape_value::heap_value::TraitObjectStorage;
+            use shape_value::v2::refcount::v2_retain;
+            let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<*const TraitObjectStorage>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_TRAIT_OBJECT);
+            new_ptr as *mut u8
+        },
+        // Construction strict-typing close (2026-06-05) — nested array slice.
+        // Mirror of the TypedObject slice arm; retain each inner-array share.
+        V2ElemType::TypedArray => unsafe {
+            use crate::executor::v2_handlers::v2_array_detect::ELEM_TYPE_TYPED_ARRAY;
+            use shape_value::v2::refcount::v2_retain;
+            use shape_value::v2::typed_array::TypedArrayElem;
+            let src = view.ptr as *const TypedArray<*const TypedArrayElem>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<*const TypedArrayElem>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_TYPED_ARRAY);
+            new_ptr as *mut u8
+        },
+        V2ElemType::Callable => unsafe {
+            let src = view.ptr as *const TypedArray<CallableArrayElem>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<CallableArrayElem>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    elem.retain();
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_CALLABLE);
             new_ptr as *mut u8
         },
     }

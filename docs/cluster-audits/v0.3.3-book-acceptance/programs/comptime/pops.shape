@@ -1,0 +1,26 @@
+comptime fn pow(base: int, exp: int) -> int {
+  let mut r = 1
+  let mut i = 0
+  while i < exp { r = r * base i = i + 1 }
+  r
+}
+comptime fn hexdigit(v: int) -> string {
+  if v < 10 { f"{v}" } else {
+    if v == 10 { "a" } else { if v == 11 { "b" } else { if v == 12 { "c" } else {
+    if v == 13 { "d" } else { if v == 14 { "e" } else { "f" } } } } }
+  }
+}
+comptime fn to_hex(n: int) -> string {
+  if n == 0 { return "0" }
+  let mut v = n
+  let mut s = ""
+  while v > 0 {
+    s = hexdigit(v % 16) + s
+    v = v / 16
+  }
+  s
+}
+let P = comptime { pow(2, 10) }
+let H = comptime { to_hex(255) }
+let H2 = comptime { to_hex(4096) }
+print(f"P={P} H={H} H2={H2}")

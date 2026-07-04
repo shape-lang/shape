@@ -25,12 +25,13 @@ use cli_args::{Cli, Commands};
 use commands::{
     ProviderOptions, run_add, run_build, run_check, run_doctest, run_expand_comptime,
     run_ext_install, run_ext_list, run_ext_remove, run_info, run_jit_parity, run_keys_generate,
-    run_keys_list, run_keys_trust, run_login, run_publish, run_register, run_remove, run_repl, run_schema_fetch,
-    run_schema_status, run_script, run_search, run_serve, run_sign, run_snapshot_delete,
-    run_snapshot_info, run_snapshot_list, run_tree, run_tui, run_verify, run_wire_serve,
+    run_keys_list, run_keys_trust, run_login, run_publish, run_register, run_remove, run_repl,
+    run_schema_fetch, run_schema_status, run_script, run_search, run_serve, run_sign,
+    run_snapshot_delete, run_snapshot_info, run_snapshot_list, run_tree, run_tui, run_verify,
+    run_wire_serve,
 };
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -78,8 +79,6 @@ async fn main() -> Result<()> {
         env_logger::init();
     }
 
-    initialize_shared_runtime().context("failed to initialize shared runtime")?;
-
     if cli.expand && cli.file.is_none() && cli.command.is_none() {
         anyhow::bail!("--expand requires a script file: shape <file.shape> --expand");
     }
@@ -87,6 +86,10 @@ async fn main() -> Result<()> {
         anyhow::bail!(
             "--module/--function are only valid with --expand or the expand-comptime subcommand"
         );
+    }
+
+    if should_initialize_shared_runtime_before_dispatch(&cli) {
+        initialize_shared_runtime().context("failed to initialize shared runtime")?;
     }
 
     let Cli {
@@ -374,10 +377,19 @@ async fn main() -> Result<()> {
                 }
             } else {
                 // No shape.toml — launch REPL
+                initialize_shared_runtime().context("failed to initialize shared runtime")?;
                 run_repl(mode, extensions, &provider_opts).await?;
             }
         }
     }
 
     Ok(())
+}
+
+fn should_initialize_shared_runtime_before_dispatch(cli: &Cli) -> bool {
+    match &cli.command {
+        Some(Commands::Run { .. }) | Some(Commands::ExpandComptime { .. }) => false,
+        None => false,
+        Some(_) => true,
+    }
 }

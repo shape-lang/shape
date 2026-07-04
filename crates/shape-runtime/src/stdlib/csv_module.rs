@@ -1,9 +1,10 @@
 //! Native `csv` module for CSV parsing and serialization.
 //!
-//! Phase 2d Array cluster migration: `parse`, `stringify`, `read_file`,
-//! and `is_valid` ported to the typed marshal layer using
-//! `TypedArrayData::String` (rows of strings) inside
-//! `the-deleted-heterogeneous-element-carrier` (array of rows).
+//! Phase 2d Array cluster migration: `parse`, `read_file`, `stringify`, and
+//! `is_valid` are on the typed marshal layer. `parse` / `read_file` project
+//! the v2 nested typed-array carrier directly, and `stringify` consumes the
+//! same shape: outer `TypedArray<*const TypedArrayElem>`, inner
+//! `TypedArray<*const StringObj>`.
 //!
 //! Stage C HashMap-marshal P1(b) activation (2026-05-07): `parse_records`
 //! and `stringify_records` activated using `HeapValue::HashMap(HashMapData)`
@@ -23,37 +24,23 @@ use shape_value::heap_value::{HeapValue, TypedObjectStorage};
 use shape_value::{NativeKind, ValueSlot};
 use std::sync::Arc;
 
-// W17-out-of-bundle-A-followups (2026-05-12): `row_to_heap` was the
-// per-row `Arc<HeapValue::TypedArray(TypedArrayData::String)>` builder
-// for the pre-rewire `csv.parse` / `csv.read_file` `Array<Array<string>>`
-// shape. Both now surface-and-stop pending the
-// W17-typed-carrier-array-typedarray follow-up; the helper is removed
-// alongside its construction call sites.
+fn parse_csv_rows(text: &str, fn_name: &str) -> Result<Vec<Vec<Arc<String>>>, String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(text.as_bytes());
+    let mut rows = Vec::new();
 
-/// Read a `Vec<Vec<String>>` from a `Vec<Arc<HeapValue>>` whose elements
-/// are each the deleted outer typed-array arm.
-///
-/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: this consumer
-/// pattern-matched `HeapValue::TypedArray(Arc<TypedArrayData>)` to extract
-/// the per-row `Vec<String>`. Both the outer arm and the inner
-/// `TypedArrayData::String` shape are deleted (V3-S5 ckpt-1/ckpt-4/ckpt-5)
-/// — the per-row carrier is now a `*mut TypedArray<*const StringObj>` raw
-/// pointer with no `HeapValue::*` wrapper, so `Vec<Arc<HeapValue>>` cannot
-/// express it. Pairs with the Round 2 `Vec<Arc<HeapValue>>` rewire
-/// follow-up at `marshal.rs:FromSlot<Vec<Arc<HeapValue>>>` and the
-/// `from_typed_array_<T>` constructor wave at `slot.rs:142`.
-fn rows_from_heap_array(
-    rows: &[Arc<HeapValue>],
-    fn_name: &str,
-) -> Result<Vec<Vec<String>>, String> {
-    let _ = rows;
-    Err(format!(
-        "{}: V3-S5 ckpt-5-prime²c SURFACE — per-row outer-array-arm \
-         consumer needs Vec<Arc<HeapValue>> rewire for the deleted \
-         outer-array-arm. Round 2 follow-up. ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED.",
-        fn_name
-    ))
+    for result in reader.records() {
+        let record = result.map_err(|e| format!("{} failed: {}", fn_name, e))?;
+        rows.push(
+            record
+                .iter()
+                .map(|cell| Arc::new(cell.to_string()))
+                .collect(),
+        );
+    }
+
+    Ok(rows)
 }
 
 /// Create the `csv` module with CSV parsing and serialization functions.
@@ -62,43 +49,21 @@ pub fn create_csv_module() -> ModuleExports {
     module.description = "CSV parsing and serialization".to_string();
 
     // csv.parse(text: string) -> Array<Array<string>>
-    //
-    // W17-out-of-bundle-A-followups (2026-05-12): surface-and-stop.
-    // `Array<Array<string>>` is homogeneous in
-    // `HeapKind::TypedArray (TypedArrayData::String)` — the natural
-    // Q25.A specialized variant is
-    // `TypedArrayData::TypedArray(Arc<TypedBuffer<Arc<TypedArrayData>>>)`,
-    // but adding a nested-TypedArray variant is out of bundle-A-followups
-    // scope (the prompt forbids new HeapKind variants and an added
-    // TypedArrayData variant cascades through ~40 exhaustive matches).
-    // Users wanting per-record dispatch should use `csv.parse_records`
-    // which lowers to `Array<TypedObject>` via the C+ precedent.
     register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse",
         "Parse CSV text into an array of rows (each row is an array of strings)",
         "text",
         "string",
-        ConcreteType::ArrayHeapValue("Array<Array<string>>".to_string()),
+        ConcreteType::ArrayStringRows,
         |text, _ctx| {
-            let _ = text;
-            // phase-2d-hardening:(f) — csv.parse surface-and-stop:
-            // Array<Array<string>> needs TypedArrayData::TypedArray
-            // (nested-TypedArray) variant. Use csv.parse_records for
-            // per-record TypedObject dispatch in the meantime.
-            Err(format!(
-                "csv.method parse() -> SURFACE — `Array<Array<string>>` needs a \
-                 nested-array variant in ADR-006 \
-                 §2.7.24 Q25.A's spec list. Tracked as \
-                 W17-typed-carrier-array-typedarray follow-up (out of \
-                 bundle-A-followups scope). Use `csv.parse_records` for \
-                 per-record TypedObject access. ADR-006 §2.7.24 Q25.A."
-            ))
+            let rows = parse_csv_rows(text.as_str(), "csv.parse()")?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayStringRows(rows)))
         },
     );
 
     // csv.stringify(data: Array<Array<string>>, delimiter?: string) -> string
-    register_typed_fn_2_full::<_, Vec<Arc<HeapValue>>, Arc<String>>(
+    register_typed_fn_2_full::<_, Vec<Vec<Arc<String>>>, Arc<String>>(
         &mut module,
         "stringify",
         "Convert an array of rows to a CSV string",
@@ -121,21 +86,15 @@ pub fn create_csv_module() -> ModuleExports {
         ],
         ConcreteType::String,
         |data, delimiter, _ctx| {
-            let rows = rows_from_heap_array(&data, "csv.stringify()")?;
-
-            let delim_byte = delimiter
-                .as_bytes()
-                .first()
-                .copied()
-                .unwrap_or(b',');
+            let delim_byte = delimiter.as_bytes().first().copied().unwrap_or(b',');
 
             let mut writer = csv::WriterBuilder::new()
                 .delimiter(delim_byte)
                 .from_writer(Vec::new());
 
-            for row in &rows {
+            for row in &data {
                 writer
-                    .write_record(row)
+                    .write_record(row.iter().map(|cell| cell.as_str()))
                     .map_err(|e| format!("csv.stringify() failed: {}", e))?;
             }
 
@@ -150,30 +109,34 @@ pub fn create_csv_module() -> ModuleExports {
     );
 
     // csv.read_file(path: string) -> Result<Array<Array<string>>>
-    //
-    // W17-out-of-bundle-A-followups (2026-05-12): surface-and-stop, same
-    // shape as csv.parse above — `Array<Array<string>>` needs the
-    // nested-TypedArray variant in Q25.A's spec list. Tracked as
-    // W17-typed-carrier-array-typedarray follow-up.
     register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "read_file",
         "Read and parse a CSV file into an array of rows",
         "path",
         "string",
-        ConcreteType::Result(Box::new(ConcreteType::ArrayHeapValue(
-            "Array<Array<string>>".to_string(),
-        ))),
-        |path, _ctx| {
-            let _ = path;
-            // phase-2d-hardening:(f) — csv.read_file surface-and-stop:
-            // same nested-TypedArray gap as csv.parse.
-            Err(format!(
-                "csv.method read_file() -> SURFACE — `Array<Array<string>>` needs a \
-                 nested-array variant in ADR-006 \
-                 §2.7.24 Q25.A's spec list. Tracked as \
-                 W17-typed-carrier-array-typedarray follow-up. ADR-006 §2.7.24 Q25.A."
-            ))
+        ConcreteType::Result(Box::new(ConcreteType::ArrayStringRows)),
+        |path, ctx| {
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path.as_str(),
+            )?;
+
+            let text = match std::fs::read_to_string(path.as_str()) {
+                Ok(text) => text,
+                Err(e) => {
+                    return Ok(TypedReturn::Err(ConcreteReturn::String(format!(
+                        "csv.read_file() failed to read {}: {}",
+                        path, e
+                    ))));
+                }
+            };
+
+            match parse_csv_rows(text.as_str(), "csv.read_file()") {
+                Ok(rows) => Ok(TypedReturn::Ok(ConcreteReturn::ArrayStringRows(rows))),
+                Err(e) => Ok(TypedReturn::Err(ConcreteReturn::String(e))),
+            }
         },
     );
 
@@ -241,9 +204,8 @@ pub fn create_csv_module() -> ModuleExports {
             // dedupes by field-name list; subsequent CSV files with the
             // same header columns reuse the same SchemaId.
             let schema_id = register_predeclared_any_schema(&headers);
-            let field_kinds: Arc<[NativeKind]> = Arc::from(
-                vec![NativeKind::String; headers.len()].into_boxed_slice(),
-            );
+            let field_kinds: Arc<[NativeKind]> =
+                Arc::from(vec![NativeKind::String; headers.len()].into_boxed_slice());
             // Heap mask: every field is a string (heap-resident).
             let heap_mask: u64 = if headers.len() >= 64 {
                 u64::MAX
@@ -253,8 +215,7 @@ pub fn create_csv_module() -> ModuleExports {
 
             let mut records: Vec<Arc<HeapValue>> = Vec::new();
             for result in reader.records() {
-                let record =
-                    result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
+                let record = result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
                 let n = headers.len().min(record.len());
                 let mut slots: Vec<ValueSlot> = Vec::with_capacity(headers.len());
                 // Use min(headers, record) length plus pad with empty
@@ -305,16 +266,14 @@ pub fn create_csv_module() -> ModuleExports {
                 name: "data".to_string(),
                 type_name: "Array<HashMap<string, string>>".to_string(),
                 required: true,
-                description: "Array of records (hashmaps with string keys and values)"
-                    .to_string(),
+                description: "Array of records (hashmaps with string keys and values)".to_string(),
                 ..Default::default()
             },
             ModuleParam {
                 name: "headers".to_string(),
                 type_name: "Array<string>".to_string(),
                 required: false,
-                description: "Explicit header order (default: keys from first record)"
-                    .to_string(),
+                description: "Explicit header order (default: keys from first record)".to_string(),
                 default_snippet: Some("[]".to_string()),
                 ..Default::default()
             },
@@ -347,12 +306,17 @@ pub fn create_csv_module() -> ModuleExports {
                             shape_value::heap_value::HashMapKindedRef::Decimal(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::TypedObject(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::TraitObject(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Callable(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::HashMap(arc) => arc.keys,
                         };
-                        let n = unsafe { shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize };
+                        let n = unsafe {
+                            shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize
+                        };
                         (0..n)
                             .map(|i| unsafe {
-                                let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+                                let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                    keys_ptr, i as u32,
+                                );
                                 shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
                             })
                             .collect()
@@ -379,9 +343,7 @@ pub fn create_csv_module() -> ModuleExports {
                     }
                 }
             } else {
-                return Ok(TypedReturn::Concrete(ConcreteReturn::String(
-                    String::new(),
-                )));
+                return Ok(TypedReturn::Concrete(ConcreteReturn::String(String::new())));
             };
 
             let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
@@ -407,7 +369,8 @@ pub fn create_csv_module() -> ModuleExports {
                                             let ptr: *const shape_value::v2::string_obj::StringObj =
                                                 unsafe { *(*arc.values).data.add(idx) };
                                             unsafe {
-                                                shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                                                shape_value::v2::string_obj::StringObj::as_str(ptr)
+                                                    .to_owned()
                                             }
                                         })
                                         .unwrap_or_default()
@@ -438,15 +401,11 @@ pub fn create_csv_module() -> ModuleExports {
                             // Resolve header → slot index via the schema's
                             // field list. Empty cell when the record's
                             // schema doesn't have the requested header.
-                            let cell = match schema
-                                .fields
-                                .iter()
-                                .position(|f| f.name == *header)
-                            {
-                                Some(idx) if idx < storage.slots.len() => {
+                            let cell = match schema.fields.iter().position(|f| f.name == *header) {
+                                Some(idx) if idx < storage.slots().len() => {
                                     // Slot is a string per parse_records'
                                     // construction; read via the kind table.
-                                    let bits = storage.slots[idx].raw();
+                                    let bits = storage.slots()[idx].raw();
                                     if bits == 0 {
                                         String::new()
                                     } else {

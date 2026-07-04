@@ -30,26 +30,44 @@ Exit codes:
 
 ## Adding corpus seeds (W13.3 territory)
 
-W13.3 lands the per-domain corpus at `tools/shape-fuzz/corpus/<domain>/*.shape`
-following the 50-seed inventory in the W13 audit §3 (arithmetic 10 +
-collections 10 + closures 7 + patterns 8 + async 5 + generics 8 +
-fallthrough 2). Until then, the only seed in this crate is the smoke
-self-test at `tests/smoke-self-test/s1.shape` (the same program as
-`tests/smokes/s1.shape` at the repo root, see `tests/smokes/README.md`),
-exercised by `cargo test -p shape-fuzz`.
+W13.3 landed the per-domain corpus at `tools/shape-fuzz/corpus/<domain>/*.shape`
+following the 50-seed inventory in the W13 audit §3. The current checked-in
+inventory is 59 seeds: arithmetic 10 + collections 15 + closures 7 +
+patterns 12 + async 5 + generics 8 + fallthrough 2. The patterns count
+includes the four W88C Result/Option differential seeds (`m09`-`m12`); this is
+an expected corpus expansion, not a negative-corpus or convergence-semantics
+change. The smoke self-test remains at `tests/smoke-self-test/s1.shape` (the
+same program as `tests/smokes/s1.shape` at the repo root, see
+`tests/smokes/README.md`), exercised by `cargo test -p shape-fuzz`.
 
 When W13.3 lands corpus seeds, each `(g)`-class entry runs end-to-end and
 must classify `Convergent`; each `(n)`-class entry is named after its
 `docs/v0.3-close-summary.md` §5.1 residual class and is the harness's own
 regression sentinel against unintended convergence flips.
 
-## CI cadence (W13.4 — nightly fuzz workflow landed)
+## Per-commit curated gate
 
-The harness runs **NIGHTLY ONLY** per the Phase 4 test execution policy
-in `docs/cluster-audits/phase-3-team-lead-handover.md:42-47`. It is not
-a per-commit gate, not a merge-ceremony gate (except at audit-day batch
-merges per the coverage-gate convention), and not the v0.3.0 release
-gate.
+`scripts/differential-gate.sh` runs the existing `shape-fuzz run`
+subprocess harness against a small golden subset from
+`tools/shape-fuzz/tests/corpus`. It invokes `shape run --mode vm` and
+`shape run --mode jit` through the built `shape-fuzz` binary; it does not
+use the disabled in-process Rust differential test.
+
+```bash
+cargo build -p shape-cli --bin shape
+cargo build -p shape-fuzz --bin shape-fuzz
+bash scripts/differential-gate.sh
+```
+
+`just differential-gate` wraps the same sequence. CI runs this curated
+gate on pull requests and pushes to `main`.
+
+## Full-corpus nightly cadence (W13.4)
+
+The full corpus runs **NIGHTLY ONLY** per the Phase 4 test execution
+policy in `docs/cluster-audits/phase-3-team-lead-handover.md:42-47`.
+It is separate from the per-commit curated gate because it includes known
+negative-class seeds.
 
 `.github/workflows/nightly-fuzz.yml` runs the harness on schedule
 (`0 4 * * *` UTC) and on-demand via `workflow_dispatch`. Each run:

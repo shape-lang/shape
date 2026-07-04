@@ -464,6 +464,72 @@ test()"#,
 }
 
 // ========================================================================
+// 8b. slice()  — book SPEC lead substring method (fundamentals/strings.mdx)
+//     char-indexed half-open [start, end)
+// ========================================================================
+
+/// STAGE-S2: `s.slice(start, end)` — book llm_summary lead method.
+#[test]
+fn test_slice_basic() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(1, 3) }
+test()"#,
+    )
+    .expect_string("el");
+}
+
+/// slice over the whole string.
+#[test]
+fn test_slice_full() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(0, 5) }
+test()"#,
+    )
+    .expect_string("hello");
+}
+
+/// slice empty range yields "".
+#[test]
+fn test_slice_empty_range() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(2, 2) }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// slice inverted range (start > end) yields "".
+#[test]
+fn test_slice_inverted_range() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(3, 1) }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// slice end-bound clamps past the string length.
+#[test]
+fn test_slice_clamps_end() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(0, 100) }
+test()"#,
+    )
+    .expect_string("hello");
+}
+
+/// slice is char-indexed (Unicode scalars), not byte-indexed.
+#[test]
+fn test_slice_multibyte_chars() {
+    // "日本語テスト" chars: 日(0) 本(1) 語(2) テ(3) ス(4) ト(5)
+    ShapeTest::new(
+        r#"fn test() -> string { "日本語テスト".slice(1, 3) }
+test()"#,
+    )
+    .expect_string("本語");
+}
+
+// ========================================================================
 // 9. toUpperCase() / toLowerCase()
 // ========================================================================
 
@@ -729,7 +795,7 @@ test()"#,
     .expect_string("o");
 }
 
-/// Verifies charAt out of bounds returns null.
+/// Verifies charAt out of bounds returns None.
 #[test]
 fn test_char_at_out_of_bounds() {
     ShapeTest::new(
@@ -1353,4 +1419,177 @@ fn test_empty_string_split() {
 test()"#,
     )
     .expect_string("");
+}
+
+// ========================================================================
+// charAt — string model (single char = 1-char string, NOT a char scalar)
+//
+// STAGE-S4 regression suite. The book (`fundamentals/strings.mdx` +
+// `operators.mdx`) gives Shape NO first-class `char` type: a single
+// character is a 1-char `string`; char *literals* `'a'` are an int-codepoint
+// interop escape hatch. `charAt` is declared `-> string`, so it MUST yield a
+// real 1-char string. The pre-fix implementation returned a `NativeKind::Char`
+// scalar typed as `string`, which corrupted `Array<string>` collection (the
+// codepoint bits were stored where a `*const StringObj` was expected, then
+// read back as a pointer → SIGSEGV exit 139). A ShapeTest runs the program
+// in-process, so a SIGSEGV would abort the whole test binary — these tests
+// double as no-segfault assertions.
+// ========================================================================
+
+/// Scalar `charAt` returns a real 1-char string.
+#[test]
+fn test_char_at_scalar_returns_string() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "alpha"
+            w.charAt(0)
+        }
+test()"#,
+    )
+    .expect_string("a");
+}
+
+/// `charAt` mid-string.
+#[test]
+fn test_char_at_mid() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "hello"
+            w.charAt(2)
+        }
+test()"#,
+    )
+    .expect_string("l");
+}
+
+/// Out-of-range `charAt` returns the empty string (string-model neutral).
+#[test]
+fn test_char_at_out_of_range() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "hi"
+            w.charAt(5)
+        }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// Negative-index `charAt` returns the empty string.
+#[test]
+fn test_char_at_negative_index() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "hi"
+            w.charAt(-1)
+        }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// CATASTROPHIC SEGFAULT REGRESSION (exit 139, both modes): collect
+/// `charAt` results into an `Array<string>` via `map`, then index-read.
+/// Pre-fix this stored codepoint bits as a string element and derefed them
+/// as a `*const StringObj` on read → SIGSEGV. A correct value (or a clean
+/// compile error) is required; a segfault aborts this test binary.
+#[test]
+fn test_char_at_map_collect_into_array_string_no_segfault() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let ws: Array<string> = ["alpha", "beta", "gamma"]
+            let firsts: Array<string> = ws.map(|w| w.charAt(0))
+            firsts[2]
+        }
+test()"#,
+    )
+    .expect_string("g");
+}
+
+/// `charAt` inside a for-loop over a range yields each character as a string;
+/// f-string interpolation accumulates them. Exercises the loop-variable index
+/// path (distinct from the constant-index fast-path) without a SIGSEGV.
+#[test]
+fn test_char_at_for_loop() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "abc"
+            let mut acc: string = ""
+            for i in 0..3 {
+                acc = f"{acc}{w.charAt(i)}"
+            }
+            acc
+        }
+test()"#,
+    )
+    .expect_string("abc");
+}
+
+// ========================================================================
+// STAGE-S5: string-method results infer `string` (concatenable + comparable)
+//
+// The STAGE-S4 char model makes a single character a real 1-char `string`,
+// so `s.charAt(i)` / `s.slice(..)` / `s.substring(..)` MUST infer `string`
+// (book strings.mdx §Methods: each is typed `-> string`). Before the
+// STAGE-S5 `infer_expr_type` MethodCall arm, the bytecode compiler resolved
+// these to `unknown`, so a strict-typed downstream use (`s.charAt(0) + "!"`,
+// `s.slice(0,2) == "he"`) was rejected as `string + unknown`. These tests
+// pin the parity with the `s[i]` index arm.
+// ========================================================================
+
+/// `charAt` result concatenates with a string literal under strict typing.
+#[test]
+fn test_char_at_concat_is_string() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let s: string = "hello"
+            s.charAt(0) + "!"
+        }
+test()"#,
+    )
+    .expect_string("h!");
+}
+
+/// `slice` result concatenates with a string literal under strict typing.
+#[test]
+fn test_slice_concat_is_string() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let s: string = "hello"
+            s.slice(0, 2) + "!"
+        }
+test()"#,
+    )
+    .expect_string("he!");
+}
+
+/// `substring` result compares against a string literal under strict typing.
+#[test]
+fn test_substring_eq_is_string() {
+    ShapeTest::new(
+        r#"fn test() -> bool {
+            let s: string = "hello"
+            s.substring(0, 2) == "he"
+        }
+test()"#,
+    )
+    .expect_bool(true);
+}
+
+/// Loop accumulator over `charAt` concatenation (the book `acc + s[i]`
+/// shape, method form): infers `string` so `acc + s.charAt(i)` compiles.
+#[test]
+fn test_char_at_concat_accumulate() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let s: string = "abc"
+            let mut acc: string = ""
+            for i in 0..3 {
+                acc = acc + s.charAt(i)
+            }
+            acc
+        }
+test()"#,
+    )
+    .expect_string("abc");
 }

@@ -1,7 +1,7 @@
 /// @module std::core::set
 /// Set module - unordered collection of unique elements
 ///
-/// Backed by HashMap for O(1) lookup.
+/// Backed by the native Set<T> carrier for O(1) lookup.
 /// Exports: set.new(), set.from_array(arr), set.add(s, item), set.remove(s, item),
 ///          set.includes(s, item), set.union(a, b), set.intersection(a, b),
 ///          set.difference(a, b), set.to_array(s), set.len(s)
@@ -12,71 +12,55 @@
 /// Array/Set/HashMap. No backwards-compat aliases shipped.
 
 /// Create a new empty set
-pub fn new() {
-    HashMap()
+pub fn new<T>() -> Set<T> {
+    Set()
 }
 
 /// Create a set from an array (deduplicates)
-pub fn from_array(arr) {
-    var s = HashMap()
+pub fn from_array<T>(arr: Array<T>) -> Set<T> {
+    var s: Set<T> = Set()
     for item in arr {
-        s = s.set(item, true)
+        s = s.add(item)
     }
     s
 }
 
 /// Add an item to the set, returns new set
-pub fn add(s, item) {
-    s.set(item, true)
+pub fn add<T>(s: Set<T>, item: T) -> Set<T> {
+    s.add(item)
 }
 
 /// Remove an item from the set, returns new set
-pub fn remove(s, item) {
+pub fn remove<T>(s: Set<T>, item: T) -> Set<T> {
     s.delete(item)
 }
 
 /// Check if set includes an item (criterion F: renamed from `contains`).
-pub fn includes(s, item) {
+pub fn includes<T>(s: Set<T>, item: T) -> bool {
     s.has(item)
 }
 
 /// Union of two sets
-pub fn union(a, b) {
-    var result = a
-    for key in b.keys() {
-        result = result.set(key, true)
-    }
-    result
+pub fn union<T>(a: Set<T>, b: Set<T>) -> Set<T> {
+    a.union(b)
 }
 
 /// Intersection of two sets
-pub fn intersection(a, b) {
-    var result = HashMap()
-    for key in a.keys() {
-        if b.has(key) {
-            result = result.set(key, true)
-        }
-    }
-    result
+pub fn intersection<T>(a: Set<T>, b: Set<T>) -> Set<T> {
+    a.intersection(b)
 }
 
 /// Difference (a - b)
-pub fn difference(a, b) {
-    var result = HashMap()
-    for key in a.keys() {
-        if !b.has(key) {
-            result = result.set(key, true)
-        }
-    }
-    result
+pub fn difference<T>(a: Set<T>, b: Set<T>) -> Set<T> {
+    a.difference(b)
 }
 
 /// Convert set to array
-pub fn to_array(s) {
-    s.keys()
+pub fn to_array<T>(s: Set<T>) -> Array<T> {
+    s.toArray()
 }
 
 /// Get the number of elements (criterion F: renamed from `size`).
-pub fn len(s) {
+pub fn len<T>(s: Set<T>) -> int {
     s.len()
 }

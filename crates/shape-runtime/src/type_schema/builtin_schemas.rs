@@ -63,6 +63,18 @@ pub const SIM_RETURN_COMPLETED: usize = 3;
 pub const SIM_RETURN_EVENT_LOG: usize = 4;
 pub const SIM_RETURN_SEED: usize = 5;
 
+// -- Option (2 fields) --
+pub const OPTION_VARIANT: usize = 0;
+pub const OPTION_PAYLOAD: usize = 1;
+pub const OPTION_VARIANT_SOME: i64 = 0;
+pub const OPTION_VARIANT_NONE: i64 = 1;
+
+// -- Result (2 fields) --
+pub const RESULT_VARIANT: usize = 0;
+pub const RESULT_PAYLOAD: usize = 1;
+pub const RESULT_VARIANT_OK: i64 = 0;
+pub const RESULT_VARIANT_ERR: i64 = 1;
+
 // =========================================================================
 // BuiltinSchemaIds — one ID per fixed-layout schema
 // =========================================================================
@@ -81,6 +93,8 @@ pub struct BuiltinSchemaIds {
     pub group_result: SchemaId,
     pub event_log_entry: SchemaId,
     pub simulate_return: SchemaId,
+    pub option: SchemaId,
+    pub result: SchemaId,
     pub empty_object: SchemaId,
 }
 
@@ -98,6 +112,8 @@ pub fn resolve_builtin_schema_ids(registry: &TypeSchemaRegistry) -> Option<Built
         group_result: registry.get("__GroupResult")?.id,
         event_log_entry: registry.get("__EventLogEntry")?.id,
         simulate_return: registry.get("__SimulateReturn")?.id,
+        option: registry.get("__Option")?.id,
+        result: registry.get("__Result")?.id,
         empty_object: registry.get("__EmptyObject")?.id,
     })
 }
@@ -173,6 +189,16 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .any_field("seed")
         .register(registry);
 
+    let option = TypeSchemaBuilder::new("__Option")
+        .i64_field("variant")
+        .any_field("payload")
+        .register(registry);
+
+    let result = TypeSchemaBuilder::new("__Result")
+        .i64_field("variant")
+        .any_field("payload")
+        .register(registry);
+
     let empty_object = TypeSchemaBuilder::new("__EmptyObject").register(registry);
 
     // Internal comptime helper object shapes
@@ -215,6 +241,8 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         group_result,
         event_log_entry,
         simulate_return,
+        option,
+        result,
         empty_object,
     }
 }
@@ -239,6 +267,8 @@ mod tests {
         assert!(registry.has_type("__GroupResult"));
         assert!(registry.has_type("__EventLogEntry"));
         assert!(registry.has_type("__SimulateReturn"));
+        assert!(registry.has_type("__Option"));
+        assert!(registry.has_type("__Result"));
         assert!(registry.has_type("__EmptyObject"));
         assert!(registry.has_type("__ComptimeBuildConfig"));
         assert!(registry.has_type("__ComptimeTargetField"));
@@ -251,6 +281,12 @@ mod tests {
 
         let trace_frame = registry.get_by_id(ids.trace_frame).unwrap();
         assert_eq!(trace_frame.field_count(), 4);
+
+        let option = registry.get_by_id(ids.option).unwrap();
+        assert_eq!(option.field_count(), 2);
+
+        let result = registry.get_by_id(ids.result).unwrap();
+        assert_eq!(result.field_count(), 2);
 
         let empty = registry.get_by_id(ids.empty_object).unwrap();
         assert_eq!(empty.field_count(), 0);
@@ -273,5 +309,50 @@ mod tests {
         assert_eq!(schema.fields[SIM_RETURN_FINAL_STATE].name, "final_state");
         assert_eq!(schema.fields[SIM_RETURN_COMPLETED].name, "completed");
         assert_eq!(schema.fields[SIM_RETURN_SEED].name, "seed");
+
+        let schema = registry.get_by_id(ids.option).unwrap();
+        assert_eq!(schema.fields[OPTION_VARIANT].name, "variant");
+        assert_eq!(schema.fields[OPTION_PAYLOAD].name, "payload");
+
+        let schema = registry.get_by_id(ids.result).unwrap();
+        assert_eq!(schema.fields[RESULT_VARIANT].name, "variant");
+        assert_eq!(schema.fields[RESULT_PAYLOAD].name, "payload");
+    }
+
+    #[test]
+    fn test_option_result_carrier_tags_match_stdlib_enums() {
+        let registry = TypeSchemaRegistry::with_stdlib_types();
+
+        let option = registry.get("Option").unwrap();
+        assert_eq!(
+            option.variant_id("Some").map(i64::from),
+            Some(OPTION_VARIANT_SOME)
+        );
+        assert_eq!(
+            option.variant_id("None").map(i64::from),
+            Some(OPTION_VARIANT_NONE)
+        );
+
+        let result = registry.get("Result").unwrap();
+        assert_eq!(
+            result.variant_id("Ok").map(i64::from),
+            Some(RESULT_VARIANT_OK)
+        );
+        assert_eq!(
+            result.variant_id("Err").map(i64::from),
+            Some(RESULT_VARIANT_ERR)
+        );
+    }
+
+    #[test]
+    fn test_resolve_builtin_schema_ids_requires_registered_option_result() {
+        let registry = TypeSchemaRegistry::new();
+        assert!(resolve_builtin_schema_ids(&registry).is_none());
+
+        let mut registry = TypeSchemaRegistry::new();
+        let ids = register_builtin_schemas(&mut registry);
+        let resolved = resolve_builtin_schema_ids(&registry).unwrap();
+        assert_eq!(resolved.option, ids.option);
+        assert_eq!(resolved.result, ids.result);
     }
 }
