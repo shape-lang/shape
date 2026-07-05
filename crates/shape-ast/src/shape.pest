@@ -915,7 +915,13 @@ expression = { assignment_expr }
 
 compound_assign_op = { "**=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "^=" | "&=" | "|=" }
 assign_op = { "=" ~ !">" }
-assignment_expr = { postfix_expr ~ (compound_assign_op | assign_op) ~ assignment_expr | pipe_expr }
+// Left-factored: parse the LHS ONCE as pipe_expr, then optionally an assignment tail.
+// The old form (postfix_expr ~ op ~ assignment_expr | pipe_expr) parsed the whole LHS
+// twice on every non-assignment expression — a 2x per-nesting-level multiplier that made
+// parse time exponential in expression nesting depth (WF-0C). Assignment-target validity
+// (identifier / property / index only) is enforced in the AST transform
+// (parse_assignment_impl in parser/expressions/binary_ops.rs), same as before.
+assignment_expr = { pipe_expr ~ ((compound_assign_op | assign_op) ~ assignment_expr)? }
 
 // Pipe operator: data |> transform |> analyze
 // Left-associative, pipes left value into right function
@@ -930,7 +936,8 @@ ternary_branch = { ternary_expr_no_range }
 // Ternary inside a branch — uses no_range expressions to avoid ambiguity with range .. operator
 ternary_expr_no_range = { null_coalesce_expr_no_range ~ ("?" ~ ternary_branch ~ ":" ~ ternary_branch)? }
 
-assignment_expr_no_range = { postfix_expr ~ (compound_assign_op | assign_op) ~ assignment_expr_no_range | null_coalesce_expr_no_range }
+// Left-factored for the same reason as assignment_expr (WF-0C).
+assignment_expr_no_range = { null_coalesce_expr_no_range ~ ((compound_assign_op | assign_op) ~ assignment_expr_no_range)? }
 
 null_coalesce_expr_no_range = { context_expr_no_range ~ ("??" ~ context_expr_no_range)* }
 context_expr_no_range = { or_expr_no_range ~ ("!!" ~ or_expr_no_range)* }
@@ -974,16 +981,20 @@ tolerance_spec = { number ~ "%"? }
 // Range expressions with Rust-style syntax
 // Supports: start..end, start..=end, ..end, ..=end, start.., ..
 range_expr = {
-    // Full bounded range: start..end or start..=end (must try before range_from)
-    shift_expr ~ range_op ~ shift_expr
-    // Half-open from start: start..
-    | shift_expr ~ ".."
-    // Range to end: ..end or ..=end
+    // Left-factored: parse shift_expr exactly ONCE, then optionally a range tail.
+    // Tail priority preserved from the pre-factored rule: bounded (range_op ~ shift_expr)
+    // before half-open (".."). Produces identical child-pair sequences:
+    //   1..2  -> [shift_expr, range_op, shift_expr]
+    //   1..   -> [shift_expr]              (".." consumed, no pair — same as before)
+    //   1     -> [shift_expr]
+    //   ..2   -> [range_op, shift_expr]
+    //   ..    -> []
+    // Do NOT revert to the non-factored 5-alternative form: it re-parses shift_expr
+    // up to 3x per invocation, which is a per-nesting-level multiplier that made
+    // parse time exponential in expression nesting depth (WF-0C).
+    shift_expr ~ (range_op ~ shift_expr | "..")?
     | range_op ~ shift_expr
-    // Full range: ..
     | ".."
-    // Not a range - just an expression
-    | shift_expr
 }
 
 // Range operator: ..= (inclusive) must come before .. (exclusive)
@@ -1312,9 +1323,15 @@ block_item = {
 }
 
 // ===== Array Literal and List Comprehension =====
-array_literal = { 
-    list_comprehension
-    | "[" ~ array_elements? ~ "]" 
+// WF-0C: plain-elements branch FIRST. The two branches are mutually exclusive
+// (a comprehension requires `for` after the head expression, which the elements
+// branch can never consume before the closing "]"), so ordering does not change
+// the accepted language — but comprehension-first re-parsed the first element on
+// every plain array, a 2x per-nesting-level multiplier that made deeply nested
+// array literals exponential to parse.
+array_literal = {
+    "[" ~ array_elements? ~ "]"
+    | list_comprehension
 }
 array_elements = { array_element ~ ("," ~ array_element)* ~ ","? }
 array_element = { spread_element | expression }

@@ -294,6 +294,26 @@ fn parse_assignment_expr_no_range(pair: Pair<Rule>) -> Result<Expr> {
     parse_assignment_impl(pair, false)
 }
 
+// WF-0C: with the left-factored assignment_expr grammar the LHS child is a
+// pipe_expr (or null_coalesce_expr_no_range in the no-range variant) rather than
+// a postfix_expr. Parse it with the matching rule parser; target-shape validity
+// (identifier / property / index) is still enforced by the matches! checks below.
+fn parse_assignment_target(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
+    match pair.as_rule() {
+        Rule::postfix_expr => super::primary::parse_postfix_expr(pair),
+        Rule::pipe_expr => parse_pipe_expr(pair),
+        Rule::ternary_expr => parse_ternary_expr(pair),
+        Rule::null_coalesce_expr_no_range => (select_null_coalesce(false))(pair),
+        _ => {
+            if allow_range {
+                parse_pipe_expr(pair)
+            } else {
+                (select_null_coalesce(false))(pair)
+            }
+        }
+    }
+}
+
 fn parse_assignment_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
     let span = pair_span(&pair);
     let pair_loc = pair_location(&pair);
@@ -311,7 +331,7 @@ fn parse_assignment_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
 
     if let Some(second) = inner.next() {
         if second.as_rule() == Rule::compound_assign_op {
-            let target = super::primary::parse_postfix_expr(first)?;
+            let target = parse_assignment_target(first, allow_range)?;
             if !matches!(
                 target,
                 Expr::Identifier(_, _) | Expr::PropertyAccess { .. } | Expr::IndexAccess { .. }
@@ -345,7 +365,7 @@ fn parse_assignment_impl(pair: Pair<Rule>, allow_range: bool) -> Result<Expr> {
                 span,
             ))
         } else if second.as_rule() == Rule::assign_op {
-            let target = super::primary::parse_postfix_expr(first)?;
+            let target = parse_assignment_target(first, allow_range)?;
             if !matches!(
                 target,
                 Expr::Identifier(_, _) | Expr::PropertyAccess { .. } | Expr::IndexAccess { .. }
