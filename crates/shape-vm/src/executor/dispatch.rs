@@ -316,6 +316,17 @@ impl VirtualMachine {
                 self.poll_tier_completions();
             }
 
+            // Resource limit check (sandboxed execution). WF-1D: the fast path
+            // previously skipped this, so instruction / wall-time caps never
+            // fired via the CLI (audit §4.2). Mirror the debug/trace slow path
+            // so caps fire here too. Near-zero cost when `resource_usage` is
+            // `None` (the trusted-local default).
+            if let Some(ref mut usage) = self.resource_usage {
+                usage
+                    .tick_instruction()
+                    .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+            }
+
             let instruction = self.program.instructions[ip];
 
             // Record instruction in metrics (opt-in, near-zero cost when None)
@@ -440,6 +451,13 @@ impl VirtualMachine {
                 return Err(VMError::Interrupted);
             }
 
+            // Resource limit check (WF-1D: fast path must enforce caps too).
+            if let Some(ref mut usage) = self.resource_usage {
+                usage
+                    .tick_instruction()
+                    .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+            }
+
             let instruction = self.program.instructions[ip];
 
             // Record instruction in metrics (opt-in, near-zero cost when None)
@@ -480,6 +498,14 @@ impl VirtualMachine {
             let instruction = self.program.instructions[self.ip];
             self.ip += 1;
             self.instruction_count += 1;
+
+            // Resource limit check (WF-1D: enforce caps on the resume-driver
+            // loop too, so a snapshot-resumed program cannot run unbounded).
+            if let Some(ref mut usage) = self.resource_usage {
+                usage
+                    .tick_instruction()
+                    .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+            }
 
             match self.execute_instruction(&instruction, ctx.as_deref_mut()) {
                 Ok(()) => {}
