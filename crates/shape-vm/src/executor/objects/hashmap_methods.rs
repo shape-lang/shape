@@ -506,13 +506,20 @@ fn value_slot_at(kref: &HashMapKindedRef, i: usize) -> KindedSlot {
     }
 }
 
-/// Project the receiver `KindedSlot` to the inner `Arc<HashMapData>` via
+/// Project the receiver `KindedSlot` to the inner `Arc<HashMapKindedRef>` via
 /// the §2.7.6 / Q8 single-discriminator path: kind gate on
-/// `Ptr(HeapKind::HashMap)`, then `slot.as_heap_value()` matched against
-/// `HeapValue::HashMap(arc)`. The receiver retains its share — the caller
-/// borrows through the `&Arc<HashMapData>` and never decrements.
+/// `Ptr(HeapKind::HashMap)`, then recover the `Arc<HashMapKindedRef>` the
+/// producer wrote (slot bits are `Arc::into_raw(Arc<HashMapKindedRef>)` per
+/// `KindedSlot::from_hashmap`, NOT an `Arc<HeapValue>` — so `as_heap_value()`
+/// would be a type-confused read; recovery is `Arc::from_raw` + share bump).
+/// The receiver retains its share — the caller borrows through the returned
+/// `Arc<HashMapKindedRef>` and never decrements the slot's original share.
+///
+/// `pub(crate)` so sibling consumers (`iterator_methods::handle_hashmap_iter`)
+/// recover the receiver through the SAME carrier the producer wrote instead of
+/// re-deriving a divergent `as_heap_value()` recovery (WF-1A Item 5b).
 #[inline]
-fn as_hashmap(slot: &KindedSlot) -> Result<Arc<HashMapKindedRef>, VMError> {
+pub(crate) fn as_hashmap(slot: &KindedSlot) -> Result<Arc<HashMapKindedRef>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::HashMap)) {
         return Err(type_error(format!(
             "HashMap method receiver must be a HashMap (got kind {:?})",
