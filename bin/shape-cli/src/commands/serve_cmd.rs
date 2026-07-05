@@ -30,6 +30,9 @@ struct ServeConfig {
     auth_token: Option<String>,
     max_concurrent: usize,
     sandbox: SandboxLevel,
+    /// WF-1D security wiring: the permission envelope actually enforced by
+    /// every execution this server runs (derived from `sandbox` + bind class).
+    security: SecurityPosture,
     _mode: ExecutionModeArg,
     extensions: Vec<std::path::PathBuf>,
     provider_opts: ProviderOptions,
@@ -46,14 +49,75 @@ impl std::str::FromStr for SandboxLevel {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
+            // `moderate` is the ratified alias for the permissive envelope.
             "strict" => Ok(SandboxLevel::Strict),
-            "permissive" => Ok(SandboxLevel::Permissive),
-            "none" => Ok(SandboxLevel::None),
+            "permissive" | "moderate" => Ok(SandboxLevel::Permissive),
+            "none" | "off" => Ok(SandboxLevel::None),
             _ => Err(format!(
-                "unknown sandbox level: '{}' (expected strict|permissive|none)",
+                "unknown sandbox level: '{}' (expected strict|moderate|off)",
                 s
             )),
         }
+    }
+}
+
+/// The concrete security envelope a served execution runs under (WF-1D).
+#[derive(Clone)]
+struct SecurityPosture {
+    granted: shape_abi_v1::PermissionSet,
+    scope: shape_abi_v1::ScopeConstraints,
+    limits: shape_vm::resource_limits::ResourceLimits,
+}
+
+/// Map a `--sandbox` level plus the bind class into a real
+/// `PermissionSet` + `ScopeConstraints` + `ResourceLimits`, per the ratified
+/// per-bind-class posture (project_design_ratification_2026_07_05 Q15/Q28/Q52):
+///
+/// - `strict`   → grant nothing (`pure`), sandboxed resource caps.
+/// - `moderate` → read + env + time + random + outbound-connect; still no
+///   `fs.write` / `net.listen` / `process`, sandboxed caps.
+/// - `off`      → full permissions, unlimited resources (trusted).
+///
+/// Bind class: loopback binds the level's set; a non-loopback bind is clamped
+/// to `pure` ("Pure-only until configured") regardless of level — fail closed.
+///
+/// Foreign code (`Permission::Ffi`): `shape serve` defaults to the STRICT-EMPTY
+/// ffi posture (ffi-rebuild §4.8.2 / OQ-6, ratified 2026-07-05) — the deliberate
+/// asymmetry vs. the local trusted-run unscoped grant. `strict`/`moderate` never
+/// grant `Ffi`; only `off` (explicit total trust) confers it via `full()`. The
+/// returned scope carries empty `ffi_languages`/`ffi_libraries`/`ffi_symbols`
+/// (strict-empty) — WF-2A wires the pre-`dlopen` scope check against them.
+fn derive_serve_security(level: SandboxLevel, is_loopback: bool) -> SecurityPosture {
+    use shape_abi_v1::{Permission, PermissionSet, ScopeConstraints};
+    use shape_vm::resource_limits::ResourceLimits;
+
+    let (granted, limits) = match level {
+        // Strict/moderate deliberately omit `Ffi` (fail closed on foreign code).
+        SandboxLevel::Strict => (PermissionSet::pure(), ResourceLimits::sandboxed()),
+        SandboxLevel::Permissive => {
+            let mut set = PermissionSet::pure();
+            set.insert(Permission::FsRead);
+            set.insert(Permission::Env);
+            set.insert(Permission::Time);
+            set.insert(Permission::Random);
+            set.insert(Permission::NetConnect);
+            (set, ResourceLimits::sandboxed())
+        }
+        // `off` == operator-declared total trust: `full()` includes `Ffi`.
+        SandboxLevel::None => (PermissionSet::full(), ResourceLimits::unlimited()),
+    };
+
+    // Non-loopback binds fail closed to Pure-only until explicitly configured.
+    let granted = if is_loopback {
+        granted
+    } else {
+        granted.intersection(&PermissionSet::pure())
+    };
+
+    SecurityPosture {
+        granted,
+        scope: ScopeConstraints::none(),
+        limits,
     }
 }
 
@@ -149,10 +213,16 @@ pub async fn run_serve(
         Arc::new(runtimes)
     };
 
+    // WF-1D security wiring: derive the real permission + resource envelope
+    // from the sandbox level and bind class ONCE at startup. Every execution
+    // this server runs is gated by this posture.
+    let security = derive_serve_security(sandbox_level, addr.ip().is_loopback());
+
     let config = Arc::new(ServeConfig {
         auth_token,
         max_concurrent,
         sandbox: sandbox_level,
+        security,
         _mode: mode,
         extensions,
         provider_opts: provider_opts.clone(),
@@ -162,6 +232,7 @@ pub async fn run_serve(
 
     let listener = TcpListener::bind(addr).await?;
     eprintln!("Shape serve listening on {}", addr);
+    let granted_names: Vec<&str> = config.security.granted.iter().map(|p| p.name()).collect();
     eprintln!(
         "  sandbox: {:?}, max-concurrent: {}, auth: {}",
         config.sandbox,
@@ -170,6 +241,15 @@ pub async fn run_serve(
             "required"
         } else {
             "none"
+        },
+    );
+    eprintln!(
+        "  granted: [{}]{}",
+        granted_names.join(", "),
+        if granted_names.is_empty() {
+            " (pure — no I/O)"
+        } else {
+            ""
         },
     );
 
@@ -283,7 +363,12 @@ async fn handle_connection(
                         .acquire()
                         .await
                         .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
-                    Some(handle_call(req, &mut state, language_runtimes))
+                    Some(handle_call(
+                        req,
+                        &mut state,
+                        language_runtimes,
+                        &config.security.granted,
+                    ))
                 }
             }
             WireMessage::ExecuteFile(req) => {
@@ -427,10 +512,10 @@ async fn handle_execute(req: ExecuteRequest, config: &ServeConfig) -> WireMessag
     let request_id = req.request_id;
     let extensions = config.extensions.clone();
     let provider_opts = config.provider_opts.clone();
-    let _sandbox = config.sandbox;
+    let security = config.security.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        execute_code_in_process(&code, &extensions, &provider_opts)
+        execute_code_in_process(&code, &extensions, &provider_opts, &security)
     })
     .await;
 
@@ -507,9 +592,16 @@ async fn handle_execute_file(req: ExecuteFileRequest, config: &ServeConfig) -> W
     let cwd = req.cwd.clone();
     let extensions = config.extensions.clone();
     let provider_opts = config.provider_opts.clone();
+    let security = config.security.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        execute_file_in_process(&path, cwd.as_deref(), &extensions, &provider_opts)
+        execute_file_in_process(
+            &path,
+            cwd.as_deref(),
+            &extensions,
+            &provider_opts,
+            &security,
+        )
     })
     .await;
 
@@ -565,9 +657,10 @@ async fn handle_execute_project(req: ExecuteProjectRequest, config: &ServeConfig
     let project_dir = req.project_dir.clone();
     let extensions = config.extensions.clone();
     let provider_opts = config.provider_opts.clone();
+    let security = config.security.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        execute_project_in_process(&project_dir, &extensions, &provider_opts)
+        execute_project_in_process(&project_dir, &extensions, &provider_opts, &security)
     })
     .await;
 
@@ -734,14 +827,21 @@ fn handle_call(
     req: shape_vm::remote::RemoteCallRequest,
     _state: &mut ConnectionState,
     language_runtimes: &LanguageRuntimes,
+    granted: &shape_abi_v1::PermissionSet,
 ) -> WireMessage {
     let tmp_dir = std::env::temp_dir().join("shape-serve-snapshots");
     match shape_runtime::snapshot::SnapshotStore::new(&tmp_dir) {
         Ok(store) => {
+            // WF-1D: gate the remote Call path with the server's derived grant.
             let response = if language_runtimes.is_empty() {
-                shape_vm::remote::execute_remote_call(req, &store)
+                shape_vm::remote::execute_remote_call(req, &store, granted)
             } else {
-                shape_vm::remote::execute_remote_call_with_runtimes(req, &store, language_runtimes)
+                shape_vm::remote::execute_remote_call_with_runtimes(
+                    req,
+                    &store,
+                    language_runtimes,
+                    granted,
+                )
             };
             WireMessage::CallResponse(response)
         }
@@ -776,6 +876,7 @@ fn execute_code_in_process(
     code: &str,
     _extensions: &[std::path::PathBuf],
     _provider_opts: &ProviderOptions,
+    security: &SecurityPosture,
 ) -> Result<InProcessResult> {
     use shape_runtime::output_adapter::SharedCaptureAdapter;
     use std::time::Instant;
@@ -786,6 +887,7 @@ fn execute_code_in_process(
         ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
 
     let mut executor = BytecodeExecutor::new();
+    apply_security_posture(&mut executor, security);
 
     extension_loading::register_extension_capability_modules(&mut engine, &mut executor);
     let module_info = executor.module_schemas();
@@ -840,6 +942,7 @@ fn execute_file_in_process(
     cwd: Option<&str>,
     _extensions: &[std::path::PathBuf],
     _provider_opts: &ProviderOptions,
+    security: &SecurityPosture,
 ) -> Result<InProcessResult> {
     use shape_runtime::output_adapter::SharedCaptureAdapter;
     use std::time::Instant;
@@ -862,6 +965,7 @@ fn execute_file_in_process(
         ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
 
     let mut executor = BytecodeExecutor::new();
+    apply_security_posture(&mut executor, security);
 
     extension_loading::register_extension_capability_modules(&mut engine, &mut executor);
     let module_info = executor.module_schemas();
@@ -915,6 +1019,7 @@ fn execute_project_in_process(
     project_dir: &str,
     extensions: &[std::path::PathBuf],
     provider_opts: &ProviderOptions,
+    security: &SecurityPosture,
 ) -> Result<InProcessResult> {
     let dir = std::path::Path::new(project_dir);
 
@@ -937,12 +1042,43 @@ fn execute_project_in_process(
         );
     }
 
+    // WF-1D: intersect the server's grant with the project's declared
+    // [permissions] so a project can only ever narrow, never widen, what the
+    // server sandbox allows. Fail closed.
+    let project_security = project_narrowed_security(&project.config, security);
+
     execute_file_in_process(
         &entry_path.to_string_lossy(),
         Some(project_dir),
         extensions,
         provider_opts,
+        &project_security,
     )
+}
+
+/// Apply a `SecurityPosture` to a `BytecodeExecutor` (WF-1D): install the
+/// runtime permission envelope + resource limits so gated stdlib dispatch and
+/// the load-time capability gate both fail closed.
+fn apply_security_posture(executor: &mut BytecodeExecutor, security: &SecurityPosture) {
+    executor.set_granted_permissions(Some(security.granted.clone()), Some(security.scope.clone()));
+    executor.set_resource_limits(Some(security.limits.clone()));
+}
+
+/// Narrow a base `SecurityPosture` by a project's `shape.toml [permissions]`
+/// section: the effective grant is the intersection of the server's grant and
+/// the project's declared set (a project may only reduce capability). If the
+/// project declares no `[permissions]`, the base posture is used unchanged.
+fn project_narrowed_security(
+    config: &shape_runtime::project::ShapeProject,
+    base: &SecurityPosture,
+) -> SecurityPosture {
+    let project_set = config.effective_permission_set();
+    let granted = base.granted.intersection(&project_set);
+    SecurityPosture {
+        granted,
+        scope: base.scope.clone(),
+        limits: base.limits.clone(),
+    }
 }
 
 /// Extract error message and diagnostics from an anyhow error.
@@ -992,13 +1128,21 @@ mod tests {
 
     /// Start a real server on a random port, return the bound address.
     async fn start_test_server() -> SocketAddr {
+        start_test_server_with_sandbox(SandboxLevel::None).await
+    }
+
+    /// Start a real loopback server at the given sandbox level (WF-1D). The
+    /// derived permission envelope is the real one — a `Strict` server grants
+    /// nothing, so gated I/O fails closed exactly as in production.
+    async fn start_test_server_with_sandbox(level: SandboxLevel) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let config = Arc::new(ServeConfig {
             auth_token: None,
             max_concurrent: 4,
-            sandbox: SandboxLevel::None,
+            sandbox: level,
+            security: derive_serve_security(level, true),
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),
@@ -1038,6 +1182,39 @@ mod tests {
         stream.read_exact(&mut resp_buf).await.unwrap();
         let decompressed = decode_framed(&resp_buf).unwrap();
         shape_wire::decode_message(&decompressed).unwrap()
+    }
+
+    #[test]
+    fn derive_serve_security_maps_levels_and_bind_class() {
+        use shape_abi_v1::Permission;
+
+        // Strict on loopback → grant nothing, sandboxed caps.
+        let strict = derive_serve_security(SandboxLevel::Strict, true);
+        assert!(strict.granted.is_empty(), "strict must grant nothing");
+        assert!(!strict.granted.contains(&Permission::FsWrite));
+        assert!(strict.limits.max_instructions.is_some());
+
+        // Permissive on loopback → read/env/time/random/connect, but no write.
+        let perm = derive_serve_security(SandboxLevel::Permissive, true);
+        assert!(perm.granted.contains(&Permission::FsRead));
+        assert!(perm.granted.contains(&Permission::NetConnect));
+        assert!(
+            !perm.granted.contains(&Permission::FsWrite),
+            "moderate must not grant fs.write — the escape stays refused"
+        );
+        assert!(!perm.granted.contains(&Permission::Process));
+
+        // None on loopback → full grant, unlimited.
+        let none = derive_serve_security(SandboxLevel::None, true);
+        assert!(none.granted.contains(&Permission::FsWrite));
+        assert!(none.limits.max_instructions.is_none());
+
+        // Non-loopback → Pure-only regardless of level (fail closed).
+        let remote_none = derive_serve_security(SandboxLevel::None, false);
+        assert!(
+            remote_none.granted.is_empty(),
+            "non-loopback must clamp to pure until configured"
+        );
     }
 
     #[tokio::test]
@@ -1106,6 +1283,102 @@ mod tests {
         }
     }
 
+    /// WF-1D regression (red→green): a `serve --sandbox strict` server MUST
+    /// refuse `file::write_text`. Before the security wiring this write
+    /// succeeded (`SUCCESS=true`, file on disk); after it, the response is
+    /// `success:false` with a permission error naming `fs.write`, and no file
+    /// is created. Anchors audit §4.2 site 1 (the reproduced live escape).
+    #[tokio::test]
+    async fn strict_sandbox_refuses_file_write() {
+        let addr = start_test_server_with_sandbox(SandboxLevel::Strict).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        // Absolute target in the temp dir so the "no file on disk" assertion is
+        // independent of the server process cwd.
+        let target = std::env::temp_dir().join(format!(
+            "wf1d_strict_escape_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&target);
+
+        let code = format!(
+            "use std::core::file\nfile::write_text(\"{}\", \"escaped under strict\")",
+            target.display()
+        );
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code,
+            request_id: 7,
+        });
+
+        let resp = roundtrip(&mut stream, &msg).await;
+        match resp {
+            WireMessage::ExecuteResponse(r) => {
+                assert_eq!(r.request_id, 7);
+                assert!(
+                    !r.success,
+                    "strict sandbox must refuse file::write_text, got success=true value={:?}",
+                    r.value
+                );
+                let err = r.error.unwrap_or_default();
+                assert!(
+                    err.to_lowercase().contains("permission")
+                        && (err.contains("fs.write") || err.to_lowercase().contains("write")),
+                    "error should name the denied fs.write permission, got: {err}"
+                );
+            }
+            other => panic!("Expected ExecuteResponse, got {:?}", other),
+        }
+
+        assert!(
+            !target.exists(),
+            "strict sandbox must NOT have written {} to disk",
+            target.display()
+        );
+        let _ = std::fs::remove_file(&target);
+    }
+
+    /// WF-1D: `--sandbox none` is the trusted escape hatch — the same write
+    /// that strict refuses succeeds under `none`, proving the gate is the
+    /// sandbox level (not a blanket block).
+    #[tokio::test]
+    async fn none_sandbox_allows_file_write() {
+        let addr = start_test_server_with_sandbox(SandboxLevel::None).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+
+        let target = std::env::temp_dir().join(format!(
+            "wf1d_none_write_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&target);
+
+        let code = format!(
+            "use std::core::file\nfile::write_text(\"{}\", \"allowed under none\")",
+            target.display()
+        );
+        let msg = WireMessage::Execute(ExecuteRequest {
+            code,
+            request_id: 8,
+        });
+
+        let resp = roundtrip(&mut stream, &msg).await;
+        match resp {
+            WireMessage::ExecuteResponse(r) => {
+                assert!(r.success, "none sandbox should allow write: {:?}", r.error);
+            }
+            other => panic!("Expected ExecuteResponse, got {:?}", other),
+        }
+        assert!(target.exists(), "none sandbox should have written the file");
+        let _ = std::fs::remove_file(&target);
+    }
+
     #[tokio::test]
     async fn test_remote_function_call_over_tcp() {
         let addr = start_test_server().await;
@@ -1154,6 +1427,7 @@ mod tests {
             auth_token: Some("secret".to_string()),
             max_concurrent: 4,
             sandbox: SandboxLevel::None,
+            security: derive_serve_security(SandboxLevel::None, true),
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),

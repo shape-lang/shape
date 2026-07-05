@@ -968,6 +968,8 @@ pub enum PermissionCategory {
     System,
     /// Sandbox controls (virtual fs, deterministic runtime, output capture).
     Sandbox,
+    /// Foreign-code execution (extern C, embedded Python/TypeScript).
+    Foreign,
 }
 
 impl PermissionCategory {
@@ -978,6 +980,7 @@ impl PermissionCategory {
             Self::Network => "Network",
             Self::System => "System",
             Self::Sandbox => "Sandbox",
+            Self::Foreign => "Foreign",
         }
     }
 }
@@ -1038,6 +1041,21 @@ pub enum Permission {
     TimeLimited,
     /// Output volume is capped (bytes or records).
     OutputLimited,
+
+    // -- Foreign code --
+    //
+    // NOTE (WF-1D stage 0, ffi-rebuild §4.8.1): `Ffi` is the 17th variant and
+    // MUST stay at the end / highest ordinal. Content hashes fold in the
+    // *sorted permission names* of each function's `required_permissions`
+    // (`content_addressed.rs:compute_hash`), and no program at HEAD derives
+    // `Ffi` yet (WF-2A's `compile_foreign_function` adds the derivation), so
+    // appending the variant here leaves every existing program's content hash
+    // unchanged. Reserving the slot early stabilizes hashes before FFI lands.
+    /// Execute foreign code: extern C native calls and embedded
+    /// dynamic-language functions (python/typescript/...). Foreign code
+    /// runs with process authority; granting Ffi is granting everything
+    /// the process can do unless scoped (see `ScopeConstraints::ffi_*`).
+    Ffi,
 }
 
 impl Permission {
@@ -1060,6 +1078,9 @@ impl Permission {
             Self::MemLimited => "sandbox.mem_limited",
             Self::TimeLimited => "sandbox.time_limited",
             Self::OutputLimited => "sandbox.output_limited",
+            // Dotted machine name (invariant: every permission name is dotted).
+            // Distinct from the shape.toml coarse grant key `ffi` (§4.8.2).
+            Self::Ffi => "ffi.call",
         }
     }
 
@@ -1082,6 +1103,7 @@ impl Permission {
             Self::MemLimited => "Memory usage is limited to a configured ceiling",
             Self::TimeLimited => "Execution time is capped",
             Self::OutputLimited => "Output volume is capped",
+            Self::Ffi => "Execute foreign code (extern C, embedded Python/TypeScript)",
         }
     }
 
@@ -1097,6 +1119,7 @@ impl Permission {
             | Self::MemLimited
             | Self::TimeLimited
             | Self::OutputLimited => PermissionCategory::Sandbox,
+            Self::Ffi => PermissionCategory::Foreign,
         }
     }
 
@@ -1119,6 +1142,8 @@ impl Permission {
             Self::MemLimited,
             Self::TimeLimited,
             Self::OutputLimited,
+            // Foreign code — keep last (highest ordinal); see the enum note.
+            Self::Ffi,
         ]
     }
 }
@@ -1344,6 +1369,34 @@ pub struct ScopeConstraints {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub max_output_bytes: Option<u64>,
+
+    // -- Foreign-code scope (ffi-rebuild §4.8.2). Only relevant for `Ffi`. --
+    //
+    // WF-1D reserves and carries these; enforcement (the pre-`dlopen` /
+    // pre-`compile()` scope check) is a WF-2A stage. An empty section with
+    // `Ffi` granted means "all foreign code allowed" (parity with an
+    // unscoped `FsRead`); a non-empty list narrows to the allowed ids/paths.
+    /// Allowed foreign language ids (e.g. `["python"]`) for `fn <lang>` bodies.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pub ffi_languages: Vec<std::string::String>,
+
+    /// Allowed native-library path globs for `extern C`, matched AFTER alias
+    /// resolution (`resolve_native_library_alias`).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pub ffi_libraries: Vec<std::string::String>,
+
+    /// Optional glob over symbols permitted within the allowed libraries.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
+    pub ffi_symbols: Vec<std::string::String>,
 }
 
 impl ScopeConstraints {
@@ -1355,6 +1408,9 @@ impl ScopeConstraints {
             max_memory_bytes: None,
             max_time_ms: None,
             max_output_bytes: None,
+            ffi_languages: Vec::new(),
+            ffi_libraries: Vec::new(),
+            ffi_symbols: Vec::new(),
         }
     }
 }
@@ -1927,6 +1983,85 @@ mod permission_tests {
         assert_eq!(cats[&PermissionCategory::Network].len(), 1);
         assert_eq!(cats[&PermissionCategory::System].len(), 1);
         assert_eq!(cats[&PermissionCategory::Sandbox].len(), 1);
+    }
+
+    // -- Ffi reservation (WF-1D stage 0, ffi-rebuild §4.8) --
+
+    #[test]
+    fn ffi_is_the_seventeenth_variant_at_the_end() {
+        let all = Permission::all_variants();
+        assert_eq!(all.len(), 17, "Ffi is the 17th permission");
+        assert_eq!(
+            *all.last().unwrap(),
+            Permission::Ffi,
+            "Ffi must stay last (highest ordinal) so content hashes are stable"
+        );
+        // Ord is declaration order; Ffi is the maximum — never reorders existing
+        // permissions in a BTreeSet, so name-sorted hash inputs are unperturbed.
+        assert!(Permission::Ffi > Permission::OutputLimited);
+    }
+
+    #[test]
+    fn ffi_metadata() {
+        assert_eq!(Permission::Ffi.name(), "ffi.call");
+        assert!(Permission::Ffi.name().contains('.')); // dotted-name invariant
+        assert_eq!(format!("{}", Permission::Ffi), "ffi.call");
+        assert_eq!(Permission::Ffi.category(), PermissionCategory::Foreign);
+        assert_eq!(format!("{}", PermissionCategory::Foreign), "Foreign");
+        assert!(Permission::Ffi.description().to_lowercase().contains("foreign"));
+    }
+
+    #[test]
+    fn full_contains_ffi_but_pure_and_readonly_do_not() {
+        assert!(PermissionSet::full().contains(&Permission::Ffi));
+        assert!(!PermissionSet::pure().contains(&Permission::Ffi));
+        assert!(!PermissionSet::readonly().contains(&Permission::Ffi));
+    }
+
+    #[test]
+    fn permission_set_display_includes_ffi_last() {
+        let set = PermissionSet::from([Permission::FsRead, Permission::Ffi]);
+        let s = format!("{}", set);
+        assert!(s.contains("ffi.call"));
+        // Ffi has the highest ordinal, so it renders last in the BTreeSet order.
+        assert!(s.ends_with("ffi.call}"), "got: {s}");
+    }
+
+    #[test]
+    fn scope_constraints_default_ffi_lists_are_empty() {
+        let sc = ScopeConstraints::none();
+        assert!(sc.ffi_languages.is_empty());
+        assert!(sc.ffi_libraries.is_empty());
+        assert!(sc.ffi_symbols.is_empty());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn ffi_permission_serde_round_trips() {
+        let set = PermissionSet::from([Permission::FsRead, Permission::Ffi]);
+        let bytes = rmp_serde::to_vec(&set).unwrap();
+        let back: PermissionSet = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(set, back);
+        assert!(back.contains(&Permission::Ffi));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn scope_constraints_ffi_fields_serde_round_trip() {
+        let sc = ScopeConstraints {
+            ffi_languages: vec!["python".into()],
+            ffi_libraries: vec!["/usr/lib/*".into()],
+            ffi_symbols: vec!["labs".into()],
+            ..Default::default()
+        };
+        // Named (map) encoding — `skip_serializing_if` requires field-keyed
+        // output; this mirrors the plugin-manifest serialization surface.
+        let bytes = rmp_serde::to_vec_named(&sc).unwrap();
+        let back: ScopeConstraints = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(sc, back);
+        assert_eq!(back.ffi_languages, vec!["python".to_string()]);
+        assert_eq!(back.ffi_libraries, vec!["/usr/lib/*".to_string()]);
+        assert_eq!(back.ffi_symbols, vec!["labs".to_string()]);
     }
 
     // -- FromIterator / IntoIterator --

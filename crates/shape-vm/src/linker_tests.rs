@@ -516,3 +516,70 @@ fn test_vm_starts_linked_program_at_entry_function() {
         "linked program with `Constant::Number(42.0)` + Halt must leave the f64 bits on top of stack",
     );
 }
+
+// ---------------------------------------------------------------------------
+// WF-1D content-hash stability anchor (ffi-rebuild §4.8.1)
+// ---------------------------------------------------------------------------
+
+/// Build a blob carrying a fixed set of *existing* permissions and finalize it.
+fn blob_with_perms(perms: PermissionSet) -> FunctionBlob {
+    let mut blob = FunctionBlob {
+        content_hash: FunctionHash::ZERO,
+        name: "wf1d_anchor".to_string(),
+        arity: 1,
+        param_names: vec!["x".to_string()],
+        locals_count: 1,
+        is_closure: false,
+        captures_count: 0,
+        is_async: false,
+        ref_params: vec![false],
+        ref_mutates: vec![false],
+        mutable_captures: vec![],
+        frame_descriptor: None,
+        instructions: vec![Instruction {
+            opcode: OpCode::Halt,
+            operand: None,
+        }],
+        constants: vec![],
+        strings: vec![],
+        dependencies: vec![],
+        callee_names: vec![],
+        type_schemas: vec![],
+        source_map: vec![],
+        foreign_dependencies: vec![],
+        required_permissions: perms,
+    };
+    blob.finalize();
+    blob
+}
+
+/// Reserving `Permission::Ffi` at the highest ordinal must NOT perturb the
+/// content hash of any program that does not derive it. The hash folds in the
+/// SORTED PERMISSION NAMES (`content_addressed.rs:compute_hash`), so a blob
+/// whose `required_permissions` are `{FsRead, FsWrite}` hashes from the byte
+/// string `["fs.read", "fs.write"]` — identical before and after the enum grew
+/// a 17th variant. This pins that value; any accidental enum reorder, `name()`
+/// change, or hash-input change trips it.
+#[test]
+fn ffi_reservation_leaves_existing_content_hash_unchanged() {
+    use shape_abi_v1::Permission;
+    let blob = blob_with_perms(PermissionSet::from([
+        Permission::FsRead,
+        Permission::FsWrite,
+    ]));
+    assert_eq!(
+        blob.content_hash.to_string(),
+        "2eb6e818552bfaf68df6ba02b43a6e29a2ab20e3601a2fc8bdd4fd800a5313e9",
+        "content hash of a non-FFI blob must stay stable across the Ffi reservation"
+    );
+
+    // Sanity: adding Ffi to the SAME blob's permissions *does* change the hash
+    // (proves the field is load-bearing — the stability above is because no
+    // existing program carries Ffi, not because permissions are ignored).
+    let with_ffi = blob_with_perms(PermissionSet::from([
+        Permission::FsRead,
+        Permission::FsWrite,
+        Permission::Ffi,
+    ]));
+    assert_ne!(blob.content_hash, with_ffi.content_hash);
+}

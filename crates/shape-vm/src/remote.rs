@@ -609,8 +609,9 @@ pub fn program_from_blobs(
 pub fn execute_remote_call(
     request: RemoteCallRequest,
     store: &SnapshotStore,
+    granted: &shape_abi_v1::PermissionSet,
 ) -> RemoteCallResponse {
-    match execute_inner(request, store) {
+    match execute_inner(request, store, granted) {
         Ok(value) => RemoteCallResponse { result: Ok(value) },
         Err(err) => RemoteCallResponse { result: Err(err) },
     }
@@ -629,8 +630,9 @@ pub fn execute_remote_call_with_runtimes(
         String,
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
+    granted: &shape_abi_v1::PermissionSet,
 ) -> RemoteCallResponse {
-    match execute_inner_with_runtimes(request, store, language_runtimes) {
+    match execute_inner_with_runtimes(request, store, language_runtimes, granted) {
         Ok(value) => RemoteCallResponse { result: Ok(value) },
         Err(err) => RemoteCallResponse { result: Err(err) },
     }
@@ -639,6 +641,7 @@ pub fn execute_remote_call_with_runtimes(
 fn execute_inner(
     request: RemoteCallRequest,
     store: &SnapshotStore,
+    granted: &shape_abi_v1::PermissionSet,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     // T1-host-tier-marshal-rebuild (ADR-006 §2.7.4, R8 2026-05-23):
     // kind-threaded marshal protocol via
@@ -653,7 +656,7 @@ fn execute_inner(
     // produces a structured `RemoteCallError` (no silent-degrade): a
     // remote call cannot proceed if the callee has no proven param
     // kinds, because the marshal protocol cannot pick an in-arm.
-    run_remote_call(request, store, None)
+    run_remote_call(request, store, None, granted)
 }
 
 fn execute_inner_with_runtimes(
@@ -663,13 +666,14 @@ fn execute_inner_with_runtimes(
         String,
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
+    granted: &shape_abi_v1::PermissionSet,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     // Same path as `execute_inner` plus the foreign-function language-
     // runtime hookup. T1-host-tier-marshal-rebuild covers the marshal
     // protocol; the language-runtime registration is forwarded through
     // `run_remote_call` so the VM picks up the runtimes before invoking
     // the callee.
-    run_remote_call(request, store, Some(language_runtimes))
+    run_remote_call(request, store, Some(language_runtimes), granted)
 }
 
 /// Shared marshal+dispatch core for `execute_inner` /
@@ -700,6 +704,7 @@ fn run_remote_call(
             std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
         >,
     >,
+    granted: &shape_abi_v1::PermissionSet,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     use crate::executor::{VMConfig, VirtualMachine};
     use shape_runtime::snapshot::{serializable_to_slot, slot_to_serializable};
@@ -739,8 +744,25 @@ fn run_remote_call(
     }
 
     // Step 2: build VM and load program.
+    //
+    // WF-1D security wiring: remote/wire code is untrusted. Install the
+    // granted permission envelope so gated stdlib dispatch fails closed, and
+    // gate the load itself when the program is content-addressed (permissions
+    // baked into content hash, checked at load time) rather than using the
+    // plain, un-gated loader. The runtime `check_permission` gate is the
+    // backstop for non-content-addressed payloads.
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(program);
+    vm.set_permissions(Some(granted.clone()), None);
+    match program.content_addressed.clone() {
+        Some(ca) => {
+            vm.load_program_with_permissions(ca, granted)
+                .map_err(|e| RemoteCallError {
+                    message: format!("Permission denied at load: {e}"),
+                    kind: RemoteErrorKind::RuntimeError,
+                })?;
+        }
+        None => vm.load_program(program),
+    }
     vm.populate_module_objects();
 
     // Step 3: resolve callee. function_hash (canonical) > function_id > name.
@@ -1197,7 +1219,10 @@ pub fn handle_wire_message(
             if let Some(ref blobs) = req.function_blobs {
                 cache.insert_blobs(blobs);
             }
-            let response = execute_remote_call(req, store);
+            // WF-1D: fail closed — this legacy V1 dispatch has no server
+            // sandbox context, so grant nothing (pure). The production serve
+            // path threads the operator's derived grant via `handle_call`.
+            let response = execute_remote_call(req, store, &shape_abi_v1::PermissionSet::pure());
             WireMessage::CallResponse(response)
         }
         WireMessage::CallResponse(_) => {

@@ -67,6 +67,8 @@ impl VirtualMachine {
             function_entry_points: Vec::new(),
             program_entry_ip: 0,
             resource_usage: None,
+            granted_permissions: None,
+            scope_constraints: None,
             time_travel: None,
             #[cfg(feature = "jit")]
             jit_compiled: false,
@@ -106,6 +108,20 @@ impl VirtualMachine {
         usage.start();
         self.resource_usage = Some(usage);
         self
+    }
+
+    /// Install the permission envelope enforced by gated stdlib dispatch
+    /// (WF-1D security wiring). `granted == None` means allow-all and MUST
+    /// only be used for genuinely-trusted local execution; the serve / remote
+    /// / wire paths always pass a concrete `PermissionSet` so they fail closed.
+    /// `constraints` narrows filesystem paths / network hosts when present.
+    pub fn set_permissions(
+        &mut self,
+        granted: Option<shape_abi_v1::PermissionSet>,
+        constraints: Option<shape_abi_v1::ScopeConstraints>,
+    ) {
+        self.granted_permissions = granted;
+        self.scope_constraints = constraints;
     }
 
     /// Set the interrupt flag (shared with Ctrl+C handler).

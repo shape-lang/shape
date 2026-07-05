@@ -18,6 +18,107 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::fs;
 
+/// The runtime security envelope enforced for a local `shape run` (WF-1D).
+///
+/// `granted == None` means allow-all — preserved for genuinely-trusted local
+/// runs (no `[permissions]` declared). When a project / frontmatter declares
+/// `[permissions]`, `granted` is `Some(effective_set)` and gated stdlib I/O
+/// fails closed against it (e.g. `fs.read = false` refuses `file::read_text`).
+#[derive(Clone, Default)]
+struct RunSecurity {
+    granted: Option<shape_abi_v1::PermissionSet>,
+    scope: Option<shape_abi_v1::ScopeConstraints>,
+    limits: Option<shape_vm::resource_limits::ResourceLimits>,
+}
+
+/// Derive the local-run security envelope from the effective project config
+/// (`shape.toml` or frontmatter `[permissions]` / `[sandbox]`) and the CLI
+/// resource-limit flags. CLI flags take precedence over `[sandbox]` values.
+fn derive_run_security(
+    config: Option<&shape_runtime::project::ShapeProject>,
+    cli_limits: &shape_vm::resource_limits::ResourceLimits,
+) -> RunSecurity {
+    // Permissions: only enforce when the user explicitly declared a
+    // [permissions] section — otherwise stay allow-all (trusted local).
+    //
+    // The trusted-local allow-all (`granted = None`) INCLUDES `Ffi` unscoped
+    // by construction — same posture as FsRead/NetConnect for local runs, so
+    // FFI hello-world works out of the box (ffi-rebuild §4.8.2 / OQ13, ratified
+    // 2026-07-05). An explicit `[permissions]` section instead fails closed on
+    // `Ffi` (`PermissionsSection::to_permission_set` opts it in only on
+    // `ffi = true`), the deliberate asymmetry vs. the unscoped local grant.
+    let (granted, scope) = match config {
+        Some(cfg) if cfg.permissions.is_some() => {
+            let section = cfg.permissions.as_ref().unwrap();
+            (
+                Some(cfg.effective_permission_set()),
+                Some(section.to_scope_constraints()),
+            )
+        }
+        _ => (None, None),
+    };
+
+    // Resource limits: CLI flags override, else fall back to [sandbox] caps.
+    let sandbox = config.and_then(|c| c.sandbox.as_ref());
+    let limits = shape_vm::resource_limits::ResourceLimits {
+        max_instructions: cli_limits.max_instructions,
+        max_memory_bytes: cli_limits
+            .max_memory_bytes
+            .or_else(|| sandbox.and_then(|s| s.memory_limit_bytes())),
+        max_wall_time: cli_limits.max_wall_time.or_else(|| {
+            sandbox
+                .and_then(|s| s.time_limit_ms())
+                .map(std::time::Duration::from_millis)
+        }),
+        max_output_bytes: cli_limits.max_output_bytes,
+    };
+    let limits = if limits.max_instructions.is_none()
+        && limits.max_memory_bytes.is_none()
+        && limits.max_wall_time.is_none()
+        && limits.max_output_bytes.is_none()
+    {
+        None
+    } else {
+        Some(limits)
+    };
+
+    RunSecurity {
+        granted,
+        scope,
+        limits,
+    }
+}
+
+/// Install a `RunSecurity` envelope onto a `BytecodeExecutor` (WF-1D).
+fn apply_run_security(executor: &mut BytecodeExecutor, security: &RunSecurity) {
+    executor.set_granted_permissions(security.granted.clone(), security.scope.clone());
+    executor.set_resource_limits(security.limits.clone());
+}
+
+/// Force the bytecode interpreter when resource limits are active (WF-1D).
+///
+/// Instruction / wall-time caps are enforced by the interpreter dispatch loop
+/// (`ResourceUsage::tick_instruction`) and memory / output caps by its
+/// alloc / output budgets. JIT-native code carries no per-instruction budget,
+/// so a `--mode jit` run would silently bypass every cap — the audit's
+/// resource-limit tier would stay inert on the default local path. When any
+/// limit is set we therefore drop to the interpreter (fail-closed) and emit a
+/// one-line note if a JIT run was downgraded. With no limits, the JIT default
+/// is preserved for trusted local execution.
+fn downgrade_mode_for_limits(mode: ExecutionMode, limits_active: bool) -> ExecutionMode {
+    if !limits_active {
+        return mode;
+    }
+    #[cfg(feature = "jit")]
+    if matches!(mode, ExecutionMode::JIT) {
+        eprintln!(
+            "[shape] resource limits set — running under the bytecode interpreter so caps are \
+             enforced (JIT-native execution has no per-instruction budget)"
+        );
+    }
+    ExecutionMode::BytecodeVM
+}
+
 /// Execute a Shape script from file
 pub async fn run_script(
     file: Option<PathBuf>,
@@ -25,6 +126,7 @@ pub async fn run_script(
     extensions: Vec<PathBuf>,
     provider_opts: &ProviderOptions,
     resume: Option<String>,
+    cli_limits: shape_vm::resource_limits::ResourceLimits,
 ) -> Result<()> {
     if let Some(script_path) = file.as_deref() {
         fs::metadata(script_path)
@@ -95,6 +197,26 @@ pub async fn run_script(
     } else {
         None
     };
+
+    // WF-1D security wiring: derive the runtime permission + resource envelope
+    // from the effective project config (`shape.toml` or frontmatter) plus the
+    // CLI resource-limit flags. `project_root` and frontmatter are mutually
+    // exclusive here (a conflict bailed above), so at most one supplies config.
+    let effective_config: Option<&shape_runtime::project::ShapeProject> = project_root
+        .as_ref()
+        .map(|p| &p.config)
+        .or(frontmatter_project.as_ref());
+    let run_security = derive_run_security(effective_config, &cli_limits);
+
+    // WF-1D: resource limits are enforced by the bytecode interpreter's
+    // dispatch loop (`tick_instruction`) plus its alloc / output budgets.
+    // JIT-native code has NO per-instruction tick, so under `--mode jit` the
+    // toplevel script (and any hot function) runs as Cranelift-native code
+    // that would silently bypass every cap. When any limit is active, force
+    // the interpreter so instruction / wall-time / memory / output caps
+    // actually fire (fail-closed). Trusted local runs with no limits keep the
+    // JIT default. The resume branches below already run under the interpreter.
+    let execution_mode = downgrade_mode_for_limits(execution_mode, run_security.limits.is_some());
 
     // Enable snapshot store (required for checkpoints and resume)
     let snapshot_root = dirs::data_local_dir()
@@ -239,6 +361,7 @@ pub async fn run_script(
 
             // Create executor, recompile, and resume from snapshot position
             let mut executor = BytecodeExecutor::new();
+            apply_run_security(&mut executor, &run_security);
             extension_loading::register_extension_capability_modules(&engine, &mut executor);
             let module_info = executor.module_schemas();
             engine.register_extension_modules(&module_info);
@@ -271,6 +394,7 @@ pub async fn run_script(
                 .map_err(|e| anyhow::anyhow!("failed to deserialize BytecodeProgram: {e}"))?;
 
             let mut executor = BytecodeExecutor::new();
+            apply_run_security(&mut executor, &run_security);
             extension_loading::register_extension_capability_modules(&engine, &mut executor);
             let module_info = executor.module_schemas();
             engine.register_extension_modules(&module_info);
@@ -301,7 +425,14 @@ pub async fn run_script(
         let f = file
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no file specified and no --resume hash"))?;
-        execute_file(&mut engine, f, execution_mode, interrupt_flag).await
+        execute_file(
+            &mut engine,
+            f,
+            execution_mode,
+            interrupt_flag,
+            &run_security,
+        )
+        .await
     };
 
     // Handle Interrupted specially — print snapshot hash and exit cleanly
@@ -1289,6 +1420,7 @@ async fn execute_file(
     path: &Path,
     execution_mode: ExecutionMode,
     interrupt_flag: Arc<AtomicU8>,
+    run_security: &RunSecurity,
 ) -> Result<()> {
     // Add the script's directory to module search paths
     if let Some(parent) = path.parent() {
@@ -1337,14 +1469,15 @@ async fn execute_file(
     }
 
     // Execute the script
-    let response = match run_engine(engine, source, execution_mode, interrupt_flag).await {
-        Ok(r) => r,
-        Err(err) => {
-            let runtime_error = engine.get_runtime_mut().take_last_runtime_error();
-            print_shape_error(&err, runtime_error.as_ref());
-            std::process::exit(1);
-        }
-    };
+    let response =
+        match run_engine(engine, source, execution_mode, interrupt_flag, run_security).await {
+            Ok(r) => r,
+            Err(err) => {
+                let runtime_error = engine.get_runtime_mut().take_last_runtime_error();
+                print_shape_error(&err, runtime_error.as_ref());
+                std::process::exit(1);
+            }
+        };
 
     // Print any messages
     for message in &response.messages {
@@ -1374,10 +1507,12 @@ async fn run_engine(
     source: &str,
     execution_mode: ExecutionMode,
     interrupt_flag: Arc<AtomicU8>,
+    run_security: &RunSecurity,
 ) -> Result<ExecutionResult> {
     let response = match execution_mode {
         ExecutionMode::BytecodeVM => {
             let mut executor = BytecodeExecutor::new();
+            apply_run_security(&mut executor, run_security);
             // Enable bytecode caching for faster subsequent runs
             if !executor.enable_bytecode_cache() {
                 eprintln!("Warning: bytecode cache unavailable");
@@ -1399,6 +1534,7 @@ async fn run_engine(
         #[cfg(feature = "jit")]
         ExecutionMode::JIT => {
             let mut executor = shape_jit::JITExecutor::new();
+            apply_run_security(&mut executor.bytecode_executor, run_security);
             extension_loading::register_extension_capability_modules(
                 engine,
                 &mut executor.bytecode_executor,
@@ -1514,6 +1650,35 @@ mod tests {
         assert!(has_frontmatter_project_conflict(
             Some(&project_root),
             Some(&frontmatter)
+        ));
+    }
+
+    // WF-1D: resource limits are enforced only by the bytecode interpreter's
+    // dispatch loop / alloc budgets — JIT-native code has no per-instruction
+    // tick. `downgrade_mode_for_limits` must drop a `--mode jit` run to the
+    // interpreter whenever a limit is active (fail-closed), and leave the JIT
+    // default untouched for trusted, unlimited local execution.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn resource_limits_force_interpreter_over_jit() {
+        use super::{ExecutionMode, downgrade_mode_for_limits};
+        assert!(
+            matches!(
+                downgrade_mode_for_limits(ExecutionMode::JIT, true),
+                ExecutionMode::BytecodeVM
+            ),
+            "an active limit must force the interpreter so caps fire"
+        );
+        assert!(
+            matches!(
+                downgrade_mode_for_limits(ExecutionMode::JIT, false),
+                ExecutionMode::JIT
+            ),
+            "no limit must preserve the JIT default (trusted local)"
+        );
+        assert!(matches!(
+            downgrade_mode_for_limits(ExecutionMode::BytecodeVM, true),
+            ExecutionMode::BytecodeVM
         ));
     }
 

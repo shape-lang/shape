@@ -5391,6 +5391,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "shape-abi-v1",
  "shape-ast",
  "shape-jit",
  "shape-runtime",

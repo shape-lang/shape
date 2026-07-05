@@ -361,6 +361,31 @@ pub struct RunCommandOptions {
 
     #[command(flatten)]
     pub expand_filter: ExpandFilterOptions,
+
+    #[command(flatten)]
+    pub limits: ResourceLimitOptions,
+}
+
+/// Resource-limit flags mapped onto `ResourceLimits` (WF-1D). When any is set,
+/// a runaway program fails in-process at the cap instead of exhausting the
+/// host. Unset flags stay unlimited (trusted local execution).
+#[derive(Args, Clone, Default)]
+pub struct ResourceLimitOptions {
+    /// Abort after executing this many bytecode instructions.
+    #[arg(long, value_name = "N")]
+    pub max_instructions: Option<u64>,
+
+    /// Cap heap growth (bytes; e.g. 268435456 for 256 MiB).
+    #[arg(long, value_name = "BYTES")]
+    pub max_memory_bytes: Option<u64>,
+
+    /// Cap wall-clock execution time (milliseconds).
+    #[arg(long, value_name = "MS")]
+    pub max_time_ms: Option<u64>,
+
+    /// Cap captured output volume (bytes).
+    #[arg(long, value_name = "BYTES")]
+    pub max_output_bytes: Option<u64>,
 }
 
 #[derive(Subcommand)]

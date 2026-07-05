@@ -457,7 +457,37 @@ impl ProgramExecutor for BytecodeExecutor {
             vm = vm.with_resource_limits(limits);
         }
         vm.set_interrupt(self.interrupt.clone());
-        vm.load_program(bytecode);
+
+        // WF-1D security wiring: install the runtime permission envelope so
+        // gated stdlib dispatch (file / net / process / env) is checked at
+        // call time. `None` = allow-all, preserved ONLY for genuinely-trusted
+        // local `unlimited()` runs; serve / remote / wire install a concrete
+        // set so they fail closed.
+        vm.set_permissions(
+            self.granted_permissions.clone(),
+            self.scope_constraints.clone(),
+        );
+
+        // Load-time capability gate — "permissions baked into content hash,
+        // checked at load time". When a granted set is installed AND the
+        // program is content-addressed, verify its transitive required
+        // permissions are a subset of the grant and fail closed BEFORE
+        // executing a single instruction. Non-content-addressed programs fall
+        // through to the runtime `check_permission` gate installed above.
+        match self.granted_permissions.clone() {
+            Some(granted) => match bytecode.content_addressed.clone() {
+                Some(ca) => {
+                    vm.load_program_with_permissions(ca, &granted).map_err(|e| {
+                        shape_runtime::error::ShapeError::SemanticError {
+                            message: format!("Permission denied at load: {e}"),
+                            location: None,
+                        }
+                    })?;
+                }
+                None => vm.load_program(bytecode),
+            },
+            None => vm.load_program(bytecode),
+        }
         for ext in &self.extensions {
             vm.register_extension(ext.clone());
         }

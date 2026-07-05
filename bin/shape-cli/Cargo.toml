@@ -27,6 +27,7 @@ jit-trace = [
 [dependencies]
 anyhow.workspace = true
 shape-ast = { workspace = true }
+shape-abi-v1 = { workspace = true }
 shape-runtime = { workspace = true }
 shape-wire = { workspace = true }
 shape-jit = { workspace = true, optional = true }

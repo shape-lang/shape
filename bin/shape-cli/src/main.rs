@@ -122,6 +122,7 @@ async fn main() -> Result<()> {
                 resume,
                 runtime,
                 expand_filter,
+                limits,
             } = opts;
             let cli_args::RuntimeCommandOptions { mode, provider } = runtime;
             let cli_args::ProviderCommandOptions {
@@ -140,7 +141,16 @@ async fn main() -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("shape run --expand requires a script path"))?;
                 run_expand_comptime(script, expand_filter.module, expand_filter.function).await?;
             } else {
-                run_script(script, mode, extensions, &run_provider_opts, resume).await?;
+                let cli_limits = resource_limits_from_flags(&limits);
+                run_script(
+                    script,
+                    mode,
+                    extensions,
+                    &run_provider_opts,
+                    resume,
+                    cli_limits,
+                )
+                .await?;
             }
         }
         (Some(Commands::Repl { opts }), _) => {
@@ -341,13 +351,29 @@ async fn main() -> Result<()> {
             if expand {
                 run_expand_comptime(file, module, function).await?;
             } else {
-                run_script(Some(file), mode, extensions, &provider_opts, resume).await?;
+                run_script(
+                    Some(file),
+                    mode,
+                    extensions,
+                    &provider_opts,
+                    resume,
+                    shape_vm::resource_limits::ResourceLimits::unlimited(),
+                )
+                .await?;
             }
         }
 
         // Resume-only mode: `shape --resume <hash>`
         (None, None) if resume.is_some() => {
-            run_script(None, mode, extensions, &provider_opts, resume).await?;
+            run_script(
+                None,
+                mode,
+                extensions,
+                &provider_opts,
+                resume,
+                shape_vm::resource_limits::ResourceLimits::unlimited(),
+            )
+            .await?;
         }
 
         // No subcommand, no file: project mode or REPL
@@ -359,8 +385,15 @@ async fn main() -> Result<()> {
                 if let Some(entry) = &project.config.project.entry {
                     let entry_path = project.root_path.join(entry);
                     if entry_path.is_file() {
-                        run_script(Some(entry_path), mode, extensions, &provider_opts, resume)
-                            .await?;
+                        run_script(
+                            Some(entry_path),
+                            mode,
+                            extensions,
+                            &provider_opts,
+                            resume,
+                            shape_vm::resource_limits::ResourceLimits::unlimited(),
+                        )
+                        .await?;
                     } else {
                         anyhow::bail!(
                             "shape.toml entry '{}' not found (resolved to {})",
@@ -384,6 +417,20 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build `ResourceLimits` from the `shape run` resource-limit flags (WF-1D).
+/// Unset flags stay `None` (unlimited); a set flag installs a finite cap the
+/// dispatch loop / alloc-budget enforce in-process.
+fn resource_limits_from_flags(
+    opts: &cli_args::ResourceLimitOptions,
+) -> shape_vm::resource_limits::ResourceLimits {
+    shape_vm::resource_limits::ResourceLimits {
+        max_instructions: opts.max_instructions,
+        max_memory_bytes: opts.max_memory_bytes,
+        max_wall_time: opts.max_time_ms.map(std::time::Duration::from_millis),
+        max_output_bytes: opts.max_output_bytes,
+    }
 }
 
 fn should_initialize_shared_runtime_before_dispatch(cli: &Cli) -> bool {

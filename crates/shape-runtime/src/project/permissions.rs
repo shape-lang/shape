@@ -36,6 +36,26 @@ pub struct PermissionsSection {
     #[serde(default)]
     pub random: Option<bool>,
 
+    /// Grant execution of foreign code (extern C / embedded python/typescript).
+    ///
+    /// Unlike the other coarse booleans (which default to `true` when a
+    /// `[permissions]` section is present), an *unset* `ffi` defaults to
+    /// `false`: `Ffi` grants full process authority, so an explicit
+    /// allowlist never silently confers it (ffi-rebuild §4.8.2 — sandboxed /
+    /// explicit-`[permissions]` contexts exclude `Ffi` unless granted).
+    #[serde(default)]
+    pub ffi: Option<bool>,
+    /// Allowed foreign language ids (e.g. `["python"]`). Empty = all languages
+    /// when `ffi = true` (parity with an unscoped grant).
+    #[serde(default)]
+    pub ffi_languages: Vec<String>,
+    /// Allowed native-library path globs for `extern C` (post alias resolution).
+    #[serde(default)]
+    pub ffi_libraries: Vec<String>,
+    /// Optional glob over symbols permitted within the allowed libraries.
+    #[serde(default)]
+    pub ffi_symbols: Vec<String>,
+
     /// Scoped filesystem constraints.
     #[serde(default)]
     pub fs: Option<FsPermissions>,
@@ -80,6 +100,10 @@ impl PermissionsSection {
                 env: Some(false),
                 time: Some(false),
                 random: Some(false),
+                ffi: Some(false),
+                ffi_languages: Vec::new(),
+                ffi_libraries: Vec::new(),
+                ffi_symbols: Vec::new(),
                 fs: None,
                 net: None,
             }),
@@ -92,6 +116,10 @@ impl PermissionsSection {
                 env: Some(true),
                 time: Some(true),
                 random: Some(false),
+                ffi: Some(false),
+                ffi_languages: Vec::new(),
+                ffi_libraries: Vec::new(),
+                ffi_symbols: Vec::new(),
                 fs: None,
                 net: None,
             }),
@@ -104,6 +132,11 @@ impl PermissionsSection {
                 env: Some(true),
                 time: Some(true),
                 random: Some(true),
+                // `full` is explicit total trust — it does confer Ffi.
+                ffi: Some(true),
+                ffi_languages: Vec::new(),
+                ffi_libraries: Vec::new(),
+                ffi_symbols: Vec::new(),
                 fs: None,
                 net: None,
             }),
@@ -141,6 +174,13 @@ impl PermissionsSection {
         if self.random.unwrap_or(true) {
             set.insert(Permission::Random);
         }
+        // Foreign code: fail-closed default. Unlike the other coarse
+        // permissions, an unset `ffi` in an explicit `[permissions]` section
+        // defaults to `false` — `Ffi` confers process authority and must be
+        // opted into explicitly (ffi-rebuild §4.8.2).
+        if self.ffi.unwrap_or(false) {
+            set.insert(Permission::Ffi);
+        }
         // Scoped permissions
         if self.fs.as_ref().map_or(false, |fs| {
             !fs.allowed.is_empty() || !fs.read_only.is_empty()
@@ -168,6 +208,68 @@ impl PermissionsSection {
         if let Some(ref net) = self.net {
             constraints.allowed_hosts = net.allowed_hosts.clone();
         }
+        // Foreign-code scope (carried for WF-2A enforcement; ffi-rebuild §4.8.2).
+        constraints.ffi_languages = self.ffi_languages.clone();
+        constraints.ffi_libraries = self.ffi_libraries.clone();
+        constraints.ffi_symbols = self.ffi_symbols.clone();
         constraints
+    }
+}
+
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+    use shape_abi_v1::Permission;
+
+    #[test]
+    fn unset_ffi_defaults_closed_even_when_section_present() {
+        // A `[permissions]` section that omits `ffi` must NOT confer it, even
+        // though the other coarse permissions default-open (ffi-rebuild §4.8.2).
+        let section: PermissionsSection = toml::from_str("").unwrap();
+        assert!(!section.to_permission_set().contains(&Permission::Ffi));
+    }
+
+    #[test]
+    fn ffi_true_grants_and_scope_lists_are_carried() {
+        let section: PermissionsSection = toml::from_str(
+            r#"
+            ffi = true
+            ffi_languages = ["python"]
+            ffi_libraries = ["/usr/lib/*"]
+            ffi_symbols = ["labs"]
+            "#,
+        )
+        .unwrap();
+        assert!(section.to_permission_set().contains(&Permission::Ffi));
+        let scope = section.to_scope_constraints();
+        assert_eq!(scope.ffi_languages, vec!["python".to_string()]);
+        assert_eq!(scope.ffi_libraries, vec!["/usr/lib/*".to_string()]);
+        assert_eq!(scope.ffi_symbols, vec!["labs".to_string()]);
+    }
+
+    #[test]
+    fn ffi_false_excludes_grant() {
+        let section: PermissionsSection = toml::from_str("ffi = false").unwrap();
+        assert!(!section.to_permission_set().contains(&Permission::Ffi));
+    }
+
+    #[test]
+    fn shorthands_map_ffi_correctly() {
+        assert!(
+            PermissionsSection::from_shorthand("full")
+                .unwrap()
+                .to_permission_set()
+                .contains(&Permission::Ffi),
+            "full is total trust — confers Ffi"
+        );
+        for name in ["pure", "readonly"] {
+            assert!(
+                !PermissionsSection::from_shorthand(name)
+                    .unwrap()
+                    .to_permission_set()
+                    .contains(&Permission::Ffi),
+                "{name} must not confer Ffi"
+            );
+        }
     }
 }
