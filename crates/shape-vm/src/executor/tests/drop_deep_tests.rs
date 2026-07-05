@@ -3043,3 +3043,222 @@ fn test_drop_edge_complex_mix() {
     let result = eval(src);
     assert_eq!(result.as_test_number(), Some(424.0));
 }
+
+// ============================================================================
+// ADR-006 §2.7.30.4 — escape-Drop-deferral, RETURNED-VALUE arm (WF-1C lane a)
+//
+// A Drop-bearing value RETURNED from a function and bound in a caller local
+// must drop EXACTLY ONCE — at the caller local's scope-exit (the
+// defer-to-escaping-binding lifetime). The producer already skips its own
+// `DropCall` on the escaping bare-identifier return; these tests pin the
+// caller-side re-arm: an inferred, unannotated `let x = <call>` whose callee
+// declares a Drop-bearing return type registers exactly one drop obligation,
+// runs the user `Drop::drop` once, never double-drops, and a chained escape
+// (`x` itself returned again) stays suppressed by the return-skip.
+//
+// Drop side-effects are observed via a module-level `mut N` counter read
+// AFTER the relevant scope exit but BEFORE the program-end module drops.
+// ============================================================================
+
+#[test]
+fn test_drop_returned_value_inferred_nested_block_drops_once() {
+    // Nested-block inferred `let x = make(7)` (compile_expr_block path). The
+    // returned R must drop exactly once at the inner block's scope-exit.
+    let src = r#"
+let mut N: int = 0
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn make(n: int) -> R {
+  let r = R { id: n }
+  r
+}
+fn probe() -> int {
+  { let x = make(7) }
+  N
+}
+probe()
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(1),
+        "inferred returned-value local must drop exactly once at block exit; got {:?}",
+        result.as_test_int()
+    );
+}
+
+#[test]
+fn test_drop_returned_value_function_body_level_drops_once() {
+    // Function-body-level (non-nested) inferred `let x = make(7)`
+    // (compile_statement path). `x` does NOT escape (`x.id` int is returned),
+    // so it drops at `make_and_consume`'s scope exit. Read N in the outer
+    // caller after that scope has fully unwound.
+    let src = r#"
+let mut N: int = 0
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn make(n: int) -> R {
+  let r = R { id: n }
+  r
+}
+fn make_and_consume(n: int) -> int {
+  let x = make(n)
+  x.id
+}
+fn probe() -> int {
+  let got = make_and_consume(7)
+  N + got * 0
+}
+probe()
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(1),
+        "function-body-level returned-value local must drop exactly once; got {:?}",
+        result.as_test_int()
+    );
+}
+
+#[test]
+fn test_drop_returned_value_direct_and_via_let_producers_no_double_drop() {
+    // Mirror of the repro_a2 A/B/C/D matrix: inferred/annotated caller
+    // bindings × via-let/direct-struct-literal producers. Each of the four
+    // must drop EXACTLY once (monotone total == 4, proving no double-run and
+    // no missed drop). The `direct` producer has no intermediate local to
+    // skip, so the caller re-arm is the only obligation — still balanced.
+    let src = r#"
+let mut N: int = 0
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn via_let(n: int) -> R {
+  let r = R { id: n }
+  r
+}
+fn direct(n: int) -> R {
+  R { id: n }
+}
+fn probe() -> int {
+  { let a = via_let(1) }
+  { let b: R = via_let(2) }
+  { let c = direct(3) }
+  { let d: R = direct(4) }
+  N
+}
+probe()
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(4),
+        "each of the four returned-value bindings must drop exactly once (no double, \
+         no miss); got {:?}",
+        result.as_test_int()
+    );
+}
+
+#[test]
+fn test_drop_returned_value_chained_escape_no_double_drop() {
+    // Chained escape: `relay` binds `let x = make(n)` (the caller re-arm
+    // registers x) and then RETURNS `x` — x escapes again. The re-arm must
+    // NOT double-drop: the existing return-skip
+    // (`return_escape_drop_skip_local`) suppresses x's DropCall in `relay`,
+    // so the value drops exactly once at the OUTERMOST binding's scope-exit.
+    let src = r#"
+let mut N: int = 0
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn make(n: int) -> R {
+  let r = R { id: n }
+  r
+}
+fn relay(n: int) -> R {
+  let x = make(n)
+  x
+}
+fn probe() -> int {
+  { let y = relay(5) }
+  N
+}
+probe()
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(1),
+        "a chained-escape returned value must drop exactly once, not once per hop; \
+         got {:?}",
+        result.as_test_int()
+    );
+}
+
+#[test]
+fn test_drop_returned_value_non_drop_return_adds_no_obligation() {
+    // A callee returning a NON-Drop type must add no spurious drop obligation
+    // (the re-arm is scoped to registered Drop types only). Here `R` is Drop
+    // but `mk_int` returns a plain `int`; only the real R values drop.
+    let src = r#"
+let mut N: int = 0
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn mk_int(n: int) -> int {
+  let r = R { id: n }
+  r.id
+}
+fn make(n: int) -> R {
+  let r = R { id: n }
+  r
+}
+fn probe() -> int {
+  { let a = mk_int(1) }
+  { let keep = make(2) }
+  N
+}
+probe()
+"#;
+    let result = eval(src);
+    // mk_int's internal `r` drops inside mk_int (1); `keep` (the returned R)
+    // drops at its block exit (1) => total 2. No extra obligation from the
+    // int-returning `let a`.
+    assert_eq!(
+        result.as_test_int(),
+        Some(2),
+        "int-returning callee must not add a drop obligation on the caller local; \
+         got {:?}",
+        result.as_test_int()
+    );
+}
+
+#[test]
+fn test_drop_returned_value_stability_no_leak_no_double_free() {
+    // Refcount-balance / stability: loop the returned-value escape pattern
+    // many times. Exactly one drop per iteration (total == iterations) proves
+    // no leak (missed drop) AND no double-free (which would over-count or
+    // crash). Heap-backed field (string) makes an Arc imbalance observable.
+    let src = r#"
+let mut N: int = 0
+type R { id: int, tag: string }
+impl Drop for R { method drop() { N = N + 1 } }
+fn make(n: int) -> R {
+  let r = R { id: n, tag: f"t-{n}" }
+  r
+}
+fn main() -> int {
+  let mut i: int = 0
+  while i < 1000 {
+    { let x = make(i) }
+    i = i + 1
+  }
+  N
+}
+main()
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(1000),
+        "1000 returned-value escapes must drop exactly 1000 times (no leak, no \
+         double-free); got {:?}",
+        result.as_test_int()
+    );
+}

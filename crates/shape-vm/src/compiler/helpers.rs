@@ -5836,6 +5836,61 @@ impl BytecodeCompiler {
         self.drop_type_info.get(&type_name).copied()
     }
 
+    /// ADR-006 §2.7.30.4 (escape-Drop-deferral, caller re-arm): resolve the
+    /// Drop type NAME + [`DropKind`] implied by a `let x = <call>`
+    /// initializer's DECLARED return type, when that return type is a
+    /// registered `impl Drop` type.
+    ///
+    /// The producer already skips its own `DropCall` for the escaping
+    /// bare-identifier tail-return (`return_escape_drop_skip_local`, set in
+    /// `functions.rs` / `statements.rs`, consumed in
+    /// `emit_drops_for_early_exit`). This resolves the caller-side half: an
+    /// inferred, unannotated `let x = make(7)` never stamps the local's type
+    /// NAME — the non-generic call-return path in
+    /// `function_call_return_concrete_type` reduces the return annotation
+    /// through the primitive-only `concrete_type_from_annotation`, which
+    /// returns `None` for a user struct — so `local_drop_kind` returns
+    /// `None`, no obligation registers, and the value's `Drop::drop` never
+    /// runs. Returning the type NAME here lets the caller both stamp the
+    /// tracker slot (so the emitted `DropCall` carries the `TypeName::drop`
+    /// symbol) and register the drop obligation.
+    ///
+    /// Resolves ONLY the callee's *declared* return annotation (never
+    /// fabricated) and returns `Some` ONLY when that type is Drop-bearing, so
+    /// a callee with no Drop-typed return adds no obligation. Mirrors
+    /// `return_ownership_hint_for_initializer`'s shadowing guards: a call
+    /// name that resolves to a local, a captured name, or a module binding is
+    /// not the module `FunctionDef` whose return type we stored.
+    pub(super) fn initializer_call_return_drop_type(
+        &self,
+        expr: &shape_ast::ast::Expr,
+    ) -> Option<(String, DropKind)> {
+        use shape_ast::ast::Expr;
+        let ret_ann = match expr {
+            Expr::FunctionCall { name, .. } => {
+                if self.resolve_local(name).is_some()
+                    || self.mutable_closure_captures.contains_key(name.as_str())
+                    || self.resolve_scoped_module_binding_name(name).is_some()
+                {
+                    return None;
+                }
+                self.function_defs.get(name)?.return_type.as_ref()?
+            }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                ..
+            } => {
+                let scoped = format!("{}::{}", namespace, function);
+                self.function_defs.get(&scoped)?.return_type.as_ref()?
+            }
+            _ => return None,
+        };
+        let type_name = Self::tracked_type_name_from_annotation(ret_ann)?;
+        let drop_kind = self.drop_type_info.get(&type_name).copied()?;
+        Some((type_name, drop_kind))
+    }
+
     /// Emit drops for all scopes being exited (used by return/break/continue).
     /// `scopes_to_exit` is the number of drop scopes to emit drops for.
     /// True when at least one in-scope `DropCall`-tracked local (any active
