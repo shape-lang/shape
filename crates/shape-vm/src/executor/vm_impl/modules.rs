@@ -710,12 +710,10 @@ impl VirtualMachine {
 
         match entry {
             shape_runtime::module_exports::ModuleFnEntry::Typed(typed) => {
-                // The body takes `&[u64]` slot bits (per its kind table)
-                // and returns `Result<TypedReturn, String>`. Translate
-                // `&[KindedSlot]` to `Vec<u64>` at the boundary.
-                let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
-                let typed_return =
-                    (typed.invoke)(&raw_bits, &ctx).map_err(VMError::RuntimeError)?;
+                // The body takes `&[KindedSlot]` carriers directly — the
+                // caller's kinds (VM §2.7.7 parallel kind track) flow
+                // through UNCHANGED. No raw-bits flatten, no re-stamp.
+                let typed_return = (typed.invoke)(args, &ctx).map_err(VMError::RuntimeError)?;
                 project_typed_return(
                     &self.builtin_schemas,
                     &self.program.type_schema_registry,
@@ -723,8 +721,11 @@ impl VirtualMachine {
                 )
             }
             shape_runtime::module_exports::ModuleFnEntry::TypedAsync(async_entry) => {
-                let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
-                let fut = (async_entry.invoke)(raw_bits);
+                // Async bodies own their arg vec across the await; clone
+                // the caller's carriers (retains one share per heap slot)
+                // — kinds preserved, no raw-bits flatten.
+                let kinded_args: Vec<shape_value::KindedSlot> = args.to_vec();
+                let fut = (async_entry.invoke)(kinded_args);
                 // Drive the future on the ambient tokio runtime. If no
                 // runtime is available we surface — async dispatch
                 // requires an explicit host runtime per the §2.7.4 task-

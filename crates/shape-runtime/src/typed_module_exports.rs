@@ -382,29 +382,41 @@ impl ConcreteType {
 /// One typed-return native module function entry.
 ///
 /// Stores the typed body alongside the declared return type, parameter
-/// types, and the per-arg [`shape_value::NativeKind`] table that the
-/// dispatcher uses to read each slot's bits. Built only by the typed
-/// `register_typed_fn_N` helpers in [`crate::marshal`] — those helpers
-/// derive `arg_kinds` from each parameter's `FromSlot::NATIVE_KIND`
-/// associated constant, so the kinds cannot drift from the body's
-/// actual Rust signature.
+/// types, and the per-arg [`shape_value::NativeKind`] registration table.
+/// The body receives per-position [`shape_value::KindedSlot`] carriers
+/// (kinds from the VM's §2.7.7 track) and reads each carrier natively —
+/// the dispatcher never decodes bits. Built by the typed
+/// `register_typed_fn_N` helpers in [`crate::marshal`] (which derive
+/// `arg_kinds` from each parameter's `FromSlot::NATIVE_KIND`, so the kinds
+/// cannot drift from the body's actual Rust signature) and by the
+/// variadic `register_typed_function` (which leaves `arg_kinds` empty —
+/// per-call kinds come solely from the caller's track).
 #[derive(Clone)]
 pub struct TypedModuleFunction {
-    /// The typed function body. Receives a raw `&[u64]` slot-bits slice
-    /// (the dispatcher has guaranteed each slot's kind matches
-    /// [`Self::arg_kinds`]) plus the `ModuleContext`; returns a
-    /// `TypedReturn`.
+    /// The typed function body. Receives per-position [`shape_value::KindedSlot`]
+    /// carriers whose kinds are stamped by the VM's §2.7.7 parallel kind
+    /// track (never fabricated from bits) plus the `ModuleContext`; returns
+    /// a `TypedReturn`. Internal Rust trait object → carries `KindedSlot`,
+    /// not raw `&[u64]` (ADR-006 §2.7.5).
     pub invoke: Arc<
-        dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String> + Send + Sync,
+        dyn for<'ctx> Fn(
+                &[shape_value::KindedSlot],
+                &ModuleContext<'ctx>,
+            ) -> Result<TypedReturn, String>
+            + Send
+            + Sync,
     >,
     /// Declared return type (used for LSP and consistency checks).
     pub return_type: ConcreteType,
     /// Parameter type names (mirrors `ModuleParam::type_name` for LSP
     /// hover/completions).
     pub arg_types: Vec<String>,
-    /// Per-arg `NativeKind` derived from `FromSlot::NATIVE_KIND` at
-    /// registration. The dispatcher uses this to decode each slot's
-    /// bits with the correct kind. Length matches `arg_types`.
+    /// Per-arg `NativeKind` registration schema, derived from
+    /// `FromSlot::NATIVE_KIND` for fixed-arity registrations (length
+    /// matches `arg_types`); **empty** for variadic registrations, whose
+    /// per-call kinds arrive stamped on the caller's `KindedSlot`
+    /// carriers. Used for consistency assertions and LSP, not to decode
+    /// bits (the body reads kinded carriers natively).
     pub arg_kinds: Vec<shape_value::NativeKind>,
 }
 
@@ -418,10 +430,13 @@ pub struct TypedModuleFunction {
 #[derive(Clone)]
 pub struct TypedModuleAsyncFunction {
     /// The typed async function body. Owns its arg vec to satisfy
-    /// `'static` future bounds. Receives raw `Vec<u64>` slot bits
-    /// whose kinds match `Self::arg_kinds`.
+    /// `'static` future bounds. Receives an owned `Vec<shape_value::KindedSlot>`
+    /// carrying the caller's true, compile-time-stamped kinds (§2.7.7) —
+    /// not raw `Vec<u64>` (ADR-006 §2.7.5).
     pub invoke: Arc<
-        dyn Fn(Vec<u64>) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+        dyn Fn(
+                Vec<shape_value::KindedSlot>,
+            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
             + Send
             + Sync,
     >,
