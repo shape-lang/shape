@@ -27,7 +27,6 @@ crates/shape-value/src/lib.rs	support_or_legacy
 crates/shape-value/src/nanboxed.rs	support_or_legacy
 crates/shape-value/src/slot.rs	support_or_legacy
 crates/shape-value/src/value.rs	support_or_legacy
-crates/shape-vm/benches/typed_access_bench.rs	test_or_bench
 crates/shape-vm/src/bytecode.rs	support_or_legacy
 crates/shape-vm/src/compiler/compiler_tests.rs	support_or_legacy
 crates/shape-vm/src/compiler/comptime.rs	support_or_legacy

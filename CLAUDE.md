@@ -63,17 +63,17 @@ cargo run --bin shape -- ext install <name>  # Install extension from source
 ```
 
 **Canonical build gate.** `just check-clean` runs `cargo check --workspace
---lib --bins --tests --examples` — `--all-targets` minus `--benches`. Every
+--all-targets` (lib + bins + tests + examples + benches). Every
 workspace member (`shape-macros`, `shape-ast`, `shape-value`, `shape-wire`,
 `shape-runtime`, `shape-vm`, `shape-jit`, `shape-diagnostics`, the two
 `shape-viz` crates, `shape-cli`, `shape-lsp`, `shape-test`, `xtask`,
-`shape-abi-v1`, `shape-gc`, `shape-ext-python`, `shape-ext-typescript`) is
+`shape-abi-v1`, `shape-ext-python`, `shape-ext-typescript`) is
 covered. `shape-app` and `shape-server` are NOT workspace members (they live
 in a separate workspace at `../shape-app/`); they are not covered by this
-gate. `--benches` is excluded because `crates/shape-vm/benches/vm_benchmarks.rs`
-and `crates/shape-vm/benches/typed_access_bench.rs` reference deleted
-post-strict-typing shapes (`OpCode::Lt`, `ValueWord`, `ValueWordExt`,
-`Constant::Value`) — bench-rebuild is Item 5's territory. Both
+gate. (`--benches` was historically excluded while the shape-vm bench files
+referenced deleted post-strict-typing shapes; benches rejoined the gate
+2026-07-05 after the stale `typed_access_bench.rs` stub was deleted and
+`vm_benchmarks.rs` was confirmed clean.) Both
 `scripts/verify-merge.sh` CHECK 2 and `just test-check` anchor on this
 command's coverage.
 
@@ -318,7 +318,7 @@ Code touchpoints carry a `// ADR-006` marker.
 - `prove_native_kind() -> Result<NativeKind, ProofGap>` in `compiler/type_tracking.rs`. `ProofGap`'s constructor is private to the type-tracking module — emit code cannot fabricate "I proved it". The Rust type system enforces this.
 - `just check-no-dynamic` recipe greps for forbidden symbols on every CI run and pre-commit. Build fails on hit.
 - Sentinel test `crates/shape-vm/src/executor/tests/no_dynamic.rs` asserts forbidden symbols are absent.
-- `just verify-merge` / `bash scripts/verify-merge.sh` — Phase 2d merge gate (11 checks, exit-code-based, NOT grep -c). Required pre-merge for every Phase 2d sub-cluster branch. Catches the 4 take-both regex misses + HeapKind ordinal collisions + 4-table HeapKind lockstep + receiver-recovery suspicious patterns (3ac2f11 soundness rule heuristic).
+- `just verify-merge` / `bash scripts/verify-merge.sh` — Phase 2d merge gate (15 checks as of 2026-07-05, exit-code-based, NOT grep -c). Required pre-merge for every Phase 2d sub-cluster branch. Catches the 4 take-both regex misses + HeapKind ordinal collisions + 4-table HeapKind lockstep + receiver-recovery suspicious patterns (3ac2f11 soundness rule heuristic).
 
 ### Phase 2d entry points (binding for Phase 2d sub-cluster work)
 

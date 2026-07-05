@@ -87,10 +87,6 @@ criterion = { workspace = true }
 tempfile = "3.8"
 
 [[bench]]
-name = "typed_access_bench"
-harness = false
-
-[[bench]]
 name = "vm_benchmarks"
 harness = false
 

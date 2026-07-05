@@ -78,16 +78,15 @@ echo
 # -----------------------------------------------------------------------------
 # CHECK 2 — canonical clean-check gate exits 0
 # -----------------------------------------------------------------------------
-# Same target set as `just check-clean`: `--lib --bins --tests --examples`
-# (`--all-targets` minus `--benches`; the two `shape-vm/benches/*.rs` files
-# reference deleted post-strict-typing shapes and are Item 5's territory).
+# Same target set as `just check-clean`: `--all-targets` (benches rejoined
+# the gate 2026-07-05 after the stale shape-vm bench stub was deleted).
 if [[ "$fast_mode" -eq 0 ]]; then
-  echo "=== CHECK 2: cargo check --workspace --lib --bins --tests --examples ==="
-  if cargo check --workspace --lib --bins --tests --examples 2>&1 | tail -5; then
-    record_pass "cargo check --workspace --lib --bins --tests --examples"
+  echo "=== CHECK 2: cargo check --workspace --all-targets ==="
+  if cargo check --workspace --all-targets 2>&1 | tail -5; then
+    record_pass "cargo check --workspace --all-targets"
     echo "  -> CLEAN"
   else
-    record_fail "cargo check --workspace --lib --bins --tests --examples" "exit non-zero"
+    record_fail "cargo check --workspace --all-targets" "exit non-zero"
     echo "  -> FAILED (exit non-zero from cargo)"
   fi
   echo
@@ -204,6 +203,154 @@ if [[ "$lockstep_fail" -eq 0 ]]; then
   echo "  -> all variants present in 4/4 tables"
 else
   record_fail "HeapKind 4-table lockstep" "one or more variants missing arms"
+fi
+echo
+
+# -----------------------------------------------------------------------------
+# CHECK 6b — JIT retain/release HeapKind lockstep (tables 5 & 6)
+# -----------------------------------------------------------------------------
+# Audit 2026-07-04 (docs/cluster-audits/audit-2026-07-04-claimed-vs-real.md §5):
+# the JIT retain/release dispatch in
+#   crates/shape-jit/src/mir_compiler/ownership.rs
+#     (`retain_func_for_place` / `release_func_for_place`)
+# and the per-HeapKind FFI retain/release bodies in
+#   crates/shape-jit/src/ffi/v2/collection_arc.rs
+# are a 5th/6th HeapKind dispatch table OUTSIDE the 4-table lockstep above.
+# A new HeapKind variant silently falls through to `_ => arc_retain /
+# arc_release` — the legacy `UnifiedValue<T>` HeapHeader carrier (refcount at
+# offset +4), which is the WRONG carrier shape for typed-Arc kinds (Rust Arc
+# control block, refcount at offset -16). This exact class has already
+# produced three documented segfault families (W12 string-carrier, W15.2
+# closure-carrier, r5c-2-β-δ TypedArray-carrier).
+#
+# Rule: every HeapKind variant must EITHER
+#   (a) have an explicit retain arm AND release arm in ownership.rs whose
+#       `self.ffi.*` targets resolve to defined `pub extern "C" fn jit_*`
+#       symbols in crates/shape-jit/src (retain/release as a pair), OR
+#   (b) be listed in the audited legacy-carrier baseline below — variants
+#       that fell through to the legacy fallback at baseline-freeze time
+#       (2026-07-05). The baseline may only SHRINK: a baseline variant that
+#       gains arms must be removed here (stale-baseline failure).
+#
+# Exit-code / list-comparison based, NOT grep -c of cargo output.
+echo "=== CHECK 6b: JIT retain/release HeapKind lockstep (tables 5/6) ==="
+jit_ownership_table="crates/shape-jit/src/mir_compiler/ownership.rs"
+jit_collection_arc_table="crates/shape-jit/src/ffi/v2/collection_arc.rs"
+
+# Audited 2026-07-05: these variants have NO explicit arm in the JIT
+# retain/release dispatch and ride the legacy `arc_retain`/`arc_release`
+# HeapHeader fallback. Frozen residual surface — new variants may NOT be
+# added here without a dated audit note proving the legacy HeapHeader
+# carrier is the actual carrier shape for the new kind.
+# (Note: `String` is carried as `NativeKind::String`, not
+# `Ptr(HeapKind::String)`; its dedicated arm is checked via the FFI-target
+# resolution pass below, so it sits in this list for the Ptr-arm scan only.)
+declare -a jit_lockstep_baseline=(
+  String
+  TypedObject
+  Decimal
+  BigInt
+  DataTable
+  Future
+  TaskGroup
+  Temporal
+  TableView
+  Content
+  Instant
+  IoHandle
+  NativeScalar
+  NativeView
+  Char
+  FilterExpr
+  Reference
+  SharedCell
+  Iterator
+  Range
+  TraitObject
+  ModuleFn
+  Matrix
+  MatrixSlice
+)
+
+jit_lockstep_fail=0
+
+if [[ ! -f "$jit_ownership_table" || ! -f "$jit_collection_arc_table" ]]; then
+  echo "  -> JIT LOCKSTEP TABLE MOVED: $jit_ownership_table and/or $jit_collection_arc_table not found — relocate the tables and update this check"
+  jit_lockstep_fail=1
+else
+  # --- Table 5: per-variant retain+release arm coverage in ownership.rs ---
+  for variant in $variants; do
+    arm_count=$(rg -c "NativeKind::Ptr\(HeapKind::${variant}\)\) =>" "$jit_ownership_table" 2>/dev/null || true)
+    arm_count=${arm_count:-0}
+    in_baseline=0
+    for b in "${jit_lockstep_baseline[@]}"; do
+      if [[ "$b" == "$variant" ]]; then
+        in_baseline=1
+        break
+      fi
+    done
+    if [[ "$in_baseline" -eq 1 ]]; then
+      if [[ "$arm_count" -gt 0 ]]; then
+        echo "  -> STALE BASELINE: HeapKind::$variant now has JIT dispatch arms — remove it from jit_lockstep_baseline in this script"
+        jit_lockstep_fail=1
+      fi
+    else
+      if [[ "$arm_count" -lt 2 ]]; then
+        echo "  -> JIT LOCKSTEP MISS: HeapKind::$variant has $arm_count/2 arms (retain + release) in $jit_ownership_table"
+        jit_lockstep_fail=1
+      fi
+    fi
+  done
+
+  # --- Table 5 -> 6 linkage: every HeapKind/String arm target must resolve
+  # to a defined `pub extern "C" fn jit_<field>` and come as a
+  # retain/release pair.
+  jit_ffi_fields=$(
+    {
+      rg -oN 'NativeKind::Ptr\(HeapKind::\w+\)\) => self\.ffi\.(\w+)' -r '$1' "$jit_ownership_table" 2>/dev/null || true
+      rg -oN 'NativeKind::String\) => self\.ffi\.(\w+)' -r '$1' "$jit_ownership_table" 2>/dev/null || true
+    } | LC_ALL=C sort -u
+  )
+  for field in $jit_ffi_fields; do
+    if ! rg -q "pub extern \"C\" fn jit_${field}\(" crates/shape-jit/src 2>/dev/null; then
+      echo "  -> JIT LOCKSTEP MISS: dispatch arm targets self.ffi.${field} but no \`pub extern \"C\" fn jit_${field}\` is defined under crates/shape-jit/src"
+      jit_lockstep_fail=1
+    fi
+    case "$field" in
+      *_retain)
+        sibling="${field%_retain}_release"
+        if ! printf '%s\n' "$jit_ffi_fields" | grep -qx "$sibling"; then
+          echo "  -> JIT LOCKSTEP MISS: retain target ${field} has no matching release arm target (${sibling}) in $jit_ownership_table"
+          jit_lockstep_fail=1
+        fi
+        ;;
+      *_release)
+        sibling="${field%_release}_retain"
+        if ! printf '%s\n' "$jit_ffi_fields" | grep -qx "$sibling"; then
+          echo "  -> JIT LOCKSTEP MISS: release target ${field} has no matching retain arm target (${sibling}) in $jit_ownership_table"
+          jit_lockstep_fail=1
+        fi
+        ;;
+    esac
+  done
+
+  # --- Table 6 internal pairing: every per-kind retain body in
+  # collection_arc.rs must have its release sibling in the same file
+  # (and vice versa).
+  ca_retains=$(rg -oN 'pub extern "C" fn (jit_arc_\w+)_retain\(' -r '$1' "$jit_collection_arc_table" 2>/dev/null | LC_ALL=C sort -u || true)
+  ca_releases=$(rg -oN 'pub extern "C" fn (jit_arc_\w+)_release\(' -r '$1' "$jit_collection_arc_table" 2>/dev/null | LC_ALL=C sort -u || true)
+  if [[ "$ca_retains" != "$ca_releases" ]]; then
+    echo "  -> JIT LOCKSTEP MISS: retain/release pair mismatch in $jit_collection_arc_table:"
+    diff <(printf '%s\n' "$ca_retains") <(printf '%s\n' "$ca_releases") | head -10 || true
+    jit_lockstep_fail=1
+  fi
+fi
+
+if [[ "$jit_lockstep_fail" -eq 0 ]]; then
+  record_pass "HeapKind JIT retain/release lockstep (tables 5/6)"
+  echo "  -> all non-baseline variants have paired JIT arms + resolved FFI targets"
+else
+  record_fail "HeapKind JIT retain/release lockstep (tables 5/6)" "variant missing JIT retain/release arm or unresolved FFI target"
 fi
 echo
 

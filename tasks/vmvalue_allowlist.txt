@@ -27,7 +27,6 @@ crates/shape-value/src/lib.rs
 crates/shape-value/src/nanboxed.rs
 crates/shape-value/src/slot.rs
 crates/shape-value/src/value.rs
-crates/shape-vm/benches/typed_access_bench.rs
 crates/shape-vm/src/bytecode.rs
 crates/shape-vm/src/compiler/compiler_tests.rs
 crates/shape-vm/src/compiler/comptime.rs

@@ -40,6 +40,14 @@ target-lexicon = "0.12"
 # only; the extension contract at `module_exports.rs:21` stays on raw bits.
 tracing = { version = "0.1", default-features = false }
 
+[dev-dependencies]
+# WF-0A gate hardening (2026-07-05): the `registry_cross_check` test module
+# in `src/mir_compiler/types.rs` iterates shape-vm's PHF method-registry maps
+# (`phf::Map<&str, MethodFnV2>`) to cross-check the JIT return-kind tables
+# against the real VM handlers. Same 0.11 line as shape-vm so the map type
+# unifies to a single crate version.
+phf = "0.11"
+
 [features]
 default = []
 # `jit-trace` enables the tracing macros at debug/trace levels. Without it,

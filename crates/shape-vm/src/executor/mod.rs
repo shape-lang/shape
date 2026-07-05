@@ -58,6 +58,15 @@ pub use control_flow::foreign_marshal;
 pub use control_flow::native_abi;
 pub use task_scheduler::{TaskScheduler, TaskStatus};
 
+// WF-0A gate hardening (2026-07-05): re-export the PHF method registry so
+// shape-jit's return-kind cross-check test
+// (`crates/shape-jit/src/mir_compiler/types.rs::registry_cross_check`) can
+// iterate the dispatch tables and invoke the real handlers instead of
+// trusting a hand-synced "Verified against method_registry.rs" comment.
+// Additive visibility only — the dispatch shell and handler modules stay
+// `pub(crate)`; the maps' values are plain `MethodFnV2` fn pointers.
+pub use objects::method_registry;
+
 /// Reserved future ID used to signal a snapshot suspension
 pub const SNAPSHOT_FUTURE_ID: u64 = u64::MAX;
 
