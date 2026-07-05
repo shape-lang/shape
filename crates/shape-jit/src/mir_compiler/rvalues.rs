@@ -1545,6 +1545,96 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().iconst(cl_ty, imm)
     }
 
+    /// Emit a signed-overflow-checked i64 `Add`/`Sub`/`Mul`.
+    ///
+    /// Per THE RULE (numeric-conversion D3, user 2026-06-01) `int` (i64)
+    /// arithmetic is EXACT across the full i64 range: overflow is a structured
+    /// runtime error, NOT a silent two's-complement wrap. The bytecode VM
+    /// raises `binop_int_checked(i64::checked_add/sub/mul)` on overflow
+    /// (`crates/shape-vm/src/executor/arithmetic/mod.rs:150-152`); this mirrors
+    /// it in codegen so `--mode jit` reports the SAME overflow instead of
+    /// `iadd`/`isub`/`imul` silently wrapping (the audit-2026-07-04 §4.4 D3
+    /// VM/JIT split-brain).
+    ///
+    /// The check is a real guarded branch — the same shape as
+    /// `compile_int_divmod_guarded`: the wrapping result and a signed-overflow
+    /// predicate are computed in the current (pre-branch) block (so the result
+    /// dominates `continue_block`), then a `brif` routes an overflow to a block
+    /// that `return_`s `JIT_SIGNAL_INT_OVERFLOW`, which the executor maps to the
+    /// VM's overflow diagnostic. This is checked-arith, NOT a `Convert<X>To<Y>`
+    /// coercion.
+    ///
+    /// Overflow predicates (all on the raw two's-complement i64 bits):
+    /// - **Add** overflows iff `lhs` and `rhs` share a sign that differs from
+    ///   the result's: `((res ^ lhs) & (res ^ rhs)) < 0`.
+    /// - **Sub** overflows iff `lhs`/`rhs` differ in sign and the result's sign
+    ///   differs from `lhs`: `((lhs ^ rhs) & (lhs ^ res)) < 0`.
+    /// - **Mul** overflows iff the true 128-bit product does not fit in 64 bits,
+    ///   i.e. the signed high half (`smulhi`) is not the sign-extension of the
+    ///   low half (`res >>s 63`).
+    fn compile_int64_checked_arith(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value, String> {
+        let (result, is_overflow) = match op {
+            BinOp::Add => {
+                let res = self.builder.ins().iadd(lhs, rhs);
+                let x1 = self.builder.ins().bxor(res, lhs);
+                let x2 = self.builder.ins().bxor(res, rhs);
+                let ov = self.builder.ins().band(x1, x2);
+                let is_ov = self.builder.ins().icmp_imm(IntCC::SignedLessThan, ov, 0);
+                (res, is_ov)
+            }
+            BinOp::Sub => {
+                let res = self.builder.ins().isub(lhs, rhs);
+                let x1 = self.builder.ins().bxor(lhs, rhs);
+                let x2 = self.builder.ins().bxor(lhs, res);
+                let ov = self.builder.ins().band(x1, x2);
+                let is_ov = self.builder.ins().icmp_imm(IntCC::SignedLessThan, ov, 0);
+                (res, is_ov)
+            }
+            BinOp::Mul => {
+                let res = self.builder.ins().imul(lhs, rhs);
+                // `smulhi` = high 64 bits of the signed 128-bit product.
+                let hi = self.builder.ins().smulhi(lhs, rhs);
+                // Arithmetic shift by 63 = sign-extension of the low half.
+                let lo_sign = self.builder.ins().sshr_imm(res, 63);
+                let is_ov = self.builder.ins().icmp(IntCC::NotEqual, hi, lo_sign);
+                (res, is_ov)
+            }
+            _ => {
+                return Err(format!(
+                    "compile_int64_checked_arith: unsupported op {:?} — only \
+                     Add/Sub/Mul carry a checked-overflow guard. SURFACE.",
+                    op
+                ));
+            }
+        };
+
+        let overflow_block = self.builder.create_block();
+        let continue_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_overflow, overflow_block, &[], continue_block, &[]);
+
+        self.builder.switch_to_block(overflow_block);
+        self.builder.seal_block(overflow_block);
+        // `narrow_iconst` masks the negative signal to the I32 width — a raw
+        // sign-extended `-5i64` is rejected by Cranelift's `iconst` verifier
+        // for `I32`. The masked value is read back by the executor as
+        // `signal as i32` == `JIT_SIGNAL_INT_OVERFLOW`. The MirToIR function
+        // always returns `i32` (the `JittedStrategyFn` ABI), so the early
+        // `return_` is type-correct — same shape as the div-by-zero guard.
+        let signal = self.narrow_iconst(types::I32, crate::context::JIT_SIGNAL_INT_OVERFLOW as i64);
+        self.builder.ins().return_(&[signal]);
+
+        self.builder.switch_to_block(continue_block);
+        self.builder.seal_block(continue_block);
+        Ok(result)
+    }
+
     // ── Inline Int64 arithmetic (raw native i64) ──────────────────
 
     /// Compile a binary op on proven `NativeKind::Int64` operands.
@@ -1557,9 +1647,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 let result = match op {
-                    BinOp::Add => self.builder.ins().iadd(lhs, rhs),
-                    BinOp::Sub => self.builder.ins().isub(lhs, rhs),
-                    BinOp::Mul => self.builder.ins().imul(lhs, rhs),
+                    // D3 (numeric-conversion ruling, user 2026-06-01):
+                    // `int` (i64) add/sub/mul is EXACT across the full i64
+                    // range — overflow is a structured runtime error, NOT a
+                    // silent two's-complement wrap. `compile_int64_checked_arith`
+                    // emits a guarded signed-overflow branch that early-returns
+                    // `JIT_SIGNAL_INT_OVERFLOW`, matching the VM's
+                    // `binop_int_checked(i64::checked_add/sub/mul)`
+                    // (`executor/arithmetic/mod.rs:150-152`). This SUPERSEDES
+                    // the prior 2026-05-20 wrapping ruling for i64 (a silent
+                    // wrap is the same hidden-data-loss defect class as a silent
+                    // narrowing cast). Narrow ints (i8/i16/i32) still wrap — see
+                    // `compile_binop_narrow_int`.
+                    BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                        self.compile_int64_checked_arith(op, lhs, rhs)?
+                    }
                     // r5c-2-gz-cp2-jit-div: VM-equivalent trap-free div/mod —
                     // div-by-zero → clean `Division by zero`; `i64::MIN / -1`
                     // → wrapping `i64::MIN` (mod → 0). See
