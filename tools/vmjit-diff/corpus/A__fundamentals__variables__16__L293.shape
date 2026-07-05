@@ -1,0 +1,6 @@
+type Unit { label: string, value: number }
+type Meter = Unit
+
+let length = Meter { label: "m", value: 42.50 }
+print(length.label)
+print(length.value)

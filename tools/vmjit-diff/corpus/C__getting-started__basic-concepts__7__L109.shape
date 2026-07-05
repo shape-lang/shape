@@ -1,0 +1,12 @@
+fn require_file(name: Option<string>) -> Result<string, string> {
+  match name {
+    Some(path) => Ok(path)
+    None => Err("missing input filename")
+  }
+}
+
+let file = Some("events.csv")
+match require_file(file) {
+  Ok(path) => print(f"path: {path}")
+  Err(msg) => print(f"error: {msg}")
+}

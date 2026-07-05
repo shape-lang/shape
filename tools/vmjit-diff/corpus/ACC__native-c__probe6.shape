@@ -1,0 +1,4 @@
+let c = ptr_new_cell()
+ptr_write(c, 5)
+print(ptr_read(c))
+ptr_free_cell(c)

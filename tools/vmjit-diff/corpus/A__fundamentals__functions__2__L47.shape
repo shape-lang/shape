@@ -1,0 +1,11 @@
+fn a() -> int {
+  1
+}
+
+fn add(x: int, y: int) -> int {
+  let sum = x + y
+  sum
+}
+
+print(a())
+print(add(2, 3))

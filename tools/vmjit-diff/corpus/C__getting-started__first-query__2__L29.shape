@@ -1,0 +1,7 @@
+let samples = [10.0, 12.0, 11.0, 14.0, 13.0, 12.0]
+
+let total = samples.sum()
+let count = samples.len()
+let avg = total / (count as number)
+
+print(f"count={count}, total={total}, avg={avg}")

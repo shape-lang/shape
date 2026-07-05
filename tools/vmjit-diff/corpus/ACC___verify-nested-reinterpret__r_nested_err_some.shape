@@ -1,0 +1,2 @@
+fn g() -> Result<int,string> { Err("boom") }
+match g() { Ok(v) => print(v), Err(Some(n)) => print(n) }

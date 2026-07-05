@@ -1,0 +1,3 @@
+from std::core::intrinsics use { Result }
+
+let value = Result::Ok(1)

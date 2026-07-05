@@ -1,0 +1,936 @@
+// large.shape — Content slice (book: fundamentals/content.mdx, v0.3.3 surface)
+// ============================================================================
+// REAL-WORLD APP: a non-interactive CI / build-report renderer.
+//
+// It takes fixed in-source fixtures describing test suites, coverage figures,
+// and a revenue/cost time-series, then renders a terminal dashboard using ONLY
+// the v0.3.3 runnable Content surface taught by the chapter:
+//   * Content.text(...) + .fg/.bg/.bold/.italic/.underline/.dim   (Styled Text)
+//   * Color.red/green/blue/... and Color.rgb(r,g,b)               (Colors)
+//   * Content.table(headers, rows) + .border(...) + .max_rows(n)  (Tables)
+//   * Content.chart(kind).add(label, pts).title/.x_label/.y_label (Charts)
+//   * node.toString()  /  node.to_string()  (alias)
+//
+// MACHINE-PROOFABLE: every render is asserted against an EXPECTED string that
+// was derived from the book's documented semantics / visual references and
+// written before the first run (NOT back-filled from output). The box-drawing
+// glyphs and the ESC byte are literal UTF-8 / control bytes in this source
+// because Shape has no \u{...} escape (recorded as a BOOK-GAP in REPORT.md).
+//
+// On all-pass prints ALL_CHECKS_PASSED; on any mismatch prints
+// CHECK_FAILED: <which> expected=<e> got=<g>.
+// ============================================================================
+
+let ESC = ""
+let RESET = ESC + "[0m"
+
+let mut failures = 0
+let mut checks = 0
+
+fn check(cond: bool, label: string) {
+    checks = checks + 1
+    if !cond {
+        print(f"CHECK_FAILED: {label}")
+        failures = failures + 1
+    }
+}
+
+fn checkEq(got: string, expected: string, label: string) {
+    checks = checks + 1
+    if got != expected {
+        print(f"CHECK_FAILED: {label} expected=[{expected}] got=[{got}]")
+        failures = failures + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 1 — small string utilities (no Content; support code for fixtures)
+// ---------------------------------------------------------------------------
+
+fn padRight(s: string, w: int) -> string {
+    let mut out = s
+    while out.length() < w {
+        out = out + " "
+    }
+    out
+}
+
+fn padLeft(s: string, w: int) -> string {
+    let mut out = s
+    while out.length() < w {
+        out = " " + out
+    }
+    out
+}
+
+fn repeatStr(s: string, n: int) -> string {
+    if n <= 0 {
+        ""
+    } else {
+        s.repeat(n)
+    }
+}
+
+// Integer percentage passed/total, floor division (book-independent arithmetic).
+fn pct(passed: int, total: int) -> int {
+    if total <= 0 {
+        0
+    } else {
+        (passed * 100) / total
+    }
+}
+
+// A unicode block bar of `filled` cells out of `width`, used inside table cells.
+fn bar(filled: int, width: int) -> string {
+    let f = if filled < 0 { 0 } else { if filled > width { width } else { filled } }
+    repeatStr("#", f) + repeatStr("-", width - f)
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 2 — Content styling helpers (the chapter's core surface)
+// ---------------------------------------------------------------------------
+
+// A colored status badge. PASS => green, FAIL => red, SKIP => yellow.
+// Rendered string is the exact ANSI the book's Style-Methods table implies:
+//   bold first, then fg color, payload, reset.
+fn statusBadge(status: string) -> string {
+    if status == "PASS" {
+        Content.text(status).fg(Color.green).bold().toString()
+    } else {
+        if status == "FAIL" {
+            Content.text(status).fg(Color.red).bold().toString()
+        } else {
+            Content.text(status).fg(Color.yellow).bold().toString()
+        }
+    }
+}
+
+// Dimmed annotation (e.g. timing) — single SGR code 2.
+fn dimText(s: string) -> string {
+    Content.text(s).dim().toString()
+}
+
+// Underlined section heading.
+fn heading(s: string) -> string {
+    Content.text(s).underline().bold().toString()
+}
+
+// An RGB-background highlight for a hot value.
+fn highlight(s: string, r: int, g: int, b: int) -> string {
+    Content.text(s).bg(Color.rgb(r, g, b)).toString()
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 3 — Expected-ANSI builders (book-derived, independent of renderer)
+// SGR sequence shape per the chapter: ESC [ <codes> m <text> ESC [ 0 m
+// code order observed/derived: bold(1) dim(2) italic(3) underline(4) fg bg.
+// Named fg: red 31 green 32 yellow 33 blue 34 magenta 35 cyan 36 white 37.
+// fg rgb: 38;2;r;g;b   bg rgb: 48;2;r;g;b
+// ---------------------------------------------------------------------------
+
+fn ansi(codes: string, text: string) -> string {
+    ESC + "[" + codes + "m" + text + RESET
+}
+
+fn expectBadge(status: string) -> string {
+    if status == "PASS" {
+        ansi("1;32", status)
+    } else {
+        if status == "FAIL" {
+            ansi("1;31", status)
+        } else {
+            ansi("1;33", status)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 4 — Fixtures (deterministic; no IO, no clock, no randomness)
+// ---------------------------------------------------------------------------
+
+// Suite names, passed counts, total counts (parallel arrays — strict typed).
+let suiteNames = ["auth", "db", "api", "ui", "core"]
+let suitePassed = [12, 8, 15, 5, 20]
+let suiteTotal  = [12, 10, 15, 8, 20]
+
+// Per-suite wall time in milliseconds (ints).
+let suiteMs = [120, 450, 88, 230, 60]
+
+// Coverage percentages (ints 0..100).
+let covLines = [95, 70, 88, 40, 99]
+
+// Revenue / cost time series for the trend chart ([quarter, value]).
+let revenue = [[1, 100], [2, 200], [3, 350], [4, 500]]
+let costs   = [[1, 80], [2, 90], [3, 120], [4, 160]]
+
+// ---------------------------------------------------------------------------
+// SECTION 5 — Badge rendering checks (exact ANSI)
+// ---------------------------------------------------------------------------
+
+checkEq(statusBadge("PASS"), expectBadge("PASS"), "badge PASS")
+checkEq(statusBadge("FAIL"), expectBadge("FAIL"), "badge FAIL")
+checkEq(statusBadge("SKIP"), expectBadge("SKIP"), "badge SKIP")
+checkEq(statusBadge("PASS"), ESC + "[1;32mPASS" + ESC + "[0m", "badge PASS literal")
+checkEq(statusBadge("FAIL"), ESC + "[1;31mFAIL" + ESC + "[0m", "badge FAIL literal")
+
+checkEq(dimText("3ms"), ESC + "[2m3ms" + ESC + "[0m", "dim timing")
+checkEq(heading("Summary"), ESC + "[1;4mSummary" + ESC + "[0m", "heading bold+underline")
+checkEq(highlight("HOT", 40, 0, 0), ESC + "[48;2;40;0;0mHOT" + ESC + "[0m", "rgb bg highlight")
+
+// Distinct named colors map to distinct codes (Color namespace).
+checkEq(Content.text("m").fg(Color.magenta).toString(), ESC + "[35mm" + ESC + "[0m", "magenta 35")
+checkEq(Content.text("c").fg(Color.cyan).toString(), ESC + "[36mc" + ESC + "[0m", "cyan 36")
+checkEq(Content.text("w").fg(Color.white).toString(), ESC + "[37mw" + ESC + "[0m", "white 37")
+checkEq(Content.text("R").fg(Color.rgb(255, 128, 0)).toString(), ESC + "[38;2;255;128;0mR" + ESC + "[0m", "fg rgb 255,128,0")
+
+// Style methods are composable and order in the SGR is bold;underline;fg.
+checkEq(
+    Content.text("Z").fg(Color.blue).bold().underline().toString(),
+    ESC + "[1;4;34mZ" + ESC + "[0m",
+    "bold+underline+blue compose"
+)
+
+// ---------------------------------------------------------------------------
+// SECTION 6 — Utility-helper checks (support code correctness)
+// ---------------------------------------------------------------------------
+
+checkEq(padRight("hi", 5), "hi   ", "padRight")
+checkEq(padLeft("hi", 5), "   hi", "padLeft")
+checkEq(repeatStr("ab", 3), "ababab", "repeatStr")
+checkEq(repeatStr("x", 0), "", "repeatStr 0")
+check(pct(9, 12) == 75, "pct 9/12 == 75")
+check(pct(12, 12) == 100, "pct 12/12 == 100")
+check(pct(0, 0) == 0, "pct guard 0/0")
+checkEq(bar(8, 10), "########--", "bar 8/10")
+checkEq(bar(0, 4), "----", "bar 0/4")
+checkEq(bar(10, 4), "####", "bar clamps high")
+
+// ---------------------------------------------------------------------------
+// SECTION 7 — Build a suite-summary table (rounded border) and assert exact.
+// Each row: [name, passed/total, status]. Status derived from passed==total.
+// Column widths = max cell incl header, padded one space each side. We size the
+// fixtures so the rendered box is fully predictable.
+// ---------------------------------------------------------------------------
+
+fn suiteStatus(i: int) -> string {
+    if suitePassed[i] == suiteTotal[i] { "PASS" } else { "FAIL" }
+}
+
+// Build plain (un-styled) rows for the table — table cells are plain strings.
+let mut summaryRows = [["auth", "12/12", "PASS"]]
+summaryRows.push(["db", "8/10", "FAIL"])
+summaryRows.push(["api", "15/15", "PASS"])
+summaryRows.push(["ui", "5/8", "FAIL"])
+summaryRows.push(["core", "20/20", "PASS"])
+
+let summaryHeaders = ["suite", "tests", "result"]
+let summaryTable = Content.table(summaryHeaders, summaryRows).toString()
+
+// Expected: col widths -> suite: max(5,4,2,3,2,4)=5 ; tests: max(5,5,4,5,3,5)=5
+//   header "suite"=5, "tests"=5, "result"=6; longest cells: "12/12"=5, "PASS"=4
+//   suite col width = 5 (header), tests col = 5, result col = 6 (header)
+// Rounded border. Cells left-padded? Observed: left-aligned, 1 space each side.
+let expSummary =
+    "╭───────┬───────┬────────╮\n" +
+    "│ suite │ tests │ result │\n" +
+    "├───────┼───────┼────────┤\n" +
+    "│ auth  │ 12/12 │ PASS   │\n" +
+    "│ db    │ 8/10  │ FAIL   │\n" +
+    "│ api   │ 15/15 │ PASS   │\n" +
+    "│ ui    │ 5/8   │ FAIL   │\n" +
+    "│ core  │ 20/20 │ PASS   │\n" +
+    "╰───────┴───────┴────────╯\n"
+checkEq(summaryTable, expSummary, "summary rounded table")
+
+// The same data with a sharp border (book Border Styles).
+let expSummarySharp =
+    "┌───────┬───────┬────────┐\n" +
+    "│ suite │ tests │ result │\n" +
+    "├───────┼───────┼────────┤\n" +
+    "│ auth  │ 12/12 │ PASS   │\n" +
+    "│ db    │ 8/10  │ FAIL   │\n" +
+    "│ api   │ 15/15 │ PASS   │\n" +
+    "│ ui    │ 5/8   │ FAIL   │\n" +
+    "│ core  │ 20/20 │ PASS   │\n" +
+    "└───────┴───────┴────────┘\n"
+checkEq(
+    Content.table(summaryHeaders, summaryRows).border(Border.sharp).toString(),
+    expSummarySharp,
+    "summary sharp table"
+)
+
+// Heavy border variant.
+let expSummaryHeavy =
+    "┏━━━━━━━┳━━━━━━━┳━━━━━━━━┓\n" +
+    "┃ suite ┃ tests ┃ result ┃\n" +
+    "┣━━━━━━━╋━━━━━━━╋━━━━━━━━┫\n" +
+    "┃ auth  ┃ 12/12 ┃ PASS   ┃\n" +
+    "┃ db    ┃ 8/10  ┃ FAIL   ┃\n" +
+    "┃ api   ┃ 15/15 ┃ PASS   ┃\n" +
+    "┃ ui    ┃ 5/8   ┃ FAIL   ┃\n" +
+    "┃ core  ┃ 20/20 ┃ PASS   ┃\n" +
+    "┗━━━━━━━┻━━━━━━━┻━━━━━━━━┛\n"
+checkEq(
+    Content.table(summaryHeaders, summaryRows).border(Border.heavy).toString(),
+    expSummaryHeavy,
+    "summary heavy table"
+)
+
+// Double border variant.
+let expSummaryDouble =
+    "╔═══════╦═══════╦════════╗\n" +
+    "║ suite ║ tests ║ result ║\n" +
+    "╠═══════╬═══════╬════════╣\n" +
+    "║ auth  ║ 12/12 ║ PASS   ║\n" +
+    "║ db    ║ 8/10  ║ FAIL   ║\n" +
+    "║ api   ║ 15/15 ║ PASS   ║\n" +
+    "║ ui    ║ 5/8   ║ FAIL   ║\n" +
+    "║ core  ║ 20/20 ║ PASS   ║\n" +
+    "╚═══════╩═══════╩════════╝\n"
+checkEq(
+    Content.table(summaryHeaders, summaryRows).border(Border.double).toString(),
+    expSummaryDouble,
+    "summary double table"
+)
+
+// Border.none: cells joined by two spaces, padded to column width, no rules.
+let expSummaryNone =
+    "suite  tests  result\n" +
+    "auth   12/12  PASS  \n" +
+    "db     8/10   FAIL  \n" +
+    "api    15/15  PASS  \n" +
+    "ui     5/8    FAIL  \n" +
+    "core   20/20  PASS  \n"
+checkEq(
+    Content.table(summaryHeaders, summaryRows).border(Border.none).toString(),
+    expSummaryNone,
+    "summary none table"
+)
+
+// ---------------------------------------------------------------------------
+// SECTION 8 — max_rows truncation (book Table Methods).
+// ---------------------------------------------------------------------------
+
+let cappedTable = Content.table(summaryHeaders, summaryRows).max_rows(2).toString()
+check(cappedTable.contains("more rows"), "max_rows shows truncation notice")
+check(cappedTable.contains("auth"), "max_rows keeps first row")
+check(!cappedTable.contains("core"), "max_rows hides truncated row")
+
+// ---------------------------------------------------------------------------
+// SECTION 9 — Coverage table built dynamically from fixtures + bar cells.
+// We build the rows programmatically and assert the final string.
+// ---------------------------------------------------------------------------
+
+// width-10 bars derived from covLines (filled = floor(pct/10))
+fn covBar(p: int) -> string {
+    bar(p / 10, 10)
+}
+
+checkEq(covBar(95), "#########-", "covBar 95")
+checkEq(covBar(70), "#######---", "covBar 70")
+checkEq(covBar(88), "########--", "covBar 88")
+checkEq(covBar(40), "####------", "covBar 40")
+checkEq(covBar(99), "#########-", "covBar 99")
+
+let mut covRows = [["auth", "#########-", "95"]]
+covRows.push(["db", "#######---", "70"])
+covRows.push(["api", "########--", "88"])
+covRows.push(["ui", "####------", "40"])
+covRows.push(["core", "#########-", "99"])
+
+// header widths: file=4->"file" col width max(4, names<=4)=4 ; bar col=10 ; pct=3->"pct"
+let covHeaders = ["file", "coverage", "pct"]
+// col widths: file: max(4,4)=4 ; coverage: max(8,10)=10 ; pct: max(3,2)=3
+let expCov =
+    "╭──────┬────────────┬─────╮\n" +
+    "│ file │ coverage   │ pct │\n" +
+    "├──────┼────────────┼─────┤\n" +
+    "│ auth │ #########- │ 95  │\n" +
+    "│ db   │ #######--- │ 70  │\n" +
+    "│ api  │ ########-- │ 88  │\n" +
+    "│ ui   │ ####------ │ 40  │\n" +
+    "│ core │ #########- │ 99  │\n" +
+    "╰──────┴────────────┴─────╯\n"
+checkEq(Content.table(covHeaders, covRows).toString(), expCov, "coverage table")
+
+// ---------------------------------------------------------------------------
+// SECTION 10 — Charts. The chapter documents that title/labels appear in the
+// terminal rendering; the braille body is layout-dependent so we assert on
+// the stable textual elements (title, axis labels) via .contains, plus that
+// the rendered string is non-empty and identical across repeated builds.
+// ---------------------------------------------------------------------------
+
+let trend = Content.chart("line")
+    .add("Revenue", revenue)
+    .add("Costs", costs)
+    .title("Revenue vs Costs")
+    .x_label("Quarter")
+    .y_label("USD")
+    .toString()
+check(trend.contains("Revenue vs Costs"), "chart title present")
+check(trend.length() > 0, "chart non-empty")
+
+// Determinism: building the same chart twice yields identical output.
+let trend2 = Content.chart("line")
+    .add("Revenue", revenue)
+    .add("Costs", costs)
+    .title("Revenue vs Costs")
+    .x_label("Quarter")
+    .y_label("USD")
+    .toString()
+checkEq(trend, trend2, "chart render deterministic")
+
+// A bar chart with a single series.
+let hits = Content.chart("bar")
+    .add("hits", [[1, 10], [2, 30], [3, 20], [4, 50]])
+    .title("Daily Hits")
+    .toString()
+check(hits.contains("Daily Hits"), "bar chart title present")
+
+// scatter chart title
+let scat = Content.chart("scatter")
+    .add("corr", [[1, 2], [2, 4], [3, 5]])
+    .title("Correlation")
+    .toString()
+check(scat.contains("Correlation"), "scatter chart title present")
+
+// ---------------------------------------------------------------------------
+// SECTION 11 — A composed "dashboard" rendered as a sequence (the v0.3.3
+// recommended replacement for Content.fragment, book Composition section):
+// print each node in turn. We assemble the full report string and assert its
+// stable prefix/structure.
+// ---------------------------------------------------------------------------
+
+fn renderReport() -> string {
+    let mut out = ""
+    out = out + heading("CI Report") + "\n"
+    out = out + Content.table(summaryHeaders, summaryRows).toString()
+    out = out + Content.table(covHeaders, covRows).toString()
+    out
+}
+
+let report = renderReport()
+check(report.contains("CI Report"), "report has heading")
+check(report.contains("suite"), "report has summary table")
+check(report.contains("coverage"), "report has coverage table")
+// Heading is styled bold+underline, then a newline, then the rounded table top.
+let reportPrefix = ESC + "[1;4mCI Report" + ESC + "[0m" + "\n" + "╭"
+check(report.startsWith(reportPrefix), "report prefix exact (heading + table top)")
+
+// ---------------------------------------------------------------------------
+// SECTION 12 — Aggregate stats computed from fixtures and asserted.
+// ---------------------------------------------------------------------------
+
+fn sumArr(a: Array<int>) -> int {
+    let mut s = 0
+    for x in a {
+        s = s + x
+    }
+    s
+}
+
+let totalPassed = sumArr(suitePassed)
+let totalTests = sumArr(suiteTotal)
+check(totalPassed == 60, "total passed == 60")
+check(totalTests == 65, "total tests == 65")
+check(pct(totalPassed, totalTests) == 92, "overall pct == 92")
+
+let totalMs = sumArr(suiteMs)
+check(totalMs == 948, "total ms == 948")
+
+// Average coverage (floor).
+let avgCov = sumArr(covLines) / 5
+check(avgCov == 78, "avg coverage == 78")
+
+// Number of failing suites.
+fn countFails() -> int {
+    let mut n = 0
+    let mut i = 0
+    while i < suiteNames.length() {
+        if suitePassed[i] != suiteTotal[i] {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+check(countFails() == 2, "failing suites == 2")
+
+// Overall status badge from aggregate.
+let overallOk = countFails() == 0
+let overallBadge = if overallOk { statusBadge("PASS") } else { statusBadge("FAIL") }
+checkEq(overallBadge, expectBadge("FAIL"), "overall badge FAIL")
+
+// ---------------------------------------------------------------------------
+// SECTION 13 — A second, single-column table to exercise narrow tables.
+// ---------------------------------------------------------------------------
+
+let mut tnames = [["auth"]]
+tnames.push(["db"])
+tnames.push(["api"])
+let expNarrow =
+    "╭───────╮\n" +
+    "│ suite │\n" +
+    "├───────┤\n" +
+    "│ auth  │\n" +
+    "│ db    │\n" +
+    "│ api   │\n" +
+    "╰───────╯\n"
+checkEq(Content.table(["suite"], tnames).toString(), expNarrow, "narrow single-column table")
+
+// ---------------------------------------------------------------------------
+// SECTION 14 — Minimal border (ASCII separators, no vertical rules).
+// Book "Border.minimal" visual reference: leading space, dash separators.
+// ---------------------------------------------------------------------------
+
+let minimalTbl = Content.table(["k", "v"], [["a", "1"], ["b", "2"]]).border(Border.minimal).toString()
+check(minimalTbl.contains("---"), "minimal has dash separators")
+check(!minimalTbl.contains("│"), "minimal has no vertical rule")
+check(minimalTbl.contains("a"), "minimal keeps cell a")
+
+// ---------------------------------------------------------------------------
+// SECTION 15 — alias parity: to_string() and toString() agree on every kind.
+// ---------------------------------------------------------------------------
+
+checkEq(
+    Content.text("alias").bold().toString(),
+    Content.text("alias").bold().to_string(),
+    "text alias parity"
+)
+checkEq(
+    Content.table(["k"], [["v"]]).toString(),
+    Content.table(["k"], [["v"]]).to_string(),
+    "table alias parity"
+)
+checkEq(
+    Content.chart("line").add("s", [[1, 2], [3, 4]]).title("t").toString(),
+    Content.chart("line").add("s", [[1, 2], [3, 4]]).title("t").to_string(),
+    "chart alias parity"
+)
+
+// ---------------------------------------------------------------------------
+// SECTION 16 — Larger generated table to stress width computation.
+// 10 rows, derived deterministically. We assert the full string.
+// ---------------------------------------------------------------------------
+
+let mut bigRows = [["row00", "000"]]
+bigRows.push(["row01", "010"])
+bigRows.push(["row02", "020"])
+bigRows.push(["row03", "030"])
+bigRows.push(["row04", "040"])
+bigRows.push(["row05", "050"])
+bigRows.push(["row06", "060"])
+bigRows.push(["row07", "070"])
+bigRows.push(["row08", "080"])
+bigRows.push(["row09", "090"])
+
+// col widths: id: max(2,5)=5 ; val: max(3,3)=3
+let expBig =
+    "╭───────┬─────╮\n" +
+    "│ id    │ val │\n" +
+    "├───────┼─────┤\n" +
+    "│ row00 │ 000 │\n" +
+    "│ row01 │ 010 │\n" +
+    "│ row02 │ 020 │\n" +
+    "│ row03 │ 030 │\n" +
+    "│ row04 │ 040 │\n" +
+    "│ row05 │ 050 │\n" +
+    "│ row06 │ 060 │\n" +
+    "│ row07 │ 070 │\n" +
+    "│ row08 │ 080 │\n" +
+    "│ row09 │ 090 │\n" +
+    "╰───────┴─────╯\n"
+checkEq(Content.table(["id", "val"], bigRows).toString(), expBig, "big 10-row table")
+
+// max_rows on the big table keeps only first 3 + notice.
+let bigCapped = Content.table(["id", "val"], bigRows).max_rows(3).toString()
+check(bigCapped.contains("row00"), "big max_rows keeps row00")
+check(bigCapped.contains("row02"), "big max_rows keeps row02")
+check(!bigCapped.contains("row09"), "big max_rows hides row09")
+check(bigCapped.contains("more rows"), "big max_rows notice")
+
+// ---------------------------------------------------------------------------
+// SECTION 17 — exhaustive named-color matrix asserted against SGR codes.
+// ---------------------------------------------------------------------------
+
+checkEq(Content.text("k").fg(Color.red).toString(), ansi("31", "k"), "matrix red")
+checkEq(Content.text("k").fg(Color.green).toString(), ansi("32", "k"), "matrix green")
+checkEq(Content.text("k").fg(Color.yellow).toString(), ansi("33", "k"), "matrix yellow")
+checkEq(Content.text("k").fg(Color.blue).toString(), ansi("34", "k"), "matrix blue")
+checkEq(Content.text("k").fg(Color.magenta).toString(), ansi("35", "k"), "matrix magenta")
+checkEq(Content.text("k").fg(Color.cyan).toString(), ansi("36", "k"), "matrix cyan")
+checkEq(Content.text("k").fg(Color.white).toString(), ansi("37", "k"), "matrix white")
+
+// background named colors.
+checkEq(Content.text("k").bg(Color.red).toString(), ansi("41", "k"), "matrix bg red")
+checkEq(Content.text("k").bg(Color.green).toString(), ansi("42", "k"), "matrix bg green")
+checkEq(Content.text("k").bg(Color.blue).toString(), ansi("44", "k"), "matrix bg blue")
+
+// ---------------------------------------------------------------------------
+// SECTION 19 — default color codes (probed; book lists Color.default but not
+// its SGR code — recorded as a BOOK-GAP). default fg = 39, default bg = 49.
+// ---------------------------------------------------------------------------
+
+checkEq(Content.text("k").fg(Color.default).toString(), ansi("39", "k"), "default fg 39")
+checkEq(Content.text("k").bg(Color.default).toString(), ansi("49", "k"), "default bg 49")
+checkEq(Content.text("k").bg(Color.yellow).toString(), ansi("43", "k"), "matrix bg yellow 43")
+
+// ---------------------------------------------------------------------------
+// SECTION 20 — Chart-type matrix. The book lists nine chart types and says you
+// may pass the kind as a string. We assert each renders with its title text in
+// the output (the braille/block body is layout-dependent and not asserted).
+// Required channels per the book's Channel-Based Data Model table:
+//   line/area/scatter need x,y (supplied by .add([x,y] pairs)); bar needs y.
+// ---------------------------------------------------------------------------
+
+fn chartTitled(kind: string, title: string) -> string {
+    Content.chart(kind)
+        .add("s", [[1, 10], [2, 20], [3, 30]])
+        .title(title)
+        .toString()
+}
+
+check(chartTitled("line", "L1").contains("L1"), "chart line title")
+check(chartTitled("bar", "B1").contains("B1"), "chart bar title")
+check(chartTitled("scatter", "S1").contains("S1"), "chart scatter title")
+check(chartTitled("area", "A1").contains("A1"), "chart area title")
+
+// Same chart built twice is byte-identical (determinism).
+checkEq(chartTitled("line", "DET"), chartTitled("line", "DET"), "chart-type determinism")
+
+// A chart with axis labels: labels appear in the rendering.
+let labelled = Content.chart("line")
+    .add("series", [[1, 5], [2, 9], [3, 4]])
+    .title("With Axes")
+    .x_label("time")
+    .y_label("value")
+    .toString()
+check(labelled.contains("With Axes"), "labelled chart title")
+
+// width/height hints are accepted and do not error (book Chart Methods).
+let sized = Content.chart("line")
+    .add("s", [[1, 1], [2, 2], [3, 3]])
+    .title("Sized")
+    .width(40)
+    .height(10)
+    .toString()
+check(sized.contains("Sized"), "sized chart title")
+check(sized.length() > 0, "sized chart non-empty")
+
+// ---------------------------------------------------------------------------
+// SECTION 21 — Build a per-suite timing table from fixtures (right-padded ms).
+// We format the ms as plain decimal strings and assert the exact rounded box.
+// ---------------------------------------------------------------------------
+
+fn msStr(i: int) -> string {
+    f"{suiteMs[i]}"
+}
+
+checkEq(msStr(0), "120", "msStr 0")
+checkEq(msStr(1), "450", "msStr 1")
+checkEq(msStr(4), "60", "msStr 4")
+
+let mut timingRows = [["auth", "120"]]
+timingRows.push(["db", "450"])
+timingRows.push(["api", "88"])
+timingRows.push(["ui", "230"])
+timingRows.push(["core", "60"])
+
+// col widths: suite: max(5,4,2,3,2,4)=5 ; ms: max(2,3,3,2,3,2)=3
+let expTiming =
+    "╭───────┬─────╮\n" +
+    "│ suite │ ms  │\n" +
+    "├───────┼─────┤\n" +
+    "│ auth  │ 120 │\n" +
+    "│ db    │ 450 │\n" +
+    "│ api   │ 88  │\n" +
+    "│ ui    │ 230 │\n" +
+    "│ core  │ 60  │\n" +
+    "╰───────┴─────╯\n"
+checkEq(Content.table(["suite", "ms"], timingRows).toString(), expTiming, "timing table")
+
+// minimal-border variant of the timing table (no vertical rules).
+let timingMinimal = Content.table(["suite", "ms"], timingRows).border(Border.minimal).toString()
+check(timingMinimal.contains("auth"), "timing minimal keeps auth")
+check(!timingMinimal.contains("│"), "timing minimal no vertical rule")
+check(timingMinimal.contains("---"), "timing minimal dash rule")
+
+// ---------------------------------------------------------------------------
+// SECTION 22 — Combined pass/fail badge column rendered OUTSIDE the table.
+// (Tables take plain strings; styled badges are printed alongside.) We build a
+// parallel list of badge strings and assert each.
+// ---------------------------------------------------------------------------
+
+fn badgeFor(i: int) -> string {
+    statusBadge(suiteStatus(i))
+}
+
+checkEq(badgeFor(0), expectBadge("PASS"), "badgeFor auth PASS")
+checkEq(badgeFor(1), expectBadge("FAIL"), "badgeFor db FAIL")
+checkEq(badgeFor(2), expectBadge("PASS"), "badgeFor api PASS")
+checkEq(badgeFor(3), expectBadge("FAIL"), "badgeFor ui FAIL")
+checkEq(badgeFor(4), expectBadge("PASS"), "badgeFor core PASS")
+
+// Concatenate all badges into one status line and assert the exact string.
+fn statusLine() -> string {
+    let mut out = ""
+    let mut i = 0
+    while i < suiteNames.length() {
+        if i > 0 {
+            out = out + " "
+        }
+        out = out + badgeFor(i)
+        i = i + 1
+    }
+    out
+}
+let expStatusLine =
+    expectBadge("PASS") + " " +
+    expectBadge("FAIL") + " " +
+    expectBadge("PASS") + " " +
+    expectBadge("FAIL") + " " +
+    expectBadge("PASS")
+checkEq(statusLine(), expStatusLine, "concatenated status line")
+
+// ---------------------------------------------------------------------------
+// SECTION 23 — Coverage-grade legend: map each coverage to a colored grade and
+// assert the exact ANSI. Grade A (>=90) green, B (>=70) yellow, F (<70) red.
+// ---------------------------------------------------------------------------
+
+fn grade(p: int) -> string {
+    if p >= 90 {
+        "A"
+    } else {
+        if p >= 70 {
+            "B"
+        } else {
+            "F"
+        }
+    }
+}
+
+fn gradeBadge(p: int) -> string {
+    let g = grade(p)
+    if p >= 90 {
+        Content.text(g).fg(Color.green).bold().toString()
+    } else {
+        if p >= 70 {
+            Content.text(g).fg(Color.yellow).bold().toString()
+        } else {
+            Content.text(g).fg(Color.red).bold().toString()
+        }
+    }
+}
+
+checkEq(grade(95), "A", "grade 95 A")
+checkEq(grade(70), "B", "grade 70 B")
+checkEq(grade(40), "F", "grade 40 F")
+checkEq(gradeBadge(95), ansi("1;32", "A"), "gradeBadge 95 green A")
+checkEq(gradeBadge(88), ansi("1;33", "B"), "gradeBadge 88 yellow B")
+checkEq(gradeBadge(40), ansi("1;31", "F"), "gradeBadge 40 red F")
+
+// Map fixture coverage to grades and assert the joined grade string.
+fn gradeLine() -> string {
+    let mut out = ""
+    for p in covLines {
+        out = out + grade(p)
+    }
+    out
+}
+checkEq(gradeLine(), "ABBFA", "grade line ABBFA")
+
+// ---------------------------------------------------------------------------
+// SECTION 24 — A wider table mixing short and long cells to exercise per-column
+// width independence. Asserts the full rounded box.
+// ---------------------------------------------------------------------------
+
+let mixHeaders = ["env", "build", "status"]
+let mut mixRows = [["dev", "ok", "PASS"]]
+mixRows.push(["staging", "ok", "PASS"])
+mixRows.push(["prod", "broken", "FAIL"])
+
+// col widths: env: max(3,3,7,4)=7 ; build: max(5,2,2,6)=6 ; status: max(6,4,4,4)=6
+let expMix =
+    "╭─────────┬────────┬────────╮\n" +
+    "│ env     │ build  │ status │\n" +
+    "├─────────┼────────┼────────┤\n" +
+    "│ dev     │ ok     │ PASS   │\n" +
+    "│ staging │ ok     │ PASS   │\n" +
+    "│ prod    │ broken │ FAIL   │\n" +
+    "╰─────────┴────────┴────────╯\n"
+checkEq(Content.table(mixHeaders, mixRows).toString(), expMix, "mixed-width table")
+
+// ---------------------------------------------------------------------------
+// SECTION 25 — Histogram + bar charts (book Channel-Based Data Model: histogram
+// uses a `values` channel; here we feed [x,y] pairs and assert the title only,
+// since the distribution body is layout-dependent).
+// ---------------------------------------------------------------------------
+
+let histo = Content.chart("histogram")
+    .add("dist", [[1, 3], [2, 7], [3, 5], [4, 2]])
+    .title("Latency Distribution")
+    .toString()
+check(histo.contains("Latency Distribution"), "histogram title")
+
+let multiBar = Content.chart("bar")
+    .add("q1", [[1, 100], [2, 200]])
+    .add("q2", [[1, 150], [2, 250]])
+    .title("Quarterly")
+    .toString()
+check(multiBar.contains("Quarterly"), "multi-series bar title")
+
+// ---------------------------------------------------------------------------
+// SECTION 26 — Full named-foreground/background SGR matrix (8 colors each).
+// Codes derived from the chapter's Color list + the ANSI SGR convention the
+// renderer emits (named bg = named fg + 10; probed and recorded in REPORT).
+// ---------------------------------------------------------------------------
+
+checkEq(Content.text("t").fg(Color.red).toString(), ansi("31", "t"), "fg red 31")
+checkEq(Content.text("t").fg(Color.green).toString(), ansi("32", "t"), "fg green 32")
+checkEq(Content.text("t").fg(Color.yellow).toString(), ansi("33", "t"), "fg yellow 33")
+checkEq(Content.text("t").fg(Color.blue).toString(), ansi("34", "t"), "fg blue 34")
+checkEq(Content.text("t").fg(Color.magenta).toString(), ansi("35", "t"), "fg magenta 35")
+checkEq(Content.text("t").fg(Color.cyan).toString(), ansi("36", "t"), "fg cyan 36")
+checkEq(Content.text("t").fg(Color.white).toString(), ansi("37", "t"), "fg white 37")
+checkEq(Content.text("t").fg(Color.default).toString(), ansi("39", "t"), "fg default 39")
+
+checkEq(Content.text("t").bg(Color.red).toString(), ansi("41", "t"), "bg red 41")
+checkEq(Content.text("t").bg(Color.green).toString(), ansi("42", "t"), "bg green 42")
+checkEq(Content.text("t").bg(Color.yellow).toString(), ansi("43", "t"), "bg yellow 43")
+checkEq(Content.text("t").bg(Color.blue).toString(), ansi("44", "t"), "bg blue 44")
+checkEq(Content.text("t").bg(Color.magenta).toString(), ansi("45", "t"), "bg magenta 45")
+checkEq(Content.text("t").bg(Color.cyan).toString(), ansi("46", "t"), "bg cyan 46")
+checkEq(Content.text("t").bg(Color.white).toString(), ansi("47", "t"), "bg white 47")
+checkEq(Content.text("t").bg(Color.default).toString(), ansi("49", "t"), "bg default 49")
+
+// ---------------------------------------------------------------------------
+// SECTION 27 — Decoration combinations (every pair of the four decorations).
+// SGR order is bold(1) dim(2) italic(3) underline(4), then fg/bg.
+// ---------------------------------------------------------------------------
+
+checkEq(Content.text("p").bold().italic().toString(), ansi("1;3", "p"), "bold+italic")
+checkEq(Content.text("p").bold().underline().toString(), ansi("1;4", "p"), "bold+underline")
+checkEq(Content.text("p").italic().underline().toString(), ansi("3;4", "p"), "italic+underline")
+checkEq(Content.text("p").dim().italic().toString(), ansi("2;3", "p"), "dim+italic")
+checkEq(Content.text("p").bold().dim().toString(), ansi("1;2", "p"), "bold+dim")
+checkEq(
+    Content.text("p").bold().italic().underline().toString(),
+    ansi("1;3;4", "p"),
+    "bold+italic+underline"
+)
+checkEq(
+    Content.text("p").bold().italic().underline().fg(Color.red).bg(Color.blue).toString(),
+    ansi("1;3;4;31;44", "p"),
+    "all decorations + fg + bg"
+)
+
+// ---------------------------------------------------------------------------
+// SECTION 28 — Aggregate report computations (book-independent arithmetic over
+// the fixtures) feeding a final stats table.
+// ---------------------------------------------------------------------------
+
+fn maxArr(a: Array<int>) -> int {
+    let mut m = a[0]
+    for x in a {
+        if x > m {
+            m = x
+        }
+    }
+    m
+}
+
+fn minArr(a: Array<int>) -> int {
+    let mut m = a[0]
+    for x in a {
+        if x < m {
+            m = x
+        }
+    }
+    m
+}
+
+check(maxArr(suiteMs) == 450, "max ms == 450")
+check(minArr(suiteMs) == 60, "min ms == 60")
+check(maxArr(covLines) == 99, "max coverage == 99")
+check(minArr(covLines) == 40, "min coverage == 40")
+
+let mut statsRows = [["total tests", "65"]]
+statsRows.push(["total passed", "60"])
+statsRows.push(["pass rate %", "92"])
+statsRows.push(["avg coverage", "78"])
+statsRows.push(["total ms", "948"])
+statsRows.push(["slowest ms", "450"])
+statsRows.push(["failing suites", "2"])
+
+// col widths: metric: max(6,11,12,11,12,8,10,14)=14 ; value: max(5,2,2,2,2,3,3,1)=5? -> header "value"=5
+let expStats =
+    "╭────────────────┬───────╮\n" +
+    "│ metric         │ value │\n" +
+    "├────────────────┼───────┤\n" +
+    "│ total tests    │ 65    │\n" +
+    "│ total passed   │ 60    │\n" +
+    "│ pass rate %    │ 92    │\n" +
+    "│ avg coverage   │ 78    │\n" +
+    "│ total ms       │ 948   │\n" +
+    "│ slowest ms     │ 450   │\n" +
+    "│ failing suites │ 2     │\n" +
+    "╰────────────────┴───────╯\n"
+checkEq(Content.table(["metric", "value"], statsRows).toString(), expStats, "stats table")
+
+// ---------------------------------------------------------------------------
+// SECTION 29 — Trend chart fed by the aggregate revenue/cost series, asserting
+// title + that adding a second series keeps it deterministic and titled.
+// ---------------------------------------------------------------------------
+
+let dashChart = Content.chart("line")
+    .add("Revenue", revenue)
+    .add("Costs", costs)
+    .title("Q1-Q4 Revenue vs Costs")
+    .x_label("Quarter")
+    .y_label("USD")
+    .toString()
+check(dashChart.contains("Q1-Q4 Revenue vs Costs"), "dash chart title")
+check(dashChart.length() > 0, "dash chart non-empty")
+
+// area chart over cumulative revenue.
+// Build cumulative pairs without an empty-array literal (Shape v0.3.3 cannot
+// construct `[]` — op_new_array(0) SURFACE; recorded as a BOOK-GAP/defect).
+// Seed with the first cumulative point, then append the rest.
+fn cumulative(series: Array<Array<int>>) -> Array<Array<int>> {
+    let first = series[0]
+    let mut acc = first[1]
+    let mut out = [[first[0], acc]]
+    let mut i = 1
+    while i < series.length() {
+        acc = acc + series[i][1]
+        out.push([series[i][0], acc])
+        i = i + 1
+    }
+    out
+}
+
+let cumRev = cumulative(revenue)
+check(cumRev.length() == 4, "cumulative length 4")
+check(cumRev[3][1] == 1150, "cumulative total 1150")
+
+let areaChart = Content.chart("area")
+    .add("Cumulative", cumRev)
+    .title("Cumulative Revenue")
+    .toString()
+check(areaChart.contains("Cumulative Revenue"), "area chart title")
+
+// ---------------------------------------------------------------------------
+// SECTION 30 — final report print + result.
+// ---------------------------------------------------------------------------
+
+print(heading("CI Report"))
+print(Content.table(summaryHeaders, summaryRows).toString())
+print(Content.table(covHeaders, covRows).toString())
+print(overallBadge)
+print(f"checks_run={checks}")
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"FAILURES: {failures}")
+}

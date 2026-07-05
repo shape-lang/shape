@@ -1,0 +1,3 @@
+comptime {
+  warning("Compiling with generated query helpers")
+}

@@ -1,0 +1,17 @@
+type Point { x: int, y: int }
+
+// Move: `q` takes ownership of the struct; `p` is consumed.
+let p = Point { x: 1, y: 2 }
+let q = p
+print(q.x)
+
+// Clone: explicit deep copy keeps both bindings live.
+let a = [10, 20, 30]
+let b = clone a
+print(a[0])
+print(b[0])
+
+// Scalars stay Copy — no move, both usable.
+let n = 7
+let m = n
+print(n + m)

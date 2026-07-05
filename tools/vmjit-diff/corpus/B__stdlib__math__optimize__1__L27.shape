@@ -1,0 +1,5 @@
+pub type OptimizeOptions {
+    tol: number,
+    max_iter: int,
+    bounds: Array<Array<number>>?,
+}

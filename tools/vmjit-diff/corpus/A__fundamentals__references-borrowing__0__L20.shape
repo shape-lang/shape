@@ -1,0 +1,3 @@
+let x = 42            // immutable, uniquely owned
+let mut count = 0     // mutable, uniquely owned — direct mutation
+var shared = [1, 2, 3]  // mutable, shared — copy-on-write on mutation

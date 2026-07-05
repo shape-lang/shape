@@ -1,0 +1,6 @@
+type Trade {
+    symbol: string,
+    price: number,
+    volume: int,
+}
+// → SHA-256("Trade" + sorted [("price", "number"), ("symbol", "string"), ("volume", "int")])

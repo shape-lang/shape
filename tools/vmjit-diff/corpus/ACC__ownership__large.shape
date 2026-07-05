@@ -1,0 +1,790 @@
+// =====================================================================
+// Ownership Deep Dive — large program (~1000 LOC).
+//
+// A deterministic, non-interactive, machine-proofable application that is
+// rooted entirely in the OWNERSHIP/borrowing/clone/move slice:
+//
+//   A versioned in-memory document store ("VaultDB") with
+//     * copy-on-write SNAPSHOTS  (clone == independent deep copy)
+//     * an UNDO/REDO history     (each version is a clone; mutating the
+//                                 live doc must not disturb a stored snapshot)
+//     * by-value call sharing    (v0.3.3: a heap arg passed to a mutator is
+//                                 shared by value; the mutation is visible to
+//                                 the caller — the book's "Share in v0.3.3")
+//     * first-class references   (read-through-&, auto-ref method dispatch)
+//     * var smart-default        (Direct counters, UniqueHeap accumulators)
+//     * scalar Copy semantics    (ints/bools copy, never move)
+//
+// EVERY expected value below was computed by hand from BOOK SEMANTICS BEFORE
+// the first run. On all-pass the program prints ALL_CHECKS_PASSED; on any
+// mismatch it prints  CHECK_FAILED: <which> expected=<e> got=<g>.
+//
+// Book sections relied on (advanced/ownership-deep-dive.mdx):
+//   - "The Binding System" (let / let mut / var, storage classes)
+//   - "Copy Semantics" (int/number/bool Copy; string/Array not Copy)
+//   - "Clone Trait" / "Move, Clone, Use-After-Move (Worked Example)"
+//   - "Call Arguments: Share in v0.3.3, Consume in v0.4"
+//   - "First-Class References" / "Auto-Referencing"
+//   - "Reference Semantics" (read a value through a stored reference)
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// 0. Test harness (assert-with-expected, all integer-valued)
+// ---------------------------------------------------------------------
+
+var g_pass = 0
+var g_fail = 0
+
+fn expect_int(name: string, expected: int, got: int) {
+    if got == expected {
+        g_pass = g_pass + 1
+    } else {
+        g_fail = g_fail + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn expect_bool(name: string, expected: bool, got: bool) {
+    if got == expected {
+        g_pass = g_pass + 1
+    } else {
+        g_fail = g_fail + 1
+        let e = if expected { 1 } else { 0 }
+        let gg = if got { 1 } else { 0 }
+        print(f"CHECK_FAILED: {name} expected={e} got={gg}")
+    }
+}
+
+fn expect_str(name: string, expected: string, got: string) {
+    if got == expected {
+        g_pass = g_pass + 1
+    } else {
+        g_fail = g_fail + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+// ---------------------------------------------------------------------
+// 1. Core data model
+// ---------------------------------------------------------------------
+
+// A document is a record: an id, a numeric "score", a mutable bag of tag ids,
+// and a content length. Arrays are NOT Copy (book table) — so an Array field
+// makes Doc a heap value whose clone must deep-copy the array.
+type Doc {
+    id: int,
+    score: int,
+    tags: Array<int>,
+    content_len: int,
+}
+
+// ---------------------------------------------------------------------
+// 2. Doc constructors / pure helpers (take & references, return owned)
+// ---------------------------------------------------------------------
+
+fn new_doc(id: int) -> Doc {
+    // A bare empty `[]` literal hits an unimplemented runtime SURFACE at HEAD
+    // (V3-S5 ckpt-5 `op_new_array(0)`), even when the target type is known
+    // from the field declaration. A TYPE-ANNOTATED empty local works, so bind
+    // the empty array through an annotated local first — the idiomatic real-
+    // user workaround.
+    let empty: Array<int> = []
+    return Doc { id: id, score: 0, tags: empty, content_len: 0 }
+}
+
+// Pure read through a shared reference: book "First-Class References" /
+// "Auto-Referencing" — the method dispatches through the borrow.
+fn doc_tag_count(&d: Doc) -> int {
+    return d.tags.len()
+}
+
+fn doc_score(&d: Doc) -> int {
+    return d.score
+}
+
+fn doc_id(&d: Doc) -> int {
+    return d.id
+}
+
+// Sum of all tag ids — exercises a for-loop reading through a borrow.
+fn doc_tag_sum(&d: Doc) -> int {
+    var acc = 0
+    for t in d.tags {
+        acc = acc + t
+    }
+    return acc
+}
+
+// ---------------------------------------------------------------------
+// 3. Mutators — v0.3.3 "share by value": the caller's Doc is shared by value,
+//    so mutation through the by-value param is caller-visible. We rely on this
+//    EXACTLY as the book's `fn append(xs) { xs.push(4) }` example documents.
+// ---------------------------------------------------------------------
+
+fn mut_add_tag(d: Doc, t: int) {
+    d.tags.push(t)
+}
+
+fn mut_bump_score(d: Doc, by: int) {
+    d.score = d.score + by
+}
+
+fn mut_set_content_len(d: Doc, n: int) {
+    d.content_len = n
+}
+
+// Add several tags from an array argument (also shared by value, read-only).
+fn mut_add_tags(d: Doc, ts: Array<int>) {
+    for t in ts {
+        d.tags.push(t)
+    }
+}
+
+// ---------------------------------------------------------------------
+// 4. Snapshot / clone helpers — clone == independent deep copy (book "Clone
+//    Trait"). A snapshot taken now must NOT change when the live doc mutates.
+// ---------------------------------------------------------------------
+
+// Explicit deep copy of a Doc. NOTE: the book (line 104) claims the `clone`
+// keyword / `.clone()` method are auto-derived and equivalent for any
+// all-Clone user type, but at HEAD the `clone` keyword on a user TypedObject
+// only parses in `let X = clone <local>` position with a directly-owned local
+// source — it FAILS for a `&`-ref parameter (`return clone d` / `let c = clone
+// d` -> "Undefined variable: 'clone'" / "Method 'clone' not found on type
+// 'Doc'"), and `doc.clone()` is unresolved on user types. So we deep-copy by
+// rebuilding the struct field-by-field: scalars are Copy, and the Array<int>
+// field is cloned via the (working) `.clone()` array method. This reproduces
+// the book's "clone == independent deep copy" semantics exactly.
+fn deep_copy(&d: Doc) -> Doc {
+    let tcopy = d.tags.clone()
+    return Doc {
+        id: d.id,
+        score: d.score,
+        tags: tcopy,
+        content_len: d.content_len,
+    }
+}
+
+fn snapshot(&d: Doc) -> Doc {
+    return deep_copy(&d)
+}
+
+// ---------------------------------------------------------------------
+// 5. The store: a "live" working doc plus a COLUMNAR commit history.
+//
+//    NOTE (defect-driven design): the natural shape here is a single
+//    `history: Array<Version>` field on the Store, committing a CLONE of the
+//    live doc into it. At HEAD that shape MISCOMPILES: a Store containing an
+//    `Array<Version>` (an array of TypedObjects each carrying a nested Doc
+//    with its own `Array<int>`), once mutated through the by-value-shared
+//    field-access mutator path, corrupts on read-back — observed as a
+//    non-deterministic SIGSEGV / `capacity overflow` panic / `Schema <hash>
+//    not found in registry`. This is the V3-S5 ckpt-5/6 "heap-element
+//    TypedArray" WIP surface. A real user therefore stores the history as
+//    PARALLEL PRIMITIVE-ARRAY COLUMNS (clock / tag-count / score / tag-sum),
+//    which is a perfectly idiomatic persistent-log shape and still proves the
+//    exact ownership property: a committed column snapshot is frozen and a
+//    later live mutation cannot disturb it. Full-Doc snapshot isolation is
+//    proved separately in scenario_snapshot via deep_copy into plain locals.
+// ---------------------------------------------------------------------
+
+type Store {
+    live: Doc,
+    hist_clock: Array<int>,
+    hist_tagcount: Array<int>,
+    hist_score: Array<int>,
+    hist_tagsum: Array<int>,
+    clock: int,
+}
+
+fn new_store(id: int) -> Store {
+    let a: Array<int> = []
+    let b: Array<int> = []
+    let c: Array<int> = []
+    let d: Array<int> = []
+    return Store {
+        live: new_doc(id),
+        hist_clock: a,
+        hist_tagcount: b,
+        hist_score: c,
+        hist_tagsum: d,
+        clock: 0,
+    }
+}
+
+// Commit the current live doc's summary as a new immutable history row. The
+// row records VALUES read from the live doc at commit time; later live
+// mutations cannot disturb already-committed rows (the property under test).
+fn store_commit(s: Store) -> int {
+    s.clock = s.clock + 1
+    s.hist_clock.push(s.clock)
+    s.hist_tagcount.push(s.live.tags.len())
+    s.hist_score.push(s.live.score)
+    s.hist_tagsum.push(doc_tag_sum(&s.live))
+    return s.clock
+}
+
+fn store_version_count(&s: Store) -> int {
+    return s.hist_clock.len()
+}
+
+fn store_version_tag_count(&s: Store, idx: int) -> int {
+    return s.hist_tagcount[idx]
+}
+
+fn store_version_score(&s: Store, idx: int) -> int {
+    return s.hist_score[idx]
+}
+
+fn store_version_clock(&s: Store, idx: int) -> int {
+    return s.hist_clock[idx]
+}
+
+fn store_version_tagsum(&s: Store, idx: int) -> int {
+    return s.hist_tagsum[idx]
+}
+
+// ---------------------------------------------------------------------
+// 6. A small immutable functional layer: transformations that take an owned
+//    Doc by value, mutate the shared-by-value copy, and return it. Because
+//    v0.3.3 shares by value, these compose into a builder-ish pipeline while
+//    the original binding also observes the growth (documented behavior).
+// ---------------------------------------------------------------------
+
+fn with_tag(d: Doc, t: int) -> Doc {
+    d.tags.push(t)
+    return d
+}
+
+fn with_score(d: Doc, sc: int) -> Doc {
+    d.score = sc
+    return d
+}
+
+// ---------------------------------------------------------------------
+// 7. Pure array utilities (exercise map/filter/reduce + clone independence)
+// ---------------------------------------------------------------------
+
+fn sum_array(&xs: Array<int>) -> int {
+    return xs.reduce(|acc, v| acc + v, 0)
+}
+
+fn max_array(&xs: Array<int>) -> int {
+    var m = xs[0]
+    for v in xs {
+        if v > m { m = v }
+    }
+    return m
+}
+
+fn count_even(&xs: Array<int>) -> int {
+    let evens = xs.filter(|v| v % 2 == 0)
+    return evens.len()
+}
+
+// =====================================================================
+//                              SCENARIOS
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// Scenario A — Copy semantics for scalars (book "Copy Semantics" table).
+// Scalars int/bool are Copy: assigning copies, the source stays usable.
+// ---------------------------------------------------------------------
+fn scenario_copy() {
+    let n = 7
+    let m = n                     // Copy
+    expect_int("copy.n_after", 7, n)         // n still usable
+    expect_int("copy.m", 7, m)
+    expect_int("copy.sum", 14, n + m)
+
+    let b = true
+    let b2 = b                    // bool Copy
+    expect_bool("copy.bool_src", true, b)
+    expect_bool("copy.bool_dst", true, b2)
+
+    // var Direct counter mutated in place (stack-mutable), source ints copied
+    var acc = 0
+    let step = 3                  // copied each iteration
+    var k = 0
+    while k < 4 {
+        acc = acc + step
+        k = k + 1
+    }
+    expect_int("copy.var_acc", 12, acc)
+    expect_int("copy.step_after", 3, step)   // step still usable
+}
+
+// ---------------------------------------------------------------------
+// Scenario B — clone gives an independent deep copy (book "Clone Trait" +
+// "Worked Example"). Mutating the source after clone must NOT touch the copy.
+// ---------------------------------------------------------------------
+fn scenario_clone_independence() {
+    let mut a = [10, 20, 30]
+    let b = clone a
+    a.push(40)                    // grow source only
+    expect_int("clone.src_len", 4, a.len())
+    expect_int("clone.dst_len", 3, b.len())   // copy unchanged
+    expect_int("clone.dst_head", 10, b[0])
+
+    // Deep copy through a struct's Array field.
+    let mut base = new_doc(1)
+    base.tags.push(100)
+    base.tags.push(200)
+    let snap = snapshot(&base)    // clone of base, independent tags array
+    base.tags.push(300)           // grow live only
+    base.score = 99
+    expect_int("clone.base_tags", 3, doc_tag_count(&base))
+    expect_int("clone.snap_tags", 2, doc_tag_count(&snap))   // frozen at 2
+    expect_int("clone.snap_tag_sum", 300, doc_tag_sum(&snap))// 100+200
+    expect_int("clone.base_score", 99, base.score)
+    expect_int("clone.snap_score", 0, snap.score)            // snapshot pre-bump
+}
+
+// ---------------------------------------------------------------------
+// Scenario C — v0.3.3 call-argument sharing (book "Share in v0.3.3"). A heap
+// arg is shared by value; mutation through the by-value param is caller-visible
+// and the argument binding stays usable afterward.
+// ---------------------------------------------------------------------
+fn scenario_call_share() {
+    let nums = [1, 2, 3]
+    mut_push_demo(nums)
+    expect_int("share.len", 4, nums.len())    // caller-visible growth
+    expect_int("share.tail", 4, nums[3])
+
+    let mut d = new_doc(2)
+    mut_add_tag(d, 5)
+    mut_add_tag(d, 6)
+    mut_bump_score(d, 40)
+    mut_set_content_len(d, 1024)
+    expect_int("share.doc_tags", 2, doc_tag_count(&d))
+    expect_int("share.doc_score", 40, doc_score(&d))
+    expect_int("share.doc_clen", 1024, d.content_len)
+
+    // Pass an array argument (read-only iteration) into a multi-add mutator.
+    let more = [7, 8, 9]
+    mut_add_tags(d, more)
+    expect_int("share.doc_tags2", 5, doc_tag_count(&d))      // 2 + 3
+    expect_int("share.more_still", 3, more.len())            // arg still usable
+    expect_int("share.doc_tag_sum", 35, doc_tag_sum(&d))     // 5+6+7+8+9
+}
+
+fn mut_push_demo(xs: Array<int>) {
+    xs.push(4)
+}
+
+// ---------------------------------------------------------------------
+// Scenario D — first-class references + auto-ref method/index dispatch
+// (book "First-Class References", "Auto-Referencing", note on stored refs).
+// ---------------------------------------------------------------------
+fn scenario_references() {
+    let x = 42
+    let r = &x
+    let val = r + 1               // read through r via DerefLoad
+    expect_int("ref.deref_read", 43, val)
+
+    let arr = [10, 20, 30]
+    let rr = &arr
+    expect_int("ref.method_len", 3, rr.len())     // auto-ref method dispatch
+    expect_int("ref.index0", 10, rr[0])           // index through ref
+    expect_int("ref.index2", 30, rr[2])
+
+    // Reference into a function that returns the *value* (not the ref).
+    let d = new_doc(3)
+    expect_int("ref.fn_id", 3, doc_id(&d))
+    expect_int("ref.fn_tags", 0, doc_tag_count(&d))
+
+    // Read-through-& of a freshly built array.
+    let primes = [2, 3, 5, 7, 11]
+    expect_int("ref.sum", 28, sum_array(&primes))
+    expect_int("ref.max", 11, max_array(&primes))
+    expect_int("ref.even", 1, count_even(&primes))   // only 2 is even
+}
+
+// ---------------------------------------------------------------------
+// Scenario E — the versioned store: COMMIT clones into history, then later
+// live mutations must not change committed snapshots; RESTORE clones back out.
+// This is the application-level proof of the clone/share ownership contract.
+// ---------------------------------------------------------------------
+fn scenario_store() {
+    let mut s = new_store(10)   // `let mut`: we reassign s.live during restore
+
+    // Build version 1: two tags, score 5.
+    mut_add_tag(s.live, 1)
+    mut_add_tag(s.live, 2)
+    mut_bump_score(s.live, 5)
+    let c1 = store_commit(s)
+    expect_int("store.clock1", 1, c1)
+    expect_int("store.hist1", 1, store_version_count(&s))
+    expect_int("store.v0_tags", 2, store_version_tag_count(&s, 0))
+    expect_int("store.v0_score", 5, store_version_score(&s, 0))
+
+    // Mutate live further: add two tags, bump score. Version 1 must stay frozen.
+    mut_add_tag(s.live, 3)
+    mut_add_tag(s.live, 4)
+    mut_bump_score(s.live, 10)
+    expect_int("store.live_tags_a", 4, doc_tag_count(&s.live))
+    expect_int("store.v0_frozen_tags", 2, store_version_tag_count(&s, 0)) // frozen
+    expect_int("store.v0_frozen_score", 5, store_version_score(&s, 0))    // frozen
+
+    // Commit version 2.
+    let c2 = store_commit(s)
+    expect_int("store.clock2", 2, c2)
+    expect_int("store.hist2", 2, store_version_count(&s))
+    expect_int("store.v1_tags", 4, store_version_tag_count(&s, 1))
+    expect_int("store.v1_score", 15, store_version_score(&s, 1))
+
+    // Continue live mutation; both committed versions remain frozen.
+    mut_add_tag(s.live, 5)
+    expect_int("store.live_tags_b", 5, doc_tag_count(&s.live))
+    expect_int("store.v0_still", 2, store_version_tag_count(&s, 0))
+    expect_int("store.v1_still", 4, store_version_tag_count(&s, 1))
+
+    // RESTORE from the version-0 committed row: rebuild a fresh live doc whose
+    // tag-count and score match the frozen snapshot. The new live doc is a
+    // brand-new owned value (independent of any committed row), so mutating it
+    // cannot disturb the frozen history.
+    let target_tags = store_version_tag_count(&s, 0)   // 2
+    let target_score = store_version_score(&s, 0)      // 5
+    s.live = new_doc(10)
+    var ri = 0
+    while ri < target_tags {
+        mut_add_tag(s.live, ri)
+        ri = ri + 1
+    }
+    mut_bump_score(s.live, target_score)
+    expect_int("store.restored_tags", 2, doc_tag_count(&s.live))
+    expect_int("store.restored_score", 5, doc_score(&s.live))
+    // Mutate restored live; version 0 must still be frozen at 2.
+    mut_add_tag(s.live, 99)
+    expect_int("store.after_restore_live", 3, doc_tag_count(&s.live))
+    expect_int("store.v0_after_restore", 2, store_version_tag_count(&s, 0))
+
+    // Clock stamps preserved in history order.
+    expect_int("store.v0_clock", 1, store_version_clock(&s, 0))
+    expect_int("store.v1_clock", 2, store_version_clock(&s, 1))
+}
+
+// ---------------------------------------------------------------------
+// Scenario F — a longer "undo timeline": commit N times, then verify each
+// committed snapshot retained the exact tag-count it had at commit time, even
+// though the live doc grew monotonically. This stress-tests clone isolation
+// across many history entries.
+// ---------------------------------------------------------------------
+fn scenario_timeline() {
+    let s = new_store(20)
+    // After commit i (1-based), the live doc has exactly i tags, score 10*i.
+    var i = 0
+    while i < 6 {
+        mut_add_tag(s.live, i)        // i in {0..5}; tag count becomes i+1
+        mut_bump_score(s.live, 10)    // score becomes 10*(i+1)
+        let stamp = store_commit(s)
+        expect_int(f"timeline.stamp_{i}", i + 1, stamp)
+        i = i + 1
+    }
+    expect_int("timeline.count", 6, store_version_count(&s))
+
+    // Each committed version k (0-based) must have exactly k+1 tags & 10*(k+1)
+    // score, frozen — despite the live doc now holding 6 tags.
+    expect_int("timeline.live_final", 6, doc_tag_count(&s.live))
+    var k = 0
+    while k < 6 {
+        expect_int(f"timeline.v{k}_tags", k + 1, store_version_tag_count(&s, k))
+        expect_int(f"timeline.v{k}_score", 10 * (k + 1), store_version_score(&s, k))
+        expect_int(f"timeline.v{k}_clock", k + 1, store_version_clock(&s, k))
+        k = k + 1
+    }
+
+    // Total tag-count across all frozen versions = 1+2+3+4+5+6 = 21.
+    var total = 0
+    var j = 0
+    while j < 6 {
+        total = total + store_version_tag_count(&s, j)
+        j = j + 1
+    }
+    expect_int("timeline.total_frozen_tags", 21, total)
+}
+
+// ---------------------------------------------------------------------
+// Scenario G — functional pipeline using by-value share + return. with_tag /
+// with_score mutate the shared-by-value copy and return it. Because v0.3.3
+// shares by value, the original binding ALSO sees the growth (documented), and
+// the returned binding is the same logical payload.
+// ---------------------------------------------------------------------
+fn scenario_pipeline() {
+    let mut d = new_doc(30)
+    let out = with_score(with_tag(with_tag(d, 1), 2), 50)
+    // The returned doc has 2 tags and score 50.
+    expect_int("pipe.out_tags", 2, doc_tag_count(&out))
+    expect_int("pipe.out_score", 50, doc_score(&out))
+    expect_int("pipe.out_id", 30, doc_id(&out))
+
+    // Independent fresh build to prove repeatability (no global state leak).
+    let mut e = new_doc(31)
+    let out2 = with_tag(with_tag(with_tag(e, 7), 8), 9)
+    expect_int("pipe.out2_tags", 3, doc_tag_count(&out2))
+    expect_int("pipe.out2_sum", 24, doc_tag_sum(&out2))   // 7+8+9
+}
+
+// ---------------------------------------------------------------------
+// Scenario H — clone-vs-share contrast in one place: take a snapshot, then run
+// a by-value mutator on the live doc; snapshot frozen, live grown. This is the
+// crisp restatement of the two halves of the ownership contract side by side.
+// ---------------------------------------------------------------------
+fn scenario_contrast() {
+    let mut live = new_doc(40)
+    mut_add_tag(live, 1)
+    mut_add_tag(live, 2)
+    mut_add_tag(live, 3)
+    let frozen = snapshot(&live)          // clone: independent
+
+    // By-value share mutator grows the live doc.
+    mut_add_tags(live, [4, 5, 6, 7])
+    expect_int("contrast.live", 7, doc_tag_count(&live))   // 3 + 4
+    expect_int("contrast.frozen", 3, doc_tag_count(&frozen)) // frozen at 3
+    expect_int("contrast.live_sum", 28, doc_tag_sum(&live))   // 1..7
+    expect_int("contrast.frozen_sum", 6, doc_tag_sum(&frozen))// 1+2+3
+
+    // A second clone of the now-grown live doc captures 7; original frozen stays 3.
+    let frozen2 = snapshot(&live)
+    mut_add_tag(live, 8)
+    expect_int("contrast.live2", 8, doc_tag_count(&live))
+    expect_int("contrast.frozen2", 7, doc_tag_count(&frozen2))
+    expect_int("contrast.frozen_orig", 3, doc_tag_count(&frozen))
+}
+
+// ---------------------------------------------------------------------
+// Scenario I — string is NOT Copy (book table). clone a string keeps both
+// usable and equal; this is a value-equality proof (strings compare by value).
+// ---------------------------------------------------------------------
+fn scenario_strings() {
+    let s = "ownership"
+    let s2 = clone s
+    expect_int("str.len", 9, s.len())
+    expect_int("str.len2", 9, s2.len())
+    expect_bool("str.eq", true, s == s2)
+    expect_str("str.val", "ownership", s2)
+
+    let upper = s.toUpperCase()
+    expect_str("str.upper", "OWNERSHIP", upper)
+    expect_str("str.src_unchanged", "ownership", s)   // s still usable & unchanged
+}
+
+// ---------------------------------------------------------------------
+// Scenario J — aggregate numeric proof over the store to give a single
+// end-to-end checksum that depends on clone isolation being exactly right.
+// ---------------------------------------------------------------------
+fn scenario_checksum() {
+    let s = new_store(50)
+    var i = 0
+    // commit 4 versions: version k has tags {0..k}, so tag count k+1.
+    while i < 4 {
+        mut_add_tag(s.live, i)
+        mut_bump_score(s.live, 100)
+        store_commit(s)
+        i = i + 1
+    }
+    // Checksum = sum over versions of (tag_count * 1 + score). Expected:
+    //   v0: tags 1, score 100  -> 101
+    //   v1: tags 2, score 200  -> 202
+    //   v2: tags 3, score 300  -> 303
+    //   v3: tags 4, score 400  -> 404
+    //   total = 1010
+    var checksum = 0
+    var k = 0
+    while k < 4 {
+        checksum = checksum + store_version_tag_count(&s, k)
+        checksum = checksum + store_version_score(&s, k)
+        k = k + 1
+    }
+    expect_int("checksum.value", 1010, checksum)
+
+    // The live doc still grew independently: 4 tags, score 400.
+    expect_int("checksum.live_tags", 4, doc_tag_count(&s.live))
+    expect_int("checksum.live_score", 400, doc_score(&s.live))
+}
+
+// ---------------------------------------------------------------------
+// Scenario K — full-Doc snapshot isolation via deep_copy into PLAIN LOCALS
+// (no array-of-struct involved). Proves the deep_copy helper reproduces the
+// book's "clone == independent deep copy" for a whole TypedObject: the copy's
+// Array<int> field is independent of the source's.
+// ---------------------------------------------------------------------
+fn scenario_snapshot() {
+    let mut live = new_doc(60)
+    mut_add_tag(live, 11)
+    mut_add_tag(live, 22)
+    mut_bump_score(live, 7)
+
+    let frozen = deep_copy(&live)        // independent whole-Doc snapshot
+    expect_int("snap.frozen_tags0", 2, doc_tag_count(&frozen))
+    expect_int("snap.frozen_score0", 7, doc_score(&frozen))
+    expect_int("snap.frozen_id", 60, doc_id(&frozen))
+
+    // Grow + rescore the live doc; the frozen snapshot must not move.
+    mut_add_tag(live, 33)
+    mut_add_tag(live, 44)
+    mut_bump_score(live, 100)
+    expect_int("snap.live_tags", 4, doc_tag_count(&live))
+    expect_int("snap.live_score", 107, doc_score(&live))
+    expect_int("snap.frozen_tags1", 2, doc_tag_count(&frozen))   // frozen
+    expect_int("snap.frozen_score1", 7, doc_score(&frozen))      // frozen
+    expect_int("snap.frozen_tagsum", 33, doc_tag_sum(&frozen))   // 11+22
+
+    // A second snapshot of the now-grown live captures 4; the first stays 2.
+    let frozen2 = deep_copy(&live)
+    mut_add_tag(live, 55)
+    expect_int("snap.live_tags2", 5, doc_tag_count(&live))
+    expect_int("snap.frozen2_tags", 4, doc_tag_count(&frozen2))
+    expect_int("snap.frozen_orig", 2, doc_tag_count(&frozen))
+    expect_int("snap.frozen2_tagsum", 110, doc_tag_sum(&frozen2)) // 11+22+33+44
+}
+
+// ---------------------------------------------------------------------
+// Scenario L — clone CHAINS: clone of a clone is still independent. Mutating
+// any link in the chain must not disturb the others (book "Clone Trait":
+// clone is a deep, independent copy).
+// ---------------------------------------------------------------------
+fn scenario_clone_chain() {
+    let mut a = [1, 2, 3]
+    let mut b = clone a          // independent of a
+    let c = clone b              // independent of b (and a)
+    a.push(4)                    // grow a only
+    b.push(5)                    // grow b only
+    expect_int("chain.a", 4, a.len())
+    expect_int("chain.b", 4, b.len())
+    expect_int("chain.c", 3, c.len())   // untouched
+    expect_int("chain.c_head", 1, c[0])
+    expect_int("chain.a_tail", 4, a[3])
+    expect_int("chain.b_tail", 5, b[3])
+
+    // Clone chain through whole Docs (deep_copy of deep_copy).
+    let mut d0 = new_doc(70)
+    mut_add_tag(d0, 1)
+    mut_add_tag(d0, 2)
+    let d1 = deep_copy(&d0)       // copy of d0 (tags = 2)
+    let d2 = deep_copy(&d1)       // copy of d1 (tags = 2)
+    mut_add_tag(d0, 3)            // grow original only
+    expect_int("chain.d0", 3, doc_tag_count(&d0))
+    expect_int("chain.d1", 2, doc_tag_count(&d1))   // frozen
+    expect_int("chain.d2", 2, doc_tag_count(&d2))   // frozen
+    expect_int("chain.d1_sum", 3, doc_tag_sum(&d1)) // 1+2
+    expect_int("chain.d2_sum", 3, doc_tag_sum(&d2)) // 1+2
+}
+
+// ---------------------------------------------------------------------
+// Scenario M — map / filter / reduce produce FRESH arrays; the source is never
+// mutated. This is the functional (non-aliasing) counterpart to the by-value
+// share path, and it relies on Array clone-on-transform isolation.
+// ---------------------------------------------------------------------
+fn scenario_functional() {
+    let src = [1, 2, 3, 4, 5]
+    // NOTE: a `.map()` result must be bound through an EXPLICIT `Array<int>`
+    // annotation before it can flow into a `&Array<int>` parameter that calls
+    // `.reduce` — without the annotation the strict-flip checker spuriously
+    // rejects it with "(Vec<int>) -> int is not compatible with (Vec<int>) ->
+    // int" (an inference-loss regression; the two types are identical).
+    // `.filter()` results do NOT need this. The annotation is the idiomatic
+    // real-user workaround.
+    let doubled: Array<int> = src.map(|x| x * 2)
+    expect_int("fn.src_unchanged", 5, src.len())     // source intact
+    expect_int("fn.doubled_head", 2, doubled[0])
+    expect_int("fn.doubled_tail", 10, doubled[4])
+    expect_int("fn.doubled_sum", 30, sum_array(&doubled))   // 2+4+6+8+10
+
+    let evens = src.filter(|x| x % 2 == 0)
+    expect_int("fn.evens_count", 2, evens.len())     // 2,4
+    expect_int("fn.evens_sum", 6, sum_array(&evens))
+
+    let folded = src.reduce(|acc, v| acc + v, 100)
+    expect_int("fn.folded", 115, folded)             // 100 + 1+2+3+4+5
+
+    // Chain transforms; each stage is an independent fresh array.
+    let stage1: Array<int> = src.map(|x| x + 1)   // [2,3,4,5,6]
+    let stage2 = stage1.filter(|x| x > 3)         // [4,5,6]
+    expect_int("fn.src_still", 5, src.len())
+    expect_int("fn.stage1_len", 5, stage1.len())
+    expect_int("fn.stage2_len", 3, stage2.len())
+    expect_int("fn.stage2_sum", 15, sum_array(&stage2))  // 4+5+6
+}
+
+// ---------------------------------------------------------------------
+// Scenario N — an end-to-end "ledger" that combines by-value sharing (entries
+// accumulate into a live doc), columnar snapshotting, deep_copy isolation, and
+// reference-based aggregate reads into one numeric invariant. The final
+// checksum is impossible to match unless every ownership rule held exactly.
+// ---------------------------------------------------------------------
+fn scenario_ledger() {
+    let mut s = new_store(80)
+    var snapshots_tagsum = 0      // accumulated frozen tag-sums
+
+    // Apply 5 batches; after batch i (1-based) the live doc has tags {1..i*2}
+    // appended cumulatively, and we commit a column row each time.
+    var i = 1
+    while i <= 5 {
+        // Append two tags whose values are i*10 and i*10+1.
+        mut_add_tag(s.live, i * 10)
+        mut_add_tag(s.live, i * 10 + 1)
+        let stamp = store_commit(s)
+        expect_int(f"ledger.stamp_{i}", i, stamp)
+        snapshots_tagsum = snapshots_tagsum + store_version_tagsum(&s, i - 1)
+        i = i + 1
+    }
+
+    // The live doc now has 10 tags (2 per batch * 5 batches).
+    expect_int("ledger.live_tags", 10, doc_tag_count(&s.live))
+    expect_int("ledger.rows", 5, store_version_count(&s))
+
+    // Hand-computed expected tag-sums per committed row (cumulative):
+    //   after b1: tags {10,11}                       sum 21
+    //   after b2: + {20,21}                           sum 21+41 = 62
+    //   after b3: + {30,31}                           sum 62+61 = 123
+    //   after b4: + {40,41}                           sum 123+81 = 204
+    //   after b5: + {50,51}                           sum 204+101 = 305
+    // Sum of those five frozen tag-sums = 21+62+123+204+305 = 715.
+    expect_int("ledger.row0_sum", 21, store_version_tagsum(&s, 0))
+    expect_int("ledger.row4_sum", 305, store_version_tagsum(&s, 4))
+    expect_int("ledger.snapshots_tagsum", 715, snapshots_tagsum)
+
+    // The LIVE doc's full tag-sum = sum over all appended tags:
+    //   sum_{i=1..5} (i*10 + i*10+1) = sum_{i=1..5}(20i + 1)
+    //   = 20*(1+2+3+4+5) + 5 = 20*15 + 5 = 305.
+    expect_int("ledger.live_tagsum", 305, doc_tag_sum(&s.live))
+
+    // Take a full-Doc deep_copy snapshot of the final live doc; it freezes 10.
+    let final_frozen = deep_copy(&s.live)
+    mut_add_tag(s.live, 999)
+    expect_int("ledger.live_after", 11, doc_tag_count(&s.live))
+    expect_int("ledger.frozen_final", 10, doc_tag_count(&final_frozen))
+    expect_int("ledger.frozen_final_sum", 305, doc_tag_sum(&final_frozen))
+
+    // Grand checksum: row count + last stamp + snapshots_tagsum + live_tagsum.
+    //   = 5 + 5 + 715 + 305 = 1030.
+    let grand = store_version_count(&s) + store_version_clock(&s, 4) + snapshots_tagsum + doc_tag_sum(&final_frozen)
+    expect_int("ledger.grand_checksum", 1030, grand)
+}
+
+// =====================================================================
+//                                MAIN
+// =====================================================================
+
+scenario_copy()
+scenario_clone_independence()
+scenario_call_share()
+scenario_references()
+scenario_store()
+scenario_timeline()
+scenario_pipeline()
+scenario_contrast()
+scenario_strings()
+scenario_checksum()
+scenario_snapshot()
+scenario_clone_chain()
+scenario_functional()
+scenario_ledger()
+
+print(f"PASS={g_pass} FAIL={g_fail}")
+if g_fail == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print("SOME_CHECKS_FAILED")
+}

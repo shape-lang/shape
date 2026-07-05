@@ -1,0 +1,3 @@
+let maybe_name: Option<string> = None
+let name = maybe_name ?? "anonymous"
+print(name)

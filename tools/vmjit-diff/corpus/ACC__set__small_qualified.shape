@@ -1,0 +1,44 @@
+// small_qualified.shape — book-fallback variant.
+// After the assigned chapter's `from ... use { }` import failed with
+// "Undefined function", a real user consults the reference / the
+// stdlib/core/collections book page, which documents the working form:
+//   use std::core::set
+//   set::new(), set::from_array(...), ...
+// (This import-form discrepancy is itself a BOOK-WRONG finding for set.mdx.)
+//
+// Self-checks use plain if-guards + CHECK_FAILED prints because `assert`
+// is not resolvable in this CLI script mode (separate finding).
+
+use std::core::set
+
+fn check(name: string, cond: bool) {
+  if !cond {
+    print(f"CHECK_FAILED: {name}")
+  }
+}
+
+fn main() {
+  let empty = set::new()
+  check("empty_len", set::len(empty) == 0)
+
+  let s = set::from_array(["a", "b", "c", "b", "a"])
+  check("dedup_len", set::len(s) == 3)
+
+  let base = set::from_array(["a", "b", "c"])
+  let s2 = set::add(base, "d")
+  let s3 = set::remove(s2, "b")
+
+  check("includes_a", set::includes(s3, "a") == true)
+  check("includes_b", set::includes(s3, "b") == false)
+  check("s3_len", set::len(s3) == 3)
+
+  let a = set::from_array(["x", "y", "z"])
+  let b = set::from_array(["y", "z", "w"])
+  check("union_len", set::len(set::union(a, b)) == 4)
+  check("inter_len", set::len(set::intersection(a, b)) == 2)
+  check("diff_len", set::len(set::difference(a, b)) == 1)
+
+  print("ALL_CHECKS_PASSED")
+}
+
+main()

@@ -1,0 +1,6 @@
+trait Sequence {
+  type Element : Display;
+  fn render() -> string;
+}
+
+print("ok")

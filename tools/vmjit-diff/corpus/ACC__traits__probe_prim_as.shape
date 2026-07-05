@@ -1,0 +1,9 @@
+let n = true as number
+print(n)
+
+fn parse_int(s: string) -> Result<int, AnyError> {
+  let n = (s as int?)?
+  Ok(n)
+}
+
+print(parse_int("42"))

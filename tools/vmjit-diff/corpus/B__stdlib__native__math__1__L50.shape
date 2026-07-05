@@ -1,0 +1,1 @@
+from std::core::math use { PI, E, TAU, sin, cos, tan, asin, acos, atan, atan2, clamp, lerp, sign, degrees, radians }

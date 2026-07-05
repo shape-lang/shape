@@ -1,0 +1,41 @@
+// small.shape - math::optimize Nelder-Mead, book-driven (optimize.mdx)
+// Determinism: fixed objective; assert optimum within tolerance.
+use std::math::optimize
+
+fn main() {
+    // Unconstrained: minimize x[0]^2 + x[1]^2, optimum at (0,0), f=0.
+    // Book section "optimize::minimize" first example.
+    let r1 = optimize::minimize(
+        |x| x[0] * x[0] + x[1] * x[1],
+        [5.0, 5.0],
+        OptimizeOptions {
+            tol: 0.000001,
+            max_iter: 1000,
+            bounds: None,
+        }
+    )
+    // Expected (book): result.x ~ [0,0]; result.fun ~ 0; converged == true.
+    assert(r1.converged, "r1 should converge")
+    assert(r1.fun < 0.0001, "r1.fun should be near 0")
+    assert(abs(r1.x[0]) < 0.01, "r1.x[0] near 0")
+    assert(abs(r1.x[1]) < 0.01, "r1.x[1] near 0")
+
+    // Bounded: minimize (x[0]-2)^2, x[0] restricted to [0,1].
+    // Book section "With bounds": optimum on boundary, result.x ~ [1.0].
+    let r2 = optimize::minimize(
+        |x| (x[0] - 2.0) * (x[0] - 2.0),
+        [0.0],
+        OptimizeOptions {
+            tol: 0.000001,
+            max_iter: 500,
+            bounds: [[0.0, 1.0]],
+        }
+    )
+    // Expected: bound binding at x=1; f = (1-2)^2 = 1.0.
+    assert(abs(r2.x[0] - 1.0) < 0.01, "r2.x[0] should hit upper bound 1.0")
+    assert(abs(r2.fun - 1.0) < 0.01, "r2.fun should be ~1.0 at bound")
+
+    print("ALL_CHECKS_PASSED")
+}
+
+main()

@@ -1,0 +1,7 @@
+let a = { x: 1, y: 2 }
+let b = { y: 20, z: 30 }
+let c = a + b
+
+print(c.x)   // 1
+print(c.y)   // 20  — overridden by right operand
+print(c.z)   // 30

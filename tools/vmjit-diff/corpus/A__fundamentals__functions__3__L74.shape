@@ -1,0 +1,6 @@
+fn greet(name: string = "world") -> string {
+  f"hello {name}"
+}
+
+print(greet())
+print(greet("shape"))

@@ -1,0 +1,54 @@
+// Hello world
+print("Hello, Shape!")
+
+// Variables and types
+let name = "world"
+let count = 3
+
+for i in 0..count {
+    print(f"Hello, {name}! ({i + 1})")
+}
+
+// Functions
+fn greet(name: string) -> string {
+    f"Welcome, {name}!"
+}
+
+print(greet("Alice"))
+
+// Type definitions
+type Person {
+    name: string,
+    age: int,
+}
+
+let alice = Person { name: "Alice", age: 30 }
+print(f"{alice.name} is {alice.age} years old")
+
+// Pattern matching with guards
+fn describe_age(age: int) -> string {
+    match age {
+        x: int where x < 13 => "child"
+        x: int where x < 20 => "teenager"
+        x: int where x < 65 => "adult"
+        _ => "senior"
+    }
+}
+
+print(describe_age(alice.age))  // "adult"
+
+// Error handling with Result
+fn validate_age(age: int) -> Result<int, string> {
+    if age < 0 {
+        return Err(f"invalid age: {age}")
+    }
+    if age > 150 {
+        return Err(f"invalid age: {age}")
+    }
+    Ok(age)
+}
+
+match validate_age(30) {
+    Ok(age) => print(f"valid age: {age}")
+    Err(msg) => print(f"error: {msg}")
+}

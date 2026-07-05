@@ -1,0 +1,77 @@
+// small.shape — Tables slice  (book: fundamentals/tables.mdx)
+//
+// Idiomatic exercise of the chapter core that ACTUALLY runs on the shipped
+// compiler: row-literal Table<T>, filter (keep matching rows), count (row
+// count), and chained filter().count().
+//
+// BOOK-GAP recorded in REPORT.md: the book's "Table Methods" / "Loading Tables"
+// / "Query Syntax" sections present filter/count/orderBy/etc. as directly
+// callable on Table<T> with no extra declarations.  On the shipped compiler the
+// methods are ONLY reachable after an explicit `impl Queryable for Table`
+// (the form shown in fundamentals/traits.mdx).  Without it every call fails with
+// "Table cannot have fields".  We add that impl block so the program runs.
+//
+// Expected values below are derived from BOOK SEMANTICS (count = number of row
+// literals; filter keeps rows whose predicate is true) and written before the
+// first run.
+
+from std::core::queryable use { Queryable }
+
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+impl Queryable for Table {
+    method filter(predicate) { self.filter(predicate) }
+    method count() { self.count() }
+    method execute() { self }
+}
+
+fn main() {
+  // Fixed in-memory dataset (deterministic).
+  let events: Table<Event> =
+      [3, 120.0, "gamma"],
+      [1, 50.0,  "alpha"],
+      [2, 75.5,  "beta"]
+
+  // count(): three row literals.
+  let n = events.count()
+  if n != 3 { print(f"CHECK_FAILED: count expected=3 got={n}"); return }
+
+  // filter keeps rows where value > 70.0  =>  120.0 and 75.5  => 2 rows.
+  let hi = events.filter(|row| row.value > 70.0)
+  let hn = hi.count()
+  if hn != 2 { print(f"CHECK_FAILED: filter_gt70_count expected=2 got={hn}"); return }
+
+  // filter value > 200.0 keeps no rows => 0.
+  let none = events.filter(|row| row.value > 200.0)
+  let nonen = none.count()
+  if nonen != 0 { print(f"CHECK_FAILED: filter_gt200_count expected=0 got={nonen}"); return }
+
+  // filter value > 0.0 keeps all rows => 3.
+  let all = events.filter(|row| row.value > 0.0)
+  let alln = all.count()
+  if alln != 3 { print(f"CHECK_FAILED: filter_gt0_count expected=3 got={alln}"); return }
+
+  // filter on an int field: id > 1 keeps rows 3 and 2 => 2 rows.
+  let big_ids = events.filter(|row| row.id > 1)
+  let big_idsn = big_ids.count()
+  if big_idsn != 2 { print(f"CHECK_FAILED: filter_id_gt1_count expected=2 got={big_idsn}"); return }
+
+  // filter on a string field: tag == "alpha" keeps 1 row.
+  let alpha = events.filter(|row| row.tag == "alpha")
+  let alphan = alpha.count()
+  if alphan != 1 { print(f"CHECK_FAILED: filter_tag_alpha_count expected=1 got={alphan}"); return }
+
+  // chained filter: value > 60.0 then id < 3  => keeps row 2 (75.5) only.
+  // (row 3 has id 3, excluded; row 1 value 50.0 excluded by first filter.)
+  let chained = events.filter(|row| row.value > 60.0).filter(|row| row.id < 3)
+  let chainedn = chained.count()
+  if chainedn != 1 { print(f"CHECK_FAILED: chained_filter_count expected=1 got={chainedn}"); return }
+
+  print("ALL_CHECKS_PASSED")
+}
+
+main()

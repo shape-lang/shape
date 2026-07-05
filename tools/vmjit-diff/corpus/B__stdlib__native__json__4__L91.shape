@@ -1,0 +1,9 @@
+pub enum Json {
+    Null,
+    Bool(bool),
+    Int(int),
+    Number(number),
+    Str(string),
+    Array(any),
+    Object(any),
+}

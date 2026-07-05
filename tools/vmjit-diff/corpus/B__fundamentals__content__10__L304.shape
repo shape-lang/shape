@@ -1,0 +1,6 @@
+let chart = Content.chart("line")
+    .add("Revenue", [[1, 100], [2, 200], [3, 350]])
+    .title("Quarterly Revenue")
+    .x_label("Quarter")
+    .y_label("USD")
+print(chart.toString())

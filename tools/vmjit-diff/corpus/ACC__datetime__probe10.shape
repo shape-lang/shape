@@ -1,0 +1,11 @@
+from std::core::intrinsics use { DateTime }
+let dt = DateTime.parse("2024-06-15T14:30:45+00:00")
+
+print("1: no-arg string method timezone() in f-string")
+print(f"tz={dt.timezone()}")
+
+print("2: no-arg string method offset() in f-string")
+print(f"off={dt.offset()}")
+
+print("3: format(arg) in f-string -> EXPECT FAIL")
+print(f"t={dt.format('%H:%M')}")

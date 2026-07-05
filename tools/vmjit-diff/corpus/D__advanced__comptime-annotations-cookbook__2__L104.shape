@@ -1,0 +1,31 @@
+type Prompt {
+  @description("The user's query")
+  query: string
+
+  @description("Creativity level")
+  @range(0.0, 1.0)
+  temperature: float
+}
+
+annotation json_schema() {
+  targets: [type]
+
+  comptime post(target, ctx) {
+    comptime for field in target.fields {
+      comptime for ann in field.annotations {
+        if ann.name == "description" {
+          // use ann.args[0] as JSON Schema "description"
+        }
+        if ann.name == "range" {
+          // use ann.args[0], ann.args[1] as "minimum", "maximum"
+        }
+      }
+    }
+
+    extend target {
+      method schema() {
+        // return generated JSON Schema object
+      }
+    }
+  }
+}

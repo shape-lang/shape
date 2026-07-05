@@ -1,0 +1,17 @@
+annotation synced(peers) {
+    targets: [function]
+    comptime post(target, ctx) {
+        replace body {
+            let before = state::capture_module()
+            let result = __original__(args)
+            let after = state::capture_module()
+            let delta = state::diff(before, after)
+            if delta.changed.len() > 0 {
+                for peer in peers {
+                    peer.send(state::serialize(delta))
+                }
+            }
+            result
+        }
+    }
+}

@@ -1,0 +1,6 @@
+let x = 42         // int
+let y = -1000      // int
+let big = 9000000000000000000  // int (within i64 range)
+print(x)
+print(y)
+print(big)

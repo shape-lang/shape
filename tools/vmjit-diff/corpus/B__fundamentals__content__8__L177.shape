@@ -1,0 +1,6 @@
+let node = Content.text("Error")
+    .fg(Color.red)
+    .bg(Color.rgb(40, 0, 0))
+    .bold()
+    .underline()
+print(node.toString())

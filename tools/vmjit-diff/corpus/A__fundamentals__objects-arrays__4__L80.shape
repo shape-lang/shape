@@ -1,0 +1,9 @@
+let nums = [1, 2, 3, 4]
+let doubled = nums.map(|x| x * 2)
+let evens = nums.filter(|x| x % 2 == 0)
+
+print(doubled)
+print(evens)
+print(nums.first())
+print(nums.last())
+print(nums.len())

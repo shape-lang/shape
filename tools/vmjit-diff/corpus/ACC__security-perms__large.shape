@@ -1,0 +1,960 @@
+// large.shape - Capability-Based Permission Policy Engine
+// Book: advanced/security-permissions.mdx (Shape "Security & Permissions")
+//
+// REAL-WORLD APPLICATION: a non-interactive policy engine that re-implements
+// the book's THREE-TIER security model as a deterministic decision procedure,
+// then runs a fixture suite of synthetic "programs" against various granted
+// permission sets / scope constraints / resource limits and ASSERTS the
+// grant/deny/limit outcome of each against a value DERIVED FROM BOOK SEMANTICS
+// (every expected value written before the first run; none back-filled).
+//
+// WHY THIS ENCODING: the book documents a HOST-SIDE (Rust) API that is NOT
+// reachable from Shape program code (PermissionSet, Permission, ResourceLimits,
+// ScopeConstraints, PermissionGrant all resolve to "Undefined variable"; the
+// "Practical Examples" do not run -- see REPORT.md BOOK-WRONG). The book's data
+// model and decision rules are, however, FULLY and PRECISELY specified, so the
+// engine below is a faithful executable model of them. Permission sets are
+// integer bitsets (the book calls a PermissionSet "a deterministic set",
+// lines 269-272); set algebra is bitwise; scope globs use scalar string ops.
+// (Typed string-array iteration is broken in this strict-flip worktree, so the
+// engine deliberately avoids string-array iteration -- see REPORT.md.)
+//
+// =====================================================================
+// SECTION 0. Permission catalogue  (book "Permission Enum", lines 226-267)
+// =====================================================================
+// Index ordering follows the book's four category tables verbatim:
+//   Filesystem: 0 fs.read, 1 fs.write, 2 fs.scoped
+//   Network:    3 net.connect, 4 net.listen, 5 net.scoped
+//   System:     6 sys.process, 7 sys.env, 8 sys.time, 9 sys.random
+//   Sandbox:    10 sandbox.vfs, 11 sandbox.deterministic, 12 sandbox.capture,
+//               13 sandbox.mem_limited, 14 sandbox.time_limited, 15 sandbox.output_limited
+
+fn perm_count() -> int { return 16 }
+
+fn perm_name(i: int) -> string {
+    match i {
+        0 => "fs.read",
+        1 => "fs.write",
+        2 => "fs.scoped",
+        3 => "net.connect",
+        4 => "net.listen",
+        5 => "net.scoped",
+        6 => "sys.process",
+        7 => "sys.env",
+        8 => "sys.time",
+        9 => "sys.random",
+        10 => "sandbox.vfs",
+        11 => "sandbox.deterministic",
+        12 => "sandbox.capture",
+        13 => "sandbox.mem_limited",
+        14 => "sandbox.time_limited",
+        15 => "sandbox.output_limited",
+        _ => "unknown"
+    }
+}
+
+fn perm_desc(i: int) -> string {
+    match i {
+        0 => "Read files and directories",
+        1 => "Write, create, and delete files and directories",
+        2 => "Filesystem access scoped to specific paths",
+        3 => "Open outbound network connections",
+        4 => "Listen for inbound network connections",
+        5 => "Network access scoped to specific hosts/ports",
+        6 => "Spawn child processes",
+        7 => "Read environment variables",
+        8 => "Access wall-clock time",
+        9 => "Access random number generation",
+        10 => "Operate against a virtual filesystem",
+        11 => "Run in a deterministic runtime (fixed time, seeded RNG)",
+        12 => "Output is captured for inspection",
+        13 => "Memory usage is limited to a configured ceiling",
+        14 => "Execution time is capped",
+        15 => "Output volume is capped",
+        _ => "unknown"
+    }
+}
+
+// book "category()" grouping (lines 229-263): 0..2 fs, 3..5 net, 6..9 sys, 10..15 sandbox
+fn perm_category(i: int) -> string {
+    if i <= 2 { return "Filesystem" }
+    if i <= 5 { return "Network" }
+    if i <= 9 { return "System" }
+    return "Sandbox"
+}
+
+// named indices for readability
+fn P_FS_READ() -> int { return 0 }
+fn P_FS_WRITE() -> int { return 1 }
+fn P_FS_SCOPED() -> int { return 2 }
+fn P_NET_CONNECT() -> int { return 3 }
+fn P_NET_LISTEN() -> int { return 4 }
+fn P_NET_SCOPED() -> int { return 5 }
+fn P_PROCESS() -> int { return 6 }
+fn P_ENV() -> int { return 7 }
+fn P_TIME() -> int { return 8 }
+fn P_RANDOM() -> int { return 9 }
+fn P_VFS() -> int { return 10 }
+fn P_DETERMINISTIC() -> int { return 11 }
+fn P_CAPTURE() -> int { return 12 }
+fn P_MEM_LIMITED() -> int { return 13 }
+fn P_TIME_LIMITED() -> int { return 14 }
+fn P_OUTPUT_LIMITED() -> int { return 15 }
+
+// =====================================================================
+// SECTION 1. PermissionSet algebra  (book "PermissionSet API", lines 269-306)
+// =====================================================================
+// A PermissionSet is an int whose bit i is set iff permission i is present.
+
+fn bit(i: int) -> int { return 1 << i }
+
+fn ps_empty() -> int { return 0 }
+
+// a.contains(perm)  (line 291)
+fn ps_contains(set: int, i: int) -> bool { return (set & bit(i)) != 0 }
+
+// a.insert(perm) -> new set (line 292)
+fn ps_insert(set: int, i: int) -> int { return set | bit(i) }
+
+// a.remove(perm) -> new set (line 293)
+fn ps_remove(set: int, i: int) -> int { return set & (~bit(i)) }
+
+// a.union(b)  (line 286)
+fn ps_union(a: int, b: int) -> int { return a | b }
+
+// a.intersection(b)  (line 287)
+fn ps_intersection(a: int, b: int) -> int { return a & b }
+
+// a.difference(b)  (line 288)
+fn ps_difference(a: int, b: int) -> int { return a & (~b) }
+
+// a.is_subset(b)  (line 289): every perm in a is also in b
+fn ps_is_subset(a: int, b: int) -> bool { return (a & b) == a }
+
+// a.is_superset(b)  (line 290)
+fn ps_is_superset(a: int, b: int) -> bool { return (a & b) == b }
+
+// a.is_empty()  (line 294)
+fn ps_is_empty(set: int) -> bool { return set == 0 }
+
+// a.len()  (line 295): popcount over the 16 used bits
+fn ps_len(set: int) -> int {
+    let mut n = 0
+    let mut i = 0
+    while i < 16 {
+        if (set & bit(i)) != 0 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// Display: brace-delimited, comma-separated machine names in stable index order
+// (book "Display", lines 299-306; PermissionSet is BTreeSet-backed so iteration
+// order is stable -- we use index order, which matches name sort for our table).
+fn ps_display(set: int) -> string {
+    let mut out = "{"
+    let mut first = true
+    let mut i = 0
+    while i < 16 {
+        if (set & bit(i)) != 0 {
+            if first {
+                out = f"{out}{perm_name(i)}"
+                first = false
+            } else {
+                out = f"{out}, {perm_name(i)}"
+            }
+        }
+        i = i + 1
+    }
+    return f"{out}}}"
+}
+
+// number of permissions of a given category present in the set
+// (models book "a.by_category()" line 296, reduced to a count query).
+fn ps_count_in_category(set: int, cat: string) -> int {
+    let mut n = 0
+    let mut i = 0
+    while i < 16 {
+        if (set & bit(i)) != 0 && perm_category(i) == cat { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// Constructors  (book "Constructors", lines 276-281)
+fn ps_pure() -> int { return 0 }                       // empty
+fn ps_readonly() -> int {                              // FsRead + Env + Time
+    return bit(P_FS_READ()) | bit(P_ENV()) | bit(P_TIME())
+}
+fn ps_full() -> int { return (1 << 16) - 1 }           // all 16
+
+// =====================================================================
+// SECTION 2. Capability tags  (book "Capability Tags" table, lines 65-84)
+// =====================================================================
+// Maps (module, function) -> the single permission its call requires, or -1 if
+// the function/module is pure (no permission). Pure-computation modules
+// (json, crypto, testing, regex, log, math) require nothing (lines 67-68).
+//
+// We encode the lookup as a switch on a "module.function" key string.
+// Special cases the book calls out:
+//   io::open / file open with mode "rw" needs BOTH FsRead and FsWrite -- handled
+//     by the dedicated cap_required_mode() function below (book lines 150-153).
+//   time.now requires no permission (book line 84), but time.millis needs Time.
+
+fn cap_required(key: string) -> int {
+    match key {
+        // io module (book lines 71-76)
+        "io.open" => P_FS_READ(),          // default-mode "r" (book line 71); see cap_required_mode
+        "io.read_file" => P_FS_READ(),
+        "io.write_file" => P_FS_WRITE(),
+        "io.tcp_connect" => P_NET_CONNECT(),
+        "io.listen" => P_NET_LISTEN(),
+        "io.spawn" => P_PROCESS(),
+        "io.exec" => P_PROCESS(),
+        // file module (book lines 77-78)
+        "file.read_text" => P_FS_READ(),
+        "file.read_lines" => P_FS_READ(),
+        "file.read_bytes" => P_FS_READ(),
+        "file.write_text" => P_FS_WRITE(),
+        "file.write_bytes" => P_FS_WRITE(),
+        "file.append" => P_FS_WRITE(),
+        // http module (book line 79)
+        "http.get" => P_NET_CONNECT(),
+        "http.post" => P_NET_CONNECT(),
+        "http.put" => P_NET_CONNECT(),
+        "http.delete" => P_NET_CONNECT(),
+        // env module (book line 80)
+        "env.get" => P_ENV(),
+        "env.has" => P_ENV(),
+        "env.all" => P_ENV(),
+        "env.args" => P_ENV(),
+        "env.cwd" => P_ENV(),
+        // time module (book lines 81, 84)
+        "time.millis" => P_TIME(),
+        "time.now" => -1,                  // explicitly NO permission (book line 84)
+        // pure modules (book lines 67-68): no permission
+        _ => -1
+    }
+}
+
+// io::open / open with mode (book lines 148-153):
+//   "r"  -> FsRead ; "w"/"a" -> FsWrite ; "rw" -> BOTH.
+// Returns a bitset (not a single index) of the permissions the open requires.
+fn open_required_set(mode: string) -> int {
+    if mode == "r" { return bit(P_FS_READ()) }
+    if mode == "w" { return bit(P_FS_WRITE()) }
+    if mode == "a" { return bit(P_FS_WRITE()) }
+    if mode == "rw" { return bit(P_FS_READ()) | bit(P_FS_WRITE()) }
+    return 0
+}
+
+// =====================================================================
+// SECTION 3. Tier-1 compile-time / link-time capability checking
+//            (book "Tier 1", lines 19-63; "Practical Example 2", 405-430)
+// =====================================================================
+// A synthetic program declares, as a required-permission bitset, the union of
+// every capability tag of every stdlib function it imports (book "Linker
+// union", lines 34-42). Load is permitted iff required is_subset granted
+// (book "Load-time gate", lines 44-59).
+
+// Result of a load attempt.
+fn LOAD_OK() -> int { return 0 }
+fn LOAD_DENIED() -> int { return 1 }
+
+// returns LOAD_OK if required subset-of granted, else LOAD_DENIED
+fn load_decision(required: int, granted: int) -> int {
+    if ps_is_subset(required, granted) { return LOAD_OK() }
+    return LOAD_DENIED()
+}
+
+// The "missing" permissions reported on a denied load (book lines 53-57):
+//   missing = required.difference(granted)
+fn load_missing(required: int, granted: int) -> int {
+    return ps_difference(required, granted)
+}
+
+// =====================================================================
+// SECTION 4. Tier-2 runtime permission gating
+//            (book "Tier 2", lines 86-162; "check_permission", 116-139)
+// =====================================================================
+// Returns "" when allowed; else the EXACT book deny message (line 130):
+//   "Permission denied: <description> (<name>)"
+// granted_set is the runtime PermissionSet. The book's "None => allow all"
+// backwards-compatible case (line 108) is modeled by passing ps_full().
+
+fn check_permission(granted: int, i: int) -> string {
+    if ps_contains(granted, i) { return "" }
+    return f"Permission denied: {perm_desc(i)} ({perm_name(i)})"
+}
+
+// Gate an open() call by mode (book lines 148-153): all required perms must pass.
+fn check_open(granted: int, mode: string) -> string {
+    let req = open_required_set(mode)
+    let mut i = 0
+    while i < 16 {
+        if (req & bit(i)) != 0 {
+            let r = check_permission(granted, i)
+            if r != "" { return r }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// =====================================================================
+// SECTION 5. ScopeConstraints  (book "ScopeConstraints", lines 308-370)
+// =====================================================================
+// Glob matching for FsScoped allowed_paths and host:port for NetScoped
+// allowed_hosts. We avoid string-array iteration (broken in this worktree) by
+// checking one candidate against one glob/host pattern at a time; the fixture
+// suite enumerates the small fixed pattern set explicitly.
+
+fn has_prefix(s: string, p: string) -> bool {
+    if s.len() < p.len() { return false }
+    return s.substring(0, p.len()) == p
+}
+
+fn ends_with(s: string, suf: string) -> bool {
+    if s.len() < suf.len() { return false }
+    return s.substring(s.len() - suf.len(), s.len()) == suf
+}
+
+// glob semantics (book examples lines 334-341):
+//   "/data/**" -> any path under /data/ (recursive)
+//   "/tmp/*"   -> direct children of /tmp/ only (no further "/")
+//   exact      -> equality
+fn matches_glob(path: string, glob: string) -> bool {
+    if ends_with(glob, "**") {
+        let pre = glob.substring(0, glob.len() - 2)
+        return has_prefix(path, pre)
+    }
+    if ends_with(glob, "*") {
+        let pre = glob.substring(0, glob.len() - 1)
+        if !has_prefix(path, pre) { return false }
+        let rest = path.substring(pre.len(), path.len())
+        return !rest.contains("/")
+    }
+    return path == glob
+}
+
+// host:port match (book example lines 348-355). Pattern is "host:port"; an
+// exact string match of the requested "host:port" is required.
+fn matches_host(req: string, pattern: string) -> bool {
+    return req == pattern
+}
+
+// =====================================================================
+// SECTION 6. Tier-3 ResourceLimits / ResourceUsage / ResourceLimitExceeded
+//            (book "Tier 3", lines 164-223; "Practical Example 4", 457-488)
+// =====================================================================
+// sandboxed() preset (book "Presets" table, lines 189-194):
+//   instructions 10_000_000, memory 256 MB, wall 30 s, output 1 MB.
+
+fn LIMIT_INSTR() -> int { return 10000000 }
+fn LIMIT_MEM() -> int { return 268435456 }      // 256 * 1024 * 1024
+fn LIMIT_WALL_MS() -> int { return 30000 }      // 30 seconds in ms
+fn LIMIT_OUTPUT() -> int { return 1048576 }     // 1 MB
+
+// Decision codes for a usage check.
+fn USAGE_OK() -> int { return 0 }
+fn EXC_INSTR() -> int { return 1 }
+fn EXC_MEM() -> int { return 2 }
+fn EXC_WALL() -> int { return 3 }
+fn EXC_OUTPUT() -> int { return 4 }
+
+// Each check uses the book's ">=" trigger condition (book "ResourceLimitExceeded"
+// table, lines 218-223 -- e.g. "{executed} >= {limit}"). limit < 0 means
+// "None / unlimited" (book lines 176-180): never exceeded.
+fn check_instr(limit: int, executed: int) -> int {
+    if limit < 0 { return USAGE_OK() }
+    if executed >= limit { return EXC_INSTR() }
+    return USAGE_OK()
+}
+fn check_mem(limit: int, allocated: int) -> int {
+    if limit < 0 { return USAGE_OK() }
+    if allocated >= limit { return EXC_MEM() }
+    return USAGE_OK()
+}
+fn check_wall(limit: int, elapsed: int) -> int {
+    if limit < 0 { return USAGE_OK() }
+    if elapsed >= limit { return EXC_WALL() }
+    return USAGE_OK()
+}
+fn check_output(limit: int, written: int) -> int {
+    if limit < 0 { return USAGE_OK() }
+    if written >= limit { return EXC_OUTPUT() }
+    return USAGE_OK()
+}
+
+// Book error messages (book "ResourceLimitExceeded" table, lines 218-223).
+fn exc_message(code: int, limit: int, actual: int) -> string {
+    match code {
+        1 => f"Instruction limit exceeded: {actual} >= {limit}",
+        2 => f"Memory limit exceeded: {actual} bytes >= {limit} bytes",
+        3 => f"Wall time limit exceeded: {actual} >= {limit}",
+        4 => f"Output limit exceeded: {actual} bytes >= {limit} bytes",
+        _ => ""
+    }
+}
+
+// =====================================================================
+// SECTION 7. Combined three-tier gate  (book "Combining All Three Tiers", 490-516)
+// =====================================================================
+// A program is admitted iff: Tier-1 load passes (required subset-of granted),
+// AND Tier-2 runtime grants every permission the program actually exercises,
+// AND Tier-3 usage is within all limits. Returns a code:
+//   0 admitted; 1 tier1-denied; 2 tier2-denied; 3 tier3-exceeded.
+fn three_tier_admit(required: int, exercised: int, granted: int,
+                    instr_limit: int, instr_used: int) -> int {
+    if load_decision(required, granted) != LOAD_OK() { return 1 }
+    // every exercised permission must be granted at runtime
+    let mut i = 0
+    while i < 16 {
+        if (exercised & bit(i)) != 0 {
+            if check_permission(granted, i) != "" { return 2 }
+        }
+        i = i + 1
+    }
+    if check_instr(instr_limit, instr_used) != USAGE_OK() { return 3 }
+    return 0
+}
+
+// =====================================================================
+// SECTION 8. Test harness
+// =====================================================================
+// Global pass/fail accounting via module-level mutable counters.
+
+let mut g_checks = 0
+let mut g_failed = 0
+let mut g_first_fail = ""
+
+fn expect_int(label: string, got: int, want: int) {
+    g_checks = g_checks + 1
+    if got != want {
+        g_failed = g_failed + 1
+        if g_first_fail == "" {
+            g_first_fail = f"CHECK_FAILED: {label} expected={want} got={got}"
+        }
+    }
+}
+
+fn expect_bool(label: string, got: bool, want: bool) {
+    g_checks = g_checks + 1
+    if got != want {
+        g_failed = g_failed + 1
+        if g_first_fail == "" {
+            let gs = if got { "true" } else { "false" }
+            let ws = if want { "true" } else { "false" }
+            g_first_fail = f"CHECK_FAILED: {label} expected={ws} got={gs}"
+        }
+    }
+}
+
+fn expect_str(label: string, got: string, want: string) {
+    g_checks = g_checks + 1
+    if got != want {
+        g_failed = g_failed + 1
+        if g_first_fail == "" {
+            g_first_fail = f"CHECK_FAILED: {label} expected={want} got={got}"
+        }
+    }
+}
+
+// =====================================================================
+// SECTION 9. Fixture suite -- every expected value derived from book semantics
+// =====================================================================
+
+fn test_catalogue() {
+    // 16 permissions, names/descriptions/categories from the book tables.
+    expect_int("perm_count", perm_count(), 16)
+    expect_str("name_0", perm_name(0), "fs.read")
+    expect_str("name_1", perm_name(1), "fs.write")
+    expect_str("name_3", perm_name(3), "net.connect")
+    expect_str("name_4", perm_name(4), "net.listen")
+    expect_str("name_6", perm_name(6), "sys.process")
+    expect_str("name_7", perm_name(7), "sys.env")
+    expect_str("name_8", perm_name(8), "sys.time")
+    expect_str("name_9", perm_name(9), "sys.random")
+    expect_str("name_10", perm_name(10), "sandbox.vfs")
+    expect_str("name_15", perm_name(15), "sandbox.output_limited")
+    expect_str("desc_0", perm_desc(0), "Read files and directories")
+    expect_str("desc_3", perm_desc(3), "Open outbound network connections")
+    expect_str("desc_11", perm_desc(11), "Run in a deterministic runtime (fixed time, seeded RNG)")
+    // categories (book four tables)
+    expect_str("cat_0", perm_category(0), "Filesystem")
+    expect_str("cat_2", perm_category(2), "Filesystem")
+    expect_str("cat_3", perm_category(3), "Network")
+    expect_str("cat_5", perm_category(5), "Network")
+    expect_str("cat_6", perm_category(6), "System")
+    expect_str("cat_9", perm_category(9), "System")
+    expect_str("cat_10", perm_category(10), "Sandbox")
+    expect_str("cat_15", perm_category(15), "Sandbox")
+}
+
+fn test_constructors() {
+    // pure() empty (book line 278)
+    expect_int("pure_len", ps_len(ps_pure()), 0)
+    expect_bool("pure_empty", ps_is_empty(ps_pure()), true)
+    // readonly() = FsRead+Env+Time = 3 (book line 279)
+    expect_int("readonly_len", ps_len(ps_readonly()), 3)
+    expect_bool("readonly_has_fsread", ps_contains(ps_readonly(), P_FS_READ()), true)
+    expect_bool("readonly_has_env", ps_contains(ps_readonly(), P_ENV()), true)
+    expect_bool("readonly_has_time", ps_contains(ps_readonly(), P_TIME()), true)
+    expect_bool("readonly_no_fswrite", ps_contains(ps_readonly(), P_FS_WRITE()), false)
+    expect_bool("readonly_no_net", ps_contains(ps_readonly(), P_NET_CONNECT()), false)
+    // full() = 16 (book line 280)
+    expect_int("full_len", ps_len(ps_full()), 16)
+    expect_bool("full_has_all_net", ps_contains(ps_full(), P_NET_LISTEN()), true)
+}
+
+fn test_set_algebra() {
+    let ro = ps_readonly()
+    let full = ps_full()
+    let pure = ps_pure()
+    // subset / superset (book lines 289-290)
+    expect_bool("ro_subset_full", ps_is_subset(ro, full), true)
+    expect_bool("full_subset_ro", ps_is_subset(full, ro), false)
+    expect_bool("pure_subset_ro", ps_is_subset(pure, ro), true)
+    expect_bool("full_superset_ro", ps_is_superset(full, ro), true)
+    expect_bool("ro_superset_full", ps_is_superset(ro, full), false)
+    // union (book line 286)
+    expect_int("union_ro_write_len", ps_len(ps_union(ro, bit(P_FS_WRITE()))), 4)
+    expect_int("union_idem_len", ps_len(ps_union(ro, bit(P_FS_READ()))), 3)
+    expect_int("union_full_ro_len", ps_len(ps_union(full, ro)), 16)
+    // intersection (book line 287)
+    expect_int("inter_ro_full_len", ps_len(ps_intersection(ro, full)), 3)
+    expect_int("inter_ro_pure_len", ps_len(ps_intersection(ro, pure)), 0)
+    // difference (book line 288)
+    expect_int("diff_full_ro_len", ps_len(ps_difference(full, ro)), 13)
+    expect_int("diff_ro_full_len", ps_len(ps_difference(ro, full)), 0)
+    // insert / remove (book lines 292-293)
+    let added = ps_insert(ro, P_NET_CONNECT())
+    expect_int("insert_len", ps_len(added), 4)
+    expect_bool("insert_has", ps_contains(added, P_NET_CONNECT()), true)
+    let removed = ps_remove(ro, P_FS_READ())
+    expect_int("remove_len", ps_len(removed), 2)
+    expect_bool("remove_gone", ps_contains(removed, P_FS_READ()), false)
+    // by_category counts (book line 296): readonly has 1 fs + 2 sys
+    expect_int("ro_cat_fs", ps_count_in_category(ro, "Filesystem"), 1)
+    expect_int("ro_cat_sys", ps_count_in_category(ro, "System"), 2)
+    expect_int("ro_cat_net", ps_count_in_category(ro, "Network"), 0)
+    // full: 3 fs + 3 net + 4 sys + 6 sandbox
+    expect_int("full_cat_fs", ps_count_in_category(full, "Filesystem"), 3)
+    expect_int("full_cat_net", ps_count_in_category(full, "Network"), 3)
+    expect_int("full_cat_sys", ps_count_in_category(full, "System"), 4)
+    expect_int("full_cat_sandbox", ps_count_in_category(full, "Sandbox"), 6)
+}
+
+fn test_display() {
+    // book "Display" (lines 299-306): {fs.read, sys.env} style.
+    let s = ps_insert(ps_insert(ps_empty(), P_FS_READ()), P_ENV())
+    expect_str("display_fsread_env", ps_display(s), "{fs.read, sys.env}")
+    expect_str("display_empty", ps_display(ps_empty()), "{}")
+    // readonly display: index order 0,7,8 -> fs.read, sys.env, sys.time
+    expect_str("display_readonly", ps_display(ps_readonly()), "{fs.read, sys.env, sys.time}")
+}
+
+fn test_capability_tags() {
+    // book "Capability Tags" table (lines 71-84)
+    expect_int("cap_io_open", cap_required("io.open"), P_FS_READ())
+    expect_int("cap_io_read_file", cap_required("io.read_file"), P_FS_READ())
+    expect_int("cap_io_write_file", cap_required("io.write_file"), P_FS_WRITE())
+    expect_int("cap_io_tcp_connect", cap_required("io.tcp_connect"), P_NET_CONNECT())
+    expect_int("cap_io_listen", cap_required("io.listen"), P_NET_LISTEN())
+    expect_int("cap_io_spawn", cap_required("io.spawn"), P_PROCESS())
+    expect_int("cap_io_exec", cap_required("io.exec"), P_PROCESS())
+    expect_int("cap_file_read_text", cap_required("file.read_text"), P_FS_READ())
+    expect_int("cap_file_write_text", cap_required("file.write_text"), P_FS_WRITE())
+    expect_int("cap_file_append", cap_required("file.append"), P_FS_WRITE())
+    expect_int("cap_http_get", cap_required("http.get"), P_NET_CONNECT())
+    expect_int("cap_http_post", cap_required("http.post"), P_NET_CONNECT())
+    expect_int("cap_env_get", cap_required("env.get"), P_ENV())
+    expect_int("cap_env_cwd", cap_required("env.cwd"), P_ENV())
+    expect_int("cap_time_millis", cap_required("time.millis"), P_TIME())
+    // time.now and pure modules require NOTHING (book lines 67-68, 84) -> -1
+    expect_int("cap_time_now", cap_required("time.now"), -1)
+    expect_int("cap_json_parse", cap_required("json.parse"), -1)
+    expect_int("cap_crypto_hash", cap_required("crypto.hash"), -1)
+    expect_int("cap_math_sqrt", cap_required("math.sqrt"), -1)
+    expect_int("cap_regex_match", cap_required("regex.match"), -1)
+    expect_int("cap_log_info", cap_required("log.info"), -1)
+    // open by mode (book lines 150-153)
+    expect_int("open_r_len", ps_len(open_required_set("r")), 1)
+    expect_bool("open_r_isread", ps_contains(open_required_set("r"), P_FS_READ()), true)
+    expect_int("open_w_len", ps_len(open_required_set("w")), 1)
+    expect_bool("open_w_iswrite", ps_contains(open_required_set("w"), P_FS_WRITE()), true)
+    expect_int("open_a_len", ps_len(open_required_set("a")), 1)
+    expect_bool("open_a_iswrite", ps_contains(open_required_set("a"), P_FS_WRITE()), true)
+    expect_int("open_rw_len", ps_len(open_required_set("rw")), 2)
+    expect_bool("open_rw_read", ps_contains(open_required_set("rw"), P_FS_READ()), true)
+    expect_bool("open_rw_write", ps_contains(open_required_set("rw"), P_FS_WRITE()), true)
+}
+
+fn test_tier1_load() {
+    // book "Practical Example 2" (lines 405-430): analysis.shape imports
+    // io::open (FsRead), io::read_to_string (pure), io::write_file (FsWrite),
+    // so required = {FsRead, FsWrite}; loaded under readonly() (FsRead+Env+Time).
+    let required = bit(P_FS_READ()) | bit(P_FS_WRITE())
+    let granted = ps_readonly()
+    expect_int("ex2_load_denied", load_decision(required, granted), LOAD_DENIED())
+    // missing = required.difference(granted) = {FsWrite} (book lines 53-57, 426-430)
+    let missing = load_missing(required, granted)
+    expect_int("ex2_missing_len", ps_len(missing), 1)
+    expect_bool("ex2_missing_is_fswrite", ps_contains(missing, P_FS_WRITE()), true)
+    expect_str("ex2_missing_display", ps_display(missing), "{fs.write}")
+
+    // A pure program (only json/math) requires nothing -> loads under pure().
+    let pure_prog = 0
+    expect_int("pure_prog_load", load_decision(pure_prog, ps_pure()), LOAD_OK())
+
+    // A read-only analysis program (io.read_file + env.get + time.millis)
+    // requires {FsRead, Env, Time} = readonly() exactly -> loads under readonly().
+    let ro_prog = bit(P_FS_READ()) | bit(P_ENV()) | bit(P_TIME())
+    expect_int("ro_prog_load", load_decision(ro_prog, ps_readonly()), LOAD_OK())
+    expect_int("ro_prog_missing", ps_len(load_missing(ro_prog, ps_readonly())), 0)
+
+    // A networking program (http.get) under readonly() -> denied, missing net.connect.
+    let net_prog = bit(P_NET_CONNECT())
+    expect_int("net_prog_load", load_decision(net_prog, ps_readonly()), LOAD_DENIED())
+    expect_str("net_prog_missing", ps_display(load_missing(net_prog, ps_readonly())), "{net.connect}")
+
+    // Under full() everything loads.
+    expect_int("net_prog_full", load_decision(net_prog, ps_full()), LOAD_OK())
+    expect_int("rw_prog_full", load_decision(bit(P_FS_READ()) | bit(P_FS_WRITE()), ps_full()), LOAD_OK())
+}
+
+fn test_tier2_gating() {
+    let ro = ps_readonly()
+    let full = ps_full()
+    let pure = ps_pure()
+    // io::open("data.csv","r") -> FsRead -> readonly allows (book lines 137-138)
+    expect_str("open_r_ro", check_open(ro, "r"), "")
+    // open w -> FsWrite -> readonly denies (book line 152)
+    expect_str("open_w_ro", check_open(ro, "w"),
+        "Permission denied: Write, create, and delete files and directories (fs.write)")
+    // open rw -> needs read AND write -> readonly denies on the write half
+    expect_str("open_rw_ro", check_open(ro, "rw"),
+        "Permission denied: Write, create, and delete files and directories (fs.write)")
+    // open rw under full -> allowed
+    expect_str("open_rw_full", check_open(full, "rw"), "")
+    // direct check_permission deny messages (book line 130 format)
+    expect_str("chk_fswrite_ro", check_permission(ro, P_FS_WRITE()),
+        "Permission denied: Write, create, and delete files and directories (fs.write)")
+    expect_str("chk_net_ro", check_permission(ro, P_NET_CONNECT()),
+        "Permission denied: Open outbound network connections (net.connect)")
+    expect_str("chk_process_ro", check_permission(ro, P_PROCESS()),
+        "Permission denied: Spawn child processes (sys.process)")
+    expect_str("chk_random_ro", check_permission(ro, P_RANDOM()),
+        "Permission denied: Access random number generation (sys.random)")
+    // allowed cases return empty
+    expect_str("chk_fsread_ro", check_permission(ro, P_FS_READ()), "")
+    expect_str("chk_env_ro", check_permission(ro, P_ENV()), "")
+    expect_str("chk_time_ro", check_permission(ro, P_TIME()), "")
+    expect_str("chk_net_full", check_permission(full, P_NET_CONNECT()), "")
+    // pure() denies even fs.read
+    expect_str("chk_fsread_pure", check_permission(pure, P_FS_READ()),
+        "Permission denied: Read files and directories (fs.read)")
+    // book "Practical Example 3" (lines 432-455): tcp_connect under a ctx
+    // narrowed to readonly() -> net.connect deny message.
+    expect_str("ex3_tcp_connect", check_permission(ro, P_NET_CONNECT()),
+        "Permission denied: Open outbound network connections (net.connect)")
+}
+
+fn test_scope_constraints() {
+    // book FsScoped example (lines 334-341): allowed_paths ["/tmp/*", "/data/**"]
+    expect_bool("glob_tmp_direct", matches_glob("/tmp/a.txt", "/tmp/*"), true)
+    expect_bool("glob_tmp_nested", matches_glob("/tmp/sub/a.txt", "/tmp/*"), false)
+    expect_bool("glob_data_direct", matches_glob("/data/x", "/data/**"), true)
+    expect_bool("glob_data_deep", matches_glob("/data/a/b/c.csv", "/data/**"), true)
+    expect_bool("glob_data_outside", matches_glob("/etc/passwd", "/data/**"), false)
+    expect_bool("glob_tmp_outside", matches_glob("/var/log", "/tmp/*"), false)
+    // exact path glob
+    expect_bool("glob_exact_hit", matches_glob("/data/readonly/x", "/data/readonly/x"), true)
+    expect_bool("glob_exact_miss", matches_glob("/data/readonly/y", "/data/readonly/x"), false)
+    // book "Combining All Three Tiers" (lines 503-504): allowed_paths "/data/readonly/**"
+    expect_bool("combine_glob_in", matches_glob("/data/readonly/config.json", "/data/readonly/**"), true)
+    expect_bool("combine_glob_out", matches_glob("/data/secret/key.pem", "/data/readonly/**"), false)
+    // book NetScoped example (lines 348-355): allowed_hosts ["api.example.com:443", "db.internal:5432"]
+    expect_bool("host_api_hit", matches_host("api.example.com:443", "api.example.com:443"), true)
+    expect_bool("host_db_hit", matches_host("db.internal:5432", "db.internal:5432"), true)
+    expect_bool("host_wrong_port", matches_host("api.example.com:80", "api.example.com:443"), false)
+    expect_bool("host_wrong_host", matches_host("evil.com:443", "api.example.com:443"), false)
+}
+
+fn test_tier3_resource_limits() {
+    // sandboxed() preset values (book "Presets" table lines 189-194)
+    expect_int("sandbox_instr", LIMIT_INSTR(), 10000000)
+    expect_int("sandbox_mem", LIMIT_MEM(), 268435456)
+    expect_int("sandbox_wall", LIMIT_WALL_MS(), 30000)
+    expect_int("sandbox_output", LIMIT_OUTPUT(), 1048576)
+    // unlimited() -> -1 (None) never exceeds (book lines 176-180, 190-191)
+    expect_int("unlimited_instr_ok", check_instr(-1, 999999999999), USAGE_OK())
+    expect_int("unlimited_mem_ok", check_mem(-1, 999999999999), USAGE_OK())
+    // instruction limit: book ">= limit" trigger (line 220, 478-480)
+    expect_int("instr_under", check_instr(LIMIT_INSTR(), 9999999), USAGE_OK())
+    expect_int("instr_at", check_instr(LIMIT_INSTR(), 10000000), EXC_INSTR())   // 10M >= 10M
+    expect_int("instr_over", check_instr(LIMIT_INSTR(), 10000001), EXC_INSTR())
+    // memory limit (book line 221)
+    expect_int("mem_under", check_mem(LIMIT_MEM(), 268435455), USAGE_OK())
+    expect_int("mem_at", check_mem(LIMIT_MEM(), 268435456), EXC_MEM())
+    // wall time (book line 222)
+    expect_int("wall_under", check_wall(LIMIT_WALL_MS(), 29999), USAGE_OK())
+    expect_int("wall_at", check_wall(LIMIT_WALL_MS(), 30000), EXC_WALL())
+    // output (book line 223)
+    expect_int("output_under", check_output(LIMIT_OUTPUT(), 1048575), USAGE_OK())
+    expect_int("output_at", check_output(LIMIT_OUTPUT(), 1048576), EXC_OUTPUT())
+    // exact error message strings (book "ResourceLimitExceeded" table lines 218-223)
+    expect_str("msg_instr", exc_message(EXC_INSTR(), 10000000, 10000000),
+        "Instruction limit exceeded: 10000000 >= 10000000")
+    expect_str("msg_mem", exc_message(EXC_MEM(), 268435456, 268435456),
+        "Memory limit exceeded: 268435456 bytes >= 268435456 bytes")
+    expect_str("msg_wall", exc_message(EXC_WALL(), 30000, 30000),
+        "Wall time limit exceeded: 30000 >= 30000")
+    expect_str("msg_output", exc_message(EXC_OUTPUT(), 1048576, 1048576),
+        "Output limit exceeded: 1048576 bytes >= 1048576 bytes")
+}
+
+fn test_three_tier_combined() {
+    // book "Combining All Three Tiers" (lines 490-516):
+    // granted = readonly(); program that only reads files + env + time, well
+    // under limits -> admitted (code 0).
+    let granted = ps_readonly()
+    let req_ro = bit(P_FS_READ()) | bit(P_ENV())
+    expect_int("combine_admit", three_tier_admit(req_ro, req_ro, granted, LIMIT_INSTR(), 5000), 0)
+    // program that imports write -> tier-1 denied (code 1)
+    let req_w = bit(P_FS_READ()) | bit(P_FS_WRITE())
+    expect_int("combine_tier1_deny", three_tier_admit(req_w, req_w, granted, LIMIT_INSTR(), 5000), 1)
+    // program whose declared required passes tier-1 (subset of readonly) but at
+    // runtime exercises net.connect that the granted set lacks -> tier-2 (code 2).
+    // (required understates what it does -- defense-in-depth, book lines 86-92.)
+    expect_int("combine_tier2_deny",
+        three_tier_admit(bit(P_FS_READ()), bit(P_FS_READ()) | bit(P_NET_CONNECT()), granted, LIMIT_INSTR(), 5000), 2)
+    // program admitted by tier-1+2 but runs away on instructions -> tier-3 (code 3).
+    expect_int("combine_tier3_deny",
+        three_tier_admit(req_ro, req_ro, granted, LIMIT_INSTR(), 10000000), 3)
+    // full grant + unlimited -> a heavy program is admitted.
+    expect_int("combine_full_admit",
+        three_tier_admit(ps_full(), ps_full(), ps_full(), -1, 999999999), 0)
+}
+
+// =====================================================================
+// SECTION 10. Exhaustive catalogue round-trip + envelope checks
+// =====================================================================
+// Each permission has a stable name, a non-empty description, and a category
+// from one of the four groups (book lines 264-267). Verify the whole 16-entry
+// catalogue mechanically rather than spot-checking.
+
+fn is_valid_category(cat: string) -> bool {
+    return cat == "Filesystem" || cat == "Network" || cat == "System" || cat == "Sandbox"
+}
+
+fn test_catalogue_exhaustive() {
+    // every index 0..15 has a known (non-"unknown") name + valid category
+    let mut i = 0
+    let mut named = 0
+    let mut categorized = 0
+    while i < 16 {
+        if perm_name(i) != "unknown" { named = named + 1 }
+        if is_valid_category(perm_category(i)) { categorized = categorized + 1 }
+        i = i + 1
+    }
+    expect_int("all_named", named, 16)
+    expect_int("all_categorized", categorized, 16)
+    // index 16 (out of range) -> "unknown"
+    expect_str("oob_name", perm_name(16), "unknown")
+
+    // full() bit-by-bit: every permission present
+    let full = ps_full()
+    let mut present = 0
+    let mut j = 0
+    while j < 16 {
+        if ps_contains(full, j) { present = present + 1 }
+        j = j + 1
+    }
+    expect_int("full_all_present", present, 16)
+
+    // pure() bit-by-bit: nothing present
+    let pure = ps_pure()
+    let mut absent = 0
+    let mut k = 0
+    while k < 16 {
+        if !ps_contains(pure, k) { absent = absent + 1 }
+        k = k + 1
+    }
+    expect_int("pure_all_absent", absent, 16)
+
+    // insert-then-remove round trips back to the original set for every perm.
+    let base = ps_readonly()
+    let mut rt_ok = 0
+    let mut m = 0
+    while m < 16 {
+        let after = ps_remove(ps_insert(base, m), m)
+        // if m was already in base, insert is a no-op and remove takes it out;
+        // so the round trip equals base only when m was NOT originally present.
+        if !ps_contains(base, m) {
+            if after == base { rt_ok = rt_ok + 1 }
+        } else {
+            // m was present: insert no-op, remove deletes it -> base without m
+            if after == ps_remove(base, m) { rt_ok = rt_ok + 1 }
+        }
+        m = m + 1
+    }
+    expect_int("insert_remove_roundtrip", rt_ok, 16)
+}
+
+// =====================================================================
+// SECTION 11. Program-manifest scenario matrix
+// =====================================================================
+// Each synthetic program is described by (required-permission bitset,
+// runtime-exercised bitset, instructions). We assert its admission outcome
+// under three policies the book names: pure(), readonly(), full(), plus a
+// sandboxed() instruction cap. Outcomes are derived from book decision rules.
+//
+// Programs (capability tags from book "Capability Tags" table):
+//   "json_report"  : json.parse + math.sqrt           -> required 0           (pure)
+//   "log_analyzer" : file.read_text + env.get + time.millis -> {FsRead,Env,Time}
+//   "csv_writer"   : file.read_text + file.write_text  -> {FsRead,FsWrite}
+//   "web_scraper"  : http.get + file.write_text        -> {NetConnect,FsWrite}
+//   "deployer"     : io.spawn + io.exec + file.write_text -> {Process,FsWrite}
+
+fn prog_required(name: string) -> int {
+    match name {
+        "json_report" => 0,
+        "log_analyzer" => bit(P_FS_READ()) | bit(P_ENV()) | bit(P_TIME()),
+        "csv_writer" => bit(P_FS_READ()) | bit(P_FS_WRITE()),
+        "web_scraper" => bit(P_NET_CONNECT()) | bit(P_FS_WRITE()),
+        "deployer" => bit(P_PROCESS()) | bit(P_FS_WRITE()),
+        _ => 0
+    }
+}
+
+fn test_scenario_matrix() {
+    // json_report: requires nothing -> loads under ANY policy including pure().
+    expect_int("json_under_pure", load_decision(prog_required("json_report"), ps_pure()), LOAD_OK())
+    expect_int("json_under_readonly", load_decision(prog_required("json_report"), ps_readonly()), LOAD_OK())
+    expect_int("json_under_full", load_decision(prog_required("json_report"), ps_full()), LOAD_OK())
+
+    // log_analyzer: needs {FsRead,Env,Time} = readonly() exactly.
+    expect_int("log_under_pure", load_decision(prog_required("log_analyzer"), ps_pure()), LOAD_DENIED())
+    expect_int("log_under_readonly", load_decision(prog_required("log_analyzer"), ps_readonly()), LOAD_OK())
+    expect_int("log_under_full", load_decision(prog_required("log_analyzer"), ps_full()), LOAD_OK())
+    // under pure(), all 3 are missing
+    expect_int("log_missing_count", ps_len(load_missing(prog_required("log_analyzer"), ps_pure())), 3)
+
+    // csv_writer: {FsRead,FsWrite} -> readonly denies (FsWrite missing), full ok.
+    expect_int("csv_under_readonly", load_decision(prog_required("csv_writer"), ps_readonly()), LOAD_DENIED())
+    expect_str("csv_missing", ps_display(load_missing(prog_required("csv_writer"), ps_readonly())), "{fs.write}")
+    expect_int("csv_under_full", load_decision(prog_required("csv_writer"), ps_full()), LOAD_OK())
+
+    // web_scraper: {NetConnect,FsWrite} -> readonly denies both, full ok.
+    expect_int("web_under_readonly", load_decision(prog_required("web_scraper"), ps_readonly()), LOAD_DENIED())
+    expect_int("web_missing_count", ps_len(load_missing(prog_required("web_scraper"), ps_readonly())), 2)
+    expect_str("web_missing", ps_display(load_missing(prog_required("web_scraper"), ps_readonly())), "{fs.write, net.connect}")
+    expect_int("web_under_full", load_decision(prog_required("web_scraper"), ps_full()), LOAD_OK())
+
+    // deployer: {Process,FsWrite} -> readonly denies both, full ok.
+    expect_int("deployer_under_readonly", load_decision(prog_required("deployer"), ps_readonly()), LOAD_DENIED())
+    expect_str("deployer_missing", ps_display(load_missing(prog_required("deployer"), ps_readonly())), "{fs.write, sys.process}")
+    expect_int("deployer_under_full", load_decision(prog_required("deployer"), ps_full()), LOAD_OK())
+
+    // A custom intermediate policy: readonly() + FsWrite admits csv_writer but
+    // still denies web_scraper (net.connect missing) and deployer (process missing).
+    let rw_policy = ps_insert(ps_readonly(), P_FS_WRITE())
+    expect_int("csv_under_rw", load_decision(prog_required("csv_writer"), rw_policy), LOAD_OK())
+    expect_int("web_under_rw", load_decision(prog_required("web_scraper"), rw_policy), LOAD_DENIED())
+    expect_str("web_missing_rw", ps_display(load_missing(prog_required("web_scraper"), rw_policy)), "{net.connect}")
+    expect_int("deployer_under_rw", load_decision(prog_required("deployer"), rw_policy), LOAD_DENIED())
+
+    // A network policy: readonly() + NetConnect admits a pure-network fetch but
+    // not web_scraper (still needs FsWrite).
+    let net_policy = ps_insert(ps_readonly(), P_NET_CONNECT())
+    expect_int("fetch_under_net", load_decision(bit(P_NET_CONNECT()), net_policy), LOAD_OK())
+    expect_int("web_under_net", load_decision(prog_required("web_scraper"), net_policy), LOAD_DENIED())
+    expect_str("web_missing_net", ps_display(load_missing(prog_required("web_scraper"), net_policy)), "{fs.write}")
+}
+
+// =====================================================================
+// SECTION 12. Defense-in-depth: tier-1 pass but tier-2 runtime narrowing
+// =====================================================================
+// Book Tier-2 intro (lines 86-92, 432-455): a program loaded with full() at
+// compile time can be narrowed at runtime to readonly(); any disallowed call
+// then fails with the book deny message. We model "loaded under full, run under
+// readonly" and assert each exercised capability's runtime outcome.
+
+fn test_defense_in_depth() {
+    let compile_grant = ps_full()       // loaded permissively (book line 89)
+    let runtime_grant = ps_readonly()   // narrowed at runtime (book lines 90-91)
+
+    // web_scraper loads fine at compile time under full().
+    expect_int("did_load", load_decision(prog_required("web_scraper"), compile_grant), LOAD_OK())
+    // ...but at runtime, its http.get (net.connect) is blocked.
+    expect_str("did_net_blocked", check_permission(runtime_grant, P_NET_CONNECT()),
+        "Permission denied: Open outbound network connections (net.connect)")
+    // ...and its file.write_text (fs.write) is blocked.
+    expect_str("did_write_blocked", check_permission(runtime_grant, P_FS_WRITE()),
+        "Permission denied: Write, create, and delete files and directories (fs.write)")
+
+    // deployer's io.spawn (sys.process) is blocked at runtime under readonly().
+    expect_str("did_process_blocked", check_permission(runtime_grant, P_PROCESS()),
+        "Permission denied: Spawn child processes (sys.process)")
+
+    // log_analyzer exercises only readonly capabilities -> all allowed at runtime.
+    expect_str("did_read_ok", check_permission(runtime_grant, P_FS_READ()), "")
+    expect_str("did_env_ok", check_permission(runtime_grant, P_ENV()), "")
+    expect_str("did_time_ok", check_permission(runtime_grant, P_TIME()), "")
+}
+
+// =====================================================================
+// SECTION 13. Scope-constraint admission scenarios
+// =====================================================================
+// Book "Combining All Three Tiers" (lines 502-504) scopes FsRead to
+// "/data/readonly/**". A read of a path inside the scope is admitted; outside
+// is denied even though the bare FsRead permission is granted.
+
+fn scoped_read_ok(path: string) -> bool {
+    // permission granted (FsRead in readonly) AND path within the allowed glob
+    return ps_contains(ps_readonly(), P_FS_READ()) && matches_glob(path, "/data/readonly/**")
+}
+
+fn test_scope_admission() {
+    expect_bool("scope_in_config", scoped_read_ok("/data/readonly/config.json"), true)
+    expect_bool("scope_in_nested", scoped_read_ok("/data/readonly/sub/dir/x.csv"), true)
+    expect_bool("scope_out_secret", scoped_read_ok("/data/secret/key.pem"), false)
+    expect_bool("scope_out_etc", scoped_read_ok("/etc/passwd"), false)
+    expect_bool("scope_boundary", scoped_read_ok("/data/readonly"), false) // no trailing slash -> not under glob prefix "/data/readonly/"
+
+    // NetScoped admission (book lines 346-355): connect allowed only to listed host:port.
+    let allowed_a = "api.example.com:443"
+    let allowed_b = "db.internal:5432"
+    expect_bool("netscope_api", matches_host("api.example.com:443", allowed_a), true)
+    expect_bool("netscope_db", matches_host("db.internal:5432", allowed_b), true)
+    expect_bool("netscope_api_wrongport", matches_host("api.example.com:8080", allowed_a), false)
+    expect_bool("netscope_unlisted", matches_host("metrics.io:443", allowed_a), false)
+}
+
+fn main() {
+    test_catalogue()
+    test_constructors()
+    test_set_algebra()
+    test_display()
+    test_capability_tags()
+    test_tier1_load()
+    test_tier2_gating()
+    test_scope_constraints()
+    test_tier3_resource_limits()
+    test_three_tier_combined()
+    test_catalogue_exhaustive()
+    test_scenario_matrix()
+    test_defense_in_depth()
+    test_scope_admission()
+
+    if g_failed == 0 {
+        print(f"checks_run={g_checks}")
+        print("ALL_CHECKS_PASSED")
+    } else {
+        print(f"checks_run={g_checks} failed={g_failed}")
+        print(g_first_fail)
+    }
+}
+
+main()

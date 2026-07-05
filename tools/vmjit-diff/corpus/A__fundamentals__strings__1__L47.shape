@@ -1,0 +1,2 @@
+let s = "plain text";
+let escaped = "quote: \" | newline: \n | tab: \t";

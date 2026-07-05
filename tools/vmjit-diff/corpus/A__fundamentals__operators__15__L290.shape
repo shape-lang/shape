@@ -1,0 +1,12 @@
+type Vec2 { x: int, y: int }
+
+impl Neg for Vec2 {
+  method neg() -> Vec2 {
+    Vec2 { x: -self.x, y: -self.y }
+  }
+}
+
+let v = Vec2 { x: 3, y: -4 }
+let n = -v
+print(n.x)   // -3
+print(n.y)   // 4

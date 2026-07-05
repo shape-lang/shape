@@ -1,0 +1,8 @@
+enum Status { Active, Inactive, Pending, Banned }
+
+let s = Status::Pending
+
+match s {
+    Status::Active => print("active"),
+    _              => print("not active"),
+}

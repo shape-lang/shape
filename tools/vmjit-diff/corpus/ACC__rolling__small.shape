@@ -1,0 +1,65 @@
+// small.shape — Book slice: stdlib/core/rolling
+// Exercises the chapter's core: windowed aggregations + linear recurrence.
+//
+// Methodology: book-PRIMARY. Every construct below comes from
+// stdlib/core/rolling.mdx:
+//   - Import idiom: `use std::core::utils::rolling` (mdx line 18, 35).
+//   - Call form: `rolling::rolling_mean(prices, 3)` (mdx lines 37-38).
+//   - Functions: rolling_sum / rolling_mean / rolling_std / rolling_variance
+//     (mdx table lines 28-31) and rolling::linear_recurrence (mdx line 43).
+//   - linear_recurrence semantics: y[t] = y[t-1]*decay + input[t] (mdx line 48).
+//
+// EXPECTED VALUES derived from BOOK SEMANTICS, written BEFORE first run.
+//
+// Windowed-output shape: the book says each function "returns a windowed
+// output of the same shape" (mdx line 24) — i.e. same length as `series`.
+// The book is SILENT on what the first (period-1) positions hold; standard
+// rolling-window semantics (and the math/finance cross-refs) imply the first
+// (period-1) slots are undefined/NaN until the window fills. We therefore
+// only assert positions at index >= period-1, where the value is well-defined.
+
+use std::core::utils::rolling
+// BOOK-GAP: rolling.mdx never shows how to obtain `assert`; import borrowed
+// from std::core::utils::testing (used across sibling book-acceptance slices).
+from std::core::utils::testing use { assert }
+
+// --- Fixtures ---
+let prices = [100.0, 101.0, 102.5, 101.8, 103.0, 104.2]
+
+// rolling_sum, period 3: windowed sums at index >= 2
+//   idx2 = 100.0+101.0+102.5 = 303.5
+//   idx3 = 101.0+102.5+101.8 = 305.3
+//   idx4 = 102.5+101.8+103.0 = 307.3
+//   idx5 = 101.8+103.0+104.2 = 309.0
+let sum_3 = rolling::rolling_sum(prices, 3)
+assert(sum_3[2] == 303.5)
+assert(sum_3[5] == 309.0)
+
+// rolling_mean, period 3 = rolling_sum / 3
+//   idx5 = 309.0 / 3 = 103.0
+let mean_3 = rolling::rolling_mean(prices, 3)
+assert(mean_3[5] == 103.0)
+
+// rolling_std (population std, divide by period) and rolling_variance == std^2
+// (mdx line 31: "rolling_variance (= rolling_std^2)"). We assert the algebraic
+// relationship variance[i] == std[i]*std[i] rather than a transcendental value.
+let std_3 = rolling::rolling_std(prices, 3)
+let var_3 = rolling::rolling_variance(prices, 3)
+let d = var_3[5] - (std_3[5] * std_3[5])
+assert(d < 0.0000001)
+assert(d > -0.0000001)
+
+// linear_recurrence: y[t] = y[t-1]*decay + input[t], seed initial_value.
+// signal = unit impulse then a second impulse; decay 0.9, init 0.0.
+//   y0 = 0.0*0.9 + 1.0 = 1.0
+//   y1 = 1.0*0.9 + 0.0 = 0.9
+//   y2 = 0.9*0.9 + 0.0 = 0.81
+let signal = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+let smoothed = rolling::linear_recurrence(signal, 0.9, 0.0)
+assert(smoothed[0] == 1.0)
+assert(smoothed[1] == 0.9)
+let e2 = smoothed[2] - 0.81
+assert(e2 < 0.0000001)
+assert(e2 > -0.0000001)
+
+print("ALL_CHECKS_PASSED")

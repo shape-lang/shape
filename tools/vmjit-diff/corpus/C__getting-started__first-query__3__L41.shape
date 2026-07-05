@@ -1,0 +1,6 @@
+let readings = [18, 22, 27, 19, 30, 25]
+
+let threshold = 24
+let high = readings.filter(|v| v > threshold)
+
+print(high)   // [27, 30, 25]

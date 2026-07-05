@@ -1,0 +1,16 @@
+// Probe 2: with explicit imports per book preamble
+from std::core::intrinsics use { Table }
+from std::core::queryable use { Queryable }
+
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+let events: Table<Event> =
+    [1, 50.0,  "alpha"],
+    [2, 75.5,  "beta"],
+    [3, 120.0, "gamma"]
+
+print(events.count())

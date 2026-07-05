@@ -1,0 +1,77 @@
+// small.shape — DateTime slice, book-driven, fully deterministic.
+// Exercises construction (parse / from_epoch / literal), component access,
+// day-info, formatting, arithmetic, timezone conversion, comparisons.
+// Determinism: fixed epoch + fixed parsed datetimes only. No now()/utc()/to_local().
+from std::core::intrinsics use { DateTime }
+
+let mut checks = 0
+
+fn check(name: string, cond: bool) {
+    if cond {
+        checks = checks + 1
+    } else {
+        print(f"CHECK_FAILED: {name}")
+    }
+}
+
+// --- Construction: parse (book "Parsing Strings") ---
+let dt = DateTime.parse("2024-06-15T14:30:45+00:00")
+check("year", dt.year() == 2024)
+check("month", dt.month() == 6)
+check("day", dt.day() == 15)
+check("hour", dt.hour() == 14)
+check("minute", dt.minute() == 30)
+check("second", dt.second() == 45)
+
+// --- Construction: from_epoch (book "From Epoch") ---
+let ep = DateTime.from_epoch(1705314600000)
+check("from_epoch iso", ep.iso8601() == "2024-01-15T10:30:00+00:00")
+
+// --- Construction: literal (book "DateTime Literals") ---
+let lit = @"2024-01-15"
+check("literal year", lit.year() == 2024)
+
+// --- Formatting (book "Custom Format" + "Standard Formats") ---
+check("fmt slashes", dt.format("%Y/%m/%d %H:%M") == "2024/06/15 14:30")
+check("fmt month name", dt.format("%B %d, %Y") == "June 15, 2024")
+check("fmt weekday", dt.format("%A") == "Saturday")
+check("iso8601", dt.iso8601() == "2024-06-15T14:30:45+00:00")
+check("unix_ts", dt.unix_timestamp() == 1718461845)
+
+// --- Day Information (book "Day Information"; 2024-01-06 is Saturday) ---
+let sat = DateTime.parse("2024-01-06T12:00:00+00:00")
+check("day_of_week", sat.day_of_week() == 5)
+check("is_weekend", sat.is_weekend())
+check("is_weekday false", sat.is_weekday() == false)
+check("day_of_year", sat.day_of_year() == 6)
+check("week_of_year", sat.week_of_year() == 1)
+
+// --- Arithmetic (book "Adding Time" + clamping) ---
+let jan30 = DateTime.parse("2024-01-30T12:00:00+00:00")
+check("add_days", jan30.add_days(1).day() == 31)
+check("add_hours", jan30.add_hours(5).hour() == 17)
+let jan31 = DateTime.parse("2024-01-31T00:00:00+00:00")
+check("add_months clamp", jan31.add_months(1).day() == 29)
+
+// --- Operator arithmetic with duration suffixes (book "Operator Arithmetic") ---
+let a = DateTime.parse("2024-06-15T12:00:00+00:00")
+check("plus 3d", (a + 3d).day() == 18)
+check("minus 1w", (a - 1w).day() == 8)
+
+// --- Timezone (book "Converting Between Timezones") ---
+let nyc = a.to_timezone("America/New_York")
+check("to_timezone hour", nyc.hour() == 8)
+check("to_utc roundtrip", nyc.to_utc().hour() == 12)
+
+// --- Comparisons (book "Comparisons") ---
+let morning = DateTime.parse("2024-03-15T08:00:00+00:00")
+let evening = DateTime.parse("2024-03-15T22:30:00+00:00")
+check("is_before", morning.is_before(evening))
+check("is_after", evening.is_after(morning))
+check("is_same_day", morning.is_same_day(evening))
+
+if checks == 28 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"INCOMPLETE: {checks}/28")
+}

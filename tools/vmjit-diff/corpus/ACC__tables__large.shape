@@ -1,0 +1,615 @@
+// large.shape — Tables slice  (book: fundamentals/tables.mdx)
+//
+// REAL-WORLD APP: a deterministic in-memory analytics engine over fixed
+// Table<T> datasets.  It models a small commerce warehouse (orders, customers,
+// products, regions, shipments) and answers ~120 analytic queries, each
+// expressed with the book's Table query surface (row-literal construction +
+// filter + count + chaining) and ASSERTED against an expected value that was
+// computed BY HAND from the fixed dataset using BOOK SEMANTICS, written before
+// the first run.
+//
+// ---------------------------------------------------------------------------
+// WHY THIS SHAPE (book-acceptance honesty notes — full detail in REPORT.md):
+//
+//   * The book ("Table Methods", "Loading Tables", "Query Syntax") presents
+//     filter / count / orderBy / map / select / head / tail / limit / forEach
+//     as directly callable on Table<T>.  On the shipped compiler ONLY an
+//     explicit `impl Queryable for Table { ... }` makes ANY method reachable;
+//     without it every call fails with "Table cannot have fields".  (BOOK-GAP)
+//
+//   * Of the documented methods, the ones that actually work end-to-end on the
+//     shipped compiler are: filter, count, head, tail, and forEach-for-print.
+//     orderBy IGNORES its direction argument (always ascending), map/select are
+//     "Not implemented", limit returns a carrier whose downstream iteration is
+//     "Not implemented", and extracting row fields into an outer captured Vec
+//     via forEach is "Not implemented".  (BOOK-WRONG / defects — REPORT.md.)
+//
+//   * Because reliable, deterministic, MACHINE-PROOFABLE assertions are only
+//     possible through filter + count + chaining, this engine builds its entire
+//     analytic surface from those primitives.  Every count is a hand-computed
+//     expected value.  This is the largest honest machine-proofable program the
+//     shipped Table API supports.
+// ---------------------------------------------------------------------------
+
+from std::core::queryable use { Queryable }
+
+// ===========================================================================
+// Row types
+// ===========================================================================
+
+type Order {
+  id: int,
+  customer_id: int,
+  product_id: int,
+  region_id: int,
+  qty: int,
+  amount: number,
+  status: string
+}
+
+type Customer {
+  id: int,
+  region_id: int,
+  tier: string,
+  active: int
+}
+
+type Product {
+  id: int,
+  category: string,
+  price: number,
+  in_stock: int
+}
+
+type Region {
+  id: int,
+  name: string,
+  population: int
+}
+
+type Shipment {
+  order_id: int,
+  weight: number,
+  expedited: int,
+  carrier: string
+}
+
+// ===========================================================================
+// Queryable impl — required to reach the documented Table methods at all.
+// (BOOK-GAP: the book never shows this is necessary.)
+// ===========================================================================
+
+impl Queryable for Table {
+    method filter(predicate) { self.filter(predicate) }
+    method count() { self.count() }
+    method head(n) { self.head(n) }
+    method tail(n) { self.tail(n) }
+    method execute() { self }
+}
+
+// ===========================================================================
+// Assertion helper.  Shape has no exceptions; we accumulate a fail count and a
+// first-failure message, then report at the end.
+// ===========================================================================
+
+type CheckState {
+  fails: int,
+  first_msg: string
+}
+
+fn check_eq(st: CheckState, name: string, expected: int, got: int) -> CheckState {
+  if expected == got {
+    st
+  } else {
+    let msg = if st.fails == 0 {
+      f"CHECK_FAILED: {name} expected={expected} got={got}"
+    } else {
+      st.first_msg
+    }
+    CheckState { fails: st.fails + 1, first_msg: msg }
+  }
+}
+
+// ===========================================================================
+// Fixed datasets.  All values are literal and deterministic.
+//
+//   ORDERS (id, customer_id, product_id, region_id, qty, amount, status)
+//   20 rows.  Hand-reference table is maintained in REPORT.md.
+// ===========================================================================
+
+fn orders() -> Table<Order> {
+  let t: Table<Order> =
+      [ 1,  1, 100, 1, 2,  40.0,  "shipped"],
+      [ 2,  1, 101, 1, 1,  15.0,  "shipped"],
+      [ 3,  2, 100, 2, 5, 100.0,  "pending"],
+      [ 4,  2, 102, 2, 3,  90.0,  "shipped"],
+      [ 5,  3, 103, 3, 1,  30.0,  "cancelled"],
+      [ 6,  3, 100, 3, 4,  80.0,  "shipped"],
+      [ 7,  4, 101, 1, 2,  30.0,  "pending"],
+      [ 8,  4, 104, 1, 1,  60.0,  "shipped"],
+      [ 9,  5, 102, 2, 6, 180.0,  "shipped"],
+      [10,  5, 103, 2, 2,  60.0,  "pending"],
+      [11,  6, 100, 3, 3,  60.0,  "shipped"],
+      [12,  6, 105, 3, 1, 250.0,  "shipped"],
+      [13,  7, 101, 1, 4,  60.0,  "cancelled"],
+      [14,  7, 104, 1, 2, 120.0,  "shipped"],
+      [15,  8, 102, 2, 1,  30.0,  "pending"],
+      [16,  8, 100, 2, 7, 140.0,  "shipped"],
+      [17,  9, 105, 3, 2, 500.0,  "shipped"],
+      [18,  9, 103, 3, 1,  30.0,  "shipped"],
+      [19, 10, 101, 1, 3,  45.0,  "pending"],
+      [20, 10, 100, 1, 5, 100.0,  "shipped"]
+  t
+}
+
+//   CUSTOMERS (id, region_id, tier, active) — 10 rows.
+fn customers() -> Table<Customer> {
+  let t: Table<Customer> =
+      [ 1, 1, "gold",     1],
+      [ 2, 2, "silver",   1],
+      [ 3, 3, "bronze",   0],
+      [ 4, 1, "gold",     1],
+      [ 5, 2, "silver",   1],
+      [ 6, 3, "bronze",   1],
+      [ 7, 1, "silver",   0],
+      [ 8, 2, "gold",     1],
+      [ 9, 3, "gold",     1],
+      [10, 1, "bronze",   1]
+  t
+}
+
+//   PRODUCTS (id, category, price, in_stock) — 6 rows.
+fn products() -> Table<Product> {
+  let t: Table<Product> =
+      [100, "widget",   20.0, 1],
+      [101, "widget",   15.0, 1],
+      [102, "gadget",   30.0, 1],
+      [103, "gadget",   30.0, 0],
+      [104, "gizmo",    60.0, 1],
+      [105, "gizmo",   250.0, 0]
+  t
+}
+
+//   REGIONS (id, name, population) — 3 rows.
+fn regions() -> Table<Region> {
+  let t: Table<Region> =
+      [1, "north", 1000000],
+      [2, "south",  500000],
+      [3, "east",   250000]
+  t
+}
+
+//   SHIPMENTS (order_id, weight, expedited, carrier) — 14 rows (shipped orders).
+fn shipments() -> Table<Shipment> {
+  let t: Table<Shipment> =
+      [ 1,  2.5, 0, "ups"],
+      [ 2,  1.0, 0, "ups"],
+      [ 4,  4.0, 1, "fedex"],
+      [ 6,  3.5, 0, "dhl"],
+      [ 8,  1.5, 1, "fedex"],
+      [ 9,  6.0, 0, "ups"],
+      [11,  3.0, 0, "dhl"],
+      [12,  0.5, 1, "fedex"],
+      [14,  2.0, 1, "ups"],
+      [16,  7.0, 0, "dhl"],
+      [17,  1.0, 1, "fedex"],
+      [18,  0.5, 0, "ups"],
+      [20,  5.0, 0, "dhl"],
+      [ 3,  5.5, 0, "ups"]
+  t
+}
+
+type Reading {
+  sensor_id: int,
+  hour: int,
+  temp: number,
+  humidity: int,
+  ok: int
+}
+
+//   READINGS (sensor_id, hour, temp, humidity, ok) — 24 rows.
+//   3 sensors (1,2,3), hours 0..7 each.  Hand-reference in REPORT.md.
+fn readings() -> Table<Reading> {
+  let t: Table<Reading> =
+      [1, 0, 18.0, 40, 1],
+      [1, 1, 19.5, 42, 1],
+      [1, 2, 21.0, 45, 1],
+      [1, 3, 23.5, 50, 1],
+      [1, 4, 26.0, 55, 0],
+      [1, 5, 28.5, 60, 0],
+      [1, 6, 24.0, 52, 1],
+      [1, 7, 20.0, 44, 1],
+      [2, 0, 15.0, 30, 1],
+      [2, 1, 16.5, 33, 1],
+      [2, 2, 17.0, 35, 1],
+      [2, 3, 18.5, 38, 1],
+      [2, 4, 22.0, 48, 1],
+      [2, 5, 25.0, 58, 0],
+      [2, 6, 27.5, 62, 0],
+      [2, 7, 21.0, 46, 1],
+      [3, 0, 30.0, 70, 0],
+      [3, 1, 31.5, 72, 0],
+      [3, 2, 29.0, 68, 1],
+      [3, 3, 24.0, 55, 1],
+      [3, 4, 19.0, 40, 1],
+      [3, 5, 17.5, 36, 1],
+      [3, 6, 16.0, 33, 1],
+      [3, 7, 15.5, 31, 1]
+  t
+}
+
+// ===========================================================================
+// Query suite.  Each block: a filter/chain over a dataset, then count(), then
+// an assertion vs a hand-computed expected value.
+// ===========================================================================
+
+fn main() {
+  let mut st = CheckState { fails: 0, first_msg: "" }
+
+  let ords = orders()
+  let custs = customers()
+  let prods = products()
+  let regs = regions()
+  let ships = shipments()
+
+  // ----- Cardinality of base tables -----------------------------------------
+  st = check_eq(st, "orders_count", 20, ords.count())
+  st = check_eq(st, "customers_count", 10, custs.count())
+  st = check_eq(st, "products_count", 6, prods.count())
+  st = check_eq(st, "regions_count", 3, regs.count())
+  st = check_eq(st, "shipments_count", 14, ships.count())
+
+  // ----- ORDERS by status ---------------------------------------------------
+  // shipped: ids 1,2,4,6,8,9,11,12,14,16,17,18,20 = 13
+  st = check_eq(st, "orders_shipped",
+      13, ords.filter(|o| o.status == "shipped").count())
+  // pending: ids 3,7,10,15,19 = 5
+  st = check_eq(st, "orders_pending",
+      5, ords.filter(|o| o.status == "pending").count())
+  // cancelled: ids 5,13 = 2
+  st = check_eq(st, "orders_cancelled",
+      2, ords.filter(|o| o.status == "cancelled").count())
+  // not cancelled = 20 - 2 = 18
+  st = check_eq(st, "orders_not_cancelled",
+      18, ords.filter(|o| o.status != "cancelled").count())
+
+  // ----- ORDERS by region ---------------------------------------------------
+  // region 1: ids 1,2,7,8,13,14,19,20 = 8
+  st = check_eq(st, "orders_region1",
+      8, ords.filter(|o| o.region_id == 1).count())
+  // region 2: ids 3,4,9,10,15,16 = 6
+  st = check_eq(st, "orders_region2",
+      6, ords.filter(|o| o.region_id == 2).count())
+  // region 3: ids 5,6,11,12,17,18 = 6
+  st = check_eq(st, "orders_region3",
+      6, ords.filter(|o| o.region_id == 3).count())
+
+  // ----- ORDERS by amount thresholds ----------------------------------------
+  // amount > 100.0:  ids 9(180),12(250),14(120),16(140),17(500) = 5
+  st = check_eq(st, "orders_amount_gt100",
+      5, ords.filter(|o| o.amount > 100.0).count())
+  // amount >= 100.0: above plus 3(100),20(100) = 7
+  st = check_eq(st, "orders_amount_ge100",
+      7, ords.filter(|o| o.amount >= 100.0).count())
+  // amount < 50.0: ids 1(40),2(15),5(30),7(30),15(30),18(30),19(45) = 7
+  st = check_eq(st, "orders_amount_lt50",
+      7, ords.filter(|o| o.amount < 50.0).count())
+  // amount between [30,90] inclusive: 1(40),4(90),5(30),6(80),7(30),
+  //   8(60),10(60),11(60),13(60),15(30),18(30),19(45) = 12
+  st = check_eq(st, "orders_amount_30to90",
+      12, ords.filter(|o| o.amount >= 30.0).filter(|o| o.amount <= 90.0).count())
+
+  // ----- ORDERS by qty ------------------------------------------------------
+  // qty == 1: ids 2,5,8,12,15,18 = 6
+  st = check_eq(st, "orders_qty1",
+      6, ords.filter(|o| o.qty == 1).count())
+  // qty >= 4: ids 3(5),6(4),9(6),13(4),16(7),20(5) = 6
+  st = check_eq(st, "orders_qty_ge4",
+      6, ords.filter(|o| o.qty >= 4).count())
+  // qty even (2,4,6): ids 1(2),6(4),7(2),9(6),10(2),13(4),14(2),17(2) = 8
+  st = check_eq(st, "orders_qty_even",
+      8, ords.filter(|o| (o.qty % 2) == 0).count())
+
+  // ----- ORDERS by product --------------------------------------------------
+  // product 100 (widget): ids 1,3,6,11,16,20 = 6
+  st = check_eq(st, "orders_prod100",
+      6, ords.filter(|o| o.product_id == 100).count())
+  // product 101: ids 2,7,13,19 = 4
+  st = check_eq(st, "orders_prod101",
+      4, ords.filter(|o| o.product_id == 101).count())
+  // product 105 (gizmo expensive): ids 12,17 = 2
+  st = check_eq(st, "orders_prod105",
+      2, ords.filter(|o| o.product_id == 105).count())
+
+  // ----- ORDERS compound: shipped AND region 1 ------------------------------
+  // region1 shipped: ids 1,2,8,14,20 = 5  (7,13,19 are pending/cancelled)
+  st = check_eq(st, "orders_region1_shipped",
+      5, ords.filter(|o| o.region_id == 1).filter(|o| o.status == "shipped").count())
+  // shipped AND amount > 100: ids 9,12,14,16,17 = 5
+  st = check_eq(st, "orders_shipped_gt100",
+      5, ords.filter(|o| o.status == "shipped").filter(|o| o.amount > 100.0).count())
+  // pending AND qty >= 3: ids 3(5),19(3) = 2  (7 qty2,10 qty2,15 qty1)
+  st = check_eq(st, "orders_pending_qty_ge3",
+      2, ords.filter(|o| o.status == "pending").filter(|o| o.qty >= 3).count())
+  // shipped AND region3 AND amount < 100: ids 6(80),11(60),18(30) = 3
+  //   (12 is 250, 17 is 500 — excluded)
+  st = check_eq(st, "orders_shipped_r3_lt100",
+      3, ords.filter(|o| o.status == "shipped")
+              .filter(|o| o.region_id == 3)
+              .filter(|o| o.amount < 100.0).count())
+
+  // ----- ORDERS by customer -------------------------------------------------
+  // customer 1: ids 1,2 = 2
+  st = check_eq(st, "orders_cust1", 2, ords.filter(|o| o.customer_id == 1).count())
+  // customer 5: ids 9,10 = 2
+  st = check_eq(st, "orders_cust5", 2, ords.filter(|o| o.customer_id == 5).count())
+  // customer 9: ids 17,18 = 2
+  st = check_eq(st, "orders_cust9", 2, ords.filter(|o| o.customer_id == 9).count())
+  // customer_id <= 5 (first half): ids 1..10 = 10
+  st = check_eq(st, "orders_cust_le5", 10, ords.filter(|o| o.customer_id <= 5).count())
+
+  // ----- CUSTOMERS by tier --------------------------------------------------
+  // gold: ids 1,4,8,9 = 4
+  st = check_eq(st, "cust_gold", 4, custs.filter(|c| c.tier == "gold").count())
+  // silver: ids 2,5,7 = 3
+  st = check_eq(st, "cust_silver", 3, custs.filter(|c| c.tier == "silver").count())
+  // bronze: ids 3,6,10 = 3
+  st = check_eq(st, "cust_bronze", 3, custs.filter(|c| c.tier == "bronze").count())
+
+  // ----- CUSTOMERS active ---------------------------------------------------
+  // active==1: ids 1,2,4,5,6,8,9,10 = 8  (3 and 7 inactive)
+  st = check_eq(st, "cust_active", 8, custs.filter(|c| c.active == 1).count())
+  // inactive: 2
+  st = check_eq(st, "cust_inactive", 2, custs.filter(|c| c.active == 0).count())
+  // active gold: ids 1,4,8,9 = 4 (all gold active)
+  st = check_eq(st, "cust_active_gold",
+      4, custs.filter(|c| c.active == 1).filter(|c| c.tier == "gold").count())
+  // inactive non-gold: id 3(bronze),7(silver) = 2
+  st = check_eq(st, "cust_inactive_nongold",
+      2, custs.filter(|c| c.active == 0).filter(|c| c.tier != "gold").count())
+
+  // ----- CUSTOMERS by region ------------------------------------------------
+  // region1: ids 1,4,7,10 = 4
+  st = check_eq(st, "cust_region1", 4, custs.filter(|c| c.region_id == 1).count())
+  // region2: ids 2,5,8 = 3
+  st = check_eq(st, "cust_region2", 3, custs.filter(|c| c.region_id == 2).count())
+  // region3: ids 3,6,9 = 3
+  st = check_eq(st, "cust_region3", 3, custs.filter(|c| c.region_id == 3).count())
+  // region1 active: ids 1,4,10 = 3  (7 inactive)
+  st = check_eq(st, "cust_region1_active",
+      3, custs.filter(|c| c.region_id == 1).filter(|c| c.active == 1).count())
+
+  // ----- PRODUCTS -----------------------------------------------------------
+  // widget: 100,101 = 2
+  st = check_eq(st, "prod_widget", 2, prods.filter(|p| p.category == "widget").count())
+  // gadget: 102,103 = 2
+  st = check_eq(st, "prod_gadget", 2, prods.filter(|p| p.category == "gadget").count())
+  // gizmo: 104,105 = 2
+  st = check_eq(st, "prod_gizmo", 2, prods.filter(|p| p.category == "gizmo").count())
+  // in_stock: 100,101,102,104 = 4
+  st = check_eq(st, "prod_in_stock", 4, prods.filter(|p| p.in_stock == 1).count())
+  // out of stock: 103,105 = 2
+  st = check_eq(st, "prod_out_stock", 2, prods.filter(|p| p.in_stock == 0).count())
+  // price >= 30: 102,103,104,105 = 4
+  st = check_eq(st, "prod_price_ge30", 4, prods.filter(|p| p.price >= 30.0).count())
+  // price < 30: 100(20),101(15) = 2
+  st = check_eq(st, "prod_price_lt30", 2, prods.filter(|p| p.price < 30.0).count())
+  // in stock AND price >= 30: 102,104 = 2
+  st = check_eq(st, "prod_in_stock_ge30",
+      2, prods.filter(|p| p.in_stock == 1).filter(|p| p.price >= 30.0).count())
+  // gizmo in stock: 104 = 1 (105 out of stock)
+  st = check_eq(st, "prod_gizmo_in_stock",
+      1, prods.filter(|p| p.category == "gizmo").filter(|p| p.in_stock == 1).count())
+
+  // ----- REGIONS ------------------------------------------------------------
+  // population > 400000: north(1M),south(500k) = 2
+  st = check_eq(st, "region_pop_gt400k",
+      2, regs.filter(|r| r.population > 400000).count())
+  // population <= 250000: east = 1
+  st = check_eq(st, "region_pop_le250k",
+      1, regs.filter(|r| r.population <= 250000).count())
+  // name == "south": 1
+  st = check_eq(st, "region_south", 1, regs.filter(|r| r.name == "south").count())
+
+  // ----- SHIPMENTS ----------------------------------------------------------
+  // expedited: order_ids 4,8,12,14,17 = 5
+  st = check_eq(st, "ship_expedited", 5, ships.filter(|s| s.expedited == 1).count())
+  // not expedited: 14 - 5 = 9
+  st = check_eq(st, "ship_standard", 9, ships.filter(|s| s.expedited == 0).count())
+  // carrier ups: order_ids 1,2,9,14,18,3 = 6
+  st = check_eq(st, "ship_ups", 6, ships.filter(|s| s.carrier == "ups").count())
+  // carrier fedex: 4,8,12,17 = 4
+  st = check_eq(st, "ship_fedex", 4, ships.filter(|s| s.carrier == "fedex").count())
+  // carrier dhl: 6,11,16,20 = 4
+  st = check_eq(st, "ship_dhl", 4, ships.filter(|s| s.carrier == "dhl").count())
+  // weight > 3.0: 4(4.0),6(3.5),9(6.0),16(7.0),20(5.0),3(5.5) = 6
+  st = check_eq(st, "ship_weight_gt3",
+      6, ships.filter(|s| s.weight > 3.0).count())
+  // weight <= 1.0: 2(1.0),12(0.5),17(1.0),18(0.5) = 4
+  st = check_eq(st, "ship_weight_le1",
+      4, ships.filter(|s| s.weight <= 1.0).count())
+  // expedited fedex: 4,8,12,17 = 4 (all fedex are expedited)
+  st = check_eq(st, "ship_expedited_fedex",
+      4, ships.filter(|s| s.expedited == 1).filter(|s| s.carrier == "fedex").count())
+  // expedited ups: 14 = 1
+  st = check_eq(st, "ship_expedited_ups",
+      1, ships.filter(|s| s.expedited == 1).filter(|s| s.carrier == "ups").count())
+  // standard heavy (weight > 3 AND not expedited): 6(3.5),9(6.0),16(7.0),20(5.0),3(5.5) = 5
+  //   (4 is expedited — excluded)
+  st = check_eq(st, "ship_standard_heavy",
+      5, ships.filter(|s| s.expedited == 0).filter(|s| s.weight > 3.0).count())
+
+  // ----- head / tail (book "First/last N rows") -----------------------------
+  // head(5) of orders has 5 rows.
+  st = check_eq(st, "orders_head5", 5, ords.head(5).count())
+  // tail(3) of orders has 3 rows.
+  st = check_eq(st, "orders_tail3", 3, ords.tail(3).count())
+  // head(100) caps at available 20 rows.
+  st = check_eq(st, "orders_head100", 20, ords.head(100).count())
+  // head(0) => 0 rows.
+  st = check_eq(st, "orders_head0", 0, ords.head(0).count())
+  // filter then head: shipped (13 rows) head(4) => 4.
+  st = check_eq(st, "orders_shipped_head4",
+      4, ords.filter(|o| o.status == "shipped").head(4).count())
+  // filter then tail: pending (5 rows) tail(2) => 2.
+  st = check_eq(st, "orders_pending_tail2",
+      2, ords.filter(|o| o.status == "pending").tail(2).count())
+
+  // ----- Deeper chains (3-4 predicates) -------------------------------------
+  // shipped, region1, amount >= 40, qty >= 2:
+  //   region1 shipped = ids 1,2,8,14,20.
+  //   amount: 1=40,2=15,8=60,14=120,20=100. >=40 keeps 1,8,14,20.
+  //   qty:    1=2,8=1,14=2,20=5. >=2 keeps 1,14,20 => 3.
+  st = check_eq(st, "deep_chain_1",
+      3, ords.filter(|o| o.status == "shipped")
+              .filter(|o| o.region_id == 1)
+              .filter(|o| o.amount >= 40.0)
+              .filter(|o| o.qty >= 2).count())
+  // product 100 shipped amount >= 80:
+  //   prod100 ids 1,3,6,11,16,20. shipped removes 3(pending) => 1,6,11,16,20.
+  //   amount: 1=40,6=80,11=60,16=140,20=100. >=80 keeps 6,16,20 => 3.
+  st = check_eq(st, "deep_chain_2",
+      3, ords.filter(|o| o.product_id == 100)
+              .filter(|o| o.status == "shipped")
+              .filter(|o| o.amount >= 80.0).count())
+  // gizmo orders (product 104 or 105):
+  //   104: ids 8,14.  105: ids 12,17.  => count via two filters won't OR;
+  //   use product_id >= 104 (only 104,105 exist >=104) => 8,14,12,17 = 4.
+  st = check_eq(st, "deep_chain_gizmo_orders",
+      4, ords.filter(|o| o.product_id >= 104).count())
+  // gizmo orders that are shipped AND amount >= 120:
+  //   8(60),14(120),12(250),17(500). shipped: all four shipped.
+  //   amount>=120: 14,12,17 => 3.
+  st = check_eq(st, "deep_chain_gizmo_big",
+      3, ords.filter(|o| o.product_id >= 104)
+              .filter(|o| o.status == "shipped")
+              .filter(|o| o.amount >= 120.0).count())
+
+  // ----- Empty-result chains ------------------------------------------------
+  // cancelled AND amount > 100: cancelled are 5(30),13(60) => 0.
+  st = check_eq(st, "empty_cancelled_big",
+      0, ords.filter(|o| o.status == "cancelled").filter(|o| o.amount > 100.0).count())
+  // region1 AND region2 (contradiction) => 0.
+  st = check_eq(st, "empty_contradiction",
+      0, ords.filter(|o| o.region_id == 1).filter(|o| o.region_id == 2).count())
+  // qty > 100 => 0.
+  st = check_eq(st, "empty_qty_huge",
+      0, ords.filter(|o| o.qty > 100).count())
+
+  // ----- Full-pass chains (predicate always true) ---------------------------
+  // amount >= 0 keeps all 20.
+  st = check_eq(st, "full_amount_nonneg",
+      20, ords.filter(|o| o.amount >= 0.0).count())
+  // id >= 1 keeps all 20.
+  st = check_eq(st, "full_id_pos",
+      20, ords.filter(|o| o.id >= 1).count())
+  // double full-pass still 20.
+  st = check_eq(st, "full_double",
+      20, ords.filter(|o| o.id >= 1).filter(|o| o.amount >= 0.0).count())
+
+  // ----- Cross-dataset consistency (manual joins by count) ------------------
+  // # orders for gold customers (1,4,8,9):
+  //   cust1: 2 (ids1,2), cust4: 2 (ids7,8), cust8: 2 (ids15,16), cust9: 2 (ids17,18)
+  //   = 8.  We approximate via customer_id membership using four filters summed.
+  let gold_orders =
+      ords.filter(|o| o.customer_id == 1).count() +
+      ords.filter(|o| o.customer_id == 4).count() +
+      ords.filter(|o| o.customer_id == 8).count() +
+      ords.filter(|o| o.customer_id == 9).count()
+  st = check_eq(st, "gold_customer_orders", 8, gold_orders)
+
+  // # shipped orders in region with population > 400000 (regions 1 and 2):
+  //   region1 shipped = 5 (computed above), region2 shipped:
+  //   region2 ids 3,4,9,10,15,16; shipped among them: 4,9,16 = 3.  total 8.
+  let big_region_shipped =
+      ords.filter(|o| o.region_id == 1).filter(|o| o.status == "shipped").count() +
+      ords.filter(|o| o.region_id == 2).filter(|o| o.status == "shipped").count()
+  st = check_eq(st, "big_region_shipped", 8, big_region_shipped)
+
+  // total amount-bucket partition must sum to 20:
+  //   lt50 + [50,100] + gt100 == total.
+  //   lt50 = 6 (computed). gt100 = 5 (computed).
+  //   [50,100] inclusive: amount>=50 and <=100:
+  //     8(60),3(100),4(90),6(80),10(60),11(60),13(60),20(100) = 8.
+  //   Plus: is anything else in [50,100]? 1=40 no,2=15 no,5=30,7=30,9=180,
+  //     12=250,14=120,15=30,16=140,17=500,18=30,19=45 => none more. So 8.
+  //   Wait recheck: amounts list:
+  //     1=40,2=15,3=100,4=90,5=30,6=80,7=30,8=60,9=180,10=60,
+  //     11=60,12=250,13=60,14=120,15=30,16=140,17=500,18=30,19=45,20=100
+  //   <50: 40,15,30,30,30,45,30 -> ids 1,2,5,7,15,18,19 = 7  (re-derived!)
+  //   So lt50 is actually 7, not 6 — the earlier "orders_amount_lt50" expected
+  //   6 is WRONG.  Corrected below; the partition uses the corrected value.
+  let lt50 = ords.filter(|o| o.amount < 50.0).count()
+  let mid  = ords.filter(|o| o.amount >= 50.0).filter(|o| o.amount <= 100.0).count()
+  let gt100 = ords.filter(|o| o.amount > 100.0).count()
+  st = check_eq(st, "amount_partition_sum", 20, lt50 + mid + gt100)
+
+  // ----- READINGS (telemetry analytics) -------------------------------------
+  let rds = readings()
+  st = check_eq(st, "readings_count", 24, rds.count())
+  // per-sensor cardinality
+  st = check_eq(st, "rd_sensor1", 8, rds.filter(|r| r.sensor_id == 1).count())
+  st = check_eq(st, "rd_sensor2", 8, rds.filter(|r| r.sensor_id == 2).count())
+  st = check_eq(st, "rd_sensor3", 8, rds.filter(|r| r.sensor_id == 3).count())
+  // ok flag: not-ok = 6 (s1 h4,h5; s2 h5,h6; s3 h0,h1); ok = 18.
+  st = check_eq(st, "rd_not_ok", 6, rds.filter(|r| r.ok == 0).count())
+  st = check_eq(st, "rd_ok", 18, rds.filter(|r| r.ok == 1).count())
+  // temp thresholds
+  // > 25.0: s1 26.0,28.5; s2 27.5; s3 30.0,31.5,29.0 = 6
+  st = check_eq(st, "rd_temp_gt25", 6, rds.filter(|r| r.temp > 25.0).count())
+  // >= 25.0: above + s2 25.0 = 7
+  st = check_eq(st, "rd_temp_ge25", 7, rds.filter(|r| r.temp >= 25.0).count())
+  // < 18.0: s2 15.0,16.5,17.0; s3 17.5,16.0,15.5 = 6
+  st = check_eq(st, "rd_temp_lt18", 6, rds.filter(|r| r.temp < 18.0).count())
+  // humidity thresholds
+  // >= 60: s1 60; s2 62; s3 70,72,68 = 5
+  st = check_eq(st, "rd_hum_ge60", 5, rds.filter(|r| r.humidity >= 60).count())
+  // < 40: s2 30,33,35,38; s3 36,33,31 = 7
+  st = check_eq(st, "rd_hum_lt40", 7, rds.filter(|r| r.humidity < 40).count())
+  // hour buckets
+  st = check_eq(st, "rd_hour0", 3, rds.filter(|r| r.hour == 0).count())
+  st = check_eq(st, "rd_hour_ge4", 12, rds.filter(|r| r.hour >= 4).count())
+  // sensor1 ok readings: h0,1,2,3,6,7 = 6
+  st = check_eq(st, "rd_sensor1_ok",
+      6, rds.filter(|r| r.sensor_id == 1).filter(|r| r.ok == 1).count())
+  // sensor3 not-ok: h0,h1 = 2
+  st = check_eq(st, "rd_sensor3_not_ok",
+      2, rds.filter(|r| r.sensor_id == 3).filter(|r| r.ok == 0).count())
+  // temp>25 AND not ok: s1 26.0,28.5; s2 27.5; s3 30.0,31.5 = 5 (s3 29.0 is ok)
+  st = check_eq(st, "rd_hot_failed",
+      5, rds.filter(|r| r.temp > 25.0).filter(|r| r.ok == 0).count())
+  // temp>25 AND ok: only s3 29.0 = 1
+  st = check_eq(st, "rd_hot_ok",
+      1, rds.filter(|r| r.temp > 25.0).filter(|r| r.ok == 1).count())
+  // hour>=4 AND temp<20: s3 h4 19.0,h5 17.5,h6 16.0,h7 15.5 = 4
+  st = check_eq(st, "rd_late_cold",
+      4, rds.filter(|r| r.hour >= 4).filter(|r| r.temp < 20.0).count())
+  // partition by ok must sum to total
+  let ok_n = rds.filter(|r| r.ok == 1).count()
+  let notok_n = rds.filter(|r| r.ok == 0).count()
+  st = check_eq(st, "rd_ok_partition", 24, ok_n + notok_n)
+  // head/tail on readings
+  st = check_eq(st, "rd_head6", 6, rds.head(6).count())
+  st = check_eq(st, "rd_tail6", 6, rds.tail(6).count())
+  // filtered head: ok readings (18) head(10) => 10
+  st = check_eq(st, "rd_ok_head10",
+      10, rds.filter(|r| r.ok == 1).head(10).count())
+  // per-sensor failure totals must sum to global not-ok (6)
+  let s1_fail = rds.filter(|r| r.sensor_id == 1).filter(|r| r.ok == 0).count()
+  let s2_fail = rds.filter(|r| r.sensor_id == 2).filter(|r| r.ok == 0).count()
+  let s3_fail = rds.filter(|r| r.sensor_id == 3).filter(|r| r.ok == 0).count()
+  st = check_eq(st, "rd_fail_sum", 6, s1_fail + s2_fail + s3_fail)
+  st = check_eq(st, "rd_s1_fail", 2, s1_fail)
+  st = check_eq(st, "rd_s2_fail", 2, s2_fail)
+  st = check_eq(st, "rd_s3_fail", 2, s3_fail)
+
+  // ----- Report -------------------------------------------------------------
+  if st.fails == 0 {
+    print("ALL_CHECKS_PASSED")
+  } else {
+    print(st.first_msg)
+    print(f"TOTAL_FAILURES={st.fails}")
+  }
+}
+
+main()

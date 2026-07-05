@@ -1,0 +1,14 @@
+let mut x = 1
+x = 5      // simple assignment
+x += 2     // Add
+x -= 1     // Sub
+x *= 3     // Mul
+x /= 2     // Div
+x %= 4     // Mod
+x **= 2    // Pow (built-in only)
+x <<= 1    // Shl
+x >>= 1    // Shr
+x &= 0xFF  // BitAnd
+x |= 0x01  // BitOr
+x ^= 0x10  // BitXor
+print(x)

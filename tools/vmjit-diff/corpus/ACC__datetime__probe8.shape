@@ -1,0 +1,16 @@
+from std::core::intrinsics use { DateTime }
+
+let dt = DateTime.parse("2024-06-15T14:30:45+00:00")
+
+print("A: format outside f-string, print directly")
+print(dt.format("%H:%M"))
+
+print("B: format into a let, then f-string the string")
+let s = dt.format("%H:%M")
+print(f"val={s}")
+
+print("C: year() (returns int) inside f-string")
+print(f"y={dt.year()}")
+
+print("D: format() inside f-string")
+print(f"t={dt.format('%H:%M')}")

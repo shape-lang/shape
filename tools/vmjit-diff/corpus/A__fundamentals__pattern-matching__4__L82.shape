@@ -1,0 +1,7 @@
+fn bucket(n: int) -> int {
+  match n {
+    x: int where x < 10 => 0
+    x: int where x < 100 => 1
+    _ => 2
+  }
+}

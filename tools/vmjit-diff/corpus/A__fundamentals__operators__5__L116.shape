@@ -1,0 +1,3 @@
+print("apple" < "banana")
+print("apple" == "apple")
+print("z" > "a")

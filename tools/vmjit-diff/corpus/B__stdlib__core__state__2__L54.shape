@@ -1,0 +1,6 @@
+pub type Frame<T> {
+    function: FunctionRef,
+    local_ip: int,             // Position within the function's blob
+    locals: Vec<T>,
+    upvalues: Vec<T>?,         // Captured values for closures
+}

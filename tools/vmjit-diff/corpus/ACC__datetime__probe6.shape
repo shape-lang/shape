@@ -1,0 +1,21 @@
+from std::core::intrinsics use { DateTime }
+
+let event_time = DateTime.parse("2024-06-15T14:30:45+00:00")
+let zones = ["America/New_York", "Europe/London", "Asia/Tokyo"]
+
+print("=== case 1: f-string with just tz ===")
+for tz in zones {
+    print(f"{tz}: hello")
+}
+
+print("=== case 2: f-string with format, no leading tz ===")
+for tz in zones {
+    let local = event_time.to_timezone(tz)
+    print(f"{local.format('%H:%M')}")
+}
+
+print("=== case 3: f-string with tz then format ===")
+for tz in zones {
+    let local = event_time.to_timezone(tz)
+    print(f"{tz}: {local.format('%H:%M')}")
+}

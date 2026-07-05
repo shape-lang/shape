@@ -1,0 +1,9 @@
+// MINIMAL REPRO — confirmed language defect (FN-REG-CORRECTNESS).
+// A field read off an indexed element of a Vec<StructType> works in print(),
+// but fails type-inference the moment it flows into an arithmetic operator.
+type Run { value: int, len: int }
+let mut rs = []
+rs = rs.push(Run { value: 0, len: 4 })
+print(rs[0].len)        // OK -> prints 4
+let s = rs[0].len + 1   // FAILS: "Reference(Run) cannot have fields"
+print(s)

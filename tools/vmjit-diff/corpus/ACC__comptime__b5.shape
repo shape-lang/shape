@@ -1,0 +1,2 @@
+let X = comptime { error("MY-ERROR-MARKER") }
+print("unreachable")

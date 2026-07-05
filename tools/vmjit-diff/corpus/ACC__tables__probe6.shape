@@ -1,0 +1,28 @@
+// Probe 6: count, map, orderBy, limit, select via explicit impl
+from std::core::queryable use { Queryable }
+
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+impl Queryable for Table {
+    method filter(predicate) { self.filter(predicate) }
+    method map(transform) { self.map(transform) }
+    method orderBy(key_fn, direction) { self.orderBy(key_fn, direction) }
+    method limit(n) { self.limit(n) }
+    method count() { self.count() }
+    method execute() { self }
+}
+
+let events: Table<Event> =
+    [1, 50.0,  "alpha"],
+    [2, 75.5,  "beta"],
+    [3, 120.0, "gamma"]
+
+let c = events.count()
+print(f"count={c}")
+
+let hi = events.filter(|row| row.value > 70.0)
+print(f"hi_count={hi.count()}")

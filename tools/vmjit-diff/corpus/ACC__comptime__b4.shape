@@ -1,0 +1,4 @@
+comptime {
+  warning("HELLO-WARNING-MARKER")
+}
+print("done")

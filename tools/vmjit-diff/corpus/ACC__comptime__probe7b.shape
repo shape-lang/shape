@@ -1,0 +1,6 @@
+let r = comptime { implements("int", "Display") }
+if r == None {
+  print("is-none")
+} else {
+  print("not-none")
+}

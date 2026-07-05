@@ -1,0 +1,16 @@
+// SYN__i64-overflow-wrap — synthetic known-divergence repro (WF-0B).
+//
+// Audit 2026-07-04 "claimed-vs-real" §4(b) / D3 numeric ruling (2026-06-01):
+// VM raises the checked i64-overflow error (exit 1); default-mode JIT emits
+// plain iadd (crates/shape-jit rvalues.rs:1559-1563) and silently wraps to
+// i64::MIN, printing -9223372036854775808 with exit 0.
+//
+// Expected classification: DIVERGED (known-red: class i64-overflow-wrap).
+fn add_pair(a: int, b: int) -> int {
+    a + b
+}
+
+let big: int = 9223372036854775807
+let one: int = 1
+let r: int = add_pair(big, one)
+print(r)

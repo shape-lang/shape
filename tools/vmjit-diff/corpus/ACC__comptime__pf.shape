@@ -1,0 +1,5 @@
+comptime fn avg(a: int, b: int) -> float {
+  (a + b) / 2.0
+}
+let V = comptime { avg(3, 7) }
+print(f"{V}")

@@ -1,0 +1,18 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+fn read_file(path: string) -> Result<string> {
+    // stand-in for an I/O call that may fail
+    return Ok("port = 8080");
+}
+
+fn parse_config(text: string) -> Result<int> {
+    return Ok(8080);
+}
+
+fn load_config(path: string) -> Result<int> {
+    let text = (read_file(path) !! "Failed to read config")?;
+    return parse_config(text) !! "Config parse failed";
+}
+
+let cfg = load_config("config.shape")?;
+print(cfg)

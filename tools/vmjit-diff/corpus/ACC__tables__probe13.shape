@@ -1,0 +1,26 @@
+from std::core::queryable use { Queryable }
+type Event { id: int, value: number, tag: string }
+impl Queryable for Table {
+    method filter(p) { self.filter(p) }
+    method forEach(f) { self.forEach(f) }
+    method count() { self.count() }
+    method execute() { self }
+}
+fn main() {
+  let events: Table<Event> =
+      [3, 120.0, "gamma"],
+      [1, 50.0,  "alpha"],
+      [2, 75.5,  "beta"]
+
+  // (A) f-string interpolation of a field — does this work?
+  print("A:")
+  events.forEach(|row| print(f"{row.value}"))
+
+  // (B) bind field to a let inside forEach
+  print("B:")
+  events.forEach(|row| {
+    let v = row.value
+    print(v)
+  })
+}
+main()

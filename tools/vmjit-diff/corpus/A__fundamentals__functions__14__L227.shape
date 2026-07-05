@@ -1,0 +1,8 @@
+fn sma(period: int = 14, threshold: number = 0.01) -> number {
+  threshold * (period as number)
+}
+
+print(sma(20, 0.05))                       // all-positional        => 1.0
+print(sma(period: 20, threshold: 0.05))    // both named            => 1.0
+print(sma(threshold: 0.02))                // partial named, period defaults => 0.28
+print(sma(20, threshold: 0.02))            // positional + named    => 0.4

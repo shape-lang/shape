@@ -1,0 +1,3 @@
+let BUILD_TAG = comptime {
+  "dev"
+}

@@ -1,0 +1,38 @@
+let score = 84
+let grade = if score >= 90 { "A" } else if score >= 80 { "B" } else { "C" }
+print(grade)
+
+let value = {
+  let base = 10
+  base * 2
+}
+print(value)
+
+for i in 0..5 { print(i) }
+
+let points = [{x: 1, y: 2}, {x: 3, y: 4}]
+for {x, y} in points { print(f"({x}, {y})") }
+
+var j = 0
+while j < 3 { print(j) ; j = j + 1 }
+
+for i in 0..10 {
+  if i == 2 { continue }
+  if i == 6 { break }
+  print(i)
+}
+
+var k = 0
+loop {
+  if k >= 5 { break }
+  print(k)
+  k = k + 1
+}
+
+var n = 0
+let result = loop {
+  n = n + 1
+  let x = n * 4
+  if x > 10 { break x * 2 }
+}
+print(result)

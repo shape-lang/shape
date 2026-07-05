@@ -1,0 +1,13 @@
+fn try_parse(s: string) -> Result<int, string> {
+  if s == "ok" { Ok(42) } else { Err("bad") }
+}
+
+fn run(s: string) -> Result<int, string> {
+  let n: int = try_parse(s)?
+  Ok(n + 1)
+}
+
+match run("ok") {
+  Ok(n) => print(n),
+  Err(e) => print(e)
+}

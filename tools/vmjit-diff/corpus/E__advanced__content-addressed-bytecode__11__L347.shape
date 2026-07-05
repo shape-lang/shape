@@ -1,0 +1,16 @@
+annotation memoized(store) {
+    targets: [function]
+    comptime post(target, ctx) {
+        replace body {
+            let key = state::hash([state::fn_hash(__original__), ...args])
+            match store.get(key) {
+                Some(cached) => state::deserialize(cached),
+                None => {
+                    let result = __original__(args)
+                    store.put(key, state::serialize(result))
+                    result
+                }
+            }
+        }
+    }
+}

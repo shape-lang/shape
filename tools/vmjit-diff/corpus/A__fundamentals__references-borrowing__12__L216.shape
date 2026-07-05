@@ -1,0 +1,5 @@
+let mut nums = [1, 2, 3]
+let r = &nums          // shared borrow starts
+print(r[0])            // last use of r — borrow ENDS here
+nums.push(4)           // OK: no active borrows
+print(nums)            // [1, 2, 3, 4]

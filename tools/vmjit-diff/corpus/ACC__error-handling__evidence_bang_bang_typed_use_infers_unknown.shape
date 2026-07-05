@@ -1,0 +1,18 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+fn find_user(id: int) -> Result<int> {
+  if id == 0 { return Err("no such user") }
+  return Ok(id * 10)
+}
+
+// Exact book shape: bind then return Ok(a) — does it infer?
+fn lookup_arith(id: int) -> Result<int> {
+  let user_id = (find_user(id) !! "User not found")?
+  return Ok(user_id + 1)
+}
+
+let r = lookup_arith(5)
+match r {
+  Ok(v) => print(f"ok {v}"),
+  Err(e) => print("err"),
+}

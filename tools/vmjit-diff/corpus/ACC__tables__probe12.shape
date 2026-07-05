@@ -1,0 +1,23 @@
+from std::core::queryable use { Queryable }
+type Event { id: int, value: number, tag: string }
+impl Queryable for Table {
+    method filter(p) { self.filter(p) }
+    method forEach(f) { self.forEach(f) }
+    method execute() { self }
+}
+fn main() {
+  let events: Table<Event> =
+      [3, 120.0, "gamma"],
+      [1, 50.0,  "alpha"],
+      [2, 75.5,  "beta"]
+  let mut a: Vec<number> = []
+  events.forEach(|row| a.push(row.value))
+  print(a)
+  let mut b: Vec<int> = []
+  events.filter(|row| row.value > 70.0).forEach(|row| b.push(row.id))
+  print(b)
+  let mut s: Vec<string> = []
+  events.forEach(|row| s.push(row.tag))
+  print(s)
+}
+main()

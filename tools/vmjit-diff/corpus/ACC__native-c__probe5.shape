@@ -1,0 +1,13 @@
+---
+name = "probe5"
+
+[native-dependencies]
+stub = { provider = "path", path = "./libstub.so" }
+---
+type C PairC {
+  a: i64,
+  b: i64,
+}
+
+extern C fn stub_add_i64(a: i64, b: i64) -> i64 from "stub" as "stub_add_i64";
+print(stub_add_i64(1, 2))
