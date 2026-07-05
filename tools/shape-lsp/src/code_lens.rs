@@ -243,7 +243,7 @@ fn find_test_line(text: &str, name: &str) -> Option<u32> {
 }
 
 /// Find the line number where a pattern is defined
-#[allow(dead_code)]
+#[allow(dead_code)] // exercised only by unit tests
 fn find_pattern_line(text: &str, name: &str) -> Option<u32> {
     let pattern = format!("pattern {}", name);
     for (line_num, line) in text.lines().enumerate() {

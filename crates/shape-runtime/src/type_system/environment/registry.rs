@@ -90,7 +90,7 @@ pub struct TraitImplEntry {
 /// we check blanket impls: if X satisfies all required_bounds, the blanket
 /// impl applies.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // trait_name/method_names populated by register_blanket_impl, not yet read
 pub struct BlanketImplEntry {
     /// The trait being implemented
     pub trait_name: String,

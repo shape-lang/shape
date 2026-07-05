@@ -619,7 +619,6 @@ impl TypeArgResolution {
     /// bindings. The mono_key is built via [`build_mono_key_with_consts`] so
     /// type-only and const-only and mixed calls all hash distinctly in the
     /// specialization cache.
-    #[allow(dead_code)]
     pub fn with_consts(
         fn_name: impl Into<String>,
         type_args: Vec<ConcreteType>,

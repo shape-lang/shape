@@ -21,7 +21,6 @@ use super::typed_object::TypedObject;
 ///
 /// # Safety
 /// `ptr` must point to a valid, live `TypedObject` or be null (no-op on null).
-#[allow(dead_code)]
 pub extern "C" fn jit_v2_retain_typed_object(ptr: *const u8) {
     if ptr.is_null() {
         return;
@@ -37,7 +36,6 @@ pub extern "C" fn jit_v2_retain_typed_object(ptr: *const u8) {
 ///
 /// # Safety
 /// `ptr` must point to a valid, live `TypedObject` or be null (no-op on null).
-#[allow(dead_code)]
 pub extern "C" fn jit_v2_release_typed_object(ptr: *const u8) {
     if ptr.is_null() {
         return;

@@ -133,7 +133,6 @@ fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Look up the `ConcreteType` (if any) the bytecode compiler recorded for
     /// a local slot.
-    #[allow(dead_code)]
     pub(crate) fn concrete_type_for_slot(&self, slot: SlotId) -> Option<&ConcreteType> {
         let ct = self.concrete_types.get(slot.0 as usize)?;
         if matches!(ct, ConcreteType::Void) {

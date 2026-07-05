@@ -37,7 +37,6 @@ pub use vectorization::SIMDPlan;
 /// Function-level optimization plan consumed by bytecode->IR lowering.
 #[derive(Debug, Clone, Default)]
 pub struct FunctionOptimizationPlan {
-    #[allow(dead_code)]
     /// Phase 1: typed MIR representation of the function bytecode.
     pub typed_mir: TypedMirFunction,
     /// Phase 2/4: loop lowering and nested-loop specialization decisions.
@@ -65,7 +64,6 @@ pub struct FunctionOptimizationPlan {
     pub numeric_arrays: NumericArrayPlan,
     /// Phase 6: call-path optimization decisions.
     pub call_path: CallPathPlan,
-    #[allow(dead_code)]
     /// Phase 7: typed table/queryable lowering opportunities.
     pub table_queryable: TableQueryablePlan,
     /// Phase 8: HOF method inlining opportunities (map/filter/reduce/find/some/every/forEach/findIndex).

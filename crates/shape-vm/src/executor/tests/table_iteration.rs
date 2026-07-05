@@ -75,7 +75,6 @@ fn make_single_row_table() -> Arc<DataTable> {
 ///   StoreLocal(1)       ; idx = idx + 1
 ///   Jump(loop_start)    ; back to IterDone check
 ///   LoadLocal(2)        ; push count as result
-#[allow(dead_code)]
 fn run_table_count_loop(table_arc: Arc<DataTable>) -> i64 {
     run_table_count_loop_with_constant(Constant::Value(KindedConstant::from_datatable(table_arc)))
 }

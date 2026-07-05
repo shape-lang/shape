@@ -163,8 +163,8 @@ impl ContainerKind {
 /// Reserved future surface: the place a writeback target can name. Used
 /// by the runtime dispatch path when a future hardening pass moves the
 /// write-back into `op_call_method` itself.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum WriteBackTarget {
     Local(u16),
     ModuleBinding(u16),

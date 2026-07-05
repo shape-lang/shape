@@ -19,7 +19,6 @@
 //! every keystroke.
 
 use crate::type_inference::{MethodCompletionInfo, extract_type_methods};
-use shape_ast::parser::parse_program;
 use shape_runtime::module_loader::ModuleLoader;
 use shape_runtime::stdlib_metadata::default_stdlib_path;
 use std::collections::HashMap;
@@ -79,38 +78,6 @@ fn merge_methods(dst: &mut MethodMap, src: MethodMap) {
 #[cfg(test)]
 fn load_stdlib_type_methods_uncached() -> MethodMap {
     load_stdlib_type_methods()
-}
-
-/// Fallback path for sources that don't parse via the module loader (e.g.
-/// when running outside the workspace and `SHAPE_STDLIB_PATH` points at a
-/// directory the loader can't introspect). Walks the directory tree and
-/// parses each `.shape` file directly. Returns empty on any failure.
-#[allow(dead_code)]
-fn load_stdlib_type_methods_via_walk() -> MethodMap {
-    let mut out: MethodMap = HashMap::new();
-    let stdlib_path = default_stdlib_path();
-    if !stdlib_path.is_dir() {
-        return out;
-    }
-    let mut stack = vec![stdlib_path];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "shape") {
-                if let Ok(src) = std::fs::read_to_string(&path) {
-                    if let Ok(program) = parse_program(&src) {
-                        merge_methods(&mut out, extract_type_methods(&program));
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]

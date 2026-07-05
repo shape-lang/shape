@@ -161,7 +161,6 @@ impl ComptimeTarget {
     }
 
     /// Create a target descriptor for an expression.
-    #[allow(dead_code)]
     pub fn for_expression() -> Self {
         Self {
             kind: AnnotationTargetKind::Expression,

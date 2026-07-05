@@ -728,7 +728,6 @@ fn msgpack_type_name(val: &Rmp) -> &'static str {
 // imported for the §Renames-to-refuse-on-sight refresher — both are
 // kept available for the heap-slot dispatch path even when current
 // arms don't all consume them.
-#[allow(dead_code)]
 fn _unused_imports_keepalive(_hv: &HeapValue, _tp: &TypedObjectPtr) {}
 
 #[cfg(test)]

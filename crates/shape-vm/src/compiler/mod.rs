@@ -1012,10 +1012,8 @@ pub struct BytecodeCompiler {
     pub(crate) enum_tuple_variant_fields:
         HashMap<(String, String), Vec<shape_ast::ast::TypeAnnotation>>,
     /// Cached const specializations keyed by `(base_name + const-arg fingerprint)`.
-    #[allow(dead_code)]
     pub(crate) const_specializations: HashMap<String, usize>,
     /// Monotonic counter for unique specialization symbol names.
-    #[allow(dead_code)]
     pub(crate) next_const_specialization_id: u64,
     /// Const-parameter bindings for specialized function symbols.
     /// These bindings are exposed to comptime handlers as typed module_bindings.

@@ -14,7 +14,6 @@ pub enum ScalarType {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum MirOp {
     LoadLocal(u16),
     StoreLocal(u16),
@@ -35,7 +34,6 @@ pub enum MirOp {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct MirInst {
     pub idx: usize,
     pub op: MirOp,

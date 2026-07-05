@@ -17,10 +17,6 @@
 
 use super::value_ffi::*;
 
-// SIMD threshold - use SIMD for arrays >= this size
-#[allow(dead_code)]
-const SIMD_THRESHOLD: usize = 16;
-
 // ============================================================================
 // Trigonometric Functions
 // ============================================================================
@@ -145,70 +141,6 @@ pub extern "C" fn jit_pow(base_bits: u64, exp_bits: u64) -> u64 {
 // `compile_binop` surfaces an error if one ever reaches it. The 11
 // Rust FFI bodies, their Cranelift signatures, and the matching
 // symbol registrations were deleted in the same commit.
-
-/// SIMD-accelerated Series addition
-#[allow(dead_code)]
-fn series_add_simd(a_bits: u64, b_bits: u64) -> u64 {
-    series_simd_binary_op(
-        a_bits,
-        b_bits,
-        super::simd::jit_simd_add,
-        super::simd::jit_simd_add_scalar,
-    )
-}
-
-/// SIMD-accelerated Series subtraction
-#[allow(dead_code)]
-fn series_sub_simd(a_bits: u64, b_bits: u64) -> u64 {
-    series_simd_binary_op(
-        a_bits,
-        b_bits,
-        super::simd::jit_simd_sub,
-        super::simd::jit_simd_sub_scalar,
-    )
-}
-
-/// SIMD-accelerated Series multiplication
-#[allow(dead_code)]
-fn series_mul_simd(a_bits: u64, b_bits: u64) -> u64 {
-    series_simd_binary_op(
-        a_bits,
-        b_bits,
-        super::simd::jit_simd_mul,
-        super::simd::jit_simd_mul_scalar,
-    )
-}
-
-/// SIMD-accelerated Series division
-#[allow(dead_code)]
-fn series_div_simd(a_bits: u64, b_bits: u64) -> u64 {
-    series_simd_binary_op(
-        a_bits,
-        b_bits,
-        super::simd::jit_simd_div,
-        super::simd::jit_simd_div_scalar,
-    )
-}
-
-/// Helper for SIMD series binary operations
-/// Uses raw pointer SIMD functions for maximum performance
-fn series_simd_binary_op(
-    _a_bits: u64,
-    _b_bits: u64,
-    _simd_binary: extern "C" fn(*const f64, *const f64, u64) -> *mut f64,
-    _simd_scalar: extern "C" fn(*const f64, f64, u64) -> *mut f64,
-) -> u64 {
-    TAG_NULL
-}
-
-/// Fallback helper for series binary operations (for non-SIMD ops)
-#[allow(dead_code)]
-fn series_binary_op<F>(_a_bits: u64, _b_bits: u64, _op: F) -> u64
-where
-    F: Fn(f64, f64) -> f64,
-{
-    TAG_NULL
-}
 
 /// Generic comparison for Series > Series, Series > number, etc.
 /// Returns a Series of 1.0/0.0 for series comparisons, or a boolean for scalars.

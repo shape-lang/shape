@@ -84,7 +84,6 @@ pub fn enum_value_completions(values: &[String]) -> Vec<CompletionItem> {
 }
 
 /// Check if cursor is at annotation position
-#[allow(dead_code)]
 pub fn is_at_annotation_position(text: &str) -> bool {
     let trimmed = text.trim_end();
     if trimmed.ends_with('@') {

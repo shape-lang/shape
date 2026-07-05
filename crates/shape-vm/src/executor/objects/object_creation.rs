@@ -584,5 +584,4 @@ fn kinded_to_slot(
 
 // Suppress unused import lint — KindedSlot is reserved for forward-port of
 // the v2-raw rebuilt array constructors at ckpt-6 STRICT close.
-#[allow(dead_code)]
 fn _ckpt5_reserved_kinded_slot(_: KindedSlot) {}
