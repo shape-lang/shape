@@ -1464,6 +1464,65 @@ pub fn register_typed_fn_3<F, P0, P1, P2>(
     );
 }
 
+/// Register a **per-arity** (fixed 3-arg) native whose body receives the raw
+/// `&[KindedSlot]` carriers plus the [`ModuleContext`], rather than
+/// `FromSlot`-marshaled Rust params. Used where the argument shapes are
+/// polymorphic across call sites but the arity is fixed and every slot's kind
+/// is real (from the VM §2.7.7 stack kind track) — e.g. `remote::call`'s
+/// `(addr, fn_ref, arg-pack)`, whose `fn_ref` (named-fn id / closure) and
+/// arg-pack (per-callee TypedObject / Array) inhabit no single `FromSlot`
+/// carrier (distributed §4.1.1).
+///
+/// This is the **per-arity** typed path (ADR-006 §2.7.4 "per-arity is preferred
+/// when the function arity is fixed"): `arg_kinds` are the declared, non-`Bool`
+/// kinds and the body dispatches on each slot's stamped `NativeKind` /
+/// `as_heap_value()` (ADR-005 §1). It is NOT the variadic `register_typed_function`
+/// Bool-default shape (CLAUDE.md §Forbidden Patterns) — no `KindedSlot::new(_,
+/// NativeKind::Bool)` fabrication, no kind-from-bits.
+pub fn register_typed_fn_3_raw<F>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_names: [(&str, &str); 3],
+    arg_kinds: [NativeKind; 3],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 3 {
+            return Err(MarshalError::ArgCount {
+                expected: 3,
+                got: slots.len(),
+            }
+            .into());
+        }
+        body(slots, ctx)
+    });
+    let params = param_names
+        .iter()
+        .map(|(name, ty)| crate::module_exports::ModuleParam {
+            name: (*name).to_string(),
+            type_name: (*ty).to_string(),
+            required: true,
+            ..Default::default()
+        })
+        .collect();
+    install(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds.to_vec(),
+        invoke,
+    );
+}
+
 // ─────────────── per-arity `_full` register helpers (optional-arg) ───────────
 //
 // Mirror `register_typed_fn_N` but take `[ModuleParam; N]` directly instead

@@ -63,11 +63,18 @@ pub builtin fn execute(addr: string, code: string) -> Result<HashMap<string, _>,
 /// ```
 pub builtin fn ping(addr: string) -> Result<HashMap<string, _>, string>;
 
-/// Call a function on a remote Shape server by reference.
+/// Internal compiler-elaborated sibling of the public `remote::call` primitive
+/// (Q35 / OQ-11). Retired name: `__call` — the `__` dunder marks this as
+/// internal/compiler-generated machinery (like `__into_*`), reachable by the
+/// `@remote` annotation's specialized before-hook but never documented as user
+/// API. The public, recoverable-error primitive is `remote::call` (returns
+/// `Result<R, RemoteError>`); this `_raising` sibling maps transport/protocol
+/// failures onto an ordinary runtime error (Q26).
 ///
 /// Low-level transport used by the `@remote` annotation. Serializes the
-/// function and arguments via the wire protocol and sends them to the
-/// remote `shape serve` node.
+/// function reference (resolved to its content hash + minimal transitive blob
+/// closure) and arguments via the wire protocol and sends them to the remote
+/// `shape serve` node.
 ///
 /// # Arguments
 ///
@@ -75,10 +82,59 @@ pub builtin fn ping(addr: string) -> Result<HashMap<string, _>, string>;
 /// * `fn_ref` - Function reference to call remotely
 /// * `args` - Arguments to pass to the remote function
 ///
-/// # Returns
+/// Returns the callee's value directly (typed at the callee's declared return
+/// type via compiler elaboration). Transport / protocol / remote failures raise
+/// as an ordinary runtime error (Q26) rather than surfacing a `Result` — the
+/// recoverable structured surface is the public `remote::call` primitive.
+builtin fn __call_raising(addr: string, fn_ref: _, args: Array<_>) -> _;
+
+/// Structured error returned by the recoverable `remote::call` primitive
+/// (Q26 / distributed §4.2). Every transport, protocol, permission, and remote
+/// failure maps onto exactly one variant (the normative §4.9 mapping), so
+/// userland retry / load-balancing / idempotency annotations `match` on
+/// variants — they never parse error-message text.
 ///
-/// `Ok(value)` with the function's return value, or `Err(message)` on failure.
-builtin fn __call(addr: string, fn_ref: _, args: Array<_>) -> Result<_, string>;
+/// The **pre-send / post-send split** is load-bearing (§4.9): `Transport` is a
+/// PRE-send failure — the request frame was never fully written, so the call
+/// provably did NOT execute and is retry-safe. `ConnectionLost` and `Timeout`
+/// are POST-send — the frame went out before the reply was lost, so the call
+/// MAY have executed and must never be auto-retried. A variant-trusting retry
+/// annotation depends on this boundary to avoid re-running non-idempotent
+/// calls.
+enum RemoteError {
+    /// PRE-SEND: connect refused / DNS failure / send failure / payload over
+    /// the transport cap — the request was never fully sent; the call did NOT
+    /// execute. Safe to retry.
+    Transport { message: string },
+    /// POST-SEND: the connection was closed or reset AFTER the request frame
+    /// was fully written, before a reply arrived — the call MAY have executed.
+    ConnectionLost { message: string },
+    /// POST-SEND: sender-side read timeout — the call MAY have executed.
+    Timeout { message: string },
+    /// The receiver refused the function's required permissions against its
+    /// own granted set. `missing` is the permission names the server does not
+    /// grant (e.g. `["fs.write"]`).
+    PermissionDenied { missing: Array<string> },
+    /// The server requires authentication and the token was missing or
+    /// rejected — a distinct, user-actionable class (pass / refresh a token).
+    AuthRequired { message: string },
+    /// The receiver could not find the named function.
+    MissingFunction { name: string },
+    /// Remote execution exceeded the receiver's `ResourceLimits`
+    /// (incl. wall-time overrun, `limit == "wall_time"`).
+    ResourceLimitExceeded { limit: string },
+    /// Wire / call-format / protocol version mismatch.
+    VersionSkew { server: int, client: int },
+    /// A closure capture was refused. `name` is the captured VARIABLE name
+    /// (never a slot index); `reason` states why plus a remediation.
+    UnsupportedCapture { name: string, reason: string },
+    /// Transfer-integrity class: blob hash mismatch, malformed request,
+    /// retry-exhausted missing blobs, or a call-ABI (arity / arg-kind /
+    /// return-kind) mismatch.
+    Protocol { message: string },
+    /// The callee's OWN runtime error surfaced back to the caller.
+    Remote { message: string },
+}
 
 /// Ship execution to a remote `shape serve` node.
 ///
@@ -98,8 +154,12 @@ builtin fn __call(addr: string, fn_ref: _, args: Array<_>) -> Result<_, string>;
 pub annotation remote(addr) {
     targets: [function]
     before(args, ctx) {
-        let target = ctx["__impl"] ?? args[0]
-        let result = __call(addr, target, args)
+        // §4.1.5 / OQ-12: `ctx.target` is a typed function value statically
+        // bound to the annotated function's original implementation. No
+        // stringly `ctx["__impl"]` lookup and NO `?? args[0]` fallback — an
+        // unavailable target binding is an annotation-machinery bug that must
+        // fail loudly, never silently misdispatch a call argument as the callee.
+        let result = __call_raising(addr, ctx.target, args)
         { result: result }
     }
 }
