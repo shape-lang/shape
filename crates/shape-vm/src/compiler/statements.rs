@@ -6099,6 +6099,23 @@ impl BytecodeCompiler {
                         if self.local_drop_kind(local_idx).is_some() {
                             self.return_escape_drop_skip_local = Some(local_idx);
                         }
+                        // ADR-006 §2.7.30.4 (escape-Drop-deferral,
+                        // closure-capture arm): returning a closure binding
+                        // (`let f = || r.id; return f`) escapes its captures.
+                        // Mark the closure's Drop-bearing captures for
+                        // Drop-skip so the scope-exit `DropCall` does not
+                        // finalize a value the returned closure still reads.
+                        // Mirrors the implicit tail-return arm in
+                        // `compile_function`.
+                        if let Some(captures) = self
+                            .closure_binding_capture_drop_locals
+                            .get(&local_idx)
+                            .cloned()
+                        {
+                            for cap in captures {
+                                self.closure_escape_drop_skip_locals.insert(cap);
+                            }
+                        }
                     }
                 }
                 // Emit drops for all active drop scopes before returning
@@ -7063,12 +7080,42 @@ impl BytecodeCompiler {
                     // Select sync vs async opcode based on the type's DropKind.
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         if let Some(local_idx) = self.resolve_local(name) {
-                            let drop_kind = self.local_drop_kind(local_idx).or_else(|| {
+                            let mut drop_kind = self.local_drop_kind(local_idx).or_else(|| {
                                 var_decl
                                     .type_annotation
                                     .as_ref()
                                     .and_then(|ann| self.annotation_drop_kind(ann))
                             });
+
+                            // ADR-006 §2.7.30.4 (escape-Drop-deferral, caller
+                            // re-arm): an inferred, unannotated `let x =
+                            // <call>` whose callee's DECLARED return type is a
+                            // Drop type. The producer already skipped its own
+                            // `DropCall` on the escaping bare-identifier return
+                            // (`return_escape_drop_skip_local`); this stamps the
+                            // caller local's type NAME from that return
+                            // annotation so the emitted `DropCall` carries the
+                            // `TypeName::drop` symbol (emit_drop_call_for_local
+                            // reads the tracker) AND `local_drop_kind` resolves,
+                            // registering exactly one drop obligation at the
+                            // caller local's scope-exit — the
+                            // defer-to-escaping-binding lifetime. Gated on
+                            // `drop_kind.is_none()` so an already-resolved
+                            // (annotated / structurally-stamped) local is left
+                            // byte-identical, and scoped to Drop-typed returns
+                            // only (blast-radius-minimal). A chained escape (`x`
+                            // itself later returned) stays suppressed by the
+                            // existing return-skip in emit_drops_for_early_exit.
+                            if drop_kind.is_none() {
+                                if let Some((ret_type_name, ret_drop_kind)) = var_decl
+                                    .value
+                                    .as_ref()
+                                    .and_then(|init| self.initializer_call_return_drop_type(init))
+                                {
+                                    self.set_local_type_info(local_idx, &ret_type_name);
+                                    drop_kind = Some(ret_drop_kind);
+                                }
+                            }
 
                             let is_async = match drop_kind {
                                 Some(DropKind::AsyncOnly) => {
@@ -7118,6 +7165,42 @@ impl BytecodeCompiler {
                             // (stack-resident).
                             if self.binding_slot_needs_ownership_drop(local_idx, var_decl.kind) {
                                 self.track_ownership_drop_local(local_idx);
+                            }
+                            // ADR-006 §2.7.30.4 (escape-Drop-deferral,
+                            // closure-capture arm): if this binding's
+                            // initializer is a direct closure literal that
+                            // captured Drop-bearing locals, associate the
+                            // binding slot with those captures so a later
+                            // `return f` can defer their Drop to the closure's
+                            // lifetime. `take()` unconditionally to clear any
+                            // stale value (e.g. a closure passed as a call
+                            // argument); only record when the initializer is a
+                            // direct `Expr::FunctionExpr`, so `let x = foo(||
+                            // r.id)` never mis-associates `r` with `x`.
+                            if let Some(drop_captures) =
+                                self.pending_closure_capture_drop_locals.take()
+                            {
+                                let is_direct_closure = matches!(
+                                    var_decl.value.as_ref(),
+                                    Some(shape_ast::ast::Expr::FunctionExpr { .. })
+                                );
+                                if is_direct_closure {
+                                    self.closure_binding_capture_drop_locals
+                                        .insert(local_idx, drop_captures);
+                                }
+                            }
+                            // ADR-006 §2.7.30 (escape-Drop-deferral,
+                            // closure-capture arm, WF-1C lane b — CONSUMER
+                            // side): if this binding received an ESCAPING
+                            // closure from a call return (`let read =
+                            // make_reader()`), register the slot so its
+                            // scope-exit discharges the closure's deferred
+                            // capture Drops. The runtime opcode no-ops for
+                            // non-closures, so over-approximation is harmless.
+                            if let Some(value) = var_decl.value.as_ref() {
+                                if self.binding_should_track_closure_capture_drop(value) {
+                                    self.track_closure_capture_drop_local(local_idx);
+                                }
                             }
                             if let Some(value) = &var_decl.value {
                                 self.finish_reference_binding_from_expr(

@@ -379,6 +379,17 @@ pub struct VirtualMachine {
     /// When Some, print output is captured here instead of going to stdout
     output_buffer: Option<Vec<String>>,
 
+    /// Drop-error diagnostic sink (WF-1C fix (c), ADR-006 §2.7.30).
+    ///
+    /// A runtime error raised inside a user `Drop::drop` body is CONTAINED,
+    /// not propagated: the aborted drop frame is unwound, the error is logged
+    /// here (and to stderr), and the VM dispatch loop proceeds to the next
+    /// scope-exit `DropCall` so the remaining drops still run and the scope's
+    /// return value is preserved. This vec is the queryable record of every
+    /// contained drop error (empty on the happy path). Cleared only by the
+    /// host via [`VirtualMachine::take_drop_errors`].
+    drop_errors: Vec<String>,
+
     /// Extension module registry — single source of truth for all extension modules.
     /// Used by extension dispatch, auto-available module_bindings, and LSP completions.
     module_registry: shape_runtime::module_exports::ModuleExportRegistry,

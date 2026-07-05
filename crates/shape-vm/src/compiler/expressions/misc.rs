@@ -185,12 +185,43 @@ impl BytecodeCompiler {
                                     }
                                 }
                                 // Track for auto-drop at scope exit
-                                let drop_kind = self.local_drop_kind(local_idx).or_else(|| {
+                                let mut drop_kind = self.local_drop_kind(local_idx).or_else(|| {
                                     var_decl
                                         .type_annotation
                                         .as_ref()
                                         .and_then(|ann| self.annotation_drop_kind(ann))
                                 });
+
+                                // ADR-006 §2.7.30.4 (escape-Drop-deferral,
+                                // caller re-arm): a nested-block inferred,
+                                // unannotated `let x = <call>` whose callee's
+                                // DECLARED return type is a Drop type. This is
+                                // the block-scope analogue of the same re-arm in
+                                // `compile_statement` (statements.rs): the
+                                // producer already skipped its own `DropCall` on
+                                // the escaping bare-identifier return
+                                // (`return_escape_drop_skip_local`), but the
+                                // inferred call-return local's type NAME is never
+                                // stamped (the non-generic call-return path in
+                                // `function_call_return_concrete_type` reduces
+                                // the return annotation through the primitive-only
+                                // `concrete_type_from_annotation`, `None` for a
+                                // user struct), so `local_drop_kind` returns
+                                // `None` and the value's `Drop::drop` never runs.
+                                // Stamp the local's type NAME from the callee's
+                                // return annotation so the emitted `DropCall`
+                                // carries the `TypeName::drop` symbol AND register
+                                // exactly one drop obligation at this block's
+                                // scope-exit. Gated on `drop_kind.is_none()` and
+                                // scoped to Drop-typed returns only.
+                                if drop_kind.is_none() {
+                                    if let Some((ret_type_name, ret_drop_kind)) =
+                                        self.initializer_call_return_drop_type(init_expr)
+                                    {
+                                        self.set_local_type_info(local_idx, &ret_type_name);
+                                        drop_kind = Some(ret_drop_kind);
+                                    }
+                                }
                                 let is_async = match drop_kind {
                                     Some(super::super::DropKind::AsyncOnly) => {
                                         self.current_function_is_async
@@ -201,6 +232,16 @@ impl BytecodeCompiler {
                                     Some(super::super::DropKind::SyncOnly) | None => false,
                                 };
                                 self.track_drop_local(local_idx, is_async);
+                                // ADR-006 §2.7.30 (escape-Drop-deferral,
+                                // closure-capture arm, WF-1C lane b — CONSUMER
+                                // side): block-scope analogue of the
+                                // `compile_statement` registration. If this
+                                // block-local received an escaping closure from
+                                // a call return, discharge its deferred capture
+                                // Drops at the block's scope exit.
+                                if self.binding_should_track_closure_capture_drop(init_expr) {
+                                    self.track_closure_capture_drop_local(local_idx);
+                                }
                                 self.finish_reference_binding_from_expr(
                                     local_idx, true, name, init_expr, ref_borrow,
                                 );

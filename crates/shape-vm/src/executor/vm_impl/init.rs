@@ -50,6 +50,7 @@ impl VirtualMachine {
             last_uncaught_exception: None,
             module_init_done: false,
             output_buffer: None,
+            drop_errors: Vec::new(),
             module_registry: shape_runtime::module_exports::ModuleExportRegistry::new(),
             module_fn_table: Vec::new(),
             function_name_index: HashMap::new(),

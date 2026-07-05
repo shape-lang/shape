@@ -1748,6 +1748,14 @@ pub(in crate::compiler) fn emit_binary_op(
 /// thiserror's Display impl adds.  This prevents nested comptime errors
 /// from accumulating multiple prefixes like
 /// "Runtime error: Comptime block evaluation failed: Runtime error: …".
+/// ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C lane b):
+/// true when a declared return annotation is a closure/function type — i.e.
+/// the callee could return a closure whose captures need deferred-Drop
+/// discharge at the consumer binding's scope exit.
+fn annotation_is_closure_like(ann: &shape_ast::ast::TypeAnnotation) -> bool {
+    matches!(ann, shape_ast::ast::TypeAnnotation::Function { .. })
+}
+
 pub(crate) fn strip_error_prefix(e: &ShapeError) -> String {
     let msg = e.to_string();
     // Known prefixes added by thiserror Display
@@ -5696,11 +5704,30 @@ impl BytecodeCompiler {
         // lockstep with the other drop stacks; pop_drop_scope emits
         // DropSharedLocal for each entry.
         self.shared_drop_locals.push(Vec::new());
+        // ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+        // lane b — consumer side). Parallel scope stack for locals that
+        // received an escaping closure from a call return; pop_drop_scope /
+        // emit_drops_for_early_exit emit `LoadLocal; DropClosureCaptures` for
+        // each. Pushed in lockstep with the other drop stacks.
+        self.closure_capture_drop_locals.push(Vec::new());
     }
 
     /// Pop the current drop scope, emitting DropCall instructions for all
     /// tracked locals in reverse order.
     pub(super) fn pop_drop_scope(&mut self) -> Result<()> {
+        // ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+        // lane b — consumer side): discharge escaping-closure capture Drops
+        // FIRST — before the ownership `DropLocal` / `DropCall` passes below,
+        // which release the closure's own share (freeing the captures plain)
+        // AND poison the slot with the no-op Bool sentinel. `LoadLocal` +
+        // `DropClosureCaptures` must read the LIVE closure while its slot is
+        // still intact. Popped unconditionally to keep the scope stack in
+        // lockstep with `drop_locals`.
+        if let Some(closure_locals) = self.closure_capture_drop_locals.pop() {
+            for local_idx in closure_locals.into_iter().rev() {
+                self.emit_drop_closure_captures_for_local(local_idx);
+            }
+        }
         // Phase V1.1C: when `SHAPE_V2_OWNERSHIP_MOVES` is on, emit an
         // ownership-aware `DropLocal` for each heap-ref local declared in
         // this scope — in reverse order — *before* the legacy `DropCall`
@@ -5765,6 +5792,18 @@ impl BytecodeCompiler {
         // Emit DropCall for each tracked local in reverse order
         if let Some(locals) = self.drop_locals.pop() {
             for (local_idx, is_async) in locals.into_iter().rev() {
+                // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture
+                // arm): a Drop-bearing local captured by an escaping closure
+                // defers its `Drop` to the closure's lifetime — suppress the
+                // scope-exit user-`Drop` `DropCall` (see
+                // `closure_escape_drop_skip_locals`). The slot's refcount
+                // share is retired by the function-teardown
+                // `truncate_stack(bp)` (a plain `drop_with_kind`, never user
+                // `Drop::drop`); running the user `Drop::drop` here would
+                // finalize a value the returned closure still reads.
+                if self.closure_escape_drop_skip_locals.contains(&local_idx) {
+                    continue;
+                }
                 self.emit_drop_call_for_local(local_idx, is_async);
             }
         }
@@ -5890,6 +5929,98 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+    /// lane b — consumer side): emit a `LoadLocal; DropClosureCaptures` pair
+    /// for a local that received an escaping closure. The opcode discharges
+    /// the closure's Drop-bearing captures (deferred from the capturing
+    /// scope) and is a runtime no-op for a non-closure value. Net-zero on the
+    /// stack (LoadLocal push, DropClosureCaptures pop:1/push:0), so it is safe
+    /// to emit while a return value sits on the stack beneath.
+    fn emit_drop_closure_captures_for_local(&mut self, local_idx: u16) {
+        self.emit(Instruction::new(
+            OpCode::LoadLocal,
+            Some(Operand::Local(local_idx)),
+        ));
+        self.emit(Instruction::simple(OpCode::DropClosureCaptures));
+    }
+
+    /// ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+    /// lane b — consumer side): record `local_idx` as having received an
+    /// escaping closure from a call return, so its scope-exit discharges the
+    /// closure's deferred capture Drops. No-op when no drop scope is active.
+    pub(super) fn track_closure_capture_drop_local(&mut self, local_idx: u16) {
+        if let Some(scope) = self.closure_capture_drop_locals.last_mut() {
+            scope.push(local_idx);
+        }
+    }
+
+    /// ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+    /// lane b — consumer side): should a `let x = <init>` binding register
+    /// `x` for closure-capture-Drop discharge at scope exit?
+    ///
+    /// Gated on the program having at least one `impl Drop` (`drop_type_info`
+    /// non-empty) so non-Drop programs are byte-identical. The initializer
+    /// must be a function CALL whose callee's DECLARED return type cannot be
+    /// statically ruled out as a closure — a callee with no return annotation
+    /// (`fn make_reader() { ... f }`) or a closure/function return type
+    /// qualifies (conservative: the runtime opcode no-ops for non-closures /
+    /// closures without Drop-bearing captures, so an over-approximation is
+    /// harmless). A callee whose declared return type is a concrete
+    /// non-closure (`-> R`, `-> int`) is ruled out. Direct closure LITERAL
+    /// bindings (`let g = || r.id`) are NOT calls and never register here —
+    /// their captures share the caller's scope and are dropped by the
+    /// captured locals' own `DropCall` (non-escaping) or suppressed +
+    /// deferred to the returning caller (escaping producer).
+    pub(super) fn binding_should_track_closure_capture_drop(
+        &self,
+        init: &shape_ast::ast::Expr,
+    ) -> bool {
+        use shape_ast::ast::Expr;
+        if self.drop_type_info.is_empty() {
+            return false;
+        }
+        let return_ann = match init {
+            Expr::FunctionCall { name, .. } => {
+                // A call name that shadows to a local / captured / module
+                // binding is not the module `FunctionDef` whose return type
+                // we stored — mirror the shadowing guards in
+                // `initializer_call_return_drop_type`. Be conservative and
+                // register (the runtime opcode no-ops when wrong).
+                if self.resolve_local(name).is_some()
+                    || self.mutable_closure_captures.contains_key(name.as_str())
+                    || self.resolve_scoped_module_binding_name(name).is_some()
+                {
+                    return true;
+                }
+                match self.function_defs.get(name) {
+                    Some(def) => def.return_type.clone(),
+                    // Unknown callee — conservatively register.
+                    None => return true,
+                }
+            }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                ..
+            } => {
+                let scoped = format!("{}::{}", namespace, function);
+                match self.function_defs.get(&scoped) {
+                    Some(def) => def.return_type.clone(),
+                    None => return true,
+                }
+            }
+            // Not a call — captures do not escape via a call return.
+            _ => return false,
+        };
+        match return_ann {
+            // No declared return annotation — the callee could return a
+            // closure (its return type was inferred). Register.
+            None => true,
+            // Declared: register only if it is a closure/function type.
+            Some(ann) => annotation_is_closure_like(&ann),
+        }
+    }
+
     /// Emit a single LoadModuleBinding + DropCall pair for a module binding.
     /// Similar to `emit_drop_call_for_local` but loads from module bindings.
     pub(super) fn emit_drop_call_for_module_binding(&mut self, binding_idx: u16, is_async: bool) {
@@ -5937,6 +6068,61 @@ impl BytecodeCompiler {
         self.drop_type_info.get(&type_name).copied()
     }
 
+    /// ADR-006 §2.7.30.4 (escape-Drop-deferral, caller re-arm): resolve the
+    /// Drop type NAME + [`DropKind`] implied by a `let x = <call>`
+    /// initializer's DECLARED return type, when that return type is a
+    /// registered `impl Drop` type.
+    ///
+    /// The producer already skips its own `DropCall` for the escaping
+    /// bare-identifier tail-return (`return_escape_drop_skip_local`, set in
+    /// `functions.rs` / `statements.rs`, consumed in
+    /// `emit_drops_for_early_exit`). This resolves the caller-side half: an
+    /// inferred, unannotated `let x = make(7)` never stamps the local's type
+    /// NAME — the non-generic call-return path in
+    /// `function_call_return_concrete_type` reduces the return annotation
+    /// through the primitive-only `concrete_type_from_annotation`, which
+    /// returns `None` for a user struct — so `local_drop_kind` returns
+    /// `None`, no obligation registers, and the value's `Drop::drop` never
+    /// runs. Returning the type NAME here lets the caller both stamp the
+    /// tracker slot (so the emitted `DropCall` carries the `TypeName::drop`
+    /// symbol) and register the drop obligation.
+    ///
+    /// Resolves ONLY the callee's *declared* return annotation (never
+    /// fabricated) and returns `Some` ONLY when that type is Drop-bearing, so
+    /// a callee with no Drop-typed return adds no obligation. Mirrors
+    /// `return_ownership_hint_for_initializer`'s shadowing guards: a call
+    /// name that resolves to a local, a captured name, or a module binding is
+    /// not the module `FunctionDef` whose return type we stored.
+    pub(super) fn initializer_call_return_drop_type(
+        &self,
+        expr: &shape_ast::ast::Expr,
+    ) -> Option<(String, DropKind)> {
+        use shape_ast::ast::Expr;
+        let ret_ann = match expr {
+            Expr::FunctionCall { name, .. } => {
+                if self.resolve_local(name).is_some()
+                    || self.mutable_closure_captures.contains_key(name.as_str())
+                    || self.resolve_scoped_module_binding_name(name).is_some()
+                {
+                    return None;
+                }
+                self.function_defs.get(name)?.return_type.as_ref()?
+            }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                ..
+            } => {
+                let scoped = format!("{}::{}", namespace, function);
+                self.function_defs.get(&scoped)?.return_type.as_ref()?
+            }
+            _ => return None,
+        };
+        let type_name = Self::tracked_type_name_from_annotation(ret_ann)?;
+        let drop_kind = self.drop_type_info.get(&type_name).copied()?;
+        Some((type_name, drop_kind))
+    }
+
     /// Emit drops for all scopes being exited (used by return/break/continue).
     /// `scopes_to_exit` is the number of drop scopes to emit drops for.
     /// True when at least one in-scope `DropCall`-tracked local (any active
@@ -5960,6 +6146,36 @@ impl BytecodeCompiler {
         let total = self.drop_locals.len();
         if scopes_to_exit > total {
             return Ok(());
+        }
+        // ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+        // lane b — consumer side): discharge escaping-closure capture Drops
+        // FIRST — before the ownership `DropLocal` / `DropCall` passes below,
+        // which release the closure's own share (freeing the captures plain)
+        // AND poison the slot with the no-op Bool sentinel. `LoadLocal` +
+        // `DropClosureCaptures` must read the LIVE closure while its slot is
+        // still intact. Clone-not-consume (the enclosing block pops the scope
+        // stack later), mirroring the `drop_locals` treatment below. This is
+        // the function tail-return path (`compile_function` calls
+        // `emit_drops_for_early_exit`), so a caller local that received an
+        // escaping closure (`let read = make_reader()`) discharges here.
+        {
+            let closure_total = self.closure_capture_drop_locals.len();
+            if scopes_to_exit <= closure_total {
+                let mut closure_scopes: Vec<Vec<u16>> = Vec::new();
+                for i in (closure_total - scopes_to_exit..closure_total).rev() {
+                    let locals = self
+                        .closure_capture_drop_locals
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_default();
+                    closure_scopes.push(locals);
+                }
+                for locals in closure_scopes {
+                    for local_idx in locals.into_iter().rev() {
+                        self.emit_drop_closure_captures_for_local(local_idx);
+                    }
+                }
+            }
         }
         // Phase V1.1C: when the ownership-moves flag is on, also emit a
         // `DropLocal` for each heap-ref (UniqueHeap) local tracked in the
@@ -6049,6 +6265,17 @@ impl BytecodeCompiler {
                 // double-drop). Set/cleared around the return's drop-emission
                 // in the `Statement::Return` arm.
                 if self.return_escape_drop_skip_local == Some(local_idx) {
+                    continue;
+                }
+                // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture
+                // arm): a Drop-bearing local captured by an escaping closure
+                // defers its `Drop` to the closure's lifetime — suppress the
+                // scope-exit user-`Drop` `DropCall`. Same rationale as the
+                // `pop_drop_scope` skip: the slot's refcount share is retired
+                // by the function-teardown `truncate_stack(bp)`; running the
+                // user `Drop::drop` here would finalize a value the returned
+                // closure still reads (use-after-finalize).
+                if self.closure_escape_drop_skip_locals.contains(&local_idx) {
                     continue;
                 }
                 self.emit_drop_call_for_local(local_idx, is_async);

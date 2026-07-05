@@ -1,4 +1,5 @@
 use super::super::*;
+use shape_value::VMError;
 
 impl VirtualMachine {
     /// Enable output capture for testing
@@ -32,6 +33,43 @@ impl VirtualMachine {
         } else {
             println!("{}", text);
         }
+    }
+
+    /// Record + log a CONTAINED drop error (WF-1C fix (c), ADR-006 §2.7.30).
+    ///
+    /// Called from `op_drop_call_impl` when a user `Drop::drop` body aborts
+    /// with a `VMError`. The error is not propagated (that would abort the
+    /// whole program and skip the remaining scope-exit drops + lose the
+    /// return value); instead it is appended to the [`drop_errors`] sink and
+    /// echoed to stderr so a shipped run still surfaces the failure without
+    /// tearing down the VM.
+    ///
+    /// [`drop_errors`]: VirtualMachine::drop_errors
+    pub(crate) fn record_contained_drop_error(
+        &mut self,
+        type_name: Option<&str>,
+        err: &VMError,
+    ) {
+        let msg = match type_name {
+            Some(tn) => format!("drop() for `{tn}` failed and was contained: {err}"),
+            None => format!("drop() failed and was contained: {err}"),
+        };
+        eprintln!("shape: warning: {msg}");
+        self.drop_errors.push(msg);
+    }
+
+    /// Contained drop-error diagnostics accumulated so far (WF-1C fix (c)).
+    /// Empty unless a user `Drop::drop` body raised a runtime error that the
+    /// VM contained. Read-only view; use [`take_drop_errors`] to drain.
+    ///
+    /// [`take_drop_errors`]: VirtualMachine::take_drop_errors
+    pub fn drop_errors(&self) -> &[String] {
+        &self.drop_errors
+    }
+
+    /// Drain the contained drop-error diagnostics (WF-1C fix (c)).
+    pub fn take_drop_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.drop_errors)
     }
 
     /// Set a module_binding variable by name.

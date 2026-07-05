@@ -60,6 +60,7 @@ impl VirtualMachine {
             OpCode::DynMethodCall => self.op_dyn_method_call(instruction, ctx),
             OpCode::DropCall => self.op_drop_call_sync(instruction, ctx),
             OpCode::DropCallAsync => self.op_drop_call_async(instruction, ctx),
+            OpCode::DropClosureCaptures => self.op_drop_closure_captures(ctx),
             _ => unreachable!(
                 "exec_trait_object_ops called with non-trait-object opcode: {:?}",
                 instruction.opcode
@@ -728,8 +729,41 @@ impl VirtualMachine {
         // self argument) ONLY if we have a drop fn to call.
         let (bits, kind) = self.pop_kinded()?;
 
+        // Dispatch the user `Drop::drop` body (with error containment),
+        // consuming the popped `(bits, kind)` share exactly once. Factored
+        // so the closure-capture escape path (`op_drop_closure_captures`)
+        // reuses the same resolve + call + containment logic.
+        self.dispatch_user_drop(bits, kind, type_name_opt.as_deref(), is_async, ctx)
+    }
+
+    /// Run the user `Drop::drop` (or `drop_async`) body for a single
+    /// `(bits, kind)` receiver whose concrete type is `type_name_opt`,
+    /// consuming exactly one strong-count share of the receiver.
+    ///
+    /// Shared by `op_drop_call_impl` (scope-exit `DropCall`) and
+    /// `op_drop_closure_captures` (ADR-006 §2.7.30 escape-Drop-deferral,
+    /// WF-1C lane b). Contains any runtime error raised inside the drop body
+    /// (WF-1C fix (c)): the aborted drop frame is unwound, the error is
+    /// logged to the drop-error sink, and control returns `Ok(())` so the
+    /// remaining scope-exit drops still run and the scope's return value is
+    /// preserved.
+    ///
+    /// Contract: the caller transfers ownership of ONE strong-count share of
+    /// `(bits, kind)` into this call. If no `Drop` impl is registered for
+    /// `type_name_opt` the share is released via the canonical kind dispatch;
+    /// otherwise it is threaded as the `self` argument and retired by the
+    /// drop frame teardown. Either way the caller must NOT release the share
+    /// again.
+    fn dispatch_user_drop(
+        &mut self,
+        bits: u64,
+        kind: NativeKind,
+        type_name_opt: Option<&str>,
+        is_async: bool,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         // Resolve the drop function name.
-        let drop_fn_name = type_name_opt.as_ref().and_then(|tn| {
+        let drop_fn_name = type_name_opt.and_then(|tn| {
             // Drop trait registered impl: function name is
             // `TypeName::drop` (or `TypeName::drop_async`). Async drop
             // tries the async variant first, then falls back to sync.
@@ -751,8 +785,8 @@ impl VirtualMachine {
         });
 
         let Some(fn_name) = drop_fn_name else {
-            // No drop impl. The kinded pop already released the
-            // share; we're done.
+            // No drop impl. Release the share via the canonical kind
+            // dispatch; we're done.
             drop_kinded(bits, kind);
             return Ok(());
         };
@@ -779,18 +813,209 @@ impl VirtualMachine {
         let self_arg = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         let args = vec![self_arg];
         let saved_depth = self.call_stack.len();
-        self.call_function_with_nb_args(function_id, &args)?;
-        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
-        // post-fix the helper clones each arg into the new frame; let
-        // `args` drop normally to retire the caller-owned share.
-        self.execute_until_call_depth(saved_depth, ctx)?;
-        drop(args);
-        // Pop and discard the drop fn's return value (Drop::drop
-        // returns Unit; the kind dispatch on pop releases any
-        // refcount it carried).
-        let (rbits, rkind) = self.pop_kinded()?;
-        drop_kinded(rbits, rkind);
+        // WF-1C fix (c) — drop-error containment (ADR-006 §2.7.30).
+        // Capture the instruction pointer BEFORE frame setup. This is the
+        // exact `return_ip` the drop frame records
+        // (`call_function_with_nb_args` reads `self.ip` unchanged before its
+        // frame push). On the containment path `op_return` never runs for the
+        // aborted frame, so we restore `self.ip` ourselves — the outer
+        // dispatch loop then resumes at the instruction AFTER this `DropCall`,
+        // i.e. the NEXT scope-exit `DropCall`.
+        let saved_ip = self.ip;
+
+        // Drive the drop body. `call_function_with_nb_args` sets up the frame
+        // (cloning `args` into it) and `execute_until_call_depth` runs the
+        // body to its `op_return`. A runtime error anywhere in the drop body
+        // must NOT abort the program: it is contained so the remaining
+        // scope-exit drops still run and the scope's return value (sitting on
+        // the stack BENEATH the drop receivers) is preserved.
+        let drop_result = match self.call_function_with_nb_args(function_id, &args) {
+            Ok(()) => self.execute_until_call_depth(saved_depth, ctx),
+            Err(e) => Err(e),
+        };
+
+        match drop_result {
+            Ok(()) => {
+                // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+                // the helper clones each arg into the new frame; let `args`
+                // drop normally to retire the caller-owned share.
+                drop(args);
+                // Pop and discard the drop fn's return value (Drop::drop
+                // returns Unit; the kind dispatch on pop releases any
+                // refcount it carried).
+                let (rbits, rkind) = self.pop_kinded()?;
+                drop_kinded(rbits, rkind);
+                Ok(())
+            }
+            Err(err) => {
+                // ---- Drop-error containment (WF-1C fix (c)). ----
+                // 1. Unwind every frame the aborted drop body pushed beyond
+                //    `saved_depth`. `unwind_call_frames_to` truncates each
+                //    frame's data stack to its base_pointer — releasing the
+                //    arg clones this call installed plus any drop-body
+                //    temporaries via the §2.7.7 kinded drop — and retires each
+                //    frame's closure-self keep-alive share. The scope's real
+                //    return value is untouched: it sits BELOW the drop
+                //    frame's base_pointer (the receiver was already popped at
+                //    `pop_kinded` above).
+                self.unwind_call_frames_to(saved_depth);
+                // 2. Restore the instruction pointer so the outer loop resumes
+                //    at the next scope-exit `DropCall` (op_return never ran).
+                self.ip = saved_ip;
+                // 3. Release the caller-owned self-arg share exactly once.
+                //    (Mirrors the Ok path's `drop(args)`; the frame's clone
+                //    was already retired by the unwind truncate above.)
+                drop(args);
+                // 4. Record + log the contained error. Do NOT pop a return
+                //    value here — the drop fn never returned one and the
+                //    unwind already restored the stack; popping would consume
+                //    the scope's real return value sitting beneath.
+                self.record_contained_drop_error(type_name_opt, &err);
+                Ok(())
+            }
+        }
+    }
+
+    /// ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+    /// lane b). Discharge the deferred user `Drop::drop` for each
+    /// Drop-bearing capture of the closure at the top of stack, exactly
+    /// once, at the escaping closure's scope-exit.
+    ///
+    /// Stack: `[..., closure]` → `[...]` (net-zero against the paired
+    /// `LoadLocal`; the popped closure share is released after discharge).
+    ///
+    /// A Drop-bearing local captured by a RETURNED closure must not run its
+    /// user `Drop::drop` at the *capturing* scope's exit — the returned
+    /// closure still reads it (the producer suppresses that drop via
+    /// `closure_escape_drop_skip_locals`). Its Drop is deferred to the
+    /// escaping closure's lifetime: this opcode, emitted at the scope-exit
+    /// of the local that received the escaping closure, runs it.
+    ///
+    /// Share accounting: each capture's single strong-count share is owned
+    /// by the closure block (it is freed by the refcount-zero
+    /// `release_typed_closure` capture walk when the block dies). We
+    /// `clone_with_kind` a fresh share for the drop-fn `self` argument so the
+    /// drop body observes the LIVE value and the closure block's own share is
+    /// undisturbed — net-zero on the capture's refcount, and the block's
+    /// later plain refcount-zero walk frees the memory exactly once. A
+    /// drop-once header flag guards against a second discharge on an aliased
+    /// block.
+    fn op_drop_closure_captures(
+        &mut self,
+        mut ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
+        use shape_value::heap_value::HeapValue;
+        use shape_value::v2::closure_raw::{
+            read_capture_as_value_bits, set_typed_closure_captures_dropped,
+            typed_closure_captures_dropped,
+        };
+
+        // Pop the closure value (the share cloned onto the stack by the
+        // paired `LoadLocal`). We own this share until the trailing
+        // `drop_kinded` below.
+        let (bits, kind) = self.pop_kinded()?;
+
+        // No-op for a non-closure value. The binding this opcode guards may
+        // hold a Drop-struct (lane a) or any other value when the callee's
+        // return type could not be statically ruled out as a closure — the
+        // runtime kind check is the precise discriminator. Release the
+        // popped share and return.
+        if !matches!(kind, NativeKind::Ptr(HeapKind::Closure)) {
+            drop_kinded(bits, kind);
+            return Ok(());
+        }
+
+        // Recover the closure block pointer + layout via the §2.7.6 / Q8
+        // heap dispatch (ADR-005 §1 single-discriminator). `bits` keeps the
+        // block alive (we own one share), so `ptr` is valid for the whole
+        // discharge loop below.
+        let (ptr, layout) = {
+            let slot = ValueSlot::from_raw(bits);
+            match slot.as_heap_value() {
+                HeapValue::ClosureRaw(block) => (block.as_ptr(), Arc::clone(block.layout())),
+                _ => {
+                    // Kind label says Closure but payload is not ClosureRaw —
+                    // release and no-op (defensive; should be unreachable).
+                    drop_kinded(bits, kind);
+                    return Ok(());
+                }
+            }
+        };
+
+        // Drop-once guard: if a prior `DropClosureCaptures` (on an aliased
+        // block) already discharged the captures, skip — running the user
+        // Drop bodies again would double-run the finalizers.
+        // SAFETY: `ptr` points to a live closure block (we hold a share).
+        if unsafe { typed_closure_captures_dropped(ptr) } {
+            drop_kinded(bits, kind);
+            return Ok(());
+        }
+
+        // Walk each capture; for those whose concrete type is a registered
+        // `impl Drop` struct/enum, run the user Drop body once.
+        let capture_count = layout.capture_count();
+        for i in 0..capture_count {
+            let Some(type_name) = drop_capture_type_name(&layout, i) else {
+                continue;
+            };
+            if !self
+                .program
+                .trait_method_symbols
+                .contains_key(&format!("Drop::{}::__default__::drop", type_name))
+                && !self
+                    .program
+                    .trait_method_symbols
+                    .contains_key(&format!("Drop::{}::__default__::drop_async", type_name))
+            {
+                continue;
+            }
+
+            // Read the capture's raw payload + kind from the block. This does
+            // NOT retain — the share stays owned by the block.
+            // SAFETY: `ptr`/`layout` describe a live block; `i < capture_count`.
+            let cap_bits = unsafe { read_capture_as_value_bits(ptr, &layout, i) };
+            let cap_kind = layout.capture_native_kind(i);
+
+            // Retain a fresh share for the drop-fn `self` argument. The drop
+            // body observes the live value; `dispatch_user_drop` consumes
+            // exactly this cloned share, leaving the block's own capture
+            // share intact. Async captures are dispatched sync here (the
+            // escaping-closure discharge point is not an async suspension
+            // site); `dispatch_user_drop` falls back to the sync `drop` body.
+            super::vm_impl::stack::clone_with_kind(cap_bits, cap_kind);
+            self.dispatch_user_drop(
+                cap_bits,
+                cap_kind,
+                Some(&type_name),
+                /*is_async=*/ false,
+                ctx.as_deref_mut(),
+            )?;
+        }
+
+        // Mark discharged (drop-once) and release the popped closure share.
+        // SAFETY: `ptr` points to a live closure block (we still hold a
+        // share via `bits`).
+        unsafe { set_typed_closure_captures_dropped(ptr as *mut u8) };
+        drop_kinded(bits, kind);
         Ok(())
+    }
+}
+
+/// Resolve the source-level type NAME of closure capture `i` when it is a
+/// heap struct/enum that could carry an `impl Drop` (ADR-006 §2.7.30, WF-1C
+/// lane b). Returns `None` for scalar / non-nominal captures (which never
+/// carry a user `Drop`). The name is read from the layout's per-capture
+/// `ConcreteType` — stamped at closure-literal lowering by
+/// `resolve_capture_concrete_type` — so no runtime schema lookup is needed.
+fn drop_capture_type_name(
+    layout: &shape_value::v2::closure_layout::ClosureLayout,
+    i: usize,
+) -> Option<String> {
+    use shape_value::v2::ConcreteType;
+    match layout.capture_types.get(i)? {
+        ConcreteType::Struct(named) => named.name_str().map(|s| s.to_string()),
+        ConcreteType::Enum(named) => named.name_str().map(|s| s.to_string()),
+        _ => None,
     }
 }
 

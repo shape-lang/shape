@@ -907,6 +907,64 @@ pub struct BytecodeCompiler {
     /// `emit_drops_for_early_exit`, cleared immediately after).
     pub(crate) return_escape_drop_skip_local: Option<u16>,
 
+    /// ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture arm): local
+    /// slot indices of Drop-bearing values captured by an ESCAPING closure
+    /// (`let r = R{..}; let f = || r.id; f`). The closure outlives the
+    /// current frame, so the capture must stay ALIVE for the closure's
+    /// lifetime — running the user `Drop::drop` at the capturing scope's exit
+    /// is a use-after-finalize (the returned closure reads a value whose
+    /// `drop()` body already ran). When a slot is in this set,
+    /// `emit_drops_for_early_exit` / `pop_drop_scope` SKIP its user-`Drop`
+    /// `DropCall`. The slot's refcount share is still released — by the
+    /// function-teardown `truncate_stack(bp)` at `op_return_value`
+    /// (control_flow/mod.rs:984), a plain `drop_with_kind` that never
+    /// dispatches user `Drop::drop` — so the escaping closure's own capture
+    /// share keeps the referent alive until the closure itself is released.
+    /// This is the closure-capture analogue of `return_escape_drop_skip_local`.
+    /// Function-scoped: saved/restored in lockstep with `drop_locals` in
+    /// `compile_function` so a capture skip in a nested/outer function does
+    /// not leak its (frame-local) slot index into a sibling frame.
+    pub(crate) closure_escape_drop_skip_locals: HashSet<u16>,
+
+    /// ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture arm): maps a
+    /// closure-binding local slot (`let f = || r.id` → slot of `f`) to the
+    /// frame-local slots of its Drop-bearing captures (slot of `r`). The
+    /// literal escape signal (`emit_make_closure_heap_next`) only fires for a
+    /// closure LITERAL in return position (`return || ...`); the far more
+    /// common bind-then-return form (`let f = || ...; f`) is invisible to it.
+    /// This table lets the return site (`return f` / implicit tail `f`)
+    /// recognise that returning `f` escapes its captures, and mark them in
+    /// `closure_escape_drop_skip_locals`. Populated at the `let f =
+    /// <closure-literal>` binding from `pending_closure_capture_drop_locals`.
+    /// Function-scoped (saved/restored with `drop_locals`).
+    pub(crate) closure_binding_capture_drop_locals: HashMap<u16, Vec<u16>>,
+
+    /// Transient carrier: the Drop-bearing captured local slots of the closure
+    /// literal most recently lowered by `compile_expr_closure`. Consumed by
+    /// the enclosing `let f = <closure-literal>` binding to populate
+    /// `closure_binding_capture_drop_locals`. Overwritten on every closure
+    /// lowering and taken on consume, so a stale value from a closure used as
+    /// a call argument (`foo(|| r.id)`) is never mis-associated — consumption
+    /// is gated on the initializer being a direct `Expr::FunctionExpr`.
+    pub(crate) pending_closure_capture_drop_locals: Option<Vec<u16>>,
+
+    /// ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+    /// lane b — CONSUMER side). Per-scope stack (lockstep with `drop_locals`)
+    /// of local slots that received an ESCAPING closure from a call return
+    /// (`let read = make_reader()`). At the slot's scope-exit a
+    /// `LoadLocal; DropClosureCaptures` pair is emitted so the closure's
+    /// Drop-bearing captures run their user `Drop::drop` exactly once —
+    /// deferred from the *capturing* scope (where the producer suppressed
+    /// them via `closure_escape_drop_skip_locals`) to the escaping closure's
+    /// lifetime. The runtime opcode is a no-op for a non-closure value or a
+    /// closure with no Drop-bearing captures, so registration is
+    /// conservative: a `let x = <call>` whose callee's declared return type
+    /// cannot be statically ruled out as a closure. Gated at bind time on the
+    /// program having at least one `impl Drop` (`drop_type_info` non-empty) so
+    /// non-Drop programs emit nothing. Pushed/popped in `push_drop_scope` /
+    /// `pop_drop_scope`; saved/restored per-function in `compile_function`.
+    pub(crate) closure_capture_drop_locals: Vec<Vec<u16>>,
+
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,
 

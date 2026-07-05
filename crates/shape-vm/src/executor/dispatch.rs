@@ -853,7 +853,7 @@ impl VirtualMachine {
             }
 
             // Trait object operations
-            BoxTraitObject | DynMethodCall | DropCall | DropCallAsync => {
+            BoxTraitObject | DynMethodCall | DropCall | DropCallAsync | DropClosureCaptures => {
                 return self.exec_trait_object_ops(instruction, ctx);
             }
 

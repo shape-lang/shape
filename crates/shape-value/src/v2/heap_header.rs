@@ -65,6 +65,12 @@ pub const HEAP_KIND_V2_TRAIT_OBJECT: u16 = 87;
 pub const FLAG_MARKED: u8 = 0x01;
 pub const FLAG_PINNED: u8 = 0x02;
 pub const FLAG_READONLY: u8 = 0x04;
+/// Flag (closure blocks only): the user `Drop::drop` bodies of this closure
+/// block's Drop-bearing captures have already been discharged by a
+/// `DropClosureCaptures` opcode (ADR-006 §2.7.30, WF-1C lane b). Drop-once
+/// guard against a second discharge on an aliased block. See
+/// `closure_raw::{typed_closure_captures_dropped, set_typed_closure_captures_dropped}`.
+pub const FLAG_CLOSURE_CAPTURES_DROPPED: u8 = 0x08;
 
 /// 8-byte header for all v2 heap-allocated objects.
 /// Refcount at offset 0 for fastest access.

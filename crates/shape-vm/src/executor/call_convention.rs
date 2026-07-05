@@ -918,7 +918,7 @@ impl VirtualMachine {
     /// the one share the matching `clone_with_kind` installed at frame
     /// setup. No bare `vw_drop` (§2.7.7 #8), no `is_heap()` probe
     /// (§2.7.7 #7), no Bool-default fallback (§2.7.8 #4).
-    fn unwind_call_frames_to(&mut self, target_depth: usize) {
+    pub(crate) fn unwind_call_frames_to(&mut self, target_depth: usize) {
         while self.call_stack.len() > target_depth {
             let Some(frame) = self.call_stack.pop() else {
                 break;

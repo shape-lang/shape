@@ -1844,6 +1844,23 @@ impl BytecodeCompiler {
         // scope (parallel to the ownership/boxed restoration above).
         let saved_shared_locals = std::mem::take(&mut self.shared_locals);
         let saved_shared_drop_locals = std::mem::take(&mut self.shared_drop_locals);
+        // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture arm): the
+        // escaping-closure capture skip-set is keyed by frame-local slot
+        // index, so it must be isolated per function — a capture skip for a
+        // slot in a nested/outer frame must not suppress a same-indexed
+        // Drop-local in a sibling frame. Saved/restored in lockstep with
+        // `drop_locals` (parallel to `shared_drop_locals` above).
+        let saved_closure_escape_drop_skip_locals =
+            std::mem::take(&mut self.closure_escape_drop_skip_locals);
+        let saved_closure_binding_capture_drop_locals =
+            std::mem::take(&mut self.closure_binding_capture_drop_locals);
+        // ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+        // lane b — consumer side): the consumer discharge scope stack is
+        // keyed by frame-local slot index, so it must be isolated per
+        // function in lockstep with `drop_locals` (same rationale as the
+        // ownership/shared drop-scope stacks above).
+        let saved_closure_capture_drop_locals =
+            std::mem::take(&mut self.closure_capture_drop_locals);
         // Session 1 (Rust-move for let-mut captures): the moved-set is
         // function-scoped — a `let mut` binding moved into a closure in
         // the OUTER function must not leak its "moved" status into a
@@ -2379,6 +2396,27 @@ impl BytecodeCompiler {
                                 if self.local_drop_kind(local_idx).is_some() {
                                     self.return_escape_drop_skip_local = Some(local_idx);
                                 }
+                                // ADR-006 §2.7.30.4 (escape-Drop-deferral,
+                                // closure-capture arm): returning a closure
+                                // binding (`let f = || r.id; f`) escapes its
+                                // captures — the returned closure reads them
+                                // after this scope exits. Mark the closure's
+                                // Drop-bearing captures for Drop-skip so the
+                                // scope-exit `DropCall` does not finalize a
+                                // value the escaping closure still reads. The
+                                // capture shares are retired by the
+                                // frame-teardown `truncate_stack(bp)`; the
+                                // closure's own capture share keeps the
+                                // referent alive for the closure's lifetime.
+                                if let Some(captures) = self
+                                    .closure_binding_capture_drop_locals
+                                    .get(&local_idx)
+                                    .cloned()
+                                {
+                                    for cap in captures {
+                                        self.closure_escape_drop_skip_locals.insert(cap);
+                                    }
+                                }
                             }
                         }
                         // Emit drops for function-level locals before returning
@@ -2404,6 +2442,11 @@ impl BytecodeCompiler {
                         self.boxed_locals = saved_boxed_locals;
                         self.shared_locals = saved_shared_locals;
                         self.shared_drop_locals = saved_shared_drop_locals;
+                        self.closure_escape_drop_skip_locals =
+                            saved_closure_escape_drop_skip_locals;
+                        self.closure_binding_capture_drop_locals =
+                            saved_closure_binding_capture_drop_locals;
+                        self.closure_capture_drop_locals = saved_closure_capture_drop_locals;
                         self.captured_let_mut_moved = saved_captured_let_mut_moved;
                         self.type_tracker
                             .restore_local_binding_semantics(saved_local_binding_semantics);
@@ -2539,6 +2582,9 @@ impl BytecodeCompiler {
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;
+        self.closure_escape_drop_skip_locals = saved_closure_escape_drop_skip_locals;
+        self.closure_binding_capture_drop_locals = saved_closure_binding_capture_drop_locals;
+        self.closure_capture_drop_locals = saved_closure_capture_drop_locals;
         self.captured_let_mut_moved = saved_captured_let_mut_moved;
         self.type_tracker
             .restore_local_binding_semantics(saved_local_binding_semantics);
