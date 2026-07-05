@@ -213,7 +213,25 @@ impl ProgramExecutor for JITExecutor {
                     reason = %reason,
                     "jit-fallback: function failed JIT compile, running under interpreter",
                 );
-                self.bytecode_executor.execute_program(engine, program)
+                // WF-1A-followup / fix-plan §6quinquies: run the ALREADY-BUILT
+                // inspection `bytecode` on the interpreter via `execute_compiled`
+                // rather than recompiling via `execute_program`. The previous
+                // `execute_program(engine, program)` triggered a SECOND
+                // `compile_program_impl` on the same `engine.runtime.schema_registry`
+                // whose `next_id` counter was already advanced by the inspection
+                // compile at `compile_program_for_inspection` above. That second
+                // compile shifted ambient-domain merged/named-type SchemaIds while
+                // compiler-local inline-object ids reset, colliding in the shared
+                // namespace and producing the `jit-object-merge-field-add`
+                // differential (`MakeFieldRef field_idx N out of bounds`). Running
+                // the pre-built bytecode removes the double-compile entirely: it is
+                // the exact bytecode `--mode vm` compiles (single compile), so the
+                // fallback is provably identical to the VM oracle, and it skips a
+                // redundant recompile (perf win). `bytecode` is moved here; it is
+                // only borrowed (`&bytecode`) by `execute_with_jit` in the scrutinee,
+                // whose borrow ends before this arm runs.
+                self.bytecode_executor
+                    .execute_compiled(engine, bytecode, program)
             }
         }
     }
