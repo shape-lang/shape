@@ -5230,6 +5230,17 @@ impl BytecodeCompiler {
                 | BuiltinFunction::IsNaN
                 | BuiltinFunction::IsFinite
                 | BuiltinFunction::MatFromFlat
+                // WF-2E (2026-07-05): JSON navigation intrinsics. Their VM
+                // dispatch (`executor/builtins/json_helpers.rs`) reads args
+                // via `pop_builtin_args()`, which requires the compiler to
+                // push the `PushConst(Int(arg_count))` slot. Without this the
+                // dispatch pops a string arg as the count → "arg-count slot
+                // must be integer-family, got kind String".
+                | BuiltinFunction::JsonObjectGet
+                | BuiltinFunction::JsonArrayAt
+                | BuiltinFunction::JsonObjectKeys
+                | BuiltinFunction::JsonArrayLen
+                | BuiltinFunction::JsonObjectLen
         )
     }
 

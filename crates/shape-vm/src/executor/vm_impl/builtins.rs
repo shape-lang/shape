@@ -1318,23 +1318,37 @@ impl VirtualMachine {
                     let r = self.builtin_make_table_from_rows(&args)?;
                     self.push_kinded_slot(r)?;
                 }
-                BuiltinFunction::JsonObjectGet
-                | BuiltinFunction::JsonArrayAt
-                | BuiltinFunction::JsonObjectKeys
-                | BuiltinFunction::JsonArrayLen
-                | BuiltinFunction::JsonObjectLen => {
-                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5e —
-                    // JSON navigation helper body migration deferred.
-                    // Rebuild target lives at
-                    // `executor/builtins/json_helpers.rs`. Drain args to
-                    // balance the §2.7.7 parallel-kind track.
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    return Err(VMError::NotImplemented(format!(
-                        "phase-1b-vm-wave-5e-json-nav: {:?} body migration \
-                         to kinded carrier (executor/builtins/json_helpers.rs) \
-                         pending (v0.4 / planned)",
-                        builtin
-                    )));
+                // ── WF-2E (2026-07-05): JSON navigation helper dispatch ────
+                //
+                // Bodies live at `executor/builtins/json_helpers.rs`. Each
+                // pops the §2.7.7 kinded args, reads the Json-enum payload
+                // carrier through its stamped `NativeKind`, and returns a
+                // fresh owned `KindedSlot`. Args are borrowed only; the
+                // `Vec<KindedSlot>` drop retires their shares.
+                BuiltinFunction::JsonObjectGet => {
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_json_object_get(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::JsonArrayAt => {
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_json_array_at(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::JsonObjectKeys => {
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_json_object_keys(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::JsonArrayLen => {
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_json_array_len(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::JsonObjectLen => {
+                    let args = self.pop_builtin_args()?;
+                    let r = self.builtin_json_object_len(&args)?;
+                    self.push_kinded_slot(r)?;
                 }
                 // ── W8-WJ: window function dispatch (ADR-006 §2.7.10/Q11) ──
                 //
