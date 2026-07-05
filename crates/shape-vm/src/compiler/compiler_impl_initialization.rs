@@ -47,6 +47,7 @@ impl BytecodeCompiler {
             closure_registry: shape_value::v2::closure_layout::ClosureRegistry::new(),
             closure_type_ids: Vec::new(),
             closure_capture_kinds: Vec::new(),
+            closure_capture_names: Vec::new(),
             function_type_registry:
                 shape_value::v2::function_type_registry::FunctionTypeRegistry::new(),
             function_type_ids: Vec::new(),
@@ -253,6 +254,21 @@ impl BytecodeCompiler {
             .unwrap_or_default()
     }
 
+    /// Distributed §4.4 — captured variable names for the closure function at
+    /// `func_idx`, in declaration order (sibling of
+    /// [`capture_native_kinds_for_function`]). Sourced from the
+    /// `closure_capture_names` side-table recorded at closure-literal lowering.
+    /// Empty for non-closure functions or closures registered via the legacy
+    /// path (test helpers) — the remote-capture-refusal message then falls back
+    /// to `capture #i`. Non-hash metadata: names never affect content identity.
+    pub(crate) fn capture_names_for_function(&self, func_idx: usize) -> Vec<String> {
+        self.closure_capture_names
+            .iter()
+            .find(|(fid, _)| *fid as usize == func_idx)
+            .map(|(_, names)| names.clone())
+            .unwrap_or_default()
+    }
+
     /// Finalize the current blob builder for the function at `func_idx` and
     /// move it to `completed_blobs`. Called at the end of function body compilation.
     ///
@@ -267,6 +283,7 @@ impl BytecodeCompiler {
         if let Some(builder) = self.current_blob_builder.take() {
             let instr_end = self.program.instructions.len();
             let capture_kinds = self.capture_native_kinds_for_function(func_idx);
+            let capture_names = self.capture_names_for_function(func_idx);
             let func = &self.program.functions[func_idx];
             let blob = builder.finalize(
                 &self.program,
@@ -274,6 +291,7 @@ impl BytecodeCompiler {
                 &self.blob_name_to_hash,
                 instr_end,
                 capture_kinds,
+                capture_names,
             );
             self.blob_name_to_hash
                 .insert(blob.name.clone(), blob.content_hash);
@@ -344,12 +362,13 @@ impl BytecodeCompiler {
             };
 
             // __main__ is the synthetic top-level function; it never captures,
-            // so its `capture_kinds` are empty.
+            // so its `capture_kinds` and `capture_names` are empty.
             let blob = main_builder.finalize(
                 &self.program,
                 &main_func,
                 &self.blob_name_to_hash,
                 instr_end,
+                Vec::new(),
                 Vec::new(),
             );
             self.blob_name_to_hash
