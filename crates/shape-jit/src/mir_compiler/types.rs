@@ -1127,7 +1127,16 @@ fn parametric_method_return_kind_from_receiver(
         // ADR-006 §2.7.5 / Round 8A receiver-recovery soundness:
         // the §2.7.5 carrier shape for the element is preserved
         // verbatim in the return value.
-        ("sum" | "mean" | "min" | "max", ConcreteType::Array(elem)) => {
+        // WF-1A Item 5b (Array<int>.mean drift): `mean()` is an arithmetic
+        // (fractional) average — the VM-side `avg_elements` returns Float64 for
+        // EVERY element kind, including an `Array<int>` receiver (the average of
+        // ints is fractional). Only sum/min/max inherit the element kind. The
+        // pre-fix shared arm claimed the element kind (Int64) for
+        // `Array<int>.mean()` while `v2_int_avg` returns Float64 → the JIT read
+        // the f64 mean bits as an i64. Special-case `mean` to Float64; the VM
+        // handler is the source of truth.
+        ("mean", ConcreteType::Array(_)) => Some(NativeKind::Float64),
+        ("sum" | "min" | "max", ConcreteType::Array(elem)) => {
             native_kind_from_concrete_type(elem)
         }
         // `Array.get(i)` — returns element T directly (the VM-side
@@ -1200,6 +1209,22 @@ fn parametric_method_return_kind_from_receiver(
         // receiver kind is the right Ptr arm and `jit_call_method`
         // delegates to VM through the §2.7.10 / Q11 path.
         ("set" | "delete" | "merge", ConcreteType::HashMap(_, _)) => {
+            Some(NativeKind::Ptr(HeapKind::HashMap))
+        }
+        // WF-1A Item 4 (hashmap-filter): `HashMap.filter` / `HashMap.map` /
+        // `HashMap.groupBy` all return a FRESH HashMap — the VM handlers
+        // `v2_filter` / `v2_map` return `KindedSlot::from_hashmap(...)`, and
+        // `v2_group_by` returns `KindedSlot::from_hashmap(HashMapKindedRef::
+        // HashMap(...))` (`HashMap<group_key, HashMap>`); carrier
+        // `Ptr(HeapKind::HashMap)` in every case. After the item-4
+        // `receiver_is_array` gate both modes emit the plain
+        // `filter`/`map`/`groupBy` name on a HashMap receiver (instead of the
+        // Array-only `filterIndexed`/`mapIndexed`/`groupByIndexed`); without
+        // this arm the JIT left the result slot unstamped and a following
+        // `.len()` read the raw HashMap pointer bits as an int (audit §4(d)
+        // tail — `groupBy` is the same class, exposed by the same gate). The
+        // registry is the source of truth.
+        ("filter" | "map" | "groupBy", ConcreteType::HashMap(_, _)) => {
             Some(NativeKind::Ptr(HeapKind::HashMap))
         }
         // ── HashSet.add / .delete / .union / .intersection / ───────
@@ -1347,6 +1372,18 @@ fn method_return_kind_from_in_pass_kinds(
         // `parametric_method_return_kind_from_receiver` "HashMap.set /
         // .delete / .merge" arm for the VM-side handler citations.
         ("set" | "delete" | "merge", NativeKind::Ptr(HeapKind::HashMap)) => {
+            Some(NativeKind::Ptr(HeapKind::HashMap))
+        }
+        // WF-1A Item 4 (hashmap-filter): `HashMap.filter` / `HashMap.map` /
+        // `HashMap.groupBy` return a fresh HashMap (VM `v2_filter` / `v2_map` /
+        // `v2_group_by` -> `from_hashmap`). Load-bearing for the bare
+        // `HashMap()` ctor-chain receiver (its `ConcreteType` is Void/Struct,
+        // so the parametric classifier can't key it) — the EnumStore arm seeds
+        // the ctor temp's `kinds[]` slot and this fixpoint pass propagates
+        // `Ptr(HashMap)` through the `.filter`/`.map`/`.groupBy` link so the
+        // terminal `.len()` dispatches on the right receiver kind instead of
+        // reading garbage.
+        ("filter" | "map" | "groupBy", NativeKind::Ptr(HeapKind::HashMap)) => {
             Some(NativeKind::Ptr(HeapKind::HashMap))
         }
         // HashSet / Deque / PriorityQueue / Channel mutator-chain
@@ -3769,25 +3806,17 @@ mod registry_cross_check {
                 "isEmpty",
                 vec![hashmap_k1()],
             ),
-            Case {
-                label: "HashMap.iter()",
-                map_name: "HASHMAP_METHODS",
-                method: "iter",
-                args: vec![hashmap_k1()],
-                claim: well_known_method_return_kind("iter"),
-                known_drift: Some(
-                    "PIN(2026-07-05): producer/consumer carrier mismatch — \
-                     `HASHMAP_METHODS[\"iter\"]` -> `handle_hashmap_iter` recovers \
-                     the receiver via `slot.as_heap_value()` (expects \
-                     `Arc<HeapValue>` bits), but every HashMap producer \
-                     (`ValueSlot::from_hashmap`, `v2_set`, `v2_merge`, ...) \
-                     stores `Arc<HashMapKindedRef>` bits, so the decode is a \
-                     type-confused read and `HashMap.iter()` errors (or reads \
-                     garbage) instead of returning `Ptr(Iterator)` — fix is \
-                     receiver recovery via the kinded HashMap path in \
-                     `iterator_methods.rs`, not a harness change",
-                ),
-            },
+            // WF-1A Item 5b (2026-07-05): RETIRED pin. `handle_hashmap_iter`
+            // now recovers the receiver via `hashmap_methods::as_hashmap` (the
+            // kinded `Arc<HashMapKindedRef>` path the producer wrote), so it
+            // returns `Ptr(Iterator)` cleanly on a `v2_set`-produced receiver —
+            // JIT claim and VM handler now agree. Demoted to an invariant case.
+            inv(
+                "HashMap.iter()",
+                "HASHMAP_METHODS",
+                "iter",
+                vec![hashmap_k1()],
+            ),
             // Set
             inv(
                 "Set.has(k)",
@@ -4062,13 +4091,12 @@ mod registry_cross_check {
                 "mean",
                 int_arr_ct(),
                 vec![int_array()],
-                Some(
-                    "PIN(2026-07-05): JIT claims elem kind Int64, but \
-                     `v2_int_avg` -> `avg_elements` returns Float64 for I64 \
-                     receivers (an int average is fractional) — fix belongs in \
-                     `parametric_method_return_kind_from_receiver`'s \
-                     sum/mean/min/max arm, not here",
-                ),
+                // WF-1A Item 5b (2026-07-05): RETIRED. The
+                // `parametric_method_return_kind_from_receiver` sum/mean/min/max
+                // arm now special-cases `mean` -> Float64, matching the VM's
+                // `v2_int_avg` -> `avg_elements` fractional-average return. JIT
+                // and VM now agree (both Float64) for `Array<int>.mean()`.
+                None,
             ),
             pc(
                 "Array<int>.min()",
@@ -4191,10 +4219,18 @@ mod registry_cross_check {
                 hashmap_ct(),
                 vec![hashmap_k1(), KindedSlot::from_string("k")],
                 Some(
-                    "PIN(2026-07-05): JIT claims Ptr(Option) (the table comment \
-                     says `v2_get` returns `KindedSlot::from_option`), but the \
-                     actual handler returns the BARE value kind on hit \
-                     (`get_kinded` -> `from_int` for I64 maps)",
+                    "PIN(2026-07-05, RECLASSIFIED WF-1A -> WF-3A type-system-edges \
+                     / ADR-006 §2.7.17 Option-return-shape amendment): JIT claims \
+                     Ptr(Option) (the table comment says `v2_get` returns \
+                     `KindedSlot::from_option`), but the actual handler returns a \
+                     NON-UNIFORM kind — the BARE value kind on hit (`get_kinded` \
+                     -> `from_int` for I64 maps) and Null on miss. No single \
+                     static return-kind can align the JIT table to a non-uniform \
+                     handler; the sound fix is handler-side (make `HashMap.get` \
+                     return a real uniform `Option<V>`), a language-semantics \
+                     change beyond WF-1A JIT-table alignment (touches \
+                     destructuring / `match` / `?`). Kept pinned as a soundness \
+                     bug; NOT a JIT return-kind-table drift the harness can fix.",
                 ),
             ),
             pc(
@@ -4204,8 +4240,14 @@ mod registry_cross_check {
                 hashmap_ct(),
                 vec![hashmap_k1(), KindedSlot::from_string("absent")],
                 Some(
-                    "PIN(2026-07-05): JIT claims Ptr(Option), but the actual \
-                     handler returns `KindedSlot::none()` (kind Null) on miss",
+                    "PIN(2026-07-05, RECLASSIFIED WF-1A -> WF-3A type-system-edges \
+                     / ADR-006 §2.7.17 Option-return-shape amendment): JIT claims \
+                     Ptr(Option), but the actual handler returns \
+                     `KindedSlot::none()` (kind Null) on miss — the miss half of \
+                     the non-uniform `HashMap.get` return above. Sound fix is a \
+                     uniform `Option<V>` handler return (handler-side, \
+                     language-semantics); kept pinned, not a harness-fixable \
+                     JIT-table drift.",
                 ),
             ),
             pc(
