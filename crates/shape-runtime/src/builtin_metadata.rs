@@ -708,6 +708,23 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
         return_type: "TypeInfo",
         example: Some("comptime { let ti = type_info(Point); print(ti.name) }"),
     },
+    // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
+    // as a valid Shape string literal (quotes + escapes) so it can be embedded
+    // into generated source produced by the `extend (expr)` directive.
+    BuiltinMetadata {
+        name: "string_lit",
+        signature: "string_lit(value: string) -> string",
+        description: "Render a string as a valid Shape string literal (surrounding quotes + escaped quotes/backslashes/braces) for embedding into generated source. Only valid inside comptime blocks.",
+        category: "Comptime",
+        parameters: &[BuiltinParam {
+            name: "value",
+            param_type: "string",
+            optional: false,
+            description: "String to render as a Shape source literal",
+        }],
+        return_type: "string",
+        example: Some("comptime { extend (f\"fn name() -> string \\{ {string_lit(computed)} \\}\") }"),
+    },
 ];
 
 /// Collect all builtin metadata for LSP introspection.

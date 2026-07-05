@@ -84,7 +84,8 @@ pub(super) fn lower_statement(
         }
         | Statement::SetReturnExpr { expression, span }
         | Statement::ReplaceBodyExpr { expression, span }
-        | Statement::ReplaceModuleExpr { expression, span } => {
+        | Statement::ReplaceModuleExpr { expression, span }
+        | Statement::ExtendItemsExpr { expression, span } => {
             let _ = lower_expr_to_temp(builder, expression);
             builder.push_stmt(StatementKind::Nop, *span);
         }

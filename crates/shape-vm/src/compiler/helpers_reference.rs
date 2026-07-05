@@ -1327,7 +1327,8 @@ impl BytecodeCompiler {
             Statement::SetParamValue { expression, .. }
             | Statement::SetReturnExpr { expression, .. }
             | Statement::ReplaceBodyExpr { expression, .. }
-            | Statement::ReplaceModuleExpr { expression, .. } => {
+            | Statement::ReplaceModuleExpr { expression, .. }
+            | Statement::ExtendItemsExpr { expression, .. } => {
                 self.collect_reference_use_names_from_expr(expression, false, names);
             }
             Statement::ReplaceBody { body, .. } => {

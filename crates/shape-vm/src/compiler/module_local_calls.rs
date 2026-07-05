@@ -333,7 +333,8 @@ impl BytecodeCompiler {
                 Statement::SetParamValue { expression, .. }
                 | Statement::SetReturnExpr { expression, .. }
                 | Statement::ReplaceBodyExpr { expression, .. }
-                | Statement::ReplaceModuleExpr { expression, .. } => {
+                | Statement::ReplaceModuleExpr { expression, .. }
+                | Statement::ExtendItemsExpr { expression, .. } => {
                     Self::qualify_local_calls_in_expr(
                         expression,
                         module_path,

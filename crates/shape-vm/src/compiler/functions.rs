@@ -841,14 +841,24 @@ impl BytecodeCompiler {
         // These run at compile time and can inspect/modify the target.
         // Template bases (functions with const parameters) skip comptime handler
         // execution until a concrete call-site specialization binds those consts.
-        if !(has_const_template_params && !has_specialization_bindings)
-            && self.execute_comptime_handlers(&mut effective_def)?
-        {
-            // Track removed functions so call sites produce a clear error
-            // instead of jumping to an invalid entry point (stack overflow).
-            self.removed_functions.insert(effective_def.name.clone());
-            self.function_defs.remove(&effective_def.name);
-            return Ok(());
+        if !(has_const_template_params && !has_specialization_bindings) {
+            // S3 (design §4.5): snapshot the signature so a `set return` /
+            // `set param` comptime directive that mutates it can be re-checked
+            // against the body through the ordinary type-analysis path.
+            let sig_params_before = effective_def.params.clone();
+            let sig_return_before = effective_def.return_type.clone();
+            if self.execute_comptime_handlers(&mut effective_def)? {
+                // Track removed functions so call sites produce a clear error
+                // instead of jumping to an invalid entry point (stack overflow).
+                self.removed_functions.insert(effective_def.name.clone());
+                self.function_defs.remove(&effective_def.name);
+                return Ok(());
+            }
+            let signature_mutated = effective_def.params != sig_params_before
+                || effective_def.return_type != sig_return_before;
+            if signature_mutated {
+                self.recheck_directive_mutated_signature(&effective_def)?;
+            }
         }
 
         // Keep the registry synchronized with the final mutated function shape.
@@ -3302,9 +3312,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase-2c comptime emit surface: replace-body directive still depends on deleted host argument conversion"]
     fn test_replace_body_original_calls_original_function() {
-        // __original__ should call the original function body from a replacement body.
+        // §4.5.5: `__original__` is a direct typed call to the shadow function
+        // (the original body). Forwarding names the real params — there is no
+        // injected `args` array.
         let code = r#"
             annotation wrap() {
                 comptime post(target, ctx) {
@@ -3314,7 +3325,7 @@ mod tests {
                 }
             }
             @wrap()
-            function add_ten(x) {
+            fn add_ten(x: int) -> int {
                 return x + 10
             }
             add_ten(0)
@@ -3329,9 +3340,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase-2c comptime emit surface: replace-body args array depends on deleted host argument conversion"]
-    fn test_replace_body_args_contains_function_parameters() {
-        // `args` should be an array of the function's parameters in the replacement body.
+    fn test_replace_body_no_longer_injects_args_binding() {
+        // §4.5.5 deletion: the hidden `let args = [param1, ...]` binding is
+        // gone. Referencing `args` in a replacement body is now an ordinary
+        // undefined-name compile error; forwarding uses `__original__(a, b, c)`
+        // with the real parameter names (see the forwarding test above).
         let code = r#"
             annotation with_args() {
                 comptime post(target, ctx) {
@@ -3341,22 +3354,23 @@ mod tests {
                 }
             }
             @with_args()
-            function three_params(a, b, c) {
+            fn three_params(a: int, b: int, c: int) -> int {
                 return 0
             }
             three_params(10, 20, 30)
         "#;
-        let result = eval(code);
-        assert_eq!(
-            result.as_test_number().expect("Expected 3 from args.len()"),
-            3.0,
+        let err = compiles(code).expect_err("`args` is no longer an injected binding");
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("args") || lower.contains("undefined") || lower.contains("unknown"),
+            "Expected an undefined-`args` error, got: {}",
+            err
         );
     }
 
     #[test]
-    #[ignore = "Phase-2c comptime emit surface: replace-body directive still depends on deleted host argument conversion"]
     fn test_replace_body_original_with_no_params() {
-        // __original__ should work even with zero-parameter functions.
+        // __original__ works for zero-parameter functions too.
         let code = r#"
             annotation add_one() {
                 comptime post(target, ctx) {
@@ -3366,7 +3380,7 @@ mod tests {
                 }
             }
             @add_one()
-            function get_value() {
+            fn get_value() -> int {
                 return 41
             }
             get_value()

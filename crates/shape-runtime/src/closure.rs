@@ -424,6 +424,9 @@ impl EnvironmentAnalyzer {
             Statement::ReplaceModuleExpr { expression, .. } => {
                 self.analyze_expr(expression);
             }
+            Statement::ExtendItemsExpr { expression, .. } => {
+                self.analyze_expr(expression);
+            }
             Statement::ReplaceBodyExpr { expression, .. } => {
                 self.analyze_expr(expression);
             }

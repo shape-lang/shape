@@ -1534,6 +1534,7 @@ fn statement_contains_offset(stmt: &Statement, offset: usize) -> bool {
         | Statement::SetReturnType { span, .. } => span_contains_offset(*span, offset),
         Statement::SetReturnExpr { span, .. } => span_contains_offset(*span, offset),
         Statement::ReplaceModuleExpr { span, .. } => span_contains_offset(*span, offset),
+        Statement::ExtendItemsExpr { span, .. } => span_contains_offset(*span, offset),
         Statement::ReplaceBodyExpr { span, .. } => span_contains_offset(*span, offset),
         Statement::ReplaceBody { body, span } => {
             span_contains_offset(*span, offset)

@@ -1483,6 +1483,9 @@ impl<'a> Visitor for TokenCollector<'a> {
                 self.add_keyword_token("replace", *span);
                 self.add_keyword_token_in_span("module", *span);
             }
+            Statement::ExtendItemsExpr { span, .. } => {
+                self.add_keyword_token("extend", *span);
+            }
         }
         true // Continue visiting children
     }

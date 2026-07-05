@@ -724,6 +724,11 @@ fn substitute_const_in_statement(
             expression: substitute_const_in_expr(expression, const_subs),
             span: *span,
         },
+
+        Statement::ExtendItemsExpr { expression, span } => Statement::ExtendItemsExpr {
+            expression: substitute_const_in_expr(expression, const_subs),
+            span: *span,
+        },
     }
 }
 
@@ -1601,6 +1606,11 @@ fn substitute_statement(stmt: &Statement, subs: &HashMap<String, ConcreteType>) 
         },
 
         Statement::ReplaceModuleExpr { expression, span } => Statement::ReplaceModuleExpr {
+            expression: substitute_expr(expression, subs),
+            span: *span,
+        },
+
+        Statement::ExtendItemsExpr { expression, span } => Statement::ExtendItemsExpr {
             expression: substitute_expr(expression, subs),
             span: *span,
         },
@@ -3816,7 +3826,8 @@ mod tests {
             Statement::SetParamValue { expression, .. }
             | Statement::SetReturnExpr { expression, .. }
             | Statement::ReplaceBodyExpr { expression, .. }
-            | Statement::ReplaceModuleExpr { expression, .. } => {
+            | Statement::ReplaceModuleExpr { expression, .. }
+            | Statement::ExtendItemsExpr { expression, .. } => {
                 assert_no_const_id_in_expr(expression)
             }
             Statement::ReplaceBody { body, .. } => {

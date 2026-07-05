@@ -59,6 +59,12 @@ pub enum Statement {
     /// Comptime-only directive to replace a module body from an expression
     /// evaluated in comptime context.
     ReplaceModuleExpr { expression: Expr, span: Span },
+    /// Comptime-only directive to ADD generated module items from an expression
+    /// evaluated in comptime context (the `extend (expr)` computed-generation
+    /// surface, design §4.5.7). The expression must evaluate to a `string` of
+    /// top-level Shape source; the parsed items are inserted additively at the
+    /// annotated item's module scope and compiled by the strict pipeline.
+    ExtendItemsExpr { expression: Expr, span: Span },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
