@@ -240,6 +240,12 @@ WF-1A fixed its 4 core bugs + 2 of 3 drift families; the rest are **routed, not 
   - **json navigation (`.get/.at/.len/...`) PARTIAL → WF-3A inference:** works on an explicit `let d: Json = ...` receiver, not a bare `json.parse()` result (inference doesn't propagate `Json` to the bare binding).
   - **`variables__large` (W39 module-binding JIT SURFACE)** — another pre-existing differential non-MATCH surfaced; pin + route to a JIT module-binding lane.
 
+- **WF-2C remote transfer (green/yellow, committed `wave2/remote-transfer` 5 commits):** `@remote` per-function transfer works END-TO-END over a real serve node (VM==JIT); receiver-owned permission-over-wire (zero sender trust); `MissingModuleFunction` + retry-once resupply; §2.7.8 capture kind-track; forbidden-pattern-clean (`RemoteDispatcher` trait replaces the deleted `CURRENT_PROGRAM` thread-local). **WF-2F precondition CONFIRMED.** Residuals → **NEW WF-2C-followup lane (runs parallel to WF-2F):**
+  - Direct `remote::call(addr, fn, args)` public-surface compiler elaboration (Q33: call-site positional type-check + TypedObject `_0.._n` pack carrier + function-ref FromSlot) — library primitives exist, the compiler-recognized elaboration (same class as `as`→`__into_*`) is the remaining work.
+  - Closure-over-wire USER-e2e (`@remote` on a capturing closure) — library-verified (refusal matrix green), not yet driven through a user program.
+  - Heap-shaped return typed projection (arrays/objects; scalars/strings wired).
+  - Active TLS-on-TCP termination in the serve accept loop (gate honestly refuses non-loopback without cert+token today; active encryption is the follow-up).
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
