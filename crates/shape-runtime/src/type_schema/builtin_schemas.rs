@@ -5,6 +5,7 @@
 //! at init with real field types and constant field indices.
 
 use super::SchemaId;
+use super::field_types::FieldType;
 use super::registry::{TypeSchemaBuilder, TypeSchemaRegistry};
 
 // =========================================================================
@@ -201,33 +202,110 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
 
     let empty_object = TypeSchemaBuilder::new("__EmptyObject").register(registry);
 
-    // Internal comptime helper object shapes
+    // -- Comptime introspection contract schemas (comptime-excellence
+    //    §4.1.4 / §4.3, S2 root cause B) --------------------------------
+    //
+    // Reserved, concrete, named schemas backing the comptime introspection
+    // contract. Registered HERE — at registry init, before any user or
+    // module (`__mod_*`) schema — so every registry that can host comptime
+    // execution (the compiler's ambient registry AND each comptime/handler
+    // VM's bytecode registry) assigns them the SAME low, deterministic id.
+    // Descriptor construction resolves them BY NAME
+    // (`typed_object_for_named_schema`); the baked-in `schema_id` is
+    // therefore an id that means the same thing in the registry that
+    // dereferences it. This removes the cross-registry schema-id reuse that
+    // let `target.fields` / `field.name` resolve to an unrelated `__mod_*`
+    // module-object schema at the same numeric id (audit's
+    // `{is_valid, parse, stringify}` corruption).
+    //
+    // Concrete FieldTypes only — never `FieldType::Any` (R2 precedent: an
+    // all-Any schema poisons static field-tag sourcing). Array/heap
+    // carriers use `Array`/`String` informationally; the parallel
+    // field-kind track + heap_mask drive the actual read. The `reserved`
+    // flag makes ad-hoc field-set / field-order inference
+    // (`lookup_schema_for_fields`) skip these, so an unrelated `{name,
+    // kind, …}` object can never silently bind to a contract schema.
+    // `comptime_api` (value 1) is the frozen introspection-contract version
+    // marker (comptime-excellence §4.1.4): user annotation libraries feature-
+    // gate against future contract revisions via `build_config().comptime_api`
+    // without string-parsing `version`. Additive-only; appended last so the
+    // existing field offsets (debug=0 … target_arch=3) stay stable.
     let _comptime_build_config = TypeSchemaBuilder::new("__ComptimeBuildConfig")
+        .reserved()
         .bool_field("debug")
         .string_field("version")
         .string_field("target_os")
         .string_field("target_arch")
+        .int_field("comptime_api")
         .register(registry);
 
-    let _comptime_target_field = TypeSchemaBuilder::new("__ComptimeTargetField")
+    let _comptime_field_descriptor = TypeSchemaBuilder::new("__ComptimeFieldDescriptor")
+        .reserved()
         .string_field("name")
         .string_field("type")
+        .array_field("annotations", FieldType::Any)
+        .bool_field("optional")
         .register(registry);
 
-    let _comptime_target_param = TypeSchemaBuilder::new("__ComptimeTargetParam")
+    let _comptime_param_descriptor = TypeSchemaBuilder::new("__ComptimeParamDescriptor")
+        .reserved()
         .string_field("name")
         .string_field("type")
         .bool_field("const")
         .register(registry);
 
+    let _comptime_annotation_descriptor = TypeSchemaBuilder::new("__ComptimeAnnotationDescriptor")
+        .reserved()
+        .string_field("name")
+        .array_field("args", FieldType::Any)
+        .register(registry);
+
+    // comptime-excellence §4.3 line 284: `return_type: OptionString` — a
+    // function target with no declared return type produces `None`, stored
+    // as a `NativeKind::Null` slot; a declared return type produces
+    // `Some(rendered)`, stored as a `String` slot. Declaring the field
+    // `Option<string>` (`FIELD_TAG_OPTION`) routes the read through the
+    // carrier-authoritative `field_kinds` track (ADR-006 §2.7.7 / §2.7.26),
+    // so the `None` case reads back as the stamped `Null` discriminator
+    // instead of reinterpreting an absent value as a `FieldType::String`
+    // heap pointer. Declaring it plain `String` (the pre-fix shape) left the
+    // `None` read with no statically-sourceable kind → the coarse-tag read
+    // path surfaced an internal error whose message displaced the user's
+    // `error()` text (the `@llm_tool` missing-return-type guard, §4.9.2).
     let _comptime_target = TypeSchemaBuilder::new("__ComptimeTarget")
+        .reserved()
         .string_field("kind")
         .string_field("name")
-        .any_field("fields")
-        .any_field("params")
-        .any_field("return_type")
-        .any_field("annotations")
-        .any_field("captures")
+        .array_field("fields", FieldType::Any)
+        .array_field("params", FieldType::Any)
+        .option_string_field("return_type")
+        .array_field("annotations", FieldType::Any)
+        .array_field("captures", FieldType::Any)
+        .register(registry);
+
+    // TypeInfo record returned by the `type_info(T)` comptime builtin.
+    // `__`-prefixed to avoid clashing with the user-visible stdlib
+    // `TypeInfo` type (`stdlib-src/core/types.shape`); field NAMES and
+    // ORDER match that declaration ({name, kind}) so the object's physical
+    // layout aligns with the compiler's typed field access on the
+    // `OpaqueTypedObject("TypeInfo")` return type. (`TypeInfo.fields` +
+    // the single-owner lockstep with the stdlib declaration is S6.)
+    let _comptime_type_info = TypeSchemaBuilder::new("__ComptimeTypeInfo")
+        .reserved()
+        .string_field("name")
+        .string_field("kind")
+        .register(registry);
+
+    // §4.4 comptime-handler `ctx` compile-context record. Read-only build
+    // context handed to `@comptime` blocks/handlers. Field NAMES + ORDER match
+    // the handler's `ctx` param type annotation
+    // (`annotation_comptime_ctx_type_annotation`) so typed field access
+    // resolves the right offsets. (`ctx.build` is intentionally absent —
+    // `build_config()` is the single build-info surface, §4.4.)
+    let _comptime_context = TypeSchemaBuilder::new("__ComptimeContext")
+        .reserved()
+        .string_field("module_path")
+        .string_field("file")
         .register(registry);
 
     BuiltinSchemaIds {
@@ -271,9 +349,18 @@ mod tests {
         assert!(registry.has_type("__Result"));
         assert!(registry.has_type("__EmptyObject"));
         assert!(registry.has_type("__ComptimeBuildConfig"));
-        assert!(registry.has_type("__ComptimeTargetField"));
-        assert!(registry.has_type("__ComptimeTargetParam"));
+        assert!(registry.has_type("__ComptimeFieldDescriptor"));
+        assert!(registry.has_type("__ComptimeParamDescriptor"));
+        assert!(registry.has_type("__ComptimeAnnotationDescriptor"));
         assert!(registry.has_type("__ComptimeTarget"));
+        assert!(registry.has_type("__ComptimeTypeInfo"));
+
+        // Contract schemas are reserved (skipped by ad-hoc field-set
+        // inference).
+        assert!(registry.get("__ComptimeTarget").unwrap().reserved);
+        assert!(registry.get("__ComptimeFieldDescriptor").unwrap().reserved);
+        assert!(registry.get("__ComptimeBuildConfig").unwrap().reserved);
+        assert!(registry.get("__ComptimeTypeInfo").unwrap().reserved);
 
         // Check field counts
         let any_error = registry.get_by_id(ids.any_error).unwrap();

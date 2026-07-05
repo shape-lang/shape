@@ -74,6 +74,7 @@ impl TypeSchema {
             field_sources,
             enum_info: None,
             content_hash: None,
+            reserved: false,
         })
     }
 

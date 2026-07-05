@@ -696,6 +696,7 @@ pub struct TypeSchemaBuilder {
     name: String,
     fields: Vec<(String, FieldType)>,
     field_meta: Vec<Vec<FieldAnnotation>>,
+    reserved: bool,
 }
 
 impl TypeSchemaBuilder {
@@ -705,7 +706,20 @@ impl TypeSchemaBuilder {
             name: name.into(),
             fields: Vec::new(),
             field_meta: Vec::new(),
+            reserved: false,
         }
+    }
+
+    /// Mark the schema as reserved (comptime-excellence §4.1.4 / §4.3).
+    ///
+    /// Reserved schemas back the comptime introspection contract; they are
+    /// registered deterministically at init and resolved by name, and are
+    /// skipped by ad-hoc field-set / field-order schema inference so an
+    /// unrelated `{name, kind, …}` object can never bind to a contract
+    /// schema (or vice versa).
+    pub fn reserved(mut self) -> Self {
+        self.reserved = true;
+        self
     }
 
     /// Add a f64 field
@@ -739,6 +753,30 @@ impl TypeSchemaBuilder {
     /// Add a string field
     pub fn string_field(mut self, name: impl Into<String>) -> Self {
         self.fields.push((name.into(), FieldType::String));
+        self.field_meta.push(vec![]);
+        self
+    }
+
+    /// Add an `Option<string>` field (`string?`).
+    ///
+    /// The slot's per-value kind (`Null` for `None`, `String` for
+    /// `Some(s)`) lives in the parallel `field_kinds` track at storage
+    /// construction time per ADR-006 §2.7.7 / Q9 + §2.7.26; the schema
+    /// FieldType is the compile-time stamp (`FIELD_TAG_OPTION`) that
+    /// routes the field read through the carrier-authoritative
+    /// `field_kinds` lookup. Backs the comptime introspection contract's
+    /// nullable descriptor fields (`__ComptimeTarget.return_type` /
+    /// `.doc`, comptime-excellence §4.3).
+    pub fn option_string_field(mut self, name: impl Into<String>) -> Self {
+        self.fields
+            .push((name.into(), FieldType::Option(Box::new(FieldType::String))));
+        self.field_meta.push(vec![]);
+        self
+    }
+
+    /// Add a 64-bit integer field
+    pub fn int_field(mut self, name: impl Into<String>) -> Self {
+        self.fields.push((name.into(), FieldType::I64));
         self.field_meta.push(vec![]);
         self
     }
@@ -820,6 +858,7 @@ impl TypeSchemaBuilder {
     /// Build the type schema
     pub fn build(self) -> TypeSchema {
         let mut schema = TypeSchema::new(self.name, self.fields);
+        schema.reserved = self.reserved;
         // Apply annotations to fields
         for (i, annotations) in self.field_meta.into_iter().enumerate() {
             if i < schema.fields.len() {
@@ -840,6 +879,7 @@ impl TypeSchemaBuilder {
     pub fn register(self, registry: &mut TypeSchemaRegistry) -> SchemaId {
         let id = registry.allocate_id();
         let mut schema = TypeSchema::with_id(id, self.name, self.fields);
+        schema.reserved = self.reserved;
         for (i, annotations) in self.field_meta.into_iter().enumerate() {
             if i < schema.fields.len() {
                 schema.fields[i].annotations = annotations;

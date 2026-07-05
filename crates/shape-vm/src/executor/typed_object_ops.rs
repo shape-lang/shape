@@ -220,6 +220,34 @@ pub(in crate::executor) fn field_tag_to_native_kind(tag: u16) -> Option<NativeKi
     }
 }
 
+/// Whether a field read must source its `NativeKind` from the storage's
+/// parallel `field_kinds` track (via [`push_field_value_with_kind`]) rather
+/// than the coarse operand `field_type_tag` (via [`push_field_value`]).
+///
+/// True for:
+/// - `FIELD_TAG_ANY` — the schema declares no concrete type; the runtime
+///   kind was recorded at construction time (ADR-006 §2.7.26,
+///   W17-comptime-vm-dispatch).
+/// - `FIELD_TAG_OPTION` — an `Option<T>` field's inhabited kind (`Null` for
+///   `None`, the inner class for `Some`) is NOT encodable in the coarse tag
+///   (see the `FIELD_TAG_OPTION` note above); it lives in `field_kinds`. A
+///   `None` slot is non-heap, so the tag-derived read (`push_field_value`,
+///   `is_heap = false`, tag `OPTION`) has no statically-sourceable kind and
+///   surfaces an internal error — the carrier-authoritative read yields the
+///   producer-stamped `Null` instead (comptime-excellence §4.3, the
+///   `__ComptimeTarget.return_type` / `.doc` nullable descriptor fields).
+/// - any heap-backed slot (`is_heap`) — the producer-stamped carrier is
+///   authoritative over the schema tag (a `String`-typed field may store a
+///   `StringV2` carrier; the tag-derived read would retain the wrong carrier
+///   → heap corruption, the R3 strict-flip rule).
+///
+/// The dispatched kind comes from the `field_kinds` track (single source of
+/// truth, ADR-006 §2.7.7) — never fabricated from bits.
+#[inline]
+fn field_read_via_field_kinds(field_type_tag: u16, is_heap: bool) -> bool {
+    field_type_tag == FIELD_TAG_ANY || field_type_tag == FIELD_TAG_OPTION || is_heap
+}
+
 /// Push a TypedObject field onto the kinded VM stack.
 ///
 /// ADR-006 §2.7.7 — kind is sourced from the operand-encoded `field_type_tag`
@@ -466,7 +494,7 @@ impl TypedObjectOps for super::VirtualMachine {
                     // wrong carrier (`Arc::increment_strong_count::<String>` on
                     // a `StringObj` pointer) → heap corruption. FIELD_TAG_ANY
                     // (inline-scalar dynamic) keeps its existing kinded read.
-                    let result = if (hit.field_type_tag == FIELD_TAG_ANY || is_heap)
+                    let result = if field_read_via_field_kinds(hit.field_type_tag, is_heap)
                         && src_idx < storage.field_kinds.len()
                     {
                         push_field_value_with_kind(
@@ -529,7 +557,7 @@ impl TypedObjectOps for super::VirtualMachine {
                         // R3 carrier-authoritative read (strict-flip): heap-backed
                         // fields source kind from `field_kinds` — see the
                         // monomorphic-IC site above.
-                        let result = if (hit.field_type_tag == FIELD_TAG_ANY || is_heap)
+                        let result = if field_read_via_field_kinds(hit.field_type_tag, is_heap)
                             && src_idx < storage.field_kinds.len()
                         {
                             push_field_value_with_kind(
@@ -579,7 +607,7 @@ impl TypedObjectOps for super::VirtualMachine {
                     // R3 carrier-authoritative read (strict-flip): heap-backed
                     // fields source kind from `field_kinds` — see the
                     // monomorphic-IC site above.
-                    let result = if (tag == FIELD_TAG_ANY || is_heap)
+                    let result = if field_read_via_field_kinds(tag, is_heap)
                         && src_idx < storage.field_kinds.len()
                     {
                         push_field_value_with_kind(
@@ -629,7 +657,7 @@ impl TypedObjectOps for super::VirtualMachine {
             // tag-derived `NativeKind::String` read would retain the wrong
             // carrier and corrupt the heap (the `content/large.shape`
             // struct-array → row SIGABRT). FIELD_TAG_ANY keeps its kinded read.
-            let result = if (*field_type_tag == FIELD_TAG_ANY || is_heap)
+            let result = if field_read_via_field_kinds(*field_type_tag, is_heap)
                 && field_index < storage.field_kinds.len()
             {
                 push_field_value_with_kind(
