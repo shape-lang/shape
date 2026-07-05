@@ -1,0 +1,63 @@
+---
+name = "small-native-c"
+
+[native-dependencies]
+stub = { provider = "path", path = "./libstub.so" }
+---
+// Small native-C interop program, written from the book chapter
+// `advanced/native-c-interop.mdx` ("Core Syntax", "Marshalling Matrix",
+// "Out Parameters").
+//
+// It links a tiny fixed C stub (libstub.so, built from stub.c) and asserts
+// returned scalar values, plus exercises the `out` keyword out-parameter form.
+//
+// Expected values are derived purely from the C stub's arithmetic semantics:
+//   stub_add_i64(a,b) = a + b      (Marshalling Matrix: i64/int <-> int64_t)
+//   stub_add_f64(a,b) = a + b      (f64/number <-> double)
+//   stub_mul_i32(a,b) = a * b      (i32 <-> int32_t, range checked)
+//   stub_divmod(a,b,out rem):
+//        returns a / b (truncating) ; writes a % b into the out cell.
+//        Book "Out Parameters": return value is an array
+//        [original_return, out_param_1].
+
+// --- Scalar declarations (book "Core Syntax") ------------------------------
+extern C fn stub_add_i64(a: i64, b: i64) -> i64 from "stub" as "stub_add_i64";
+extern C fn stub_add_f64(a: number, b: number) -> number from "stub" as "stub_add_f64";
+extern C fn stub_mul_i32(a: i32, b: i32) -> i32 from "stub" as "stub_mul_i32";
+
+// --- out-parameter declaration (book "Out Parameters", `out` keyword) ------
+// Callers supply only the non-`out` arguments; the return is
+// [original_return, out_value].
+extern C fn stub_divmod(a: i64, b: i64, out out_rem: ptr) -> i32
+    from "stub" as "stub_divmod";
+
+fn check_int(label: string, got: i64, expected: i64) {
+    if got != expected {
+        print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    }
+}
+
+fn main() {
+    // i64 addition
+    let s = stub_add_i64(20, 22)
+    check_int("add_i64", s, 42)
+
+    // f64 addition
+    let f = stub_add_f64(1.5, 2.25)
+    if f != 3.75 {
+        print(f"CHECK_FAILED: add_f64 expected=3.75 got={f}")
+    }
+
+    // i32 multiplication
+    let m = stub_mul_i32(6, 7)
+    check_int("mul_i32", m as i64, 42)
+
+    // out-parameter: 17 / 5 = 3 remainder 2
+    let [q, rem] = stub_divmod(17, 5)
+    check_int("divmod_quotient", q as i64, 3)
+    check_int("divmod_remainder", rem as i64, 2)
+
+    print("ALL_CHECKS_PASSED")
+}
+
+main()

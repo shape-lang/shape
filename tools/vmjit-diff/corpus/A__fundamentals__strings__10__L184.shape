@@ -1,0 +1,2 @@
+let s = f"literal braces: {{value}}";
+// => "literal braces: {value}"

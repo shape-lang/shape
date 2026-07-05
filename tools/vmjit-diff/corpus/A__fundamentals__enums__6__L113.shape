@@ -1,0 +1,10 @@
+enum Color { Red, Green, Blue }
+
+let c = Color::Red
+
+// This compiles — all three variants are covered:
+match c {
+    Color::Red   => print("red"),
+    Color::Green => print("green"),
+    Color::Blue  => print("blue"),
+}

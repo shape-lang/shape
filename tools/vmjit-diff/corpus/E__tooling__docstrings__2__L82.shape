@@ -1,0 +1,6 @@
+fn identity<
+    /// Element type preserved by the function.
+    T
+>(value: T) -> T {
+    value
+}

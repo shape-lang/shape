@@ -1,0 +1,11 @@
+fn bucket(n: int) -> string {
+  match n {
+    x: int where x < 0 => "negative"
+    x: int where x == 0 => "zero"
+    _ => "positive"
+  }
+}
+
+print(bucket(-3))
+print(bucket(0))
+print(bucket(8))

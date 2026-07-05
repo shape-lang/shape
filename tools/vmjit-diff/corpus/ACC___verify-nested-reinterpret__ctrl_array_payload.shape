@@ -1,0 +1,2 @@
+fn g() -> Result<Array<int>,string> { Ok([1,2,3]) }
+match g() { Ok(Some(n)) => print(1), Err(e) => print(e) }

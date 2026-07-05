@@ -1,0 +1,8 @@
+let cfg = {
+  server: {
+    host: "localhost",
+    port: 9091
+  }
+}
+
+print(cfg.server.host)

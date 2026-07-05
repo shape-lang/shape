@@ -1,0 +1,10 @@
+type Point {
+  x: int,
+  y: int,
+}
+
+let mut point = Point { x: 10, y: 20 }
+point.y = 25
+
+let total = point.x + point.y
+print(total)

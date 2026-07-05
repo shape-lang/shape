@@ -1,0 +1,10 @@
+---
+name = "probe3"
+
+[native-dependencies]
+stub = { provider = "path", path = "./libstub.so" }
+---
+extern C fn stub_product(a: i64, b: i64, out out_prod: ptr) -> i32 from "stub" as "stub_product";
+let [status, prod] = stub_product(6, 7)
+print(status)
+print(prod)

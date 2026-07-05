@@ -1,0 +1,6 @@
+let s = """
+        this
+        is
+        a
+        multiline
+        """;

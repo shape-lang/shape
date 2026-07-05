@@ -1,0 +1,744 @@
+// large.shape — "TimeKeeper": a deterministic scheduling / calendar engine.
+//
+// A real-world, non-interactive application rooted in the DateTime slice. It
+// implements ten subsystems built only from book-documented DateTime API:
+//
+//   1. Calendar utilities  — weekday/weekend classification, day-of-year,
+//                            ISO week numbers, business-day counting.
+//   2. Recurring events    — expand a daily/weekly recurrence into concrete
+//                            occurrences via add_days arithmetic.
+//   3. SLA deadlines       — add business hours/days to a ticket open time and
+//                            assert the resulting deadline.
+//   4. Multi-TZ scheduler  — convert a UTC meeting slot into several IANA zones
+//                            and assert local wall-clock times.
+//   5. Timesheet engine    — sum durations across shifts using unix_timestamp
+//                            differences; classify each shift by weekday.
+//   6. Formatting matrix   — verify every documented format specifier.
+//   7. add_months clamping — month arithmetic + literal duration arithmetic.
+//   8. Comparison engine   — is_before/is_after/is_same_day, min/max selectors.
+//   9. Fiscal periods      — quarter derivation + per-quarter business days.
+//  10. Elapsed computation — day spans via unix_timestamp differences.
+//
+// DETERMINISM: every DateTime originates from a fixed parse()/from_epoch()/@""
+// literal. No now()/utc()/to_local(). Every computed result is asserted against
+// an EXPECTED VALUE derived from book semantics, written before first run.
+//
+// On success prints ALL_CHECKS_PASSED. On any mismatch prints
+//   CHECK_FAILED: <which> expected=<e> got=<g>
+//
+// Book sections cited inline as [book:<section>].
+
+from std::core::intrinsics use { DateTime }
+
+// ---------------------------------------------------------------------------
+// Assertion harness
+// ---------------------------------------------------------------------------
+
+let mut total = 0
+let mut failed = 0
+
+fn check_int(name: string, got: int, expected: int) {
+    total = total + 1
+    if got != expected {
+        failed = failed + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn check_str(name: string, got: string, expected: string) {
+    total = total + 1
+    if got != expected {
+        failed = failed + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) {
+    total = total + 1
+    if got != expected {
+        failed = failed + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+// ===========================================================================
+// SUBSYSTEM 1 — Calendar utilities
+// ===========================================================================
+//
+// [book:Day Information] day_of_week(): 0=Mon..6=Sun; is_weekday()/is_weekend();
+// day_of_year() ordinal; week_of_year() ISO week.
+// [book:Arithmetic] add_days() to walk a range.
+
+fn count_business_days(start: DateTime, end: DateTime) -> int {
+    let mut cur = start
+    let mut n = 0
+    while cur.is_before(end) or cur.is_same_day(end) {
+        if cur.is_weekday() {
+            n = n + 1
+        }
+        cur = cur.add_days(1)
+    }
+    return n
+}
+
+fn count_weekend_days(start: DateTime, end: DateTime) -> int {
+    let mut cur = start
+    let mut n = 0
+    while cur.is_before(end) or cur.is_same_day(end) {
+        if cur.is_weekend() {
+            n = n + 1
+        }
+        cur = cur.add_days(1)
+    }
+    return n
+}
+
+fn count_all_days(start: DateTime, end: DateTime) -> int {
+    let mut cur = start
+    let mut n = 0
+    while cur.is_before(end) or cur.is_same_day(end) {
+        n = n + 1
+        cur = cur.add_days(1)
+    }
+    return n
+}
+
+fn calendar_tests() {
+    // January 2024: Jan 1 (Mon) .. Jan 31 (Wed). 31 days.
+    // Weekends in Jan 2024: 6,7,13,14,20,21,27,28 = 8 weekend days.
+    // Business days = 31 - 8 = 23.
+    let jan_start = DateTime.parse("2024-01-01T00:00:00+00:00")
+    let jan_end = DateTime.parse("2024-01-31T00:00:00+00:00")
+    check_int("jan_all_days", count_all_days(jan_start, jan_end), 31)
+    check_int("jan_weekend_days", count_weekend_days(jan_start, jan_end), 8)
+    check_int("jan_business_days", count_business_days(jan_start, jan_end), 23)
+
+    // February 2024 (leap): Feb 1 (Thu) .. Feb 29 (Thu). 29 days.
+    // Weekends: 3,4,10,11,17,18,24,25 = 8. Business = 21.
+    let feb_start = DateTime.parse("2024-02-01T00:00:00+00:00")
+    let feb_end = DateTime.parse("2024-02-29T00:00:00+00:00")
+    check_int("feb_all_days", count_all_days(feb_start, feb_end), 29)
+    check_int("feb_weekend_days", count_weekend_days(feb_start, feb_end), 8)
+    check_int("feb_business_days", count_business_days(feb_start, feb_end), 21)
+
+    // day_of_year checkpoints.
+    // 2024-01-01 -> 1; 2024-02-29 -> 31+29 = 60; 2024-12-31 -> 366 (leap).
+    check_int("doy_jan1", DateTime.parse("2024-01-01T00:00:00+00:00").day_of_year(), 1)
+    check_int("doy_feb29", DateTime.parse("2024-02-29T00:00:00+00:00").day_of_year(), 60)
+    check_int("doy_dec31", DateTime.parse("2024-12-31T00:00:00+00:00").day_of_year(), 366)
+    // Non-leap 2023-12-31 -> 365.
+    check_int("doy_2023_dec31", DateTime.parse("2023-12-31T00:00:00+00:00").day_of_year(), 365)
+
+    // ISO week numbers. [book:Day Information] week_of_year() is ISO week.
+    // 2024-01-01 is Monday of ISO week 1.
+    check_int("woy_jan1", DateTime.parse("2024-01-01T00:00:00+00:00").week_of_year(), 1)
+    check_int("woy_jan8", DateTime.parse("2024-01-08T00:00:00+00:00").week_of_year(), 2)
+
+    // Weekday classification spot checks.
+    check_bool("mon_is_weekday", DateTime.parse("2024-01-01T00:00:00+00:00").is_weekday(), true)
+    check_bool("sat_is_weekend", DateTime.parse("2024-01-06T00:00:00+00:00").is_weekend(), true)
+    check_bool("sun_is_weekend", DateTime.parse("2024-01-07T00:00:00+00:00").is_weekend(), true)
+    check_bool("fri_is_weekday", DateTime.parse("2024-01-05T00:00:00+00:00").is_weekday(), true)
+    check_int("mon_dow", DateTime.parse("2024-01-01T00:00:00+00:00").day_of_week(), 0)
+    check_int("sun_dow", DateTime.parse("2024-01-07T00:00:00+00:00").day_of_week(), 6)
+}
+
+// ===========================================================================
+// SUBSYSTEM 2 — Recurring event expansion
+// ===========================================================================
+//
+// [book:Date Range Iteration] Use add_days to expand a recurrence rule into
+// concrete occurrence dates, collected as a "|"-joined formatted string.
+
+fn expand_daily(start: DateTime, step_days: int, count: int) -> string {
+    let mut cur = start
+    let mut acc = ""
+    let mut i = 0
+    while i < count {
+        if i > 0 {
+            acc = acc + "|"
+        }
+        acc = acc + cur.format("%Y-%m-%d")
+        cur = cur.add_days(step_days)
+        i = i + 1
+    }
+    return acc
+}
+
+fn expand_weekly(start: DateTime, count: int) -> string {
+    return expand_daily(start, 7, count)
+}
+
+fn weekday_occurrences(start: DateTime, step_days: int, count: int) -> int {
+    let mut cur = start
+    let mut n = 0
+    let mut i = 0
+    while i < count {
+        if cur.is_weekday() {
+            n = n + 1
+        }
+        cur = cur.add_days(step_days)
+        i = i + 1
+    }
+    return n
+}
+
+fn recurring_tests() {
+    // Daily standup: every day for 5 occurrences from Mon 2024-01-01.
+    let standup = DateTime.parse("2024-01-01T09:00:00+00:00")
+    check_str("daily5", expand_daily(standup, 1, 5),
+        "2024-01-01|2024-01-02|2024-01-03|2024-01-04|2024-01-05")
+
+    // Weekly sync: every Monday for 4 weeks from 2024-01-01.
+    let sync = DateTime.parse("2024-01-01T15:00:00+00:00")
+    check_str("weekly4", expand_weekly(sync, 4),
+        "2024-01-01|2024-01-08|2024-01-15|2024-01-22")
+
+    // Bi-weekly (step 14) for 3 occurrences from 2024-01-01.
+    check_str("biweekly3", expand_daily(sync, 14, 3),
+        "2024-01-01|2024-01-15|2024-01-29")
+
+    // Daily recurrence for 10 days from Mon 2024-01-01 spans 01..10:
+    // weekdays are 01-05 (Mon-Fri) and 08-10 (Mon-Wed) = 8 weekdays.
+    check_int("daily10_weekdays", weekday_occurrences(standup, 1, 10), 8)
+
+    // Every 30 days x 4 from 2024-01-31:
+    // 01-31, +30 -> 03-01, +30 -> 03-31, +30 -> 04-30.
+    let m = DateTime.parse("2024-01-31T00:00:00+00:00")
+    check_str("step30x4", expand_daily(m, 30, 4),
+        "2024-01-31|2024-03-01|2024-03-31|2024-04-30")
+}
+
+// ===========================================================================
+// SUBSYSTEM 3 — SLA deadline computation
+// ===========================================================================
+//
+// [book:Arithmetic] add_days/add_hours; [book:Operator Arithmetic] + duration.
+
+fn add_business_days(start: DateTime, n: int) -> DateTime {
+    let mut cur = start
+    let mut remaining = n
+    while remaining > 0 {
+        cur = cur.add_days(1)
+        if cur.is_weekday() {
+            remaining = remaining - 1
+        }
+    }
+    return cur
+}
+
+fn sla_tests() {
+    // Ticket opened Mon 2024-01-01 10:00 UTC, 4h SLA -> 14:00 same day.
+    let opened = DateTime.parse("2024-01-01T10:00:00+00:00")
+    let dl_4h = opened.add_hours(4)
+    check_int("sla_4h_hour", dl_4h.hour(), 14)
+    check_int("sla_4h_day", dl_4h.day(), 1)
+
+    // 48h SLA -> +2 days, Wed 2024-01-03 10:00.
+    let dl_48h = opened.add_hours(48)
+    check_int("sla_48h_day", dl_48h.day(), 3)
+    check_int("sla_48h_hour", dl_48h.hour(), 10)
+    check_str("sla_48h_weekday", dl_48h.format("%A"), "Wednesday")
+
+    // Operator-form: opened + 3d via duration suffix -> 2024-01-04.
+    let dl_3d = opened + 3d
+    check_int("sla_3d_day", dl_3d.day(), 4)
+
+    // Business-day SLA: opened Fri 2024-01-05, +1 business day -> Mon 2024-01-08.
+    let fri = DateTime.parse("2024-01-05T10:00:00+00:00")
+    let bdl = add_business_days(fri, 1)
+    check_str("sla_bd1_date", bdl.format("%Y-%m-%d"), "2024-01-08")
+    check_str("sla_bd1_weekday", bdl.format("%A"), "Monday")
+    check_int("sla_bd1_hour", bdl.hour(), 10)
+
+    // +5 business days from Mon 2024-01-01 -> Mon 2024-01-08.
+    let mon = DateTime.parse("2024-01-01T09:00:00+00:00")
+    let bdl5 = add_business_days(mon, 5)
+    check_str("sla_bd5_date", bdl5.format("%Y-%m-%d"), "2024-01-08")
+    check_str("sla_bd5_weekday", bdl5.format("%A"), "Monday")
+}
+
+// ===========================================================================
+// SUBSYSTEM 4 — Multi-timezone meeting scheduler
+// ===========================================================================
+//
+// [book:Timezone Operations] to_timezone() converts to an IANA zone; local
+// wall-clock components shift while the instant is preserved (to_utc roundtrip).
+
+fn tz_tests() {
+    // Meeting at 2024-06-15T12:00:00Z (summer: EDT/BST/JST).
+    let slot = DateTime.parse("2024-06-15T12:00:00+00:00")
+
+    // New York (EDT, UTC-4): 12:00Z -> 08:00.
+    let ny = slot.to_timezone("America/New_York")
+    check_int("ny_hour", ny.hour(), 8)
+    check_int("ny_day", ny.day(), 15)
+    check_int("ny_roundtrip_hour", ny.to_utc().hour(), 12)
+
+    // London (BST, UTC+1): 12:00Z -> 13:00.
+    let lon = slot.to_timezone("Europe/London")
+    check_int("lon_hour", lon.hour(), 13)
+    check_int("lon_day", lon.day(), 15)
+
+    // Tokyo (JST, UTC+9): 12:00Z -> 21:00.
+    let tok = slot.to_timezone("Asia/Tokyo")
+    check_int("tok_hour", tok.hour(), 21)
+    check_int("tok_day", tok.day(), 15)
+
+    // Cross-midnight: 2024-06-15T02:00:00Z in NY (UTC-4) -> 2024-06-14 22:00.
+    let early = DateTime.parse("2024-06-15T02:00:00+00:00")
+    let early_ny = early.to_timezone("America/New_York")
+    check_int("early_ny_hour", early_ny.hour(), 22)
+    check_int("early_ny_day", early_ny.day(), 14)
+    check_bool("cross_midnight_not_same_day", early.is_same_day(early_ny), false)
+
+    // Winter offsets: 2024-01-15T12:00:00Z. NY EST (UTC-5) -> 07:00; Tokyo -> 21:00.
+    let winter = DateTime.parse("2024-01-15T12:00:00+00:00")
+    check_int("ny_winter_hour", winter.to_timezone("America/New_York").hour(), 7)
+    check_int("tok_winter_hour", winter.to_timezone("Asia/Tokyo").hour(), 21)
+
+    // Book office-open example: 09:00-04:00 -> Tokyo 22:00.
+    let office_open_et = DateTime.parse("2024-06-15T09:00:00-04:00")
+    let tokyo_open = office_open_et.to_timezone("Asia/Tokyo")
+    check_str("book_office_tokyo", tokyo_open.format("%H:%M"), "22:00")
+}
+
+// ===========================================================================
+// SUBSYSTEM 5 — Timesheet aggregation
+// ===========================================================================
+//
+// [book:Standard Formats] unix_timestamp() returns seconds since epoch as int.
+
+fn shift_seconds(start: DateTime, end: DateTime) -> int {
+    return end.unix_timestamp() - start.unix_timestamp()
+}
+
+fn timesheet_tests() {
+    // Shift 1: Mon 2024-01-01 09:00 -> 17:00 = 8h = 28800s.
+    let s1a = DateTime.parse("2024-01-01T09:00:00+00:00")
+    let s1b = DateTime.parse("2024-01-01T17:00:00+00:00")
+    check_int("shift1_secs", shift_seconds(s1a, s1b), 28800)
+    check_bool("shift1_weekday", s1a.is_weekday(), true)
+
+    // Shift 2: Tue 2024-01-02 08:30 -> 16:30 = 8h = 28800s.
+    let s2a = DateTime.parse("2024-01-02T08:30:00+00:00")
+    let s2b = DateTime.parse("2024-01-02T16:30:00+00:00")
+    check_int("shift2_secs", shift_seconds(s2a, s2b), 28800)
+
+    // Shift 3: Sat 2024-01-06 10:00 -> 14:00 = 4h = 14400s (weekend).
+    let s3a = DateTime.parse("2024-01-06T10:00:00+00:00")
+    let s3b = DateTime.parse("2024-01-06T14:00:00+00:00")
+    check_int("shift3_secs", shift_seconds(s3a, s3b), 14400)
+    check_bool("shift3_weekend", s3a.is_weekend(), true)
+
+    // Total seconds = 28800 + 28800 + 14400 = 72000.
+    let total_secs = shift_seconds(s1a, s1b) + shift_seconds(s2a, s2b) + shift_seconds(s3a, s3b)
+    check_int("total_secs", total_secs, 72000)
+    check_int("total_hours", total_secs / 3600, 20)
+
+    // Weekday-only hours = (28800 + 28800)/3600 = 16.
+    let weekday_secs = shift_seconds(s1a, s1b) + shift_seconds(s2a, s2b)
+    check_int("weekday_hours", weekday_secs / 3600, 16)
+
+    // Overnight shift: Mon 22:00 -> Tue 06:00 = 8h = 28800s.
+    let on_a = DateTime.parse("2024-01-01T22:00:00+00:00")
+    let on_b = DateTime.parse("2024-01-02T06:00:00+00:00")
+    check_int("overnight_secs", shift_seconds(on_a, on_b), 28800)
+    check_bool("overnight_diff_day", on_a.is_same_day(on_b), false)
+
+    // from_epoch consistency: 1704096000000 ms = 2024-01-01T08:00:00Z.
+    let ep = DateTime.from_epoch(1704096000000)
+    check_int("epoch_unix", ep.unix_timestamp(), 1704096000)
+    check_str("epoch_iso", ep.iso8601(), "2024-01-01T08:00:00+00:00")
+    check_int("epoch_hour", ep.hour(), 8)
+}
+
+// ===========================================================================
+// SUBSYSTEM 6 — Formatting matrix
+// ===========================================================================
+//
+// [book:Formatting] Verify a matrix of format specifiers against a fixed dt.
+
+fn formatting_tests() {
+    let dt = DateTime.parse("2024-06-15T14:30:45+00:00")  // Saturday
+    check_str("fmt_Y", dt.format("%Y"), "2024")
+    check_str("fmt_m", dt.format("%m"), "06")
+    check_str("fmt_d", dt.format("%d"), "15")
+    check_str("fmt_H", dt.format("%H"), "14")
+    check_str("fmt_M", dt.format("%M"), "30")
+    check_str("fmt_S", dt.format("%S"), "45")
+    check_str("fmt_A", dt.format("%A"), "Saturday")
+    check_str("fmt_B", dt.format("%B"), "June")
+    check_str("fmt_combo", dt.format("%B %d, %Y at %H:%M"), "June 15, 2024 at 14:30")
+    check_str("fmt_iso", dt.iso8601(), "2024-06-15T14:30:45+00:00")
+    check_int("fmt_unix", dt.unix_timestamp(), 1718461845)
+
+    // rfc2822 of a Monday. [book:Standard Formats]
+    let mon = DateTime.parse("2024-01-15T10:30:00+00:00")
+    check_str("rfc2822", mon.rfc2822(), "Mon, 15 Jan 2024 10:30:00 +0000")
+
+    // Sub-second precision from from_epoch.
+    let ms = DateTime.from_epoch(1705314600250)  // 2024-01-15T10:30:00.250Z
+    check_int("ms_millis", ms.millisecond(), 250)
+    check_int("ms_micros", ms.microsecond(), 250000)
+    check_int("ms_second", ms.second(), 0)
+}
+
+// ===========================================================================
+// SUBSYSTEM 7 — add_months clamping & literal arithmetic
+// ===========================================================================
+//
+// [book:Arithmetic] add_months clamps to last valid day; [book:DateTime
+// Literals] @"..." + duration suffix arithmetic.
+
+fn months_tests() {
+    // Jan 31 + 1 month -> Feb 29 (2024 leap). +1 more -> Mar 29.
+    let jan31 = DateTime.parse("2024-01-31T00:00:00+00:00")
+    let feb = jan31.add_months(1)
+    check_int("jan31_plus1m_day", feb.day(), 29)
+    check_int("jan31_plus1m_month", feb.month(), 2)
+    check_int("feb_plus1m_day", feb.add_months(1).day(), 29)
+    check_int("feb_plus1m_month", feb.add_months(1).month(), 3)
+
+    // Nov 30 + 3 months -> Feb 28 2025 (non-leap clamp).
+    let nov = DateTime.parse("2024-11-30T00:00:00+00:00")
+    check_str("nov30_plus3m", nov.add_months(3).format("%Y-%m-%d"), "2025-02-28")
+
+    // Negative add_months: Mar 31 - 1 month -> Feb 29 (leap clamp).
+    let mar31 = DateTime.parse("2024-03-31T00:00:00+00:00")
+    check_str("mar31_minus1m", mar31.add_months(-1).format("%Y-%m-%d"), "2024-02-29")
+
+    // Literal arithmetic: @"2024-06-15" + 30d - 1w -> 2024-07-08.
+    let lit = @"2024-06-15" + 30d - 1w
+    check_str("literal_arith", lit.format("%Y-%m-%d"), "2024-07-08")
+
+    // Literal + duration: @"2024-06-15" + 3d -> 18.
+    let lit2 = @"2024-06-15" + 3d
+    check_int("literal_plus3d", lit2.day(), 18)
+
+    // add_days(365) on leap-year start -> Dec 31; +366 -> next Jan 1.
+    let y0 = DateTime.parse("2024-01-01T00:00:00+00:00")
+    check_str("add365", y0.add_days(365).format("%Y-%m-%d"), "2024-12-31")
+    check_str("add366", y0.add_days(366).format("%Y-%m-%d"), "2025-01-01")
+}
+
+// ===========================================================================
+// SUBSYSTEM 8 — Comparison & ordering engine
+// ===========================================================================
+//
+// [book:Comparisons] is_before/is_after/is_same_day; build min/max selectors.
+
+fn earliest(a: DateTime, b: DateTime) -> DateTime {
+    if a.is_before(b) {
+        return a
+    }
+    return b
+}
+
+fn latest(a: DateTime, b: DateTime) -> DateTime {
+    if a.is_after(b) {
+        return a
+    }
+    return b
+}
+
+fn comparison_tests() {
+    let t1 = DateTime.parse("2024-03-15T08:00:00+00:00")
+    let t2 = DateTime.parse("2024-03-15T22:30:00+00:00")
+    let t3 = DateTime.parse("2024-03-16T01:00:00+00:00")
+
+    check_bool("t1_before_t2", t1.is_before(t2), true)
+    check_bool("t2_after_t1", t2.is_after(t1), true)
+    check_bool("t1_t2_same_day", t1.is_same_day(t2), true)
+    check_bool("t1_t3_same_day", t1.is_same_day(t3), false)
+    check_bool("t2_before_t3", t2.is_before(t3), true)
+
+    check_str("earliest_t1t2", earliest(t1, t2).iso8601(), "2024-03-15T08:00:00+00:00")
+    check_str("latest_t1t3", latest(t1, t3).iso8601(), "2024-03-16T01:00:00+00:00")
+
+    // is_same_day across timezones (book example): 23:00-05:00 vs its UTC.
+    let est = DateTime.parse("2024-03-15T23:00:00-05:00")
+    let utc = est.to_utc()
+    check_bool("tz_same_day_false", est.is_same_day(utc), false)
+    // UTC of 2024-03-15T23:00-05:00 is 2024-03-16T04:00Z.
+    check_int("est_utc_day", utc.day(), 16)
+    check_int("est_utc_hour", utc.hour(), 4)
+
+    // Min/max over three datetimes via repeated selection.
+    let lo = earliest(earliest(t1, t2), t3)
+    check_str("min3", lo.iso8601(), "2024-03-15T08:00:00+00:00")
+    let hi = latest(latest(t1, t2), t3)
+    check_str("max3", hi.iso8601(), "2024-03-16T01:00:00+00:00")
+}
+
+// ===========================================================================
+// SUBSYSTEM 9 — Quarter / fiscal period engine
+// ===========================================================================
+
+fn quarter_of(dt: DateTime) -> int {
+    let m = dt.month()
+    if m <= 3 {
+        return 1
+    }
+    if m <= 6 {
+        return 2
+    }
+    if m <= 9 {
+        return 3
+    }
+    return 4
+}
+
+fn fiscal_tests() {
+    check_int("q_jan", quarter_of(DateTime.parse("2024-01-15T00:00:00+00:00")), 1)
+    check_int("q_apr", quarter_of(DateTime.parse("2024-04-01T00:00:00+00:00")), 2)
+    check_int("q_jul", quarter_of(DateTime.parse("2024-07-31T00:00:00+00:00")), 3)
+    check_int("q_dec", quarter_of(DateTime.parse("2024-12-31T00:00:00+00:00")), 4)
+
+    // Business days in Q1 2024 (Jan 1 .. Mar 31):
+    // Jan = 23, Feb = 21, Mar 2024 (Mar 1 Fri .. Mar 31 Sun, 31 days;
+    // weekends 2,3,9,10,16,17,23,24,30,31 = 10; business = 21). Q1 = 65.
+    let q1s = DateTime.parse("2024-01-01T00:00:00+00:00")
+    let q1e = DateTime.parse("2024-03-31T00:00:00+00:00")
+    check_int("q1_business_days", count_business_days(q1s, q1e), 65)
+
+    // All days in Q1 2024 = 31 + 29 + 31 = 91.
+    check_int("q1_all_days", count_all_days(q1s, q1e), 91)
+    // Weekend days in Q1 = 91 - 65 = 26.
+    check_int("q1_weekend_days", count_weekend_days(q1s, q1e), 26)
+}
+
+// ===========================================================================
+// SUBSYSTEM 11 — "Nth weekday of month" holiday calendar
+// ===========================================================================
+//
+// Many holidays are defined as "nth <weekday> of <month>" (e.g. US Thanksgiving
+// = 4th Thursday of November). Derive them by scanning a month with add_days +
+// day_of_week. [book:Day Information] day_of_week 0=Mon..6=Sun; [book:Arithmetic].
+
+fn nth_weekday(month_first: DateTime, target_dow: int, n: int) -> string {
+    let mut cur = month_first
+    let mut count = 0
+    let mut i = 0
+    while i < 40 {
+        if cur.day_of_week() == target_dow {
+            count = count + 1
+            if count == n {
+                return cur.format("%Y-%m-%d")
+            }
+        }
+        cur = cur.add_days(1)
+        i = i + 1
+    }
+    return "NONE"
+}
+
+fn holiday_tests() {
+    // 2nd Tuesday (dow=1) of Jan 2024: Jan 2 (1st), Jan 9 (2nd).
+    check_str("2nd_tue_jan", nth_weekday(DateTime.parse("2024-01-01T00:00:00+00:00"), 1, 2), "2024-01-09")
+    // 3rd Monday (dow=0) of Jan 2024 (US MLK day): Jan 1,8,15.
+    check_str("mlk_2024", nth_weekday(DateTime.parse("2024-01-01T00:00:00+00:00"), 0, 3), "2024-01-15")
+    // 1st Friday (dow=4) of Feb 2024: Feb 2.
+    check_str("1st_fri_feb", nth_weekday(DateTime.parse("2024-02-01T00:00:00+00:00"), 4, 1), "2024-02-02")
+    // 5th Wednesday (dow=2) of Jan 2024: 3,10,17,24,31.
+    check_str("5th_wed_jan", nth_weekday(DateTime.parse("2024-01-01T00:00:00+00:00"), 2, 5), "2024-01-31")
+    // US Thanksgiving 2024 = 4th Thursday (dow=3) of November.
+    // Nov 2024: Nov 1 Fri; Thursdays 7,14,21,28 -> 4th = Nov 28.
+    check_str("thanksgiving_2024", nth_weekday(DateTime.parse("2024-11-01T00:00:00+00:00"), 3, 4), "2024-11-28")
+    // US Memorial Day 2024 = last Monday of May. May 2024 Mondays: 6,13,20,27.
+    check_str("memorial_2024", nth_weekday(DateTime.parse("2024-05-01T00:00:00+00:00"), 0, 4), "2024-05-27")
+    // Verify the holiday lands on the expected weekday via %A.
+    let thanks = DateTime.parse("2024-11-28T00:00:00+00:00")
+    check_str("thanks_weekday", thanks.format("%A"), "Thursday")
+    let mlk = DateTime.parse("2024-01-15T00:00:00+00:00")
+    check_str("mlk_weekday", mlk.format("%A"), "Monday")
+}
+
+// ===========================================================================
+// SUBSYSTEM 12 — Meeting-overlap / conflict detector
+// ===========================================================================
+//
+// Two meeting intervals [a1,a2], [b1,b2] overlap iff a1<=b2 and b1<=a2, using
+// unix_timestamp() as a total order. [book:Standard Formats] unix_timestamp().
+
+fn overlaps(a1: DateTime, a2: DateTime, b1: DateTime, b2: DateTime) -> bool {
+    return a1.unix_timestamp() <= b2.unix_timestamp() and b1.unix_timestamp() <= a2.unix_timestamp()
+}
+
+fn minutes_between(a: DateTime, b: DateTime) -> int {
+    return (b.unix_timestamp() - a.unix_timestamp()) / 60
+}
+
+fn conflict_tests() {
+    let m1s = DateTime.parse("2024-01-01T10:00:00+00:00")
+    let m1e = DateTime.parse("2024-01-01T11:00:00+00:00")
+    let m2s = DateTime.parse("2024-01-01T10:30:00+00:00")
+    let m2e = DateTime.parse("2024-01-01T11:30:00+00:00")
+    let m3s = DateTime.parse("2024-01-01T11:30:00+00:00")
+    let m3e = DateTime.parse("2024-01-01T12:00:00+00:00")
+
+    // m1 vs m2 overlap (10:30 inside 10:00-11:00).
+    check_bool("conflict_12", overlaps(m1s, m1e, m2s, m2e), true)
+    // m1 vs m3 no overlap (m1 ends 11:00, m3 starts 11:30).
+    check_bool("conflict_13", overlaps(m1s, m1e, m3s, m3e), false)
+    // m2 vs m3 touch at 11:30 -> overlap true (closed intervals).
+    check_bool("conflict_23", overlaps(m2s, m2e, m3s, m3e), true)
+
+    // Durations in minutes.
+    check_int("dur_m1", minutes_between(m1s, m1e), 60)
+    check_int("dur_m2", minutes_between(m2s, m2e), 60)
+    check_int("dur_90", minutes_between(DateTime.parse("2024-01-01T09:00:00+00:00"),
+                                       DateTime.parse("2024-01-01T10:30:00+00:00")), 90)
+
+    // Cross-timezone conflict: a meeting 14:00-15:00 UTC vs a NY-local
+    // 09:00-10:00 EST on the same instant-line. 09:00 EST (UTC-5 winter) =
+    // 14:00 UTC, so they fully overlap regardless of zone labels.
+    let utc_mtg_s = DateTime.parse("2024-01-15T14:00:00+00:00")
+    let utc_mtg_e = DateTime.parse("2024-01-15T15:00:00+00:00")
+    let ny_mtg_s = DateTime.parse("2024-01-15T09:00:00-05:00")
+    let ny_mtg_e = DateTime.parse("2024-01-15T10:00:00-05:00")
+    check_bool("cross_tz_overlap", overlaps(utc_mtg_s, utc_mtg_e, ny_mtg_s, ny_mtg_e), true)
+    // The NY meeting start, in UTC, is exactly 14:00.
+    check_int("ny_mtg_utc_hour", ny_mtg_s.to_utc().hour(), 14)
+}
+
+// ===========================================================================
+// SUBSYSTEM 13 — Multi-timezone recurring standup report
+// ===========================================================================
+//
+// A daily 09:00-04:00 (NY EDT) standup for a week; report its UTC, London and
+// Tokyo wall-clock times. [book:Timezone Operations] to_timezone over a series.
+
+fn standup_report(week_count: int) -> string {
+    // Anchor: 2024-06-17 (Mon) 09:00 EDT (UTC-4). In UTC that is 13:00.
+    let mut cur = DateTime.parse("2024-06-17T09:00:00-04:00")
+    let mut acc = ""
+    let mut i = 0
+    while i < week_count {
+        if i > 0 {
+            acc = acc + ";"
+        }
+        // Book-idiomatic: unannotated bindings of to_utc()/to_timezone()
+        // results, exactly as the book's "Multi-timezone report" example
+        // (datetime.mdx lines 396-400). Inference resolves these to DateTime
+        // and the chained .format() works (verified: probe4.shape).
+        let utc = cur.to_utc()
+        let tok = cur.to_timezone("Asia/Tokyo")
+        acc = acc + utc.format("%Y-%m-%d") + " UTC=" + utc.format("%H:%M") + " TOK=" + tok.format("%H:%M")
+        cur = cur.add_days(1)
+        i = i + 1
+    }
+    return acc
+}
+
+fn standup_report_tests() {
+    // Each day: 09:00 EDT -> 13:00 UTC -> 22:00 Tokyo.
+    // 2024-06-17 Mon, 06-18 Tue, 06-19 Wed (3 entries).
+    let r = standup_report(3)
+    check_str("standup_report", r,
+        "2024-06-17 UTC=13:00 TOK=22:00;2024-06-18 UTC=13:00 TOK=22:00;2024-06-19 UTC=13:00 TOK=22:00")
+
+    // Single-zone offset sanity: 2024-06-17T09:00-04:00 in UTC = 13:00.
+    let anchor = DateTime.parse("2024-06-17T09:00:00-04:00")
+    check_int("anchor_utc_hour", anchor.to_utc().hour(), 13)
+    check_int("anchor_tok_hour", anchor.to_timezone("Asia/Tokyo").hour(), 22)
+    // London BST (UTC+1) in June: 13:00 UTC -> 14:00.
+    check_int("anchor_lon_hour", anchor.to_utc().to_timezone("Europe/London").hour(), 14)
+}
+
+// ===========================================================================
+// SUBSYSTEM 14 — Payroll bi-weekly period generator
+// ===========================================================================
+//
+// Generate bi-weekly pay-period start dates and count business days per period.
+// [book:Arithmetic] add_days; [book:Day Information] is_weekday.
+
+fn payroll_tests() {
+    // Period 1: 2024-01-01 (Mon) .. 2024-01-14 (Sun), 14 days, 10 business days.
+    let p1s = DateTime.parse("2024-01-01T00:00:00+00:00")
+    let p1e = DateTime.parse("2024-01-14T00:00:00+00:00")
+    check_int("payroll_p1_days", count_all_days(p1s, p1e), 14)
+    check_int("payroll_p1_business", count_business_days(p1s, p1e), 10)
+
+    // Next period starts +14 days = 2024-01-15 (Mon).
+    let p2s = p1s.add_days(14)
+    check_str("payroll_p2_start", p2s.format("%Y-%m-%d"), "2024-01-15")
+    check_str("payroll_p2_weekday", p2s.format("%A"), "Monday")
+    let p2e = p2s.add_days(13)  // inclusive 14-day window
+    check_str("payroll_p2_end", p2e.format("%Y-%m-%d"), "2024-01-28")
+    check_int("payroll_p2_business", count_business_days(p2s, p2e), 10)
+
+    // Six bi-weekly period starts from 2024-01-01.
+    let mut cur = p1s
+    let mut starts = ""
+    let mut i = 0
+    while i < 6 {
+        if i > 0 {
+            starts = starts + ","
+        }
+        starts = starts + cur.format("%Y-%m-%d")
+        cur = cur.add_days(14)
+        i = i + 1
+    }
+    // 01-01, 01-15, 01-29, 02-12, 02-26, 03-11.
+    check_str("payroll_six_starts", starts,
+        "2024-01-01,2024-01-15,2024-01-29,2024-02-12,2024-02-26,2024-03-11")
+}
+
+// ===========================================================================
+// SUBSYSTEM 10 — Elapsed computation in days via unix_timestamp
+// ===========================================================================
+
+fn days_between(a: DateTime, b: DateTime) -> int {
+    let secs = b.unix_timestamp() - a.unix_timestamp()
+    return secs / 86400
+}
+
+fn elapsed_tests() {
+    // 2024-06-10 -> 2024-06-15 = 5 days.
+    let a = DateTime.parse("2024-06-10T12:00:00+00:00")
+    let b = DateTime.parse("2024-06-15T12:00:00+00:00")
+    check_int("elapsed_5d", days_between(a, b), 5)
+
+    // 2024-01-01 00:00 -> 2024-12-31 00:00 = 365 whole days.
+    let y0 = DateTime.parse("2024-01-01T00:00:00+00:00")
+    let y1 = DateTime.parse("2024-12-31T00:00:00+00:00")
+    check_int("elapsed_365d", days_between(y0, y1), 365)
+
+    // Whole leap year Jan 1 -> next Jan 1 = 366 days.
+    let n0 = DateTime.parse("2024-01-01T00:00:00+00:00")
+    let n1 = DateTime.parse("2025-01-01T00:00:00+00:00")
+    check_int("elapsed_366d", days_between(n0, n1), 366)
+
+    // One hour difference -> 0 whole days, 3600 seconds.
+    let h0 = DateTime.parse("2024-06-15T12:00:00+00:00")
+    let h1 = DateTime.parse("2024-06-15T13:00:00+00:00")
+    check_int("elapsed_0d", days_between(h0, h1), 0)
+    check_int("elapsed_3600s", h1.unix_timestamp() - h0.unix_timestamp(), 3600)
+}
+
+// ===========================================================================
+// Driver
+// ===========================================================================
+
+calendar_tests()
+recurring_tests()
+sla_tests()
+tz_tests()
+timesheet_tests()
+formatting_tests()
+months_tests()
+comparison_tests()
+fiscal_tests()
+holiday_tests()
+conflict_tests()
+standup_report_tests()
+payroll_tests()
+elapsed_tests()
+
+print(f"TOTAL_CHECKS={total}")
+if failed == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"FAILURES={failed}")
+}

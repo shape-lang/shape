@@ -1,0 +1,2356 @@
+{
+  "version": 1,
+  "generatedAt": "2026-07-05T04:45:03.196Z",
+  "bookSite": "../../shape-web/book/book-site",
+  "bookRunnableTotal": 240,
+  "counts": {
+    "book": 240,
+    "acceptance": 224,
+    "synthetic": 3
+  },
+  "skippedCount": 0,
+  "entries": [
+    {
+      "id": "D__advanced__comptime-annotations-cookbook__1__L67.shape",
+      "tier": "book",
+      "source": "advanced/comptime-annotations-cookbook.mdx:L67 (fence #1, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime-annotations-cookbook__2__L104.shape",
+      "tier": "book",
+      "source": "advanced/comptime-annotations-cookbook.mdx:L104 (fence #2, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime__0__L46.shape",
+      "tier": "book",
+      "source": "advanced/comptime.mdx:L46 (fence #0, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime__1__L58.shape",
+      "tier": "book",
+      "source": "advanced/comptime.mdx:L58 (fence #1, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime__3__L95.shape",
+      "tier": "book",
+      "source": "advanced/comptime.mdx:L95 (fence #3, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime__4__L130.shape",
+      "tier": "book",
+      "source": "advanced/comptime.mdx:L130 (fence #4, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime__6__L270.shape",
+      "tier": "book",
+      "source": "advanced/comptime.mdx:L270 (fence #6, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime__7__L291.shape",
+      "tier": "book",
+      "source": "advanced/comptime.mdx:L291 (fence #7, slice D)"
+    },
+    {
+      "id": "D__advanced__comptime__8__L304.shape",
+      "tier": "book",
+      "source": "advanced/comptime.mdx:L304 (fence #8, slice D)"
+    },
+    {
+      "id": "E__advanced__content-addressed-bytecode__0__L29.shape",
+      "tier": "book",
+      "source": "advanced/content-addressed-bytecode.mdx:L29 (fence #0, slice E)"
+    },
+    {
+      "id": "E__advanced__content-addressed-bytecode__1__L71.shape",
+      "tier": "book",
+      "source": "advanced/content-addressed-bytecode.mdx:L71 (fence #1, slice E)"
+    },
+    {
+      "id": "E__advanced__content-addressed-bytecode__2__L117.shape",
+      "tier": "book",
+      "source": "advanced/content-addressed-bytecode.mdx:L117 (fence #2, slice E)"
+    },
+    {
+      "id": "E__advanced__content-addressed-bytecode__11__L347.shape",
+      "tier": "book",
+      "source": "advanced/content-addressed-bytecode.mdx:L347 (fence #11, slice E)"
+    },
+    {
+      "id": "E__advanced__content-addressed-bytecode__12__L371.shape",
+      "tier": "book",
+      "source": "advanced/content-addressed-bytecode.mdx:L371 (fence #12, slice E)"
+    },
+    {
+      "id": "A__advanced__ownership-deep-dive__4__L119.shape",
+      "tier": "book",
+      "source": "advanced/ownership-deep-dive.mdx:L119 (fence #4, slice A)"
+    },
+    {
+      "id": "A__advanced__ownership-deep-dive__6__L156.shape",
+      "tier": "book",
+      "source": "advanced/ownership-deep-dive.mdx:L156 (fence #6, slice A)"
+    },
+    {
+      "id": "A__advanced__ownership-deep-dive__8__L214.shape",
+      "tier": "book",
+      "source": "advanced/ownership-deep-dive.mdx:L214 (fence #8, slice A)"
+    },
+    {
+      "id": "C__examples__hello-world__0__L12.shape",
+      "tier": "book",
+      "source": "examples/hello-world.mdx:L12 (fence #0, slice C)"
+    },
+    {
+      "id": "A__fundamentals__builtin-types__0__L23.shape",
+      "tier": "book",
+      "source": "fundamentals/builtin-types.mdx:L23 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__builtin-types__1__L37.shape",
+      "tier": "book",
+      "source": "fundamentals/builtin-types.mdx:L37 (fence #1, slice A)"
+    },
+    {
+      "id": "B__fundamentals__content__0__L15.shape",
+      "tier": "book",
+      "source": "fundamentals/content.mdx:L15 (fence #0, slice B)"
+    },
+    {
+      "id": "B__fundamentals__content__5__L104.shape",
+      "tier": "book",
+      "source": "fundamentals/content.mdx:L104 (fence #5, slice B)"
+    },
+    {
+      "id": "B__fundamentals__content__8__L177.shape",
+      "tier": "book",
+      "source": "fundamentals/content.mdx:L177 (fence #8, slice B)"
+    },
+    {
+      "id": "B__fundamentals__content__9__L203.shape",
+      "tier": "book",
+      "source": "fundamentals/content.mdx:L203 (fence #9, slice B)"
+    },
+    {
+      "id": "B__fundamentals__content__10__L304.shape",
+      "tier": "book",
+      "source": "fundamentals/content.mdx:L304 (fence #10, slice B)"
+    },
+    {
+      "id": "B__fundamentals__content__11__L316.shape",
+      "tier": "book",
+      "source": "fundamentals/content.mdx:L316 (fence #11, slice B)"
+    },
+    {
+      "id": "B__fundamentals__content__15__L441.shape",
+      "tier": "book",
+      "source": "fundamentals/content.mdx:L441 (fence #15, slice B)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__0__L21.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L21 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__1__L39.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L39 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__2__L50.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L50 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__3__L58.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L58 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__4__L66.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L66 (fence #4, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__5__L76.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L76 (fence #5, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__6__L90.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L90 (fence #6, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__7__L106.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L106 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__control-flow__8__L122.shape",
+      "tier": "book",
+      "source": "fundamentals/control-flow.mdx:L122 (fence #8, slice A)"
+    },
+    {
+      "id": "B__fundamentals__datetime__0__L12.shape",
+      "tier": "book",
+      "source": "fundamentals/datetime.mdx:L12 (fence #0, slice B)"
+    },
+    {
+      "id": "B__fundamentals__datetime__4__L87.shape",
+      "tier": "book",
+      "source": "fundamentals/datetime.mdx:L87 (fence #4, slice B)"
+    },
+    {
+      "id": "B__fundamentals__datetime__5__L95.shape",
+      "tier": "book",
+      "source": "fundamentals/datetime.mdx:L95 (fence #5, slice B)"
+    },
+    {
+      "id": "A__fundamentals__enums__0__L24.shape",
+      "tier": "book",
+      "source": "fundamentals/enums.mdx:L24 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__enums__2__L55.shape",
+      "tier": "book",
+      "source": "fundamentals/enums.mdx:L55 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__enums__4__L85.shape",
+      "tier": "book",
+      "source": "fundamentals/enums.mdx:L85 (fence #4, slice A)"
+    },
+    {
+      "id": "A__fundamentals__enums__6__L113.shape",
+      "tier": "book",
+      "source": "fundamentals/enums.mdx:L113 (fence #6, slice A)"
+    },
+    {
+      "id": "A__fundamentals__enums__7__L132.shape",
+      "tier": "book",
+      "source": "fundamentals/enums.mdx:L132 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__enums__10__L185.shape",
+      "tier": "book",
+      "source": "fundamentals/enums.mdx:L185 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__enums__11__L195.shape",
+      "tier": "book",
+      "source": "fundamentals/enums.mdx:L195 (fence #11, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__0__L30.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L30 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__1__L54.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L54 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__2__L71.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L71 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__3__L81.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L81 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__5__L109.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L109 (fence #5, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__6__L162.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L162 (fence #6, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__7__L177.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L177 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__error-handling__13__L337.shape",
+      "tier": "book",
+      "source": "fundamentals/error-handling.mdx:L337 (fence #13, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__0__L24.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L24 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__1__L34.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L34 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__2__L47.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L47 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__3__L74.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L74 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__4__L85.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L85 (fence #4, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__5__L106.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L106 (fence #5, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__7__L126.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L126 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__9__L155.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L155 (fence #9, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__13__L213.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L213 (fence #13, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__14__L227.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L227 (fence #14, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__17__L278.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L278 (fence #17, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__20__L325.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L325 (fence #20, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__21__L342.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L342 (fence #21, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__23__L367.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L367 (fence #23, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__24__L379.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L379 (fence #24, slice A)"
+    },
+    {
+      "id": "A__fundamentals__functions__25__L404.shape",
+      "tier": "book",
+      "source": "fundamentals/functions.mdx:L404 (fence #25, slice A)"
+    },
+    {
+      "id": "A__fundamentals__integer-types__0__L21.shape",
+      "tier": "book",
+      "source": "fundamentals/integer-types.mdx:L21 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__integer-types__1__L79.shape",
+      "tier": "book",
+      "source": "fundamentals/integer-types.mdx:L79 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__integer-types__2__L100.shape",
+      "tier": "book",
+      "source": "fundamentals/integer-types.mdx:L100 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__integer-types__3__L119.shape",
+      "tier": "book",
+      "source": "fundamentals/integer-types.mdx:L119 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__modules__2__L36.shape",
+      "tier": "book",
+      "source": "fundamentals/modules.mdx:L36 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__modules__3__L42.shape",
+      "tier": "book",
+      "source": "fundamentals/modules.mdx:L42 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__modules__6__L68.shape",
+      "tier": "book",
+      "source": "fundamentals/modules.mdx:L68 (fence #6, slice A)"
+    },
+    {
+      "id": "A__fundamentals__modules__8__L91.shape",
+      "tier": "book",
+      "source": "fundamentals/modules.mdx:L91 (fence #8, slice A)"
+    },
+    {
+      "id": "A__fundamentals__modules__9__L109.shape",
+      "tier": "book",
+      "source": "fundamentals/modules.mdx:L109 (fence #9, slice A)"
+    },
+    {
+      "id": "A__fundamentals__modules__10__L155.shape",
+      "tier": "book",
+      "source": "fundamentals/modules.mdx:L155 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__names-and-scope__0__L34.shape",
+      "tier": "book",
+      "source": "fundamentals/names-and-scope.mdx:L34 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__names-and-scope__1__L50.shape",
+      "tier": "book",
+      "source": "fundamentals/names-and-scope.mdx:L50 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__names-and-scope__2__L74.shape",
+      "tier": "book",
+      "source": "fundamentals/names-and-scope.mdx:L74 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__names-and-scope__3__L103.shape",
+      "tier": "book",
+      "source": "fundamentals/names-and-scope.mdx:L103 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__0__L21.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L21 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__2__L47.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L47 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__3__L63.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L63 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__4__L80.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L80 (fence #4, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__7__L123.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L123 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__9__L144.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L144 (fence #9, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__10__L163.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L163 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__11__L179.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L179 (fence #11, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__12__L195.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L195 (fence #12, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__14__L219.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L219 (fence #14, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__15__L278.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L278 (fence #15, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__17__L316.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L316 (fence #17, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__19__L336.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L336 (fence #19, slice A)"
+    },
+    {
+      "id": "A__fundamentals__objects-arrays__22__L399.shape",
+      "tier": "book",
+      "source": "fundamentals/objects-arrays.mdx:L399 (fence #22, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__0__L33.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L33 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__1__L47.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L47 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__2__L55.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L55 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__3__L71.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L71 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__4__L106.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L106 (fence #4, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__5__L116.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L116 (fence #5, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__6__L129.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L129 (fence #6, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__7__L162.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L162 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__8__L175.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L175 (fence #8, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__9__L195.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L195 (fence #9, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__10__L209.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L209 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__11__L221.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L221 (fence #11, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__12__L249.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L249 (fence #12, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__13__L275.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L275 (fence #13, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__14__L283.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L283 (fence #14, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__15__L290.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L290 (fence #15, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__16__L324.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L324 (fence #16, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__18__L354.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L354 (fence #18, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__19__L367.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L367 (fence #19, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__20__L386.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L386 (fence #20, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__21__L394.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L394 (fence #21, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__22__L416.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L416 (fence #22, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__24__L451.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L451 (fence #24, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__26__L481.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L481 (fence #26, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__27__L496.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L496 (fence #27, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__29__L514.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L514 (fence #29, slice A)"
+    },
+    {
+      "id": "A__fundamentals__operators__30__L525.shape",
+      "tier": "book",
+      "source": "fundamentals/operators.mdx:L525 (fence #30, slice A)"
+    },
+    {
+      "id": "A__fundamentals__pattern-matching__0__L21.shape",
+      "tier": "book",
+      "source": "fundamentals/pattern-matching.mdx:L21 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__pattern-matching__1__L35.shape",
+      "tier": "book",
+      "source": "fundamentals/pattern-matching.mdx:L35 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__pattern-matching__2__L46.shape",
+      "tier": "book",
+      "source": "fundamentals/pattern-matching.mdx:L46 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__pattern-matching__3__L64.shape",
+      "tier": "book",
+      "source": "fundamentals/pattern-matching.mdx:L64 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__pattern-matching__4__L82.shape",
+      "tier": "book",
+      "source": "fundamentals/pattern-matching.mdx:L82 (fence #4, slice A)"
+    },
+    {
+      "id": "A__fundamentals__references-borrowing__0__L20.shape",
+      "tier": "book",
+      "source": "fundamentals/references-borrowing.mdx:L20 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__references-borrowing__3__L64.shape",
+      "tier": "book",
+      "source": "fundamentals/references-borrowing.mdx:L64 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__references-borrowing__5__L93.shape",
+      "tier": "book",
+      "source": "fundamentals/references-borrowing.mdx:L93 (fence #5, slice A)"
+    },
+    {
+      "id": "A__fundamentals__references-borrowing__9__L160.shape",
+      "tier": "book",
+      "source": "fundamentals/references-borrowing.mdx:L160 (fence #9, slice A)"
+    },
+    {
+      "id": "A__fundamentals__references-borrowing__10__L175.shape",
+      "tier": "book",
+      "source": "fundamentals/references-borrowing.mdx:L175 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__references-borrowing__12__L216.shape",
+      "tier": "book",
+      "source": "fundamentals/references-borrowing.mdx:L216 (fence #12, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__1__L47.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L47 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__2__L88.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L88 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__3__L108.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L108 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__4__L126.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L126 (fence #4, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__5__L133.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L133 (fence #5, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__6__L143.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L143 (fence #6, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__7__L152.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L152 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__10__L184.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L184 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__12__L223.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L223 (fence #12, slice A)"
+    },
+    {
+      "id": "A__fundamentals__strings__15__L263.shape",
+      "tier": "book",
+      "source": "fundamentals/strings.mdx:L263 (fence #15, slice A)"
+    },
+    {
+      "id": "B__fundamentals__tables__1__L19.shape",
+      "tier": "book",
+      "source": "fundamentals/tables.mdx:L19 (fence #1, slice B)"
+    },
+    {
+      "id": "A__fundamentals__traits__1__L27.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L27 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__2__L43.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L43 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__7__L161.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L161 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__9__L229.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L229 (fence #9, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__10__L234.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L234 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__13__L312.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L312 (fence #13, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__15__L350.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L350 (fence #15, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__16__L376.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L376 (fence #16, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__18__L410.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L410 (fence #18, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__19__L425.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L425 (fence #19, slice A)"
+    },
+    {
+      "id": "A__fundamentals__traits__20__L449.shape",
+      "tier": "book",
+      "source": "fundamentals/traits.mdx:L449 (fence #20, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__0__L30.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L30 (fence #0, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__1__L48.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L48 (fence #1, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__2__L57.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L57 (fence #2, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__3__L67.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L67 (fence #3, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__5__L120.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L120 (fence #5, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__6__L134.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L134 (fence #6, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__7__L155.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L155 (fence #7, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__9__L178.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L178 (fence #9, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__10__L194.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L194 (fence #10, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__11__L207.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L207 (fence #11, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__12__L221.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L221 (fence #12, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__13__L257.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L257 (fence #13, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__14__L271.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L271 (fence #14, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__15__L283.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L283 (fence #15, slice A)"
+    },
+    {
+      "id": "A__fundamentals__variables__16__L293.shape",
+      "tier": "book",
+      "source": "fundamentals/variables.mdx:L293 (fence #16, slice A)"
+    },
+    {
+      "id": "C__getting-started__basic-concepts__0__L14.shape",
+      "tier": "book",
+      "source": "getting-started/basic-concepts.mdx:L14 (fence #0, slice C)"
+    },
+    {
+      "id": "C__getting-started__basic-concepts__3__L50.shape",
+      "tier": "book",
+      "source": "getting-started/basic-concepts.mdx:L50 (fence #3, slice C)"
+    },
+    {
+      "id": "C__getting-started__basic-concepts__4__L69.shape",
+      "tier": "book",
+      "source": "getting-started/basic-concepts.mdx:L69 (fence #4, slice C)"
+    },
+    {
+      "id": "C__getting-started__basic-concepts__5__L80.shape",
+      "tier": "book",
+      "source": "getting-started/basic-concepts.mdx:L80 (fence #5, slice C)"
+    },
+    {
+      "id": "C__getting-started__basic-concepts__6__L93.shape",
+      "tier": "book",
+      "source": "getting-started/basic-concepts.mdx:L93 (fence #6, slice C)"
+    },
+    {
+      "id": "C__getting-started__basic-concepts__7__L109.shape",
+      "tier": "book",
+      "source": "getting-started/basic-concepts.mdx:L109 (fence #7, slice C)"
+    },
+    {
+      "id": "C__getting-started__basic-concepts__8__L133.shape",
+      "tier": "book",
+      "source": "getting-started/basic-concepts.mdx:L133 (fence #8, slice C)"
+    },
+    {
+      "id": "C__getting-started__first-query__0__L12.shape",
+      "tier": "book",
+      "source": "getting-started/first-query.mdx:L12 (fence #0, slice C)"
+    },
+    {
+      "id": "C__getting-started__first-query__1__L20.shape",
+      "tier": "book",
+      "source": "getting-started/first-query.mdx:L20 (fence #1, slice C)"
+    },
+    {
+      "id": "C__getting-started__first-query__2__L29.shape",
+      "tier": "book",
+      "source": "getting-started/first-query.mdx:L29 (fence #2, slice C)"
+    },
+    {
+      "id": "C__getting-started__first-query__3__L41.shape",
+      "tier": "book",
+      "source": "getting-started/first-query.mdx:L41 (fence #3, slice C)"
+    },
+    {
+      "id": "C__getting-started__first-query__4__L52.shape",
+      "tier": "book",
+      "source": "getting-started/first-query.mdx:L52 (fence #4, slice C)"
+    },
+    {
+      "id": "C__getting-started__first-query__5__L73.shape",
+      "tier": "book",
+      "source": "getting-started/first-query.mdx:L73 (fence #5, slice C)"
+    },
+    {
+      "id": "C__getting-started__first-query__7__L108.shape",
+      "tier": "book",
+      "source": "getting-started/first-query.mdx:L108 (fence #7, slice C)"
+    },
+    {
+      "id": "C__getting-started__installation__0__L88.shape",
+      "tier": "book",
+      "source": "getting-started/installation.mdx:L88 (fence #0, slice C)"
+    },
+    {
+      "id": "C__getting-started__installation__1__L110.shape",
+      "tier": "book",
+      "source": "getting-started/installation.mdx:L110 (fence #1, slice C)"
+    },
+    {
+      "id": "C__index__0__L46.shape",
+      "tier": "book",
+      "source": "index.mdx:L46 (fence #0, slice C)"
+    },
+    {
+      "id": "B__stdlib__core__collections__0__L18.shape",
+      "tier": "book",
+      "source": "stdlib/core/collections.mdx:L18 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__distributions__0__L18.shape",
+      "tier": "book",
+      "source": "stdlib/core/distributions.mdx:L18 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__0__L15.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L15 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__1__L25.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L25 (fence #1, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__2__L35.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L35 (fence #2, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__3__L45.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L45 (fence #3, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__4__L55.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L55 (fence #4, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__9__L107.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L107 (fence #9, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__12__L146.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L146 (fence #12, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__math__13__L158.shape",
+      "tier": "book",
+      "source": "stdlib/core/math.mdx:L158 (fence #13, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__rolling__0__L17.shape",
+      "tier": "book",
+      "source": "stdlib/core/rolling.mdx:L17 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__snapshot__0__L20.shape",
+      "tier": "book",
+      "source": "stdlib/core/snapshot.mdx:L20 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__snapshot__1__L26.shape",
+      "tier": "book",
+      "source": "stdlib/core/snapshot.mdx:L26 (fence #1, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__state__0__L25.shape",
+      "tier": "book",
+      "source": "stdlib/core/state.mdx:L25 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__state__1__L39.shape",
+      "tier": "book",
+      "source": "stdlib/core/state.mdx:L39 (fence #1, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__state__2__L54.shape",
+      "tier": "book",
+      "source": "stdlib/core/state.mdx:L54 (fence #2, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__state__3__L69.shape",
+      "tier": "book",
+      "source": "stdlib/core/state.mdx:L69 (fence #3, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__state__4__L86.shape",
+      "tier": "book",
+      "source": "stdlib/core/state.mdx:L86 (fence #4, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__state__5__L99.shape",
+      "tier": "book",
+      "source": "stdlib/core/state.mdx:L99 (fence #5, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__state__6__L111.shape",
+      "tier": "book",
+      "source": "stdlib/core/state.mdx:L111 (fence #6, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__stochastic__0__L16.shape",
+      "tier": "book",
+      "source": "stdlib/core/stochastic.mdx:L16 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__transport__0__L18.shape",
+      "tier": "book",
+      "source": "stdlib/core/transport.mdx:L18 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__transport__1__L26.shape",
+      "tier": "book",
+      "source": "stdlib/core/transport.mdx:L26 (fence #1, slice B)"
+    },
+    {
+      "id": "B__stdlib__core__transport__2__L36.shape",
+      "tier": "book",
+      "source": "stdlib/core/transport.mdx:L36 (fence #2, slice B)"
+    },
+    {
+      "id": "B__stdlib__math__optimize__1__L27.shape",
+      "tier": "book",
+      "source": "stdlib/math/optimize.mdx:L27 (fence #1, slice B)"
+    },
+    {
+      "id": "B__stdlib__math__optimize__2__L42.shape",
+      "tier": "book",
+      "source": "stdlib/math/optimize.mdx:L42 (fence #2, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__archive__0__L17.shape",
+      "tier": "book",
+      "source": "stdlib/native/archive.mdx:L17 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__compress__0__L17.shape",
+      "tier": "book",
+      "source": "stdlib/native/compress.mdx:L17 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__crypto__0__L16.shape",
+      "tier": "book",
+      "source": "stdlib/native/crypto.mdx:L16 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__csv__0__L17.shape",
+      "tier": "book",
+      "source": "stdlib/native/csv.mdx:L17 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__env__0__L19.shape",
+      "tier": "book",
+      "source": "stdlib/native/env.mdx:L19 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__file__0__L18.shape",
+      "tier": "book",
+      "source": "stdlib/native/file.mdx:L18 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__http__0__L17.shape",
+      "tier": "book",
+      "source": "stdlib/native/http.mdx:L17 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__io__0__L12.shape",
+      "tier": "book",
+      "source": "stdlib/native/io.mdx:L12 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__json__0__L22.shape",
+      "tier": "book",
+      "source": "stdlib/native/json.mdx:L22 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__json__4__L91.shape",
+      "tier": "book",
+      "source": "stdlib/native/json.mdx:L91 (fence #4, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__math__0__L38.shape",
+      "tier": "book",
+      "source": "stdlib/native/math.mdx:L38 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__math__1__L50.shape",
+      "tier": "book",
+      "source": "stdlib/native/math.mdx:L50 (fence #1, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__math__3__L96.shape",
+      "tier": "book",
+      "source": "stdlib/native/math.mdx:L96 (fence #3, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__msgpack__0__L17.shape",
+      "tier": "book",
+      "source": "stdlib/native/msgpack.mdx:L17 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__parallel__0__L29.shape",
+      "tier": "book",
+      "source": "stdlib/native/parallel.mdx:L29 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__regex__0__L16.shape",
+      "tier": "book",
+      "source": "stdlib/native/regex.mdx:L16 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__time__0__L13.shape",
+      "tier": "book",
+      "source": "stdlib/native/time.mdx:L13 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__toml__0__L16.shape",
+      "tier": "book",
+      "source": "stdlib/native/toml.mdx:L16 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__unicode__0__L18.shape",
+      "tier": "book",
+      "source": "stdlib/native/unicode.mdx:L18 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__xml__0__L16.shape",
+      "tier": "book",
+      "source": "stdlib/native/xml.mdx:L16 (fence #0, slice B)"
+    },
+    {
+      "id": "B__stdlib__native__yaml__0__L16.shape",
+      "tier": "book",
+      "source": "stdlib/native/yaml.mdx:L16 (fence #0, slice B)"
+    },
+    {
+      "id": "E__tooling__docstrings__1__L64.shape",
+      "tier": "book",
+      "source": "tooling/docstrings.mdx:L64 (fence #1, slice E)"
+    },
+    {
+      "id": "E__tooling__docstrings__2__L82.shape",
+      "tier": "book",
+      "source": "tooling/docstrings.mdx:L82 (fence #2, slice E)"
+    },
+    {
+      "id": "E__tooling__packages__0__L117.shape",
+      "tier": "book",
+      "source": "tooling/packages.mdx:L117 (fence #0, slice E)"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__HOLE_match_return_position_struct_reinterpret.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/HOLE_match_return_position_struct_reinterpret.shape"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__ctrl_let_valuepos_REJECTS.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/ctrl_let_valuepos_REJECTS.shape"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__ctrl_match_as_arg_REJECTS.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/ctrl_match_as_arg_REJECTS.shape"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__ctrl_no_return_annotation_REJECTS.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/ctrl_no_return_annotation_REJECTS.shape"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__fp_legit_option_payload_OK.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/fp_legit_option_payload_OK.shape"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__hole_return_in_arm_struct.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/hole_return_in_arm_struct.shape"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__hole_tail_int_arith.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/hole_tail_int_arith.shape"
+    },
+    {
+      "id": "ACC___verify-checkmode-bypass__hole_tail_int_payload_launder.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-checkmode-bypass/hole_tail_int_payload_launder.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__REPRO_nested_struct_reinterpret.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/REPRO_nested_struct_reinterpret.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__ctrl_array_payload.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/ctrl_array_payload.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__fp_option_q.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/fp_option_q.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__fp_valid_nested.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/fp_valid_nested.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__headline.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/headline.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__r_nested_err_some.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/r_nested_err_some.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__r_sink_arith.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/r_sink_arith.shape"
+    },
+    {
+      "id": "ACC___verify-nested-reinterpret__r_struct_payload_observe.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/_verify-nested-reinterpret/r_struct_payload_observe.shape"
+    },
+    {
+      "id": "ACC__adversarial-s1-s4__s1_disc.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/adversarial-s1-s4/s1_disc.shape"
+    },
+    {
+      "id": "ACC__adversarial-s1-s4__s1_double.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/adversarial-s1-s4/s1_double.shape"
+    },
+    {
+      "id": "ACC__adversarial-s1-s4__s1_int_then_float.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/adversarial-s1-s4/s1_int_then_float.shape"
+    },
+    {
+      "id": "ACC__adversarial-s1-s4__s1_mul_disc.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/adversarial-s1-s4/s1_mul_disc.shape"
+    },
+    {
+      "id": "ACC__adversarial-s1-s4__s1_sq_apply.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/adversarial-s1-s4/s1_sq_apply.shape"
+    },
+    {
+      "id": "ACC__annotations__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/large.shape"
+    },
+    {
+      "id": "ACC__annotations__probe1.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe1.shape"
+    },
+    {
+      "id": "ACC__annotations__probe2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe2.shape"
+    },
+    {
+      "id": "ACC__annotations__probe3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe3.shape"
+    },
+    {
+      "id": "ACC__annotations__probe4.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe4.shape"
+    },
+    {
+      "id": "ACC__annotations__probe5.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe5.shape"
+    },
+    {
+      "id": "ACC__annotations__probe6.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe6.shape"
+    },
+    {
+      "id": "ACC__annotations__probe7.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe7.shape"
+    },
+    {
+      "id": "ACC__annotations__probe8.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/probe8.shape"
+    },
+    {
+      "id": "ACC__annotations__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/annotations/small.shape"
+    },
+    {
+      "id": "ACC__async__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/async/large.shape"
+    },
+    {
+      "id": "ACC__async__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/async/small.shape"
+    },
+    {
+      "id": "ACC__collections__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/collections/large.shape"
+    },
+    {
+      "id": "ACC__collections__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/collections/small.shape"
+    },
+    {
+      "id": "ACC__comptime__b1.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b1.shape"
+    },
+    {
+      "id": "ACC__comptime__b1b.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b1b.shape"
+    },
+    {
+      "id": "ACC__comptime__b2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b2.shape"
+    },
+    {
+      "id": "ACC__comptime__b2b.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b2b.shape"
+    },
+    {
+      "id": "ACC__comptime__b3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b3.shape"
+    },
+    {
+      "id": "ACC__comptime__b4.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b4.shape"
+    },
+    {
+      "id": "ACC__comptime__b5.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b5.shape"
+    },
+    {
+      "id": "ACC__comptime__b6.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b6.shape"
+    },
+    {
+      "id": "ACC__comptime__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/large.shape"
+    },
+    {
+      "id": "ACC__comptime__pa.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pa.shape"
+    },
+    {
+      "id": "ACC__comptime__pb.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pb.shape"
+    },
+    {
+      "id": "ACC__comptime__pb2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pb2.shape"
+    },
+    {
+      "id": "ACC__comptime__pb3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pb3.shape"
+    },
+    {
+      "id": "ACC__comptime__pbool.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pbool.shape"
+    },
+    {
+      "id": "ACC__comptime__pc.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pc.shape"
+    },
+    {
+      "id": "ACC__comptime__pe.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pe.shape"
+    },
+    {
+      "id": "ACC__comptime__pf.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pf.shape"
+    },
+    {
+      "id": "ACC__comptime__pif.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pif.shape"
+    },
+    {
+      "id": "ACC__comptime__pif2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pif2.shape"
+    },
+    {
+      "id": "ACC__comptime__pn.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pn.shape"
+    },
+    {
+      "id": "ACC__comptime__po.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/po.shape"
+    },
+    {
+      "id": "ACC__comptime__pops.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pops.shape"
+    },
+    {
+      "id": "ACC__comptime__probe1.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe1.shape"
+    },
+    {
+      "id": "ACC__comptime__probe2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe2.shape"
+    },
+    {
+      "id": "ACC__comptime__probe3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe3.shape"
+    },
+    {
+      "id": "ACC__comptime__probe4.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe4.shape"
+    },
+    {
+      "id": "ACC__comptime__probe5.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe5.shape"
+    },
+    {
+      "id": "ACC__comptime__probe6.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe6.shape"
+    },
+    {
+      "id": "ACC__comptime__probe7.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe7.shape"
+    },
+    {
+      "id": "ACC__comptime__probe7b.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe7b.shape"
+    },
+    {
+      "id": "ACC__comptime__probe7c.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe7c.shape"
+    },
+    {
+      "id": "ACC__comptime__probe8.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe8.shape"
+    },
+    {
+      "id": "ACC__comptime__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/small.shape"
+    },
+    {
+      "id": "ACC__content__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/content/large.shape"
+    },
+    {
+      "id": "ACC__content__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/content/small.shape"
+    },
+    {
+      "id": "ACC__control-flow__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/control-flow/large.shape"
+    },
+    {
+      "id": "ACC__control-flow__probe_arraylit.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/control-flow/probe_arraylit.shape"
+    },
+    {
+      "id": "ACC__control-flow__probe_destructure.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/control-flow/probe_destructure.shape"
+    },
+    {
+      "id": "ACC__control-flow__probe_destructure2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/control-flow/probe_destructure2.shape"
+    },
+    {
+      "id": "ACC__control-flow__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/control-flow/small.shape"
+    },
+    {
+      "id": "ACC__control-flow__smoke.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/control-flow/smoke.shape"
+    },
+    {
+      "id": "ACC__datetime__book_verbatim.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/book_verbatim.shape"
+    },
+    {
+      "id": "ACC__datetime__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/large.shape"
+    },
+    {
+      "id": "ACC__datetime__probe.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe.shape"
+    },
+    {
+      "id": "ACC__datetime__probe10.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe10.shape"
+    },
+    {
+      "id": "ACC__datetime__probe2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe2.shape"
+    },
+    {
+      "id": "ACC__datetime__probe3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe3.shape"
+    },
+    {
+      "id": "ACC__datetime__probe4.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe4.shape"
+    },
+    {
+      "id": "ACC__datetime__probe5.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe5.shape"
+    },
+    {
+      "id": "ACC__datetime__probe6.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe6.shape"
+    },
+    {
+      "id": "ACC__datetime__probe7.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe7.shape"
+    },
+    {
+      "id": "ACC__datetime__probe8.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe8.shape"
+    },
+    {
+      "id": "ACC__datetime__probe9.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/probe9.shape"
+    },
+    {
+      "id": "ACC__datetime__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/datetime/small.shape"
+    },
+    {
+      "id": "ACC__domain-finance__p.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/domain-finance/p.shape",
+      "transform": "appended top-level main() call (script mode does not auto-invoke fn main)"
+    },
+    {
+      "id": "ACC__domain-finance__p2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/domain-finance/p2.shape"
+    },
+    {
+      "id": "ACC__domain-finance__probe1.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/domain-finance/probe1.shape",
+      "transform": "appended top-level main() call (script mode does not auto-invoke fn main)"
+    },
+    {
+      "id": "ACC__enums__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/enums/large.shape"
+    },
+    {
+      "id": "ACC__enums__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/enums/small.shape"
+    },
+    {
+      "id": "ACC__error-handling__book_e2e.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/book_e2e.shape"
+    },
+    {
+      "id": "ACC__error-handling__evidence_as_int_q_unmatchable.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/evidence_as_int_q_unmatchable.shape"
+    },
+    {
+      "id": "ACC__error-handling__evidence_bang_bang_explicit_annotation_works.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/evidence_bang_bang_explicit_annotation_works.shape"
+    },
+    {
+      "id": "ACC__error-handling__evidence_bang_bang_typed_use_infers_unknown.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/evidence_bang_bang_typed_use_infers_unknown.shape"
+    },
+    {
+      "id": "ACC__error-handling__evidence_coalesce_jit_pointer_leak.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/evidence_coalesce_jit_pointer_leak.shape"
+    },
+    {
+      "id": "ACC__error-handling__evidence_coalesce_jit_string_abort.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/evidence_coalesce_jit_string_abort.shape"
+    },
+    {
+      "id": "ACC__error-handling__evidence_three_cycle_linker_panic.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/evidence_three_cycle_linker_panic.shape"
+    },
+    {
+      "id": "ACC__error-handling__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/large.shape"
+    },
+    {
+      "id": "ACC__error-handling__large_runnable.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/large_runnable.shape"
+    },
+    {
+      "id": "ACC__error-handling__probe_arr_cast.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/probe_arr_cast.shape"
+    },
+    {
+      "id": "ACC__error-handling__probe_arrelem_cast.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/probe_arrelem_cast.shape"
+    },
+    {
+      "id": "ACC__error-handling__probe_carrier.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/probe_carrier.shape"
+    },
+    {
+      "id": "ACC__error-handling__probe_misc.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/probe_misc.shape"
+    },
+    {
+      "id": "ACC__error-handling__probe_q_infer.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/probe_q_infer.shape"
+    },
+    {
+      "id": "ACC__error-handling__probe_uncaught_chain.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/probe_uncaught_chain.shape"
+    },
+    {
+      "id": "ACC__error-handling__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/error-handling/small.shape"
+    },
+    {
+      "id": "ACC__functions__finding_s1_unknown_hof_return_kind_confusion.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/finding_s1_unknown_hof_return_kind_confusion.shape"
+    },
+    {
+      "id": "ACC__functions__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/large.shape"
+    },
+    {
+      "id": "ACC__functions__named-args-repro.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/named-args-repro.shape"
+    },
+    {
+      "id": "ACC__functions__rangevar-closure-repro.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/rangevar-closure-repro.shape"
+    },
+    {
+      "id": "ACC__functions__segfault-repro.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/segfault-repro.shape"
+    },
+    {
+      "id": "ACC__functions__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/small.shape"
+    },
+    {
+      "id": "ACC__generics__diag_mono_concat.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/diag_mono_concat.shape"
+    },
+    {
+      "id": "ACC__generics__diag_mono_fstr.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/diag_mono_fstr.shape"
+    },
+    {
+      "id": "ACC__generics__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/large.shape"
+    },
+    {
+      "id": "ACC__generics__probe1.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/probe1.shape"
+    },
+    {
+      "id": "ACC__generics__probe2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/probe2.shape"
+    },
+    {
+      "id": "ACC__generics__probe3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/probe3.shape"
+    },
+    {
+      "id": "ACC__generics__probe4.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/probe4.shape"
+    },
+    {
+      "id": "ACC__generics__probe5.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/probe5.shape"
+    },
+    {
+      "id": "ACC__generics__probe6.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/probe6.shape"
+    },
+    {
+      "id": "ACC__generics__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/small.shape"
+    },
+    {
+      "id": "ACC__generics__smoke.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/smoke.shape"
+    },
+    {
+      "id": "ACC__generics__vprobe_as.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/vprobe_as.shape"
+    },
+    {
+      "id": "ACC__generics__vprobe_hetero.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/vprobe_hetero.shape"
+    },
+    {
+      "id": "ACC__generics__vprobe_hetero2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/vprobe_hetero2.shape"
+    },
+    {
+      "id": "ACC__generics__vprobe_super_dyn.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/generics/vprobe_super_dyn.shape"
+    },
+    {
+      "id": "ACC__jit-compilation__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/jit-compilation/large.shape"
+    },
+    {
+      "id": "ACC__jit-compilation__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/jit-compilation/small.shape"
+    },
+    {
+      "id": "ACC__linalg__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/linalg/large.shape",
+      "transform": "appended top-level main() call (script mode does not auto-invoke fn main)"
+    },
+    {
+      "id": "ACC__linalg__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/linalg/small.shape",
+      "transform": "appended top-level main() call (script mode does not auto-invoke fn main)"
+    },
+    {
+      "id": "ACC__math-core__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/math-core/large.shape"
+    },
+    {
+      "id": "ACC__math-core__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/math-core/small.shape"
+    },
+    {
+      "id": "ACC__modules__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/modules/large.shape"
+    },
+    {
+      "id": "ACC__modules__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/modules/small.shape"
+    },
+    {
+      "id": "ACC__native-c__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/large.shape"
+    },
+    {
+      "id": "ACC__native-c__probe.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/probe.shape"
+    },
+    {
+      "id": "ACC__native-c__probe2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/probe2.shape"
+    },
+    {
+      "id": "ACC__native-c__probe3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/probe3.shape"
+    },
+    {
+      "id": "ACC__native-c__probe4.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/probe4.shape"
+    },
+    {
+      "id": "ACC__native-c__probe5.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/probe5.shape"
+    },
+    {
+      "id": "ACC__native-c__probe6.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/probe6.shape"
+    },
+    {
+      "id": "ACC__native-c__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/native-c/small.shape"
+    },
+    {
+      "id": "ACC__numeric-sim__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/numeric-sim/large.shape"
+    },
+    {
+      "id": "ACC__numeric-sim__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/numeric-sim/small.shape"
+    },
+    {
+      "id": "ACC__objects-arrays__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/objects-arrays/large.shape"
+    },
+    {
+      "id": "ACC__objects-arrays__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/objects-arrays/small.shape"
+    },
+    {
+      "id": "ACC__operators__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/operators/large.shape"
+    },
+    {
+      "id": "ACC__operators__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/operators/small.shape"
+    },
+    {
+      "id": "ACC__optimize__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/optimize/large.shape"
+    },
+    {
+      "id": "ACC__optimize__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/optimize/small.shape"
+    },
+    {
+      "id": "ACC__ownership__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/ownership/large.shape"
+    },
+    {
+      "id": "ACC__ownership__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/ownership/small.shape"
+    },
+    {
+      "id": "ACC__pattern-matching__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/pattern-matching/large.shape"
+    },
+    {
+      "id": "ACC__pattern-matching__probe_empty_match_arm.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/pattern-matching/probe_empty_match_arm.shape"
+    },
+    {
+      "id": "ACC__pattern-matching__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/pattern-matching/small.shape"
+    },
+    {
+      "id": "ACC__references__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/references/large.shape"
+    },
+    {
+      "id": "ACC__references__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/references/small.shape"
+    },
+    {
+      "id": "ACC__resource-mgmt__finding_async_drop_variant_decl_order.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resource-mgmt/finding_async_drop_variant_decl_order.shape"
+    },
+    {
+      "id": "ACC__resource-mgmt__finding_double_drop.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resource-mgmt/finding_double_drop.shape"
+    },
+    {
+      "id": "ACC__resource-mgmt__finding_question_mark_drop.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resource-mgmt/finding_question_mark_drop.shape"
+    },
+    {
+      "id": "ACC__resource-mgmt__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resource-mgmt/large.shape"
+    },
+    {
+      "id": "ACC__resource-mgmt__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resource-mgmt/small.shape"
+    },
+    {
+      "id": "ACC__resumability__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/large.shape"
+    },
+    {
+      "id": "ACC__resumability__large_control.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/large_control.shape"
+    },
+    {
+      "id": "ACC__resumability__probe.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/probe.shape"
+    },
+    {
+      "id": "ACC__resumability__probe_both.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/probe_both.shape"
+    },
+    {
+      "id": "ACC__resumability__probe_fn.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/probe_fn.shape"
+    },
+    {
+      "id": "ACC__resumability__probe_fnimport.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/probe_fnimport.shape"
+    },
+    {
+      "id": "ACC__resumability__probe_qual.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/probe_qual.shape"
+    },
+    {
+      "id": "ACC__resumability__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/resumability/small.shape"
+    },
+    {
+      "id": "ACC__rolling__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/rolling/small.shape"
+    },
+    {
+      "id": "ACC__security-perms__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/security-perms/large.shape"
+    },
+    {
+      "id": "ACC__security-perms__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/security-perms/small.shape"
+    },
+    {
+      "id": "ACC__set__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/set/large.shape",
+      "transform": "appended top-level main() call (script mode does not auto-invoke fn main)"
+    },
+    {
+      "id": "ACC__set__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/set/small.shape",
+      "transform": "appended top-level main() call (script mode does not auto-invoke fn main)"
+    },
+    {
+      "id": "ACC__set__small_qualified.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/set/small_qualified.shape",
+      "transform": "appended top-level main() call (script mode does not auto-invoke fn main)"
+    },
+    {
+      "id": "ACC__state__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/state/large.shape"
+    },
+    {
+      "id": "ACC__state__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/state/small.shape"
+    },
+    {
+      "id": "ACC__stats__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/stats/small.shape"
+    },
+    {
+      "id": "ACC__stdlib-log__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/stdlib-log/large.shape"
+    },
+    {
+      "id": "ACC__stdlib-log__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/stdlib-log/small.shape"
+    },
+    {
+      "id": "ACC__strings__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/strings/large.shape"
+    },
+    {
+      "id": "ACC__strings__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/strings/small.shape"
+    },
+    {
+      "id": "ACC__tables__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/large.shape"
+    },
+    {
+      "id": "ACC__tables__probe1.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe1.shape"
+    },
+    {
+      "id": "ACC__tables__probe10.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe10.shape"
+    },
+    {
+      "id": "ACC__tables__probe11.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe11.shape"
+    },
+    {
+      "id": "ACC__tables__probe12.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe12.shape"
+    },
+    {
+      "id": "ACC__tables__probe13.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe13.shape"
+    },
+    {
+      "id": "ACC__tables__probe14.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe14.shape"
+    },
+    {
+      "id": "ACC__tables__probe15.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe15.shape"
+    },
+    {
+      "id": "ACC__tables__probe2.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe2.shape"
+    },
+    {
+      "id": "ACC__tables__probe3.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe3.shape"
+    },
+    {
+      "id": "ACC__tables__probe4.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe4.shape"
+    },
+    {
+      "id": "ACC__tables__probe5.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe5.shape"
+    },
+    {
+      "id": "ACC__tables__probe6.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe6.shape"
+    },
+    {
+      "id": "ACC__tables__probe7.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe7.shape"
+    },
+    {
+      "id": "ACC__tables__probe8.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe8.shape"
+    },
+    {
+      "id": "ACC__tables__probe9.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe9.shape"
+    },
+    {
+      "id": "ACC__tables__probe_fq.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/probe_fq.shape"
+    },
+    {
+      "id": "ACC__tables__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/tables/small.shape"
+    },
+    {
+      "id": "ACC__testing__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/testing/small.shape"
+    },
+    {
+      "id": "ACC__traits__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/large.shape"
+    },
+    {
+      "id": "ACC__traits__probe_dyn.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/probe_dyn.shape"
+    },
+    {
+      "id": "ACC__traits__probe_extend.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/probe_extend.shape"
+    },
+    {
+      "id": "ACC__traits__probe_gap1.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/probe_gap1.shape"
+    },
+    {
+      "id": "ACC__traits__probe_impl.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/probe_impl.shape"
+    },
+    {
+      "id": "ACC__traits__probe_prim_as.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/probe_prim_as.shape"
+    },
+    {
+      "id": "ACC__traits__probe_super.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/probe_super.shape"
+    },
+    {
+      "id": "ACC__traits__probe_super_impl.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/probe_super_impl.shape"
+    },
+    {
+      "id": "ACC__traits__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/traits/small.shape"
+    },
+    {
+      "id": "ACC__transport__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/transport/large.shape"
+    },
+    {
+      "id": "ACC__transport__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/transport/small.shape"
+    },
+    {
+      "id": "ACC__types-primitive__defect_struct_array_field_arith.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/types-primitive/defect_struct_array_field_arith.shape"
+    },
+    {
+      "id": "ACC__types-primitive__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/types-primitive/large.shape"
+    },
+    {
+      "id": "ACC__types-primitive__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/types-primitive/small.shape"
+    },
+    {
+      "id": "ACC__types-primitive__smoke.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/types-primitive/smoke.shape"
+    },
+    {
+      "id": "ACC__variables__large.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/variables/large.shape"
+    },
+    {
+      "id": "ACC__variables__small.shape",
+      "tier": "acceptance",
+      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/variables/small.shape"
+    },
+    {
+      "id": "SYN__hashmap-filter-garbage.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__hashmap-filter-garbage.shape"
+    },
+    {
+      "id": "SYN__i64-overflow-wrap.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__i64-overflow-wrap.shape"
+    },
+    {
+      "id": "SYN__jit-double-execution.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__jit-double-execution.shape"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+// REGRESSION GUARD (was a SIGSEGV reproducer; FIXED at HEAD 2026-06-18).
+// STATUS: now prints 25, ec=0, both --mode vm and --mode jit. PASS.
+//
+// HISTORICAL: on the prior acceptance pass this crashed with SIGSEGV (ec=139,
+// no diagnostic) under both modes. A named function passed as a higher-order-
+// function argument and captured into a RETURNED closure, then invoked, used to
+// crash. It now evaluates correctly. Kept as a regression guard.
+//
+// Book (fundamentals/functions.mdx) documents the constituent pieces as working:
+//   - §Higher-Order Functions: "A function whose parameter is itself a function
+//     can take a lambda directly" + apply(double, 21).
+//   - §Higher-Order Functions: "Returning a callable and binding it to a `let`
+//     works" (adder).
+// The composition (named fn -> captured into returned closure -> called) crashes.
+//
+// CONTRAST: wrap(dbl) where dbl is a *lambda* works and prints 10.
+
+fn square(x: int) -> int { x * x }
+fn wrap(f) { |x| f(x) }
+
+let w = wrap(square)
+print(w(5))   // expected 25; actual: SIGSEGV (ec=139)

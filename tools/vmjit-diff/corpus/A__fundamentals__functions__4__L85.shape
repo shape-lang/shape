@@ -1,0 +1,7 @@
+fn rect(width: int = 10, height: int = 20) -> int {
+  width * height
+}
+
+print(rect())          // 200
+print(rect(5))         // 100  (height defaults to 20)
+print(rect(5, 6))      // 30

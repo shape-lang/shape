@@ -1,0 +1,3 @@
+let n = 7
+let kind = n % 2 == 0 ? "even" : "odd"
+print(kind)

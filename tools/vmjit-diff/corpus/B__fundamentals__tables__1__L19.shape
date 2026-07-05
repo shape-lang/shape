@@ -1,0 +1,5 @@
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}

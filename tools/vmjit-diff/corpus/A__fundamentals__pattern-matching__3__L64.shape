@@ -1,0 +1,13 @@
+fn unwrap_or(opt: Option<int>, default: int) -> int {
+  match opt {
+    Some(v) => v
+    None => default
+  }
+}
+
+fn describe(result: Result<string>) -> string {
+  match result {
+    Ok(value) => f"success: {value}"
+    Err(e) => f"failed: {e}"
+  }
+}

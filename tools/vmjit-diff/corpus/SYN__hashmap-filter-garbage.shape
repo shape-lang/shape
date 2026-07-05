@@ -1,0 +1,20 @@
+// SYN__hashmap-filter-garbage — WF-0B synthetic repro of audit 2026-07-04
+// §4(d): the compiler rewrites arity-2 HashMap.filter/map to the Array-only
+// filterIndexed/mapIndexed (shape-runtime function_calls.rs:4714).
+//
+// Expected behavior at baseline (shape 0.3.2 @ 1fb805b3):
+//   vm : Error: Runtime error: no method 'filterIndexed' on receiver kind
+//        Ptr(HashMap)                                        (exit 1)
+//   jit: prints a DIFFERENT pointer-like garbage integer each run, e.g.
+//        4816060185762492416 / 4816146652915635200            (exit 0)
+// Classification: VM_FAIL (vm non-zero, jit zero) with nondeterministic jit
+// stdout — NOT reproducible byte-for-byte between runs.
+//
+// The acceptance-tier programs containing the same construct
+// (ACC__collections__{small,large}) do NOT surface this class because earlier
+// Some(_)/Ok(_) match patterns force whole-program JIT deopt at compile time,
+// after which both modes fail identically (deterministic agreement = MATCH).
+// This synthetic keeps the filter call on the natively-JIT-compiled path.
+let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
+let big = m.filter(|k, v| v > 1)
+print(big.len())

@@ -1,0 +1,7 @@
+comptime fn double_str(s: string) -> string {
+  s + s
+}
+let X = comptime {
+  double_str("ab")
+}
+print(X)

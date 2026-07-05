@@ -1,0 +1,97 @@
+// Objects & Vectors — core exercise (book: fundamentals/objects-arrays.mdx)
+// Self-checking via a fail-counter (no global assert builtin in Shape).
+
+let mut fails = 0
+
+fn checkInt(name: string, got: int, want: int) {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    fails = fails + 1
+  }
+}
+
+fn checkBool(name: string, got: bool, want: bool) {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    fails = fails + 1
+  }
+}
+
+fn checkStr(name: string, got: string, want: string) {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    fails = fails + 1
+  }
+}
+
+// --- Vectors: literal, index, len, first/last ---
+let nums = [1, 2, 3, 4]
+checkInt("nums[0]", nums[0], 1)
+checkInt("nums[3]", nums[3], 4)
+checkInt("nums.len", nums.len(), 4)
+checkInt("nums.first", nums.first(), 1)
+checkInt("nums.last", nums.last(), 4)
+
+// --- Closed-range slicing (book: start..end) ---
+let s = [10, 20, 30, 40, 50]
+let mid = s[1..4]
+checkInt("mid.len", mid.len(), 3)
+checkInt("mid.first", mid.first(), 20)
+checkInt("mid.last", mid.last(), 40)
+
+// --- map / filter ---
+let doubled = nums.map(|x| x * 2)
+checkInt("doubled.first", doubled.first(), 2)
+checkInt("doubled.last", doubled.last(), 8)
+let evens = nums.filter(|x| x % 2 == 0)
+checkInt("evens.len", evens.len(), 2)
+checkInt("evens.first", evens.first(), 2)
+checkInt("evens.last", evens.last(), 4)
+
+// --- Vector methods from the table ---
+checkBool("includes", nums.includes(3), true)
+checkInt("indexOf", nums.indexOf(3), 2)
+checkBool("some", nums.some(|x| x > 3), true)
+checkBool("every", nums.every(|x| x > 0), true)
+checkInt("findIndex", nums.findIndex(|x| x == 3), 2)
+checkInt("find", nums.find(|x| x > 2), 3)
+checkInt("concat.len", nums.concat([5, 6]).len(), 6)
+checkInt("reverse.first", nums.reverse().first(), 4)
+checkInt("take.len", nums.take(2).len(), 2)
+checkInt("drop.first", nums.drop(2).first(), 3)
+
+// --- Anonymous objects: field access ---
+let user = { id: 1, name: "Ada" }
+checkInt("user.id", user.id, 1)
+checkStr("user.name", user.name, "Ada")
+
+// --- Nested objects ---
+let cfg = { server: { host: "localhost", port: 9091 } }
+checkStr("cfg.host", cfg.server.host, "localhost")
+checkInt("cfg.port", cfg.server.port, 9091)
+
+// --- Object merge (disjoint keys) ---
+let a = { x: 1, y: 2 }
+let b = { z: 3 }
+let c = a + b
+checkInt("merge.x", c.x, 1)
+checkInt("merge.y", c.y, 2)
+checkInt("merge.z", c.z, 3)
+
+// --- Typed objects ---
+type Point { x: int, y: int }
+let p = Point { x: 3, y: 4 }
+checkInt("p.x", p.x, 3)
+checkInt("p.y", p.y, 4)
+checkInt("p.x+p.y", p.x + p.y, 7)
+
+// --- HashMap: chained immutable construction ---
+let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
+checkBool("m.has a", m.has("a"), true)
+checkBool("m.has z", m.has("z"), false)
+checkInt("m.len", m.len(), 3)
+checkBool("m.isEmpty", m.isEmpty(), false)
+
+if fails == 0 {
+  print("ALL_CHECKS_PASSED")
+}

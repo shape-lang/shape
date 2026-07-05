@@ -1,0 +1,11 @@
+/// Compute a Hull moving average.
+///
+/// @param series Input series.
+/// @param period Window size.
+/// @returns Hull moving average series.
+/// @see std::finance::indicators::moving_averages::wma
+/// @example
+/// let value = hma(close, 21)
+pub fn hma(series, period) {
+    // ...
+}

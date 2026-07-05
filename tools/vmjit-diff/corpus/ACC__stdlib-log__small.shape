@@ -1,0 +1,70 @@
+// small.shape -- std::core::log core exercise (book: stdlib/core/log.mdx)
+// Methodology: written from book semantics ONLY.
+//
+// Book teaches:
+//   - logger() defaults to LEVEL_DEBUG (1) -- debug+ shown        (sec Levels)
+//   - logger_at(level) constructs at a given numeric level        (sec Functions)
+//   - set_level(l, lvl) returns a FRESH Logger (immutable)        (sec Set Level)
+//   - get_level(l) reads current minimum level                   (sec Functions)
+//   - level_num(name) maps trace/debug/info/warn/error to numbers (sec Functions)
+//   - levels: TRACE=0 DEBUG=1 INFO=2 WARN=3 ERROR=4               (sec Levels)
+//   - trace/debug/info/warn print "[LEVEL] msg" when level passes (sec Usage)
+
+from std::core::log use {
+  logger, logger_at, set_level, get_level,
+  LEVEL_TRACE, LEVEL_DEBUG, LEVEL_INFO, LEVEL_WARN, LEVEL_ERROR,
+  trace, debug, info, warn, level_num
+}
+
+fn check_eq(label: string, expected: int, got: int) -> bool {
+  if expected != got {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    return false
+  }
+  true
+}
+
+fn main() {
+  let mut ok: bool = true
+
+  // Expected from book sec Levels: numeric constants.
+  ok = check_eq("LEVEL_TRACE", 0, LEVEL_TRACE) && ok
+  ok = check_eq("LEVEL_DEBUG", 1, LEVEL_DEBUG) && ok
+  ok = check_eq("LEVEL_INFO", 2, LEVEL_INFO) && ok
+  ok = check_eq("LEVEL_WARN", 3, LEVEL_WARN) && ok
+  ok = check_eq("LEVEL_ERROR", 4, LEVEL_ERROR) && ok
+
+  // Expected from book sec Levels: logger() defaults to LEVEL_DEBUG = 1.
+  let l = logger()
+  ok = check_eq("default level", 1, get_level(l)) && ok
+
+  // Expected from book sec Functions: level_num maps names to numbers.
+  ok = check_eq("level_num trace", 0, level_num("trace")) && ok
+  ok = check_eq("level_num debug", 1, level_num("debug")) && ok
+  ok = check_eq("level_num info", 2, level_num("info")) && ok
+  ok = check_eq("level_num warn", 3, level_num("warn")) && ok
+  ok = check_eq("level_num error", 4, level_num("error")) && ok
+
+  // Expected from book sec Set Level: set_level returns fresh Logger at new level.
+  let l2 = set_level(l, LEVEL_INFO)
+  ok = check_eq("set_level -> info", 2, get_level(l2)) && ok
+  // Immutability: original logger unchanged.
+  ok = check_eq("original unchanged", 1, get_level(l)) && ok
+
+  // Expected from book sec Functions: logger_at constructs at the given level.
+  let lw = logger_at(LEVEL_WARN)
+  ok = check_eq("logger_at warn", 3, get_level(lw)) && ok
+
+  // Emit formatted lines (book sec Usage). With l2 at INFO(2): info+warn
+  // visible, debug+trace hidden.
+  trace(l2, "hidden trace")
+  debug(l2, "hidden debug")
+  info(l2, "visible info")
+  warn(l2, "visible warn")
+
+  if ok {
+    print("ALL_CHECKS_PASSED")
+  }
+}
+
+main()

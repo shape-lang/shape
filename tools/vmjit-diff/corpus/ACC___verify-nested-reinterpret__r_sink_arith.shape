@@ -1,0 +1,4 @@
+type Point { x: int, y: int }
+fn sink(v: int) -> int { v + 100 }
+fn g() -> Result<Point,string> { Ok(Point { x: 42, y: 2 }) }
+match g() { Ok(Some(n)) => print(sink(n)), Err(e) => print(e) }

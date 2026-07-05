@@ -1,0 +1,4 @@
+fn parse_int(raw: string) -> Result<int> {
+  let n = (raw as int?)?
+  return Ok(n)
+}

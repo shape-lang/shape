@@ -1,0 +1,38 @@
+from std::core::intrinsics use { DateTime }
+
+// DateTime - DateTime -> Duration
+let a = DateTime.parse("2024-06-15T12:00:00+00:00")
+let b = DateTime.parse("2024-06-10T12:00:00+00:00")
+let diff = a - b
+print(diff)
+
+// is_same_day across timezones (book line 331 -> false)
+let est = DateTime.parse("2024-03-15T23:00:00-05:00")
+let utc = est.to_utc()
+print(est.is_same_day(utc))   // book: false
+
+// %Z and %z and offset
+let dt = DateTime.parse("2024-06-15T14:30:00+00:00")
+print(dt.format("%Z"))   // book: UTC
+print(dt.format("%z"))   // book: +0000
+
+// multi-timezone format with %Z
+let event_time = DateTime.parse("2024-06-15T14:30:45+00:00")
+let zones = ["America/New_York", "Europe/London", "Asia/Tokyo"]
+for tz in zones {
+    let local = event_time.to_timezone(tz)
+    print(f"{tz}: {local.format('%H:%M %Z')}")
+}
+
+// business hours example
+let office_open_et = DateTime.parse("2024-06-15T09:00:00-04:00")
+let tokyo_open = office_open_et.to_timezone("Asia/Tokyo")
+print(f"NY office opens at {tokyo_open.format('%H:%M')} Tokyo time")  // book: 22:00
+
+// millisecond/microsecond from epoch
+let me = DateTime.from_epoch(1705314600250)
+print(me.millisecond())
+print(me.microsecond())
+
+// rfc2822
+print(a.rfc2822())

@@ -1,0 +1,38 @@
+// NAMED-ARGUMENTS acceptance program.
+//
+// Book fundamentals/functions.mdx §"Named Arguments" documents named arguments
+// as supported. STAGE T4 (2026-06-22) implemented named-argument binding: a
+// call with `name: value` arguments binds each to the matching parameter by
+// NAME (in any order), combinable with leading positional args, with defaults
+// filled for omitted params. An unknown named arg / a duplicate positional+named
+// for the same param is a clean compile error.
+//
+// This program exercises every now-working call shape; all outputs hold under
+// both `--mode vm` and `--mode jit`.
+
+fn box_vol(w: int, h: int, d: int) -> int { w * h * d }
+
+// (A) all-positional — 24
+print(box_vol(2, 3, 4))
+
+// (B) all-named — binds by name — 24
+print(box_vol(w: 2, h: 3, d: 4))
+
+// (C) out-of-order all-named — binds by name — 24
+print(box_vol(d: 4, w: 2, h: 3))
+
+// (D) positional-then-named — 24
+print(box_vol(2, h: 3, d: 4))
+
+// (E) default-valued param, omitted → default filled.
+fn f(x: int, y: int = 10) -> int { x + y }
+print(f(x: 5))     // 15
+print(f(5, y: 20)) // 25
+
+// EXPECT:
+// 24
+// 24
+// 24
+// 24
+// 15
+// 25

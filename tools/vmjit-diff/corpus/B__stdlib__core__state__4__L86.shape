@@ -1,0 +1,6 @@
+pub type FrameState<T> {
+    function: FunctionRef,
+    args: Vec<T>,
+    locals: Vec<T>,
+    upvalues: Vec<T>?,
+}

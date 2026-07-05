@@ -1,0 +1,469 @@
+// ============================================================================
+// large.shape — Arithmetic Expression Calculator with Error Recovery
+//
+// A real-world, non-interactive, machine-proofable application rooted in the
+// error-handling slice (fundamentals/error-handling.mdx). It implements a full
+// pipeline:
+//   1. tokenizer        -> Result<Array<Token>>   (? on `as int?`)
+//   2. recursive-descent parser -> Result<Expr>   (recursive enum AST; !! context; ?)
+//   3. evaluator        -> Result<int>            (division-by-zero Err)
+//   4. batch driver     with PER-LINE error recovery (caught Err keeps the
+//                         batch going; book §"opaque value — print/propagate")
+//
+// All error flow uses ONLY what the chapter teaches:
+//   Result<T> / Option<T>, Ok/Err, `?`, `!!`, `??`, `as Type?`.
+//
+// Every EXPECTED value is derived from arithmetic / grammar semantics and was
+// written BEFORE the first run (never back-filled from output).
+// On all-pass:  prints ALL_CHECKS_PASSED
+// On mismatch:  prints CHECK_FAILED: <which> expected=<e> got=<g>
+// ============================================================================
+
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+// ---------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------
+enum Token {
+    Num(int),
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LParen,
+    RParen,
+    End,
+}
+
+fn token_label(t: Token) -> string {
+    match t {
+        Token::Num(n) => f"Num({n})",
+        Token::Plus   => "Plus",
+        Token::Minus  => "Minus",
+        Token::Star   => "Star",
+        Token::Slash  => "Slash",
+        Token::LParen => "LParen",
+        Token::RParen => "RParen",
+        Token::End    => "End",
+    }
+}
+
+fn is_digit(c: string) -> bool {
+    return c >= "0" && c <= "9";
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer — Result-returning; ? threads the single-digit `as int?` conversion
+// ---------------------------------------------------------------------------
+fn tokenize(src: string) -> Result<Array<Token>> {
+    let mut out: Array<Token> = [];
+    let mut i = 0;
+    let n = src.length();
+    while i < n {
+        let c = src.substring(i, i + 1);
+        if c == " " {
+            i = i + 1;
+        } else if c == "+" {
+            out.push(Token::Plus);
+            i = i + 1;
+        } else if c == "-" {
+            out.push(Token::Minus);
+            i = i + 1;
+        } else if c == "*" {
+            out.push(Token::Star);
+            i = i + 1;
+        } else if c == "/" {
+            out.push(Token::Slash);
+            i = i + 1;
+        } else if c == "(" {
+            out.push(Token::LParen);
+            i = i + 1;
+        } else if c == ")" {
+            out.push(Token::RParen);
+            i = i + 1;
+        } else if is_digit(c) {
+            let mut value = 0;
+            while i < n {
+                let d = src.substring(i, i + 1);
+                if is_digit(d) {
+                    // `as int?` — book §"Fallible: as Type?"; ? propagates failure
+                    let digit = (d as int?)?;
+                    value = value * 10 + digit;
+                    i = i + 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(Token::Num(value));
+        } else {
+            return Err(f"tokenize: unexpected character '{c}' at position {i}");
+        }
+    }
+    out.push(Token::End);
+    return Ok(out);
+}
+
+// ---------------------------------------------------------------------------
+// AST — recursive enum (idiomatic; no arena)
+// ---------------------------------------------------------------------------
+enum Expr {
+    Lit(int),
+    Neg(Expr),
+    Add(Expr, Expr),
+    Sub(Expr, Expr),
+    Mul(Expr, Expr),
+    Div(Expr, Expr),
+}
+
+// ---------------------------------------------------------------------------
+// Parser — position carried in an int-only Cursor struct mutated across calls.
+// Grammar (standard precedence):
+//   expr   := term (('+' | '-') term)*
+//   term   := factor (('*' | '/') factor)*
+//   factor := '-' factor | '(' expr ')' | Num
+// ---------------------------------------------------------------------------
+type Cursor { pos: int }
+
+fn peek(tokens: Array<Token>, c: Cursor) -> Token {
+    if c.pos < tokens.length() {
+        return tokens[c.pos];
+    }
+    return Token::End;
+}
+
+fn parse_factor(tokens: Array<Token>, c: Cursor) -> Result<Expr> {
+    let t = peek(tokens, c);
+    match t {
+        Token::Num(value) => {
+            c.pos = c.pos + 1;
+            return Ok(Expr::Lit(value));
+        },
+        Token::Minus => {
+            c.pos = c.pos + 1;
+            let inner = (parse_factor(tokens, c) !! "expected factor after unary '-'")?;
+            return Ok(Expr::Neg(inner));
+        },
+        Token::LParen => {
+            c.pos = c.pos + 1;
+            let inner = (parse_expr(tokens, c) !! "expected expression inside parentheses")?;
+            let closing = peek(tokens, c);
+            match closing {
+                Token::RParen => {
+                    c.pos = c.pos + 1;
+                    return Ok(inner);
+                },
+                _ => {
+                    return Err(f"parse: expected ')' but found {token_label(closing)}");
+                },
+            }
+        },
+        _ => {
+            return Err(f"parse: expected number, '-' or '(' but found {token_label(t)}");
+        },
+    }
+}
+
+fn parse_term(tokens: Array<Token>, c: Cursor) -> Result<Expr> {
+    let mut left = (parse_factor(tokens, c) !! "expected factor")?;
+    let mut go = true;
+    while go {
+        let t = peek(tokens, c);
+        match t {
+            Token::Star => {
+                c.pos = c.pos + 1;
+                let right = (parse_factor(tokens, c) !! "expected factor after '*'")?;
+                left = Expr::Mul(left, right);
+            },
+            Token::Slash => {
+                c.pos = c.pos + 1;
+                let right = (parse_factor(tokens, c) !! "expected factor after '/'")?;
+                left = Expr::Div(left, right);
+            },
+            _ => {
+                go = false;
+            },
+        }
+    }
+    return Ok(left);
+}
+
+fn parse_expr(tokens: Array<Token>, c: Cursor) -> Result<Expr> {
+    let mut left = (parse_term(tokens, c) !! "expected term")?;
+    let mut go = true;
+    while go {
+        let t = peek(tokens, c);
+        match t {
+            Token::Plus => {
+                c.pos = c.pos + 1;
+                let right = (parse_term(tokens, c) !! "expected term after '+'")?;
+                left = Expr::Add(left, right);
+            },
+            Token::Minus => {
+                c.pos = c.pos + 1;
+                let right = (parse_term(tokens, c) !! "expected term after '-'")?;
+                left = Expr::Sub(left, right);
+            },
+            _ => {
+                go = false;
+            },
+        }
+    }
+    return Ok(left);
+}
+
+// Top-level parse: parse an expression then REQUIRE the End token (else trailing
+// garbage). Returns the AST.
+fn parse(tokens: Array<Token>) -> Result<Expr> {
+    let mut c = Cursor { pos: 0 };
+    let root = (parse_expr(tokens, c) !! "failed to parse expression")?;
+    let last = peek(tokens, c);
+    match last {
+        Token::End => {
+            return Ok(root);
+        },
+        _ => {
+            return Err(f"parse: unexpected trailing token {token_label(last)}");
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator — Result; integer arithmetic; division-by-zero is an Err
+// ---------------------------------------------------------------------------
+fn eval(e: Expr) -> Result<int> {
+    match e {
+        Expr::Lit(v) => {
+            return Ok(v);
+        },
+        Expr::Neg(inner) => {
+            let v = (eval(inner) !! "eval: failed to evaluate negation operand")?;
+            return Ok(0 - v);
+        },
+        Expr::Add(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '+'")?;
+            let b = (eval(r) !! "eval: failed right of '+'")?;
+            return Ok(a + b);
+        },
+        Expr::Sub(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '-'")?;
+            let b = (eval(r) !! "eval: failed right of '-'")?;
+            return Ok(a - b);
+        },
+        Expr::Mul(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '*'")?;
+            let b = (eval(r) !! "eval: failed right of '*'")?;
+            return Ok(a * b);
+        },
+        Expr::Div(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '/'")?;
+            let b = (eval(r) !! "eval: failed right of '/'")?;
+            if b == 0 {
+                return Err("eval: division by zero");
+            }
+            return Ok(a / b);
+        },
+    }
+}
+
+// End-to-end: source -> Result<int>. ? + !! thread tokenizer, parser, evaluator.
+fn calculate(src: string) -> Result<int> {
+    let tokens = (tokenize(src) !! "calculate: tokenize stage failed")?;
+    let ast = (parse(tokens) !! "calculate: parse stage failed")?;
+    let value = (eval(ast) !! "calculate: eval stage failed")?;
+    return Ok(value);
+}
+
+// ---------------------------------------------------------------------------
+// Self-check helpers — a caught error is OPAQUE in v0.3.3 (book §AnyError),
+// so we reduce a Result<int> to (ok?, value) without touching any error fields.
+// ---------------------------------------------------------------------------
+fn result_is_ok(r: Result<int>) -> bool {
+    match r { Ok(v) => true, Err(e) => false }
+}
+fn result_or(r: Result<int>, dflt: int) -> int {
+    match r { Ok(v) => v, Err(e) => dflt }
+}
+
+// ---------------------------------------------------------------------------
+// Batch driver with per-line error recovery. One malformed line does NOT abort
+// the batch — its Err is caught and recorded; good lines still accumulate.
+// ---------------------------------------------------------------------------
+type BatchResult {
+    ok_count: int,
+    err_count: int,
+    sum_ok: int,
+}
+
+fn run_batch(lines: Array<string>) -> BatchResult {
+    let mut ok_count = 0;
+    let mut err_count = 0;
+    let mut sum_ok = 0;
+    for line in lines {
+        let r = calculate(line);
+        match r {
+            Ok(v) => {
+                ok_count = ok_count + 1;
+                sum_ok = sum_ok + v;
+            },
+            Err(e) => {
+                err_count = err_count + 1;
+            },
+        }
+    }
+    return BatchResult { ok_count: ok_count, err_count: err_count, sum_ok: sum_ok };
+}
+
+// ---------------------------------------------------------------------------
+// A small config sub-language to exercise !! context chains + Option/??.
+// "key=expr" lines; lookup returns Option<int>; ?? supplies defaults.
+// ---------------------------------------------------------------------------
+fn lookup(key: string) -> Option<int> {
+    if key == "width"  { return Some(80); }
+    if key == "height" { return Some(24); }
+    if key == "depth"  { return Some(3); }
+    return None;
+}
+
+// Option ? propagation inside a Result context: None propagates as Err per
+// book §"? Try Operator" (None -> Err(AnyError, code OPTION_NONE)).
+fn area() -> Result<int> {
+    let w = lookup("width")?;
+    let h = lookup("height")?;
+    return Ok(w * h);
+}
+fn volume_missing() -> Result<int> {
+    let w = lookup("width")?;
+    let z = lookup("zdepth")?;   // None -> propagates as Err
+    return Ok(w * z);
+}
+
+// ===========================================================================
+// SELF-CHECKS   (expected values derived from semantics, written before run)
+// ===========================================================================
+let mut failures = 0;
+
+fn check_int(name: string, expected: int, got: int) -> int {
+    if expected != got {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}");
+        return 1;
+    }
+    return 0;
+}
+fn check_bool(name: string, expected: bool, got: bool) -> int {
+    if expected != got {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}");
+        return 1;
+    }
+    return 0;
+}
+
+// --- tokenizer sanity: "12+34" -> [Num,Plus,Num,End] = length 4 ---
+match tokenize("12+34") {
+    Ok(ts) => { failures = failures + check_int("tok_len", 4, ts.length()); },
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: tok_len tokenize errored"); },
+}
+// "(1)" -> [LParen,Num,RParen,End] = length 4
+match tokenize("(1)") {
+    Ok(ts) => { failures = failures + check_int("tok_paren_len", 4, ts.length()); },
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: tok_paren_len errored"); },
+}
+
+// --- arithmetic: precedence + associativity (all expected by hand) ---
+failures = failures + check_int("c1",  14,        result_or(calculate("2 + 3 * 4"), -1));          // 2 + 12
+failures = failures + check_int("c2",  20,        result_or(calculate("(2 + 3) * 4"), -1));        // 5 * 4
+failures = failures + check_int("c3",  75,        result_or(calculate("100 - 20 - 5"), -1));       // left-assoc
+failures = failures + check_int("c4",  26,        result_or(calculate("2 * 3 + 4 * 5"), -1));      // 6 + 20
+failures = failures + check_int("c5",  1,         result_or(calculate("20 / 4 / 5"), -1));         // (20/4)/5
+failures = failures + check_int("c6",  3,         result_or(calculate("-7 + 10"), -1));            // unary minus
+failures = failures + check_int("c7",  21,        result_or(calculate("((1 + 2) * (3 + 4))"), -1));// 3*7
+failures = failures + check_int("c8",  0 - 12,    result_or(calculate("-(3 * 4)"), -99999));       // negate group
+failures = failures + check_int("c9",  3,         result_or(calculate("7 / 2"), -1));              // int trunc
+failures = failures + check_int("c10", 42,        result_or(calculate("42"), -1));                 // single num
+failures = failures + check_int("c11", 5,         result_or(calculate("1 + 2 * 3 - 4 / 2"), -1));  // 1+6-2
+failures = failures + check_int("c12", 5,         result_or(calculate("--5"), -1));                // double neg
+failures = failures + check_int("c13", 1000,      result_or(calculate("10 * 10 * 10"), -1));       // 1000
+failures = failures + check_int("c14", 0,         result_or(calculate("5 - 5"), -99));             // zero
+failures = failures + check_int("c15", 0 - 6,     result_or(calculate("2 * -3"), -99999));         // -6
+failures = failures + check_int("c16", 100,       result_or(calculate("((((100))))"), -1));        // deep parens
+
+// --- error cases: each must be Err (recovered, never aborting the script) ---
+failures = failures + check_bool("e_divzero",    false, result_is_ok(calculate("1 / 0")));
+failures = failures + check_bool("e_divzero2",   false, result_is_ok(calculate("10 / (5 - 5)")));
+failures = failures + check_bool("e_badchar",    false, result_is_ok(calculate("3 & 4")));
+failures = failures + check_bool("e_unbalanced", false, result_is_ok(calculate("(1 + 2")));
+failures = failures + check_bool("e_trailing",   false, result_is_ok(calculate("1 2")));
+failures = failures + check_bool("e_dangling",   false, result_is_ok(calculate("1 +")));
+failures = failures + check_bool("e_lone_op",    false, result_is_ok(calculate("*")));
+failures = failures + check_bool("e_empty_grp",  false, result_is_ok(calculate("()")));
+failures = failures + check_bool("e_close_only", false, result_is_ok(calculate(")")));
+
+// --- good cases ARE ok ---
+failures = failures + check_bool("g1", true, result_is_ok(calculate("8 * 8")));
+failures = failures + check_bool("g2", true, result_is_ok(calculate("(0)")));
+
+// --- batch driver with error recovery ---
+// good: 2+2=4, 3*3=9, 10-1=9, 8/2=4  => ok=4, sum=26
+// bad:  "1 / 0" (div0), "bad$" (tokenize)  => err=2
+let lines: Array<string> = ["2 + 2", "3 * 3", "1 / 0", "10 - 1", "bad$", "8 / 2"];
+let summary = run_batch(lines);
+failures = failures + check_int("batch_ok",  4,  summary.ok_count);
+failures = failures + check_int("batch_err", 2,  summary.err_count);
+failures = failures + check_int("batch_sum", 26, summary.sum_ok);
+
+// a batch of ALL-bad lines: ok=0, err=3, sum=0 (recovery handles every failure)
+let bad_lines: Array<string> = ["1/0", "@@@", "(("];
+let bad_summary = run_batch(bad_lines);
+failures = failures + check_int("batch_allbad_ok",  0, bad_summary.ok_count);
+failures = failures + check_int("batch_allbad_err", 3, bad_summary.err_count);
+failures = failures + check_int("batch_allbad_sum", 0, bad_summary.sum_ok);
+
+// --- Option / ?? (book §Related Operators) ---
+failures = failures + check_int("opt_width",   80, lookup("width")  ?? 0);
+failures = failures + check_int("opt_missing",  0, lookup("nope")   ?? 0);
+failures = failures + check_int("opt_depth",    3, lookup("depth")  ?? 0);
+
+// --- Option ? propagation into Result ---
+failures = failures + check_int("area_ok",   1920, result_or(area(), -1));            // 80 * 24
+failures = failures + check_bool("vol_miss", false, result_is_ok(volume_missing()));   // None -> Err
+
+// --- !! Ok-passthrough: Ok(v) !! ctx == Ok(v) (book §!! table) ---
+fn must_pos(x: int) -> Result<int> {
+    if x <= 0 { return Err("must be positive"); }
+    return Ok(x);
+}
+failures = failures + check_int("ctx_ok",  5, result_or((must_pos(5) !! "validation failed"), -1));
+failures = failures + check_bool("ctx_bad", false, result_is_ok((must_pos(0) !! "validation failed")));
+
+// --- large deterministic aggregate exercising the whole pipeline 50x ---
+// total = sum_{k=1..50} of  k*(k+1)/2  (triangular numbers; k(k+1) always even
+// so integer division is exact). Closed form:
+//   sum_{1..50} k   = 1275
+//   sum_{1..50} k^2 = 42925
+//   total = (42925 + 1275)/2 = 22100
+let mut total = 0;
+let mut k = 1;
+while k <= 50 {
+    let expr = f"{k} * ({k} + 1) / 2";
+    total = total + result_or(calculate(expr), 0);
+    k = k + 1;
+}
+failures = failures + check_int("triangular_sum", 22100, total);
+
+// --- second aggregate: alternating accumulation through batch recovery ---
+// expressions 1..20, all good; each = i*i; sum of squares 1..20 = 2870
+let mut sq_lines: Array<string> = [];
+let mut j = 1;
+while j <= 20 {
+    sq_lines.push(f"{j} * {j}");
+    j = j + 1;
+}
+let sq = run_batch(sq_lines);
+failures = failures + check_int("sq_ok",  20,   sq.ok_count);
+failures = failures + check_int("sq_err",  0,   sq.err_count);
+failures = failures + check_int("sq_sum", 2870, sq.sum_ok);   // sum i^2, i=1..20
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED");
+} else {
+    print(f"FAILURES: {failures}");
+}

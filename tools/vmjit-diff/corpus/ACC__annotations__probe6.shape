@@ -1,0 +1,16 @@
+// Probe: comptime pre that READS target.params (no error call) - does array access surface?
+annotation count_params() {
+  targets: [function]
+
+  comptime pre(target, ctx) {
+    let n = target.params.length
+    print(f"param count = {n}")
+  }
+}
+
+@count_params()
+fn handler(a: int, b: int) -> int {
+  a + b
+}
+
+print("PROBE6_OK")

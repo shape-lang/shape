@@ -1,0 +1,21 @@
+// Probe: declare annotations but DO NOT apply them. Does mere declaration compile/run?
+annotation traced(tag) {
+  targets: [function]
+  before(args, ctx) { args }
+  after(args, result, ctx) { result }
+}
+
+annotation serializable() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method to_json() { }
+    }
+  }
+}
+
+fn add(a: int, b: int) -> int { a + b }
+
+let r = add(2, 3)
+print(r)
+print("PROBE8_OK")

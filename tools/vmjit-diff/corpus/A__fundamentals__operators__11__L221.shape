@@ -1,0 +1,12 @@
+type Flags { bits: int }
+
+impl BitAnd for Flags {
+  method bitand(other: Flags) -> Flags {
+    Flags { bits: self.bits & other.bits }
+  }
+}
+
+let a = Flags { bits: 0b1100 }
+let b = Flags { bits: 0b1010 }
+let c = a & b
+print(c.bits)   // 8

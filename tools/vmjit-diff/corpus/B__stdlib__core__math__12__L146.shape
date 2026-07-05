@@ -1,0 +1,4 @@
+from std::core::math use { parallel_map }
+
+let doubled = parallel_map([1.0, 2.0, 3.0], |x| x * 2.0)
+print(doubled)   // [2.0, 4.0, 6.0]

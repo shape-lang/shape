@@ -1,0 +1,6 @@
+trait Container {
+  type Item;
+  fn first() -> Option<int>;
+}
+
+print("ok")

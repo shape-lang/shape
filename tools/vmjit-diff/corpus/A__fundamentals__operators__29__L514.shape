@@ -1,0 +1,4 @@
+let newline = '\n'
+print(newline)
+let smiley  = '\u{1F600}'
+print(smiley)

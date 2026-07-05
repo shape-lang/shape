@@ -1,0 +1,2 @@
+const BUILD_TAG: string = comptime { "dev" }
+print(BUILD_TAG)

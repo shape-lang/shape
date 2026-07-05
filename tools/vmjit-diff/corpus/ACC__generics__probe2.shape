@@ -1,0 +1,28 @@
+// extend blocks (book: runnable)
+type Point { x: int, y: int }
+
+extend Point {
+  method magnitude_sq() -> int { self.x * self.x + self.y * self.y }
+  method sum() -> int { self.x + self.y }
+}
+
+let p = Point { x: 3, y: 4 }
+print(p.magnitude_sq())
+print(p.sum())
+
+// concrete element type function (book: runnable workaround for generics)
+fn first_int(items: Vec<int>) -> int {
+  items[0]
+}
+print(first_int([1, 2, 3]))
+
+// primitive as (book: runnable)
+let n = true as number
+print(n)
+
+// closure inference from context (book: runnable)
+let nums: Vec<int> = [1, 2, 3, 4]
+let evens = nums.filter(|x| x % 2 == 0)
+let big = nums.map(|x| x * 10)
+print(evens)
+print(big)

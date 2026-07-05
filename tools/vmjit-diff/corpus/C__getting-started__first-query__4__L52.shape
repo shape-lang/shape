@@ -1,0 +1,16 @@
+fn is_anomaly(value: number, mean: number, std: number) -> bool {
+  value > (mean + 2 * std)
+}
+
+let series = [20.1, 20.4, 21.0, 20.3, 25.8]
+let total = series.sum()
+let mean = total / (series.len() as number)
+let latest = series[series.len() - 1]
+// Approximate std for the example; for real code, use std::core::math::std.
+let approx_std = 1.0
+
+if is_anomaly(latest, mean, approx_std) {
+  print("anomaly detected")
+} else {
+  print("normal")
+}

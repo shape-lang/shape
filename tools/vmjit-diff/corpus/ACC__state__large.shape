@@ -1,0 +1,491 @@
+// large.shape — Book slice: stdlib/core/state
+// =====================================================================
+// A REAL-WORLD, NON-INTERACTIVE, MACHINE-PROOFABLE application rooted in
+// the `state` chapter's content-addressing core: a CONTENT-ADDRESSED
+// STORE + MERKLE-STYLE INTEGRITY VERIFIER built on `state::hash`.
+//
+// This mirrors the book's own end-to-end example "Content-Addressed Cache"
+// (state.mdx lines 475-498): "Key = hash(function identity + argument
+// values) ... Same value + same args = same cache key, across any node."
+// The whole premise (lines 8-11) is that `state::hash` is a CONTENT
+// ADDRESS: identical content -> identical key, DISTINCT content -> DISTINCT
+// key. A store keyed on hashes only works if both halves hold.
+//
+// We build:
+//   1. A pure content-addressed key/value store keyed by state::hash.
+//   2. A document model (typed objects + arrays) representing a small
+//      versioned config repository.
+//   3. A Merkle-style integrity check: hashing a document, mutating one
+//      field, and proving the hash changes (tamper detection).
+//   4. A dedup proof: identical documents collapse to one store slot.
+//
+// DETERMINISM STRATEGY (per slice): pure. No clocks, no randomness, no
+// network. Every input is a fixed literal fixture. Every expected value is
+// derived from BOOK SEMANTICS and written BEFORE the first run:
+//
+//   INVARIANT D (determinism, book line 236):
+//       state::hash(v) == state::hash(v)   for any v        => expected true
+//   INVARIANT L (length, book line 224, SHA-256 hex):
+//       state::hash(v).len() == 64                          => expected 64
+//   INVARIANT X (distinctness, content-addressing premise lines 8-11, 234):
+//       v1 structurally != v2  =>  state::hash(v1) != state::hash(v2)
+//                                                           => expected true
+//
+// We NEVER back-fill an expected value from observed output. Every
+// EXPECTED below is the book-mandated answer; a mismatch prints
+// CHECK_FAILED and is a real defect, not a test bug.
+//
+// BOOK-GAP note: the chapter uses bare `assert(...)` (line 237) but never
+// documents importing it, and `from std::core::utils::testing use { assert }`
+// does not resolve under this build. We therefore use a local `check`
+// helper (what a real user falls back to). Recorded as a book-gap.
+// =====================================================================
+
+use std::core::state
+
+// ---------------------------------------------------------------------
+// Domain model: a tiny versioned config repository.
+// ---------------------------------------------------------------------
+
+type Setting {
+    key: string,
+    value: string,
+    enabled: bool,
+}
+
+type Section {
+    name: string,
+    priority: int,
+    settings: Array<Setting>,
+}
+
+type Document {
+    title: string,
+    version: int,
+    sections: Array<Section>,
+}
+
+type Sample {
+    id: int,
+    weight: number,
+    tag: string,
+}
+
+// ---------------------------------------------------------------------
+// Assertion harness (local; book-gap fallback). Tracks pass/fail counts
+// and emits the book-mandated CHECK_FAILED / ALL_CHECKS_PASSED protocol.
+// ---------------------------------------------------------------------
+
+let mut passed: int = 0
+let mut failed: int = 0
+
+fn note_pass() -> int { 1 }
+
+// We cannot mutate module bindings from inside a fn under strict rules in a
+// portable way, so checks are inlined as expressions returning bool and the
+// caller updates counters. The helper formats failure lines per the book
+// protocol: "CHECK_FAILED: <which> expected=<e> got=<g>".
+
+fn fail_bool(label: string, expected: bool, got: bool) -> bool {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    false
+}
+
+fn fail_int(label: string, expected: int, got: int) -> bool {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    false
+}
+
+// check_true: asserts cond==true; returns true on pass, false on fail.
+fn check_true(cond: bool, label: string) -> bool {
+    if cond { return true }
+    fail_bool(label, true, cond)
+}
+
+// check_eq_int: asserts got==expected.
+fn check_eq_int(got: int, expected: int, label: string) -> bool {
+    if got == expected { return true }
+    fail_int(label, expected, got)
+}
+
+// ---------------------------------------------------------------------
+// A pure content-addressed store. Keys are state::hash() outputs (64-char
+// hex strings); values are the serialized payload's string form. Because
+// serialize() is unavailable in this build, we store the document title as
+// a stand-in payload — the STORE LOGIC (keying, dedup, lookup) is what we
+// are proving, and it depends only on state::hash producing correct keys.
+// ---------------------------------------------------------------------
+
+type StoreEntry {
+    key: string,
+    payload: string,
+}
+
+// store_has: linear scan for a key (small fixture, O(n) is fine, pure).
+fn store_has(entries: Array<StoreEntry>, key: string) -> bool {
+    for e in entries {
+        if e.key == key { return true }
+    }
+    false
+}
+
+// store_count_key: how many slots carry this key (proves dedup -> at most 1).
+fn store_count_key(entries: Array<StoreEntry>, key: string) -> int {
+    let mut n: int = 0
+    for e in entries {
+        if e.key == key { n = n + 1 }
+    }
+    n
+}
+
+// ---------------------------------------------------------------------
+// Fixtures (fixed literals — deterministic).
+// ---------------------------------------------------------------------
+
+fn sample_a() -> Sample { Sample { id: 1, weight: 1.5, tag: "alpha" } }
+fn sample_a_copy() -> Sample { Sample { id: 1, weight: 1.5, tag: "alpha" } }
+fn sample_b() -> Sample { Sample { id: 2, weight: 1.5, tag: "alpha" } }   // id differs
+fn sample_c() -> Sample { Sample { id: 1, weight: 2.5, tag: "alpha" } }   // weight differs
+fn sample_d() -> Sample { Sample { id: 1, weight: 1.5, tag: "beta" } }    // tag differs
+
+fn doc_v1() -> Document {
+    Document {
+        title: "main-config",
+        version: 1,
+        sections: [
+            Section {
+                name: "network",
+                priority: 10,
+                settings: [
+                    Setting { key: "host", value: "10.0.0.1", enabled: true },
+                    Setting { key: "port", value: "9000", enabled: true },
+                ],
+            },
+            Section {
+                name: "logging",
+                priority: 5,
+                settings: [
+                    Setting { key: "level", value: "info", enabled: false },
+                ],
+            },
+        ],
+    }
+}
+
+// doc_v1 again, identical content (different allocation) -> must hash equal.
+fn doc_v1_copy() -> Document {
+    Document {
+        title: "main-config",
+        version: 1,
+        sections: [
+            Section {
+                name: "network",
+                priority: 10,
+                settings: [
+                    Setting { key: "host", value: "10.0.0.1", enabled: true },
+                    Setting { key: "port", value: "9000", enabled: true },
+                ],
+            },
+            Section {
+                name: "logging",
+                priority: 5,
+                settings: [
+                    Setting { key: "level", value: "info", enabled: false },
+                ],
+            },
+        ],
+    }
+}
+
+// doc_v2: version bumped from 1 -> 2. Tamper at the top level.
+fn doc_v2() -> Document {
+    Document {
+        title: "main-config",
+        version: 2,
+        sections: [
+            Section {
+                name: "network",
+                priority: 10,
+                settings: [
+                    Setting { key: "host", value: "10.0.0.1", enabled: true },
+                    Setting { key: "port", value: "9000", enabled: true },
+                ],
+            },
+            Section {
+                name: "logging",
+                priority: 5,
+                settings: [
+                    Setting { key: "level", value: "info", enabled: false },
+                ],
+            },
+        ],
+    }
+}
+
+// doc_tamper_deep: one deeply-nested Setting.value mutated (info -> debug).
+// Merkle property: a deep change must propagate to the root hash.
+fn doc_tamper_deep() -> Document {
+    Document {
+        title: "main-config",
+        version: 1,
+        sections: [
+            Section {
+                name: "network",
+                priority: 10,
+                settings: [
+                    Setting { key: "host", value: "10.0.0.1", enabled: true },
+                    Setting { key: "port", value: "9000", enabled: true },
+                ],
+            },
+            Section {
+                name: "logging",
+                priority: 5,
+                settings: [
+                    Setting { key: "level", value: "debug", enabled: false },
+                ],
+            },
+        ],
+    }
+}
+
+// doc_tamper_bool: one deeply-nested Setting.enabled flipped (false -> true).
+fn doc_tamper_bool() -> Document {
+    Document {
+        title: "main-config",
+        version: 1,
+        sections: [
+            Section {
+                name: "network",
+                priority: 10,
+                settings: [
+                    Setting { key: "host", value: "10.0.0.1", enabled: true },
+                    Setting { key: "port", value: "9000", enabled: true },
+                ],
+            },
+            Section {
+                name: "logging",
+                priority: 5,
+                settings: [
+                    Setting { key: "level", value: "info", enabled: true },
+                ],
+            },
+        ],
+    }
+}
+
+// =====================================================================
+// MAIN PROOF DRIVER (top-level — script mode runs top-level statements).
+// =====================================================================
+
+let mut ok: bool = true
+
+// ---- GROUP 1: primitive determinism (INVARIANT D) ----
+let p_int_a: string = state::hash(7)
+let p_int_b: string = state::hash(7)
+if !check_true(p_int_a == p_int_b, "G1.int_determinism") { ok = false }
+
+let p_str_a: string = state::hash("config")
+let p_str_b: string = state::hash("config")
+if !check_true(p_str_a == p_str_b, "G1.str_determinism") { ok = false }
+
+let p_bool_a: string = state::hash(true)
+let p_bool_b: string = state::hash(true)
+if !check_true(p_bool_a == p_bool_b, "G1.bool_determinism") { ok = false }
+
+let p_num_a: string = state::hash(3.14159)
+let p_num_b: string = state::hash(3.14159)
+if !check_true(p_num_a == p_num_b, "G1.num_determinism") { ok = false }
+
+// ---- GROUP 2: primitive length is 64 (INVARIANT L) ----
+if !check_eq_int(p_int_a.len(), 64, "G2.int_len") { ok = false }
+if !check_eq_int(p_str_a.len(), 64, "G2.str_len") { ok = false }
+if !check_eq_int(p_bool_a.len(), 64, "G2.bool_len") { ok = false }
+if !check_eq_int(p_num_a.len(), 64, "G2.num_len") { ok = false }
+
+// ---- GROUP 3: primitive distinctness (INVARIANT X) ----
+// NOTE: state::hash returns `unknown` under this build (book says -> string),
+// so every result is bound to a typed `let string` before comparison;
+// otherwise strict typing refuses `unknown != unknown`. (Recorded book-wrong.)
+// Distinct values of the SAME type.
+let g3_h1: string = state::hash(1)
+let g3_h2: string = state::hash(2)
+if !check_true(g3_h1 != g3_h2, "G3.int_1_vs_2") { ok = false }
+let g3_h100: string = state::hash(100)
+let g3_h101: string = state::hash(101)
+if !check_true(g3_h100 != g3_h101, "G3.int_100_vs_101") { ok = false }
+let g3_ha: string = state::hash("a")
+let g3_hb: string = state::hash("b")
+if !check_true(g3_ha != g3_hb, "G3.str_a_vs_b") { ok = false }
+let g3_hc1: string = state::hash("config")
+let g3_hc2: string = state::hash("Config")
+if !check_true(g3_hc1 != g3_hc2, "G3.str_case") { ok = false }
+let g3_ht: string = state::hash(true)
+let g3_hf: string = state::hash(false)
+if !check_true(g3_ht != g3_hf, "G3.bool_t_vs_f") { ok = false }
+let g3_n1: string = state::hash(1.0)
+let g3_n2: string = state::hash(2.0)
+if !check_true(g3_n1 != g3_n2, "G3.num_1_vs_2") { ok = false }
+let g3_nc1: string = state::hash(1.5)
+let g3_nc2: string = state::hash(1.50001)
+if !check_true(g3_nc1 != g3_nc2, "G3.num_close") { ok = false }
+// Distinct values of DIFFERENT type (cross-type distinctness).
+let g3_i7: string = state::hash(7)
+let g3_s7: string = state::hash("7")
+if !check_true(g3_i7 != g3_s7, "G3.int_vs_str") { ok = false }
+let g3_i1: string = state::hash(1)
+let g3_b1: string = state::hash(true)
+if !check_true(g3_i1 != g3_b1, "G3.int_vs_bool") { ok = false }
+let g3_n10: string = state::hash(1.0)
+if !check_true(g3_i1 != g3_n10, "G3.int_vs_num") { ok = false }
+
+// ---- GROUP 4: array determinism + distinctness ----
+let arr_ints_a: Array<int> = [1, 2, 3, 4, 5]
+let arr_ints_b: Array<int> = [1, 2, 3, 4, 5]
+let arr_ints_c: Array<int> = [1, 2, 3, 4, 6]      // last element differs
+let arr_ints_d: Array<int> = [5, 4, 3, 2, 1]      // order differs
+let h_ai_a: string = state::hash(arr_ints_a)
+let h_ai_b: string = state::hash(arr_ints_b)
+let h_ai_c: string = state::hash(arr_ints_c)
+let h_ai_d: string = state::hash(arr_ints_d)
+if !check_true(h_ai_a == h_ai_b, "G4.arr_determinism") { ok = false }
+if !check_eq_int(h_ai_a.len(), 64, "G4.arr_len") { ok = false }
+if !check_true(h_ai_a != h_ai_c, "G4.arr_element_change") { ok = false }
+if !check_true(h_ai_a != h_ai_d, "G4.arr_order_change") { ok = false }
+
+let arr_str_a: Array<string> = ["x", "y", "z"]
+let arr_str_b: Array<string> = ["x", "y", "z"]
+let arr_str_c: Array<string> = ["x", "y", "Z"]
+let h_sa_a: string = state::hash(arr_str_a)
+let h_sa_b: string = state::hash(arr_str_b)
+let h_sa_c: string = state::hash(arr_str_c)
+if !check_true(h_sa_a == h_sa_b, "G4.strarr_determinism") { ok = false }
+if !check_true(h_sa_a != h_sa_c, "G4.strarr_change") { ok = false }
+
+let arr_num_a: Array<number> = [0.1, 0.2, 0.3]
+let arr_num_b: Array<number> = [0.1, 0.2, 0.3]
+let arr_num_c: Array<number> = [0.1, 0.2, 0.4]
+let h_na_a: string = state::hash(arr_num_a)
+let h_na_b: string = state::hash(arr_num_b)
+let h_na_c: string = state::hash(arr_num_c)
+if !check_true(h_na_a == h_na_b, "G4.numarr_determinism") { ok = false }
+if !check_true(h_na_a != h_na_c, "G4.numarr_change") { ok = false }
+
+// ---- GROUP 5: typed-object structural hashing (book line 234) ----
+let sa: Sample = sample_a()
+let sa2: Sample = sample_a_copy()
+let sb: Sample = sample_b()
+let sc: Sample = sample_c()
+let sd: Sample = sample_d()
+let h_sa: string = state::hash(sa)
+let h_sa2: string = state::hash(sa2)
+let h_sb: string = state::hash(sb)
+let h_sc: string = state::hash(sc)
+let h_sd: string = state::hash(sd)
+if !check_true(h_sa == h_sa2, "G5.obj_determinism") { ok = false }
+if !check_eq_int(h_sa.len(), 64, "G5.obj_len") { ok = false }
+if !check_true(h_sa != h_sb, "G5.obj_id_field") { ok = false }
+if !check_true(h_sa != h_sc, "G5.obj_weight_field") { ok = false }
+if !check_true(h_sa != h_sd, "G5.obj_tag_field") { ok = false }
+
+// ---- GROUP 6: nested-object (Merkle) hashing ----
+let d1: Document = doc_v1()
+let d1c: Document = doc_v1_copy()
+let d2: Document = doc_v2()
+let dtd: Document = doc_tamper_deep()
+let dtb: Document = doc_tamper_bool()
+let h_d1: string = state::hash(d1)
+let h_d1c: string = state::hash(d1c)
+let h_d2: string = state::hash(d2)
+let h_dtd: string = state::hash(dtd)
+let h_dtb: string = state::hash(dtb)
+if !check_true(h_d1 == h_d1c, "G6.doc_determinism") { ok = false }
+if !check_eq_int(h_d1.len(), 64, "G6.doc_len") { ok = false }
+// Top-level field change (version 1->2) must change the root hash.
+if !check_true(h_d1 != h_d2, "G6.doc_toplevel_tamper") { ok = false }
+// Deep nested string change (info->debug) must propagate to root.
+if !check_true(h_d1 != h_dtd, "G6.doc_deep_string_tamper") { ok = false }
+// Deep nested bool flip (false->true) must propagate to root.
+if !check_true(h_d1 != h_dtb, "G6.doc_deep_bool_tamper") { ok = false }
+
+// ---- GROUP 7: array-of-objects hashing ----
+let samples_a: Array<Sample> = [sample_a(), sample_b(), sample_c()]
+let samples_b: Array<Sample> = [sample_a(), sample_b(), sample_c()]
+let samples_c: Array<Sample> = [sample_a(), sample_b(), sample_d()]   // last differs
+let h_smp_a: string = state::hash(samples_a)
+let h_smp_b: string = state::hash(samples_b)
+let h_smp_c: string = state::hash(samples_c)
+if !check_true(h_smp_a == h_smp_b, "G7.objarr_determinism") { ok = false }
+if !check_true(h_smp_a != h_smp_c, "G7.objarr_change") { ok = false }
+
+// ---- GROUP 8: content-addressed store (the book's cache example) ----
+// Build a store by content-addressing each document. Identical docs must
+// dedup to ONE slot; distinct docs occupy distinct keys.
+let k_d1: string = state::hash(d1)
+let k_d1c: string = state::hash(d1c)   // identical content -> same key
+let k_d2: string = state::hash(d2)     // version 2 -> different key
+
+let store: Array<StoreEntry> = [
+    StoreEntry { key: k_d1, payload: "main-config@1" },
+    StoreEntry { key: k_d1c, payload: "main-config@1-dup" },
+    StoreEntry { key: k_d2, payload: "main-config@2" },
+]
+
+// Lookup hit for a freshly-hashed identical document.
+let probe_v1: string = state::hash(doc_v1())
+if !check_true(store_has(store, probe_v1), "G8.store_lookup_hit") { ok = false }
+// Lookup miss for a never-stored document (a v3 the store has not seen).
+// NOTE: a non-empty `sections` is used; an empty `[]` literal hits an
+// op_new_array(0) V3-S5 surface stub in this build (recorded book-gap-adjacent).
+let d3: Document = Document {
+    title: "main-config",
+    version: 3,
+    sections: [
+        Section { name: "extra", priority: 1, settings: [
+            Setting { key: "flag", value: "on", enabled: true },
+        ] },
+    ],
+}
+let probe_v3: string = state::hash(d3)
+if !check_true(!store_has(store, probe_v3), "G8.store_lookup_miss") { ok = false }
+// Dedup: d1 and d1c share a key, so that key appears in 2 slots that are
+// actually ONE logical entry. The distinctness invariant requires
+// k_d1 == k_d1c (same content) but k_d1 != k_d2 (different content).
+if !check_true(k_d1 == k_d1c, "G8.store_dedup_same_key") { ok = false }
+if !check_true(k_d1 != k_d2, "G8.store_distinct_key") { ok = false }
+if !check_eq_int(store_count_key(store, k_d2), 1, "G8.store_v2_unique") { ok = false }
+
+// ---- GROUP 9: cache-key composition (book lines 483-484) ----
+// The book composes a cache key as hash([fn_hash, ...args]). fn_hash is a
+// W17 stub here, so we model the composition with hash of an argument
+// array: same args -> same key, different args -> different key.
+let args_1: Array<int> = [10, 20, 30]
+let args_2: Array<int> = [10, 20, 30]
+let args_3: Array<int> = [10, 20, 31]
+let ck1: string = state::hash(args_1)
+let ck2: string = state::hash(args_2)
+let ck3: string = state::hash(args_3)
+if !check_true(ck1 == ck2, "G9.cachekey_same_args") { ok = false }
+if !check_true(ck1 != ck3, "G9.cachekey_diff_args") { ok = false }
+
+// ---- GROUP 10: large fan-out distinctness sweep ----
+// Hash 0..30 and prove all keys are pairwise distinct (a content address
+// space must not collide for distinct small integers). We count collisions.
+let mut collisions: int = 0
+let mut i: int = 0
+while i < 30 {
+    let mut j: int = i + 1
+    let hi: string = state::hash(i)
+    while j < 30 {
+        let hj: string = state::hash(j)
+        if hi == hj { collisions = collisions + 1 }
+        j = j + 1
+    }
+    i = i + 1
+}
+// EXPECTED: 0 collisions among 30 distinct integers (content-addressing).
+if !check_eq_int(collisions, 0, "G10.no_int_collisions") { ok = false }
+
+// ---- FINAL VERDICT ----
+if ok {
+    print("ALL_CHECKS_PASSED")
+}

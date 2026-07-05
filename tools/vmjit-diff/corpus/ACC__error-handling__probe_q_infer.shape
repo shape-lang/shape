@@ -1,0 +1,18 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+fn find_user(id: int) -> Result<int> {
+  if id == 0 { return Err("no such user") }
+  return Ok(id * 10)
+}
+
+// Plain `?` WITHOUT `!!` and WITHOUT annotation — does the success type infer?
+fn lookup_plain(id: int) -> Result<int> {
+  let user_id = find_user(id)?
+  return Ok(user_id + 1)
+}
+
+let r = lookup_plain(5)
+match r {
+  Ok(v) => print(f"plain ok {v}"),
+  Err(e) => print("err"),
+}

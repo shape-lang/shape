@@ -1,0 +1,13 @@
+// math_utils.shape
+pub fn clamp(x: int, lo: int, hi: int) -> int {
+  if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+pub type Bounds {
+  lo: int,
+  hi: int
+}
+
+pub annotation traced(tag) {
+  targets: [function]
+}

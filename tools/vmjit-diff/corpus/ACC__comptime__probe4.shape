@@ -1,0 +1,6 @@
+type Unit {
+  comptime symbol: string = "m"
+  comptime precision: int = 2
+}
+type Celsius = Unit { symbol: "°C" }
+print("type-ok")

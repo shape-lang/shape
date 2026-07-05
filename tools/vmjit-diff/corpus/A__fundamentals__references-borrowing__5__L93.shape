@@ -1,0 +1,4 @@
+let c = [4, 5, 6]
+let d = clone c        // CLONE — c stays valid
+print(c)               // OK: c is still valid
+print(d)               // OK: d is the independent copy

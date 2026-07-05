@@ -1,0 +1,13 @@
+trait Named { fn type_name() -> string; }
+trait Geo : Named { fn area() -> int; }
+type Sq { s: int }
+impl Named for Sq { method type_name() -> string { "sq" } }
+impl Geo for Sq { method area() -> int { self.s * self.s } }
+fn main() {
+  let xs: Vec<dyn Geo> = [ Sq { s: 3 } ]
+  for x in xs {
+    let n: string = x.type_name()
+    print(n)
+  }
+}
+main()

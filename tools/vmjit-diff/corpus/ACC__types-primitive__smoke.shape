@@ -1,0 +1,35 @@
+from std::core::utils::testing use { assert, assert_eq }
+
+let x = 42
+let y = -1000
+let big = 9000000000000000000
+print(x)
+print(y)
+print(big)
+
+let n: number = 3.5
+print(n)
+
+let b: bool = true
+print(b)
+
+let s: string = "hello"
+print(s)
+
+let a = 42i8
+let c = 1000i16
+let e = 100i32
+let size = 1048576u64
+print(e)
+print(size)
+
+let wide: int = 300
+let narrow = wide as i8
+let signed: int = -1
+let unsigned = signed as u8
+print(narrow)
+print(unsigned)
+
+assert(narrow == 44, "narrow")
+assert(unsigned == 255, "unsigned")
+print("SMOKE_OK")

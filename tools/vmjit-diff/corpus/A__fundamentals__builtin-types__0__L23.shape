@@ -1,0 +1,11 @@
+from std::core::intrinsics use {
+  Vec,
+  Mat,
+  Table,
+  DateTime,
+  Result,
+  Option,
+  AnyError,
+  HashMap
+}
+print("imported")

@@ -1,0 +1,23 @@
+// Probe: does comptime pre that calls error() actually FIRE (negative path)?
+// guardrail should reject a non-const first param
+comptime fn require_const_host(target) {
+  if target.params.length == 0 || target.params[0].const != true {
+    error("First parameter must be const for host policy")
+  }
+}
+
+annotation host_typed() {
+  targets: [function]
+
+  comptime pre(target, ctx) {
+    require_const_host(target)
+  }
+}
+
+// NON-const first param -> should trigger error() at compile time
+@host_typed()
+fn handler(region: string) -> int {
+  42
+}
+
+print("PROBE5_SHOULD_NOT_REACH")

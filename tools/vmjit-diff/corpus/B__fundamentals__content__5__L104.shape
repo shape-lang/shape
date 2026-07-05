@@ -1,0 +1,6 @@
+let readings = [20.0, 22.0, 21.0, 23.0]
+let pairs = [[1, 20], [2, 22], [3, 21], [4, 23]]
+let chart = Content.chart("line")
+    .add("temp", pairs)
+    .title("Sensor: temp")
+print(chart.toString())

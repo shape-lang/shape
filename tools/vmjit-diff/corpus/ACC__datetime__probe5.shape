@@ -1,0 +1,8 @@
+from std::core::intrinsics use { DateTime }
+
+let event_time = DateTime.parse("2024-06-15T14:30:45+00:00")
+let zones = ["America/New_York", "Europe/London", "Asia/Tokyo"]
+for tz in zones {
+    let local = event_time.to_timezone(tz)
+    print(f"{tz}: {local.format('%H:%M %Z')}")
+}

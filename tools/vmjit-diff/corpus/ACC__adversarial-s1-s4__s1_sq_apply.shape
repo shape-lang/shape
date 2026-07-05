@@ -1,0 +1,6 @@
+fn apply(f, x) { f(x) }
+fn main() {
+  let sq = |x| x * x
+  print(apply(sq, 7))
+}
+main()

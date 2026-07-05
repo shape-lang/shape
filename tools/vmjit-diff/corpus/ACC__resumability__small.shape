@@ -1,0 +1,66 @@
+// small.shape — Resumability slice
+// Book-primary source: advanced/resumability.mdx + stdlib/core/snapshot.mdx
+//
+// Determinism strategy: snapshot a deterministic computation, then on resume
+// recompute the SAME deterministic result. Per the book, the FIRST pass through
+// snapshot() returns Snapshot::Hash(id) and continues; a later --resume re-enters
+// the same site returning Snapshot::Resumed. The deterministic computation below
+// must yield the identical value whether run uninterrupted or recomputed on resume.
+//
+// Book semantics asserted (resumability.mdx lines 26-30):
+//   - first pass: snapshot() returns Snapshot::Hash(id)
+//   - resumed pass: same snapshot() site returns Snapshot::Resumed
+//   - code after snapshot() runs again on resume
+
+from std::core::snapshot use { Snapshot }
+
+// A deterministic pure computation: sum of squares 1..=10 = 385.
+fn deterministic_work() -> int {
+    let mut acc = 0
+    let mut i = 1
+    while i <= 10 {
+        acc = acc + i * i
+        i = i + 1
+    }
+    acc
+}
+
+// Expected value derived from BOOK SEMANTICS / arithmetic (NOT observed output):
+//   1+4+9+16+25+36+49+64+81+100 = 385
+let expected = 385
+
+// Compute once before the checkpoint to anchor determinism.
+let before = deterministic_work()
+if before != expected {
+    print(f"CHECK_FAILED: pre-snapshot work expected={expected} got={before}")
+} else {
+    // Take the checkpoint. On the first pass the book guarantees Snapshot::Hash(id);
+    // on resume the same site yields Snapshot::Resumed and the code below re-runs.
+    match snapshot() {
+        Snapshot::Hash(id) => {
+            // First pass: a non-empty hash id must be produced.
+            if id == "" {
+                print("CHECK_FAILED: hash-branch empty-id expected=non-empty got=empty")
+            } else {
+                // Recompute after the checkpoint; must still equal 385.
+                let after = deterministic_work()
+                if after != expected {
+                    print(f"CHECK_FAILED: post-snapshot work expected={expected} got={after}")
+                } else {
+                    print(f"snapshot saved: {id}")
+                    print("ALL_CHECKS_PASSED")
+                }
+            }
+        }
+        Snapshot::Resumed => {
+            // Resumed pass: deterministic recomputation must match the original.
+            let resumed = deterministic_work()
+            if resumed != expected {
+                print(f"CHECK_FAILED: resumed work expected={expected} got={resumed}")
+            } else {
+                print("resumed from snapshot")
+                print("ALL_CHECKS_PASSED")
+            }
+        }
+    }
+}

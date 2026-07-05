@@ -1,0 +1,5 @@
+pub type VmState<T> {
+    frames: Vec<Frame<T>>,
+    module_bindings: HashMap<string, T>,
+    timestamp: string,
+}

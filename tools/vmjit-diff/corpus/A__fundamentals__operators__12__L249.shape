@@ -1,0 +1,5 @@
+let ok = true
+let ready = false
+
+print(ok && !ready)   // true
+print(ok || ready)    // true

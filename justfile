@@ -195,3 +195,26 @@ coverage:
 # workspace-walk denominator-inflation pitfall).
 coverage-crate crate:
 	bash scripts/coverage.sh --crate {{crate}}
+
+# --- VM-vs-JIT differential harness (WF-0B, tools/vmjit-diff/) ---
+#
+# Runs every corpus program under `shape run --mode vm` AND `--mode jit`,
+# diffs stdout + exit code, classifies MATCH / DIVERGED / VM_FAIL / JIT_FAIL /
+# TIMEOUT, and writes tools/vmjit-diff/reports/report.{json,md}. Known
+# expected divergences are pinned in tools/vmjit-diff/known-red.json.
+# Measurement only — divergences get recorded, not fixed here.
+
+# Full run: build the release binary, then diff the whole corpus.
+diff-vmjit *ARGS:
+	cargo build --release --bin shape
+	node tools/vmjit-diff/run-diff.mjs {{ARGS}}
+
+# Diff without building — uses $SHAPE_BIN or an existing target/release/shape.
+diff-vmjit-fast *ARGS:
+	node tools/vmjit-diff/run-diff.mjs {{ARGS}}
+
+# Regenerate the committed corpus + SKIPPED.md from the book (canonical
+# extractor in ../shape-web/book/book-site), the v0.3.3 acceptance programs,
+# and tools/vmjit-diff/synthetic/.
+diff-vmjit-corpus *ARGS:
+	node tools/vmjit-diff/build-corpus.mjs {{ARGS}}

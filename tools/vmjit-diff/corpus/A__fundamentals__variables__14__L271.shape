@@ -1,0 +1,5 @@
+type LabeledCount { label: string, count: int }
+
+let lc = LabeledCount { label: "rows", count: 7 }
+print(lc.label)
+print(lc.count)

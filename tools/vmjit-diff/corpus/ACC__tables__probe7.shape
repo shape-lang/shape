@@ -1,0 +1,37 @@
+// Probe 7: map/select/orderBy and getting values out of rows
+from std::core::queryable use { Queryable }
+
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+type IdOnly { id: int }
+
+impl Queryable for Table {
+    method filter(predicate) { self.filter(predicate) }
+    method map(transform) { self.map(transform) }
+    method orderBy(key_fn, direction) { self.orderBy(key_fn, direction) }
+    method limit(n) { self.limit(n) }
+    method count() { self.count() }
+    method head(n) { self.head(n) }
+    method forEach(f) { self.forEach(f) }
+    method execute() { self }
+}
+
+let events: Table<Event> =
+    [1, 50.0,  "alpha"],
+    [2, 75.5,  "beta"],
+    [3, 120.0, "gamma"]
+
+// orderBy desc then head 2
+let top = events.orderBy(|row| row.value, "desc").head(2)
+print(top)
+
+// map to a derived row type
+let mapped = events.map(|row| IdOnly { id: row.id })
+print(mapped)
+
+// forEach to extract scalars
+events.forEach(|row| print(f"row {row.id}: {row.value}"))

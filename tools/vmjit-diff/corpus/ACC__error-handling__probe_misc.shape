@@ -1,0 +1,17 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+// book §"Infallible: as Type": `let n = true as int`
+let n = true as int;
+print(f"true_as_int {n}");
+
+// book §Fallible literal example: ("42" as int?)?  inside a fn
+fn parse_int(raw: string) -> Result<int> {
+    let v = (raw as int?)?;
+    return Ok(v);
+}
+match parse_int("42") { Ok(v) => print(f"parse_int {v}"), Err(e) => print("pi err") }
+
+// book §"Uncaught Exception Display": top-level `?` on an Err aborts the script.
+fn boom() -> Result<int> { return Err("kaboom"); }
+let x = boom()?;   // should abort here with uncaught exception
+print(f"unreachable {x}");

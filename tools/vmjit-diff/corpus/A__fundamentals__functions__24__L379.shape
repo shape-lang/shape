@@ -1,0 +1,4 @@
+let count = 10
+let bump_by_count = |x| x + count
+print(bump_by_count(5))                // 15
+print(bump_by_count(7))                // 17

@@ -1,0 +1,7 @@
+from std::core::math use { sqrt }
+
+fn radius(area: number) -> number {
+  sqrt(area / 3.14159)
+}
+
+print(radius(100.0))
