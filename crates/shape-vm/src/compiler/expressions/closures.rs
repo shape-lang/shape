@@ -4060,7 +4060,51 @@ impl BytecodeCompiler {
                         }
                     }
                 }
+                // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture
+                // arm): a Drop-bearing local captured (immutably) by an
+                // ESCAPING closure must NOT run its user `Drop::drop` at the
+                // capturing scope's exit — the returned closure still reads
+                // the capture afterward, so a scope-exit `DropCall` here is a
+                // use-after-finalize. Record the slot so
+                // `emit_drops_for_early_exit` / `pop_drop_scope` suppress the
+                // user-`Drop` `DropCall`. The slot's refcount share is still
+                // retired by the function-teardown `truncate_stack(bp)` at
+                // `op_return_value` (a plain `drop_with_kind`, no user
+                // `Drop::drop`); the closure's own capture share (bumped by
+                // `op_make_closure`) keeps the referent alive until the
+                // closure is itself released — the defer-to-escaping-reference
+                // lifetime. Gated on `closure_is_escaping` so non-escaping
+                // closures (which share the caller's scope) keep byte-
+                // identical Drop emission.
+                if closure_is_escaping {
+                    if let Some(local_idx) = self.resolve_local(captured) {
+                        if self.local_drop_kind(local_idx).is_some() {
+                            self.closure_escape_drop_skip_locals.insert(local_idx);
+                        }
+                    }
+                }
             }
+        }
+
+        // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture arm):
+        // record this closure literal's Drop-bearing captured frame-local
+        // slots so the enclosing `let f = <closure>` binding can associate
+        // them with `f` (see `pending_closure_capture_drop_locals` /
+        // `closure_binding_capture_drop_locals`). When `f` later escapes via
+        // `return f`, the return site marks these captures for Drop-skip.
+        // This carries the escape signal across the bind-then-return form
+        // that `emit_make_closure_heap_next` (literal-only) misses.
+        {
+            let mut drop_captures: Vec<u16> = Vec::new();
+            for name in &captured_vars {
+                if let Some(local_idx) = self.resolve_local(name) {
+                    if self.local_drop_kind(local_idx).is_some() {
+                        drop_captures.push(local_idx);
+                    }
+                }
+            }
+            self.pending_closure_capture_drop_locals =
+                if drop_captures.is_empty() { None } else { Some(drop_captures) };
         }
 
         // Phase F: when the compiler has been told to emit the heap-ABI

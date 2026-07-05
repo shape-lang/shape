@@ -1039,6 +1039,35 @@ pub unsafe fn typed_closure_refcount(ptr: *const u8) -> u32 {
     unsafe { (*(ptr as *const HeapHeader)).get_refcount() }
 }
 
+/// True iff this closure block's Drop-bearing captures have already had
+/// their user `Drop::drop` bodies discharged (ADR-006 §2.7.30, WF-1C lane
+/// b). Read the `FLAG_CLOSURE_CAPTURES_DROPPED` bit on the block's
+/// `HeapHeader`.
+///
+/// # Safety
+///
+/// `ptr` must point to a live `TypedClosureHeader` block.
+#[inline]
+pub unsafe fn typed_closure_captures_dropped(ptr: *const u8) -> bool {
+    use super::heap_header::FLAG_CLOSURE_CAPTURES_DROPPED;
+    // SAFETY: caller upholds that `ptr` is a live TypedClosureHeader block;
+    // `flags` lives at the fixed `HeapHeader` offset.
+    unsafe { ((*(ptr as *const HeapHeader)).flags & FLAG_CLOSURE_CAPTURES_DROPPED) != 0 }
+}
+
+/// Mark this closure block's Drop-bearing captures as discharged (set the
+/// `FLAG_CLOSURE_CAPTURES_DROPPED` bit). Idempotent (drop-once guard).
+///
+/// # Safety
+///
+/// `ptr` must point to a live `TypedClosureHeader` block.
+#[inline]
+pub unsafe fn set_typed_closure_captures_dropped(ptr: *mut u8) {
+    use super::heap_header::FLAG_CLOSURE_CAPTURES_DROPPED;
+    // SAFETY: caller upholds that `ptr` is a live TypedClosureHeader block.
+    unsafe { (*(ptr as *mut HeapHeader)).flags |= FLAG_CLOSURE_CAPTURES_DROPPED };
+}
+
 // ---------------------------------------------------------------------------
 // Per-FieldKind OwnedMutable cell helpers (Wave B / D2 dispatch).
 //

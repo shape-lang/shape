@@ -472,6 +472,16 @@ define_opcodes! {
     DropCall = 0xC8, Trait, pops: 1, pushes: 0;
     /// Call Drop::drop on the value at the top of stack (async)
     DropCallAsync = 0xC9, Trait, pops: 1, pushes: 0;
+    /// ADR-006 §2.7.30 (escape-Drop-deferral, closure-capture arm, WF-1C
+    /// lane b). Pop a closure value from the top of stack and run the user
+    /// `Drop::drop` body for each of its Drop-bearing captures exactly once
+    /// (deferred from the capturing scope's exit to the escaping closure's
+    /// lifetime). No-op for a non-closure value or a closure with no
+    /// Drop-bearing captures. A drop-once flag on the closure block header
+    /// guards against a second discharge on an aliased block. The popped
+    /// closure share is released after discharge (net-zero against the
+    /// paired `LoadLocal`).
+    DropClosureCaptures = 0x1C9, Trait, pops: 1, pushes: 0;
 
     // NOTE: Trusted arithmetic opcodes (0xCA-0xCF, 0xD5-0xD6) were removed.
     // They were functionally identical to the typed variants (AddInt, etc.)

@@ -6086,6 +6086,23 @@ impl BytecodeCompiler {
                         if self.local_drop_kind(local_idx).is_some() {
                             self.return_escape_drop_skip_local = Some(local_idx);
                         }
+                        // ADR-006 §2.7.30.4 (escape-Drop-deferral,
+                        // closure-capture arm): returning a closure binding
+                        // (`let f = || r.id; return f`) escapes its captures.
+                        // Mark the closure's Drop-bearing captures for
+                        // Drop-skip so the scope-exit `DropCall` does not
+                        // finalize a value the returned closure still reads.
+                        // Mirrors the implicit tail-return arm in
+                        // `compile_function`.
+                        if let Some(captures) = self
+                            .closure_binding_capture_drop_locals
+                            .get(&local_idx)
+                            .cloned()
+                        {
+                            for cap in captures {
+                                self.closure_escape_drop_skip_locals.insert(cap);
+                            }
+                        }
                     }
                 }
                 // Emit drops for all active drop scopes before returning
@@ -7135,6 +7152,42 @@ impl BytecodeCompiler {
                             // (stack-resident).
                             if self.binding_slot_needs_ownership_drop(local_idx, var_decl.kind) {
                                 self.track_ownership_drop_local(local_idx);
+                            }
+                            // ADR-006 §2.7.30.4 (escape-Drop-deferral,
+                            // closure-capture arm): if this binding's
+                            // initializer is a direct closure literal that
+                            // captured Drop-bearing locals, associate the
+                            // binding slot with those captures so a later
+                            // `return f` can defer their Drop to the closure's
+                            // lifetime. `take()` unconditionally to clear any
+                            // stale value (e.g. a closure passed as a call
+                            // argument); only record when the initializer is a
+                            // direct `Expr::FunctionExpr`, so `let x = foo(||
+                            // r.id)` never mis-associates `r` with `x`.
+                            if let Some(drop_captures) =
+                                self.pending_closure_capture_drop_locals.take()
+                            {
+                                let is_direct_closure = matches!(
+                                    var_decl.value.as_ref(),
+                                    Some(shape_ast::ast::Expr::FunctionExpr { .. })
+                                );
+                                if is_direct_closure {
+                                    self.closure_binding_capture_drop_locals
+                                        .insert(local_idx, drop_captures);
+                                }
+                            }
+                            // ADR-006 §2.7.30 (escape-Drop-deferral,
+                            // closure-capture arm, WF-1C lane b — CONSUMER
+                            // side): if this binding received an ESCAPING
+                            // closure from a call return (`let read =
+                            // make_reader()`), register the slot so its
+                            // scope-exit discharges the closure's deferred
+                            // capture Drops. The runtime opcode no-ops for
+                            // non-closures, so over-approximation is harmless.
+                            if let Some(value) = var_decl.value.as_ref() {
+                                if self.binding_should_track_closure_capture_drop(value) {
+                                    self.track_closure_capture_drop_local(local_idx);
+                                }
                             }
                             if let Some(value) = &var_decl.value {
                                 self.finish_reference_binding_from_expr(

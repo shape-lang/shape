@@ -3045,6 +3045,239 @@ fn test_drop_edge_complex_mix() {
 }
 
 // ============================================================================
+// ADR-006 §2.7.30.4 — escape-Drop-deferral, closure-capture arm (WF-1C lane b)
+//
+// A Drop-bearing local captured by a RETURNED closure must NOT run its user
+// `Drop::drop` at the capturing scope's exit — the returned closure still
+// reads the capture afterward, so a scope-exit `DropCall` is a
+// use-after-finalize. These tests pin the sound floor: no premature finalize,
+// no use-after-finalize, correct capture read, refcount-balanced (no leak /
+// no double-free), and non-escaping captures still drop unchanged.
+// ============================================================================
+
+#[test]
+fn test_drop_escaping_closure_capture_defers_then_runs() {
+    // `make_reader` binds a Drop-bearing `r`, captures it in a closure, and
+    // returns the closure (bind-then-return). The returned closure reads
+    // `r.id` in `main`. ADR-006 §2.7.30: escape DEFERS `r`'s Drop from
+    // `make_reader`'s scope exit to the escaping reference (`read`)'s
+    // lifetime — the end of `main` — it must neither run prematurely (the
+    // old use-after-finalize: `DROP` before the read) NOR be deleted (the
+    // WF-1C Check-1 refutation: N stays 0 forever).
+    //
+    // `n_at_read` = N observed WHILE `read` is still alive (== 0: no
+    // premature Drop, closure reads the live value 9). `N` is observed at
+    // module scope AFTER `main()` returns (`read` has died at main's scope
+    // exit → the deferred Drop ran exactly once → N == 1). Encoded as
+    // `v * 10000 + n_at_read * 100 + N`:
+    //   fixed          => 9*10000 + 0*100 + 1 = 90001
+    //   old UAF bug    => 9*10000 + 1*100 + 1 = 90101 (premature: n_at_read==1)
+    //   WF-1C-refuted  => 9*10000 + 0*100 + 0 = 90000 (deferred-and-deleted)
+    let src = r#"
+let mut N: int = 0
+let mut n_at_read: int = -1
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn make_reader() {
+  let r = R { id: 9 }
+  let f = || r.id
+  f
+}
+fn main() -> int {
+  let read = make_reader()
+  let v = read()
+  n_at_read = N
+  v
+}
+let v: int = main()
+v * 10000 + n_at_read * 100 + N
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(90001),
+        "returned-closure capture must read the live value (9) with NO premature \
+         Drop (n_at_read==0) AND the deferred Drop must run exactly once at the \
+         escaping reference's scope exit (N==1 after main); got {:?}",
+        result.as_test_int()
+    );
+}
+
+#[test]
+fn test_drop_escaping_closure_capture_explicit_return_defers_then_runs() {
+    // Same as above but with an explicit `return f` rather than an implicit
+    // tail-return. Both return arms must defer the capture's Drop to the
+    // escaping reference's lifetime and then run it exactly once.
+    let src = r#"
+let mut N: int = 0
+let mut n_at_read: int = -1
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn make_reader() {
+  let r = R { id: 7 }
+  let f = || r.id
+  return f
+}
+fn main() -> int {
+  let read = make_reader()
+  let v = read()
+  n_at_read = N
+  v
+}
+let v: int = main()
+v * 10000 + n_at_read * 100 + N
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(70001),
+        "explicit `return f` must defer the capture's Drop (n_at_read==0) and run \
+         it exactly once after the escaping reference dies (N==1 after main); \
+         got {:?}",
+        result.as_test_int()
+    );
+}
+
+#[test]
+fn test_drop_non_escaping_closure_capture_still_drops() {
+    // Non-regression: a closure that captures a Drop-bearing local but is NOT
+    // returned (used locally) must still run the capture's user Drop exactly
+    // once at scope exit — the escape-deferral must not suppress it.
+    let src = r#"
+let mut N: int = 0
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn f() -> int {
+  let r = R { id: 9 }
+  let g = || r.id
+  let x = g()
+  x
+}
+fn main() -> int {
+  let y = f()
+  N
+}
+main()
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(1),
+        "non-escaping closure capture must still drop exactly once"
+    );
+}
+
+#[test]
+fn test_drop_closure_arg_capture_not_misassociated() {
+    // A Drop-bearing local captured by a closure passed as a CALL ARGUMENT
+    // (`apply(|| r.id)`), then the call result bound and returned, must NOT
+    // wrongly defer `r`'s Drop — the binding `x` is an int, not the closure,
+    // so `r` drops normally at `f`'s scope exit. Guards the FunctionExpr-only
+    // consumption gate against mis-association.
+    let src = r#"
+let mut N: int = 0
+type R { id: int }
+impl Drop for R { method drop() { N = N + 1 } }
+fn apply(g) -> int { g() }
+fn f() -> int {
+  let r = R { id: 5 }
+  let x = apply(|| r.id)
+  x
+}
+fn main() -> int {
+  let y = f()
+  N
+}
+main()
+"#;
+    let result = eval(src);
+    assert_eq!(
+        result.as_test_int(),
+        Some(1),
+        "closure captured as a call argument must not mis-associate its \
+         capture's Drop with the call-result binding"
+    );
+}
+
+#[test]
+fn test_drop_escaping_closure_capture_reads_heap_payload() {
+    // Refcount-balance smoke: the captured object carries a heap Array field.
+    // The returned closure reads the id after the capturing scope exits; a
+    // premature free would corrupt the read or crash. `sum` must equal the
+    // known series sum, proving every capture stayed live and was read
+    // correctly across many alloc/free cycles.
+    let src = r#"
+type R { id: int, buf: Array<int> }
+impl Drop for R { method drop() { } }
+fn make_reader(k: int) {
+  let r = R { id: k, buf: [k, k, k] }
+  let f = || r.id
+  f
+}
+fn main() -> int {
+  let mut acc: int = 0
+  let mut i: int = 0
+  while i < 500 {
+    let read = make_reader(i)
+    acc = acc + read()
+    i = i + 1
+  }
+  acc
+}
+main()
+"#;
+    let result = eval(src);
+    // sum(0..500) = 499*500/2 = 124750
+    assert_eq!(
+        result.as_test_int(),
+        Some(124750),
+        "every returned-closure capture must read its live heap-backed value"
+    );
+}
+
+#[test]
+fn test_drop_escaping_closure_capture_loop_drops_once_per_iter() {
+    // Refcount-balance / stability: loop the returned-closure-capture escape
+    // pattern many times, each capture carrying a heap-string payload. The
+    // per-iteration `read` dies at the loop-body scope exit → its deferred
+    // capture Drop runs exactly once. Exactly one Drop per iteration
+    // (N == iterations) proves NO leak (missed drop) AND NO double-free
+    // (which would over-count or crash). `acc` proves each capture read its
+    // live value. Encoded as `acc * 100000 + N`.
+    let src = r#"
+let mut N: int = 0
+type R { id: int, tag: string }
+impl Drop for R { method drop() { N = N + 1 } }
+fn make_reader(k: int) {
+  let r = R { id: k, tag: f"payload-{k}" }
+  let f = || r.id
+  f
+}
+fn body() -> int {
+  let mut acc: int = 0
+  let mut i: int = 0
+  while i < 1000 {
+    let read = make_reader(i)
+    acc = acc + read()
+    i = i + 1
+  }
+  acc
+}
+let acc: int = body()
+acc * 100000 + N
+"#;
+    let result = eval(src);
+    // sum(0..1000) = 999*1000/2 = 499500; N == 1000
+    assert_eq!(
+        result.as_test_int(),
+        Some(499500 * 100000 + 1000),
+        "1000 returned-closure-capture escapes must each read the live value AND \
+         drop exactly once (no leak, no double-free); got {:?}",
+        result.as_test_int()
+    );
+}
+
+// ============================================================================
 // ADR-006 §2.7.30.4 — escape-Drop-deferral, RETURNED-VALUE arm (WF-1C lane a)
 //
 // A Drop-bearing value RETURNED from a function and bound in a caller local

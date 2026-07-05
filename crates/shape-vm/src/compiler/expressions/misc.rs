@@ -232,6 +232,16 @@ impl BytecodeCompiler {
                                     Some(super::super::DropKind::SyncOnly) | None => false,
                                 };
                                 self.track_drop_local(local_idx, is_async);
+                                // ADR-006 §2.7.30 (escape-Drop-deferral,
+                                // closure-capture arm, WF-1C lane b — CONSUMER
+                                // side): block-scope analogue of the
+                                // `compile_statement` registration. If this
+                                // block-local received an escaping closure from
+                                // a call return, discharge its deferred capture
+                                // Drops at the block's scope exit.
+                                if self.binding_should_track_closure_capture_drop(init_expr) {
+                                    self.track_closure_capture_drop_local(local_idx);
+                                }
                                 self.finish_reference_binding_from_expr(
                                     local_idx, true, name, init_expr, ref_borrow,
                                 );
