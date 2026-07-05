@@ -2067,15 +2067,6 @@ impl BytecodeCompiler {
                 TypeDiagnosticMode::Strict => {
                     return Err(Self::type_errors_to_shape(errors));
                 }
-                TypeDiagnosticMode::ReliableOnly => {
-                    let strict_errors: Vec<_> = errors
-                        .into_iter()
-                        .filter(|error| Self::should_emit_type_diagnostic(&error.error))
-                        .collect();
-                    if !strict_errors.is_empty() {
-                        return Err(Self::type_errors_to_shape(strict_errors));
-                    }
-                }
                 TypeDiagnosticMode::RecoverAll => {
                     self.errors.extend(
                         errors

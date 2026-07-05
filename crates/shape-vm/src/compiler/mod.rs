@@ -52,7 +52,7 @@ use crate::type_tracking::{TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
-    InferenceFacts, Type, TypeAnalysisMode, TypeError, TypeErrorWithLocation,
+    InferenceFacts, Type, TypeAnalysisMode, TypeErrorWithLocation,
     analyze_program_with_mode_and_comptime_context, checking::MethodTable,
 };
 
@@ -511,7 +511,6 @@ impl FunctionBlobBuilder {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeDiagnosticMode {
-    ReliableOnly,
     Strict,
     RecoverAll,
 }

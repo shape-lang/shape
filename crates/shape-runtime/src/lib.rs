@@ -120,7 +120,7 @@ pub use extensions_config::{
     load_extensions_config, load_extensions_config_from,
 };
 pub use hashing::{HashDigest, combine_hashes, hash_bytes, hash_file, hash_string};
-pub use intrinsics::{IntrinsicFn, IntrinsicsRegistry};
+pub use intrinsics::IntrinsicFn;
 pub use leakage::{LeakageDetector, LeakageReport, LeakageSeverity, LeakageType, LeakageWarning};
 pub use module_bindings::ModuleBindingRegistry;
 pub use module_exports::{
