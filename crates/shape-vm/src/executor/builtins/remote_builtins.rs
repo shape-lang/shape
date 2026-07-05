@@ -9,7 +9,9 @@
 //! Exports:
 //! - remote.execute(addr, code) -> Result<{ value, stdout, error }, string>
 //! - remote.ping(addr) -> Result<{ shape_version: string, wire_protocol: int }, string>
-//! - remote.__call(addr, fn_ref, args) -> Result<_, string>
+//! - remote.__call_raising(addr, fn_ref, args) -> Result<_, string>
+//!   (internal compiler-elaborated sibling of the public `remote::call`;
+//!   `__call` retired from the surface per Q35/OQ-11)
 //!
 //! ## W17-typed-module-exports rebuild (ADR-006 §2.7.4 + §2.7.4-addendum)
 //!
@@ -51,41 +53,283 @@
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_runtime::json_value::JsonValue;
-use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
-use shape_runtime::module_exports::ModuleExports;
+use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2, register_typed_fn_3_raw};
+use shape_runtime::module_exports::{ModuleExports, RemoteDispatcher};
+use shape_runtime::snapshot::{SerializableVMValue, SnapshotStore, slot_to_serializable};
 use shape_runtime::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_value::heap_value::HeapValue;
+use shape_value::v2::closure_raw::typed_closure_function_id;
+use shape_value::{HeapKind, KindedSlot, NativeKind};
 use shape_wire::WireValue;
 use shape_wire::transport::Transport;
 use shape_wire::transport::factory::TransportKind;
-use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::remote::{
+    RemoteCallError, RemoteCallRequest, RemoteCallResponse, RemoteErrorKind, WireMessage,
+    build_call_request_by_id, build_closure_call_request, call_with_resupply,
+};
 
 use super::transport_provider;
 
 // ---------------------------------------------------------------------------
-// Thread-local program reference for remote.__call()
+// Sender-side per-function transfer dispatcher (distributed §4.1.1)
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// The current BytecodeProgram, set by the VM before dispatching module
-    /// functions. Used by `remote.__call()` to build RemoteCallRequests.
-    static CURRENT_PROGRAM: RefCell<Option<crate::bytecode::BytecodeProgram>> = const { RefCell::new(None) };
+/// Unique-suffix counter for the ephemeral (de)serialization stores.
+static REMOTE_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh, process-local snapshot store used only to (de)serialize the
+/// arguments / captures of a single remote call. Heap-free scalar args never
+/// touch its filesystem; heap args (arrays / objects / strings) round-trip
+/// through the same `SerializableVMValue` <-> slot codec the receiver uses.
+fn ephemeral_store() -> Result<SnapshotStore, String> {
+    let seq = REMOTE_STORE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("shape-remote-{}-{}", std::process::id(), seq));
+    SnapshotStore::new(&dir)
+        .map_err(|e| format!("remote::call: failed to create serialization store: {e}"))
 }
 
-/// Set the thread-local program reference. Called by the VM before module dispatch.
-#[allow(dead_code)]
-pub fn set_current_program(program: &crate::bytecode::BytecodeProgram) {
-    CURRENT_PROGRAM.with(|p| {
-        *p.borrow_mut() = Some(program.clone());
-    });
+/// Sender-side [`RemoteDispatcher`] over the live `BytecodeProgram`.
+///
+/// Distributed §4.1.1: resolve `fn_ref` (named-function id or closure) to its
+/// content hash + minimal transitive blob closure, serialize the positional
+/// argument pack, perform the wire round-trip (with the bounded retry-once
+/// missing-blob resupply, `crate::remote::call_with_resupply`), and materialize
+/// the reply. Borrows the program — no clone, no `CURRENT_PROGRAM` thread-local
+/// (distributed R10).
+pub struct ProgramRemoteDispatcher<'a> {
+    program: &'a crate::bytecode::BytecodeProgram,
 }
 
-/// Clear the thread-local program reference. Called by the VM after module dispatch.
-#[allow(dead_code)]
-pub fn clear_current_program() {
-    CURRENT_PROGRAM.with(|p| {
-        *p.borrow_mut() = None;
-    });
+impl<'a> ProgramRemoteDispatcher<'a> {
+    pub fn new(program: &'a crate::bytecode::BytecodeProgram) -> Self {
+        Self { program }
+    }
+}
+
+/// Serialize the positional argument pack that the `@remote` before-hook /
+/// `remote::call` elaboration hands to the native.
+///
+/// The pack is a **single** carrier slot: the annotation wraps a function's
+/// positional arguments in one outer `Array` (so `addup(2, 3)` arrives as
+/// `[2, 3]`, and `f([1,2,3])` as `[[1,2,3]]`). We project that carrier through
+/// the shared `slot_to_serializable` codec — per-slot kind from the §2.7.7
+/// stack track, never fabricated — and flatten the outer array into the
+/// positional argument list the receiver marshals against `frame_descriptor`.
+fn serialize_arg_pack(
+    args: &[KindedSlot],
+    store: &SnapshotStore,
+) -> Result<Vec<SerializableVMValue>, String> {
+    if args.len() == 1 {
+        let pack = &args[0];
+        if let NativeKind::Ptr(HeapKind::TypedArray) = pack.kind() {
+            return serialize_typed_array_pack(pack.raw(), store);
+        }
+        // A lone non-array carrier is one positional argument.
+        return Ok(vec![
+            slot_to_serializable(pack.raw(), pack.kind(), store)
+                .map_err(|e| format!("remote::call: failed to serialize arguments: {e}"))?,
+        ]);
+    }
+    // Defensive: if the pack ever arrives already-flattened, serialize each
+    // slot as one positional argument (still kind-driven, never Bool-default).
+    args.iter()
+        .map(|s| {
+            slot_to_serializable(s.raw(), s.kind(), store)
+                .map_err(|e| format!("remote::call: failed to serialize arguments: {e}"))
+        })
+        .collect()
+}
+
+/// Flatten the outer positional-argument `TypedArray` into per-element
+/// `SerializableVMValue`s. Scalar-element arrays round-trip through the shared
+/// wholesale codec; heap-element arrays (e.g. `Array<string>`) are read
+/// element-by-element so each element is projected through its own per-kind
+/// arm (the wholesale codec's heap-element walk is a separate follow-up).
+/// Element kinds are the array's stamped element type — never fabricated.
+fn serialize_typed_array_pack(
+    bits: u64,
+    store: &SnapshotStore,
+) -> Result<Vec<SerializableVMValue>, String> {
+    use shape_value::v2::string_obj::StringObj;
+    use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, read_elem_type};
+
+    let ptr = bits as *const u8;
+    // SAFETY: a `Ptr(HeapKind::TypedArray)` slot's bits are a live,
+    // element-type-stamped TypedArray carrier per the construction contract.
+    let elem = unsafe { read_elem_type(ptr) };
+    let len = unsafe { TypedArray::<u64>::len(ptr as *const TypedArray<u64>) } as usize;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
+    match elem {
+        // Heap-element (String) arrays: read each `*const StringObj` element and
+        // project it through the `StringV2` arm (which the wholesale TypedArray
+        // codec does not yet cover).
+        ELEM_TYPE_STRING => {
+            let arr = ptr as *const TypedArray<*const StringObj>;
+            // SAFETY: element type is STRING, so elements are `*const StringObj`.
+            let slice = unsafe { TypedArray::<*const StringObj>::as_slice(arr) };
+            slice
+                .iter()
+                .map(|p| {
+                    slot_to_serializable(*p as u64, NativeKind::StringV2, store)
+                        .map_err(|e| format!("remote::call: failed to serialize argument: {e}"))
+                })
+                .collect()
+        }
+        // Scalar-element arrays: the wholesale codec is lossless here.
+        _ => {
+            let sv = slot_to_serializable(bits, NativeKind::Ptr(HeapKind::TypedArray), store)
+                .map_err(|e| format!("remote::call: failed to serialize arguments: {e}"))?;
+            match sv {
+                SerializableVMValue::Array(items) => Ok(items),
+                other => Ok(vec![other]),
+            }
+        }
+    }
+}
+
+/// Extract `(function_id, upvalues, upvalue_kinds)` from a closure `fn_ref`
+/// slot (distributed §4.4). Captures flow from the closure block's parallel
+/// §2.7.8 kind track via `read_capture_kinded` — `(bits, kind)` lockstep, never
+/// kind-from-bits. Heap dispatch is `as_heap_value()` + `HeapValue::ClosureRaw`
+/// (ADR-005 §1 single-discriminator).
+fn extract_closure_captures(
+    fn_ref: &KindedSlot,
+    store: &SnapshotStore,
+) -> Result<(u16, Vec<SerializableVMValue>, Vec<NativeKind>), String> {
+    let vs = fn_ref.slot();
+    let hv = vs.as_heap_value();
+    match hv {
+        HeapValue::ClosureRaw(block) => {
+            // SAFETY: a `Ptr(HeapKind::Closure)` slot's bits are a live
+            // `TypedClosureHeader` block per the construction invariant.
+            let function_id = unsafe { typed_closure_function_id(block.as_ptr()) };
+            let n = block.layout().capture_count();
+            let mut upvalues = Vec::with_capacity(n);
+            let mut kinds = Vec::with_capacity(n);
+            for i in 0..n {
+                // SAFETY: `i < capture_count()`; the block's captures were
+                // initialized at make-closure time.
+                let (bits, kind) = unsafe { block.read_capture_kinded(i) };
+                let sv = slot_to_serializable(bits, kind, store).map_err(|e| {
+                    format!("remote::call: failed to serialize closure capture #{i}: {e}")
+                })?;
+                upvalues.push(sv);
+                kinds.push(kind);
+            }
+            Ok((function_id, upvalues, kinds))
+        }
+        other => Err(format!(
+            "remote::call: expected a function or closure reference, got a {} value",
+            other.type_name(),
+        )),
+    }
+}
+
+/// Map a remote-call reply value to a `TypedReturn`. The `SerializableVMValue`
+/// variant faithfully reflects the receiver's runtime slot kind (the receiver
+/// cross-checks it against the callee's `abi_return_kind` before replying), so
+/// scalar / string returns project directly. Heap-shaped returns (arrays,
+/// objects) are a typed-projection follow-up (same scope boundary as
+/// `wire_to_json_value`'s placeholder variants).
+fn reply_to_typed_return(sv: SerializableVMValue) -> Result<TypedReturn, String> {
+    use SerializableVMValue as SV;
+    match sv {
+        SV::Int(i) => Ok(TypedReturn::Concrete(ConcreteReturn::I64(i))),
+        SV::Number(f) => Ok(TypedReturn::Concrete(ConcreteReturn::F64(f))),
+        SV::Bool(b) => Ok(TypedReturn::Concrete(ConcreteReturn::Bool(b))),
+        SV::String(s) => Ok(TypedReturn::Concrete(ConcreteReturn::String(s))),
+        SV::None | SV::Unit => Ok(TypedReturn::Concrete(ConcreteReturn::Unit)),
+        other => Err(format!(
+            "remote::call: remote returned a value shape ({:?}) whose typed \
+             sender-side projection is a follow-up (scalar / string returns are \
+             wired). Use remote.execute for polymorphic results.",
+            std::mem::discriminant(&other),
+        )),
+    }
+}
+
+/// One request -> response round-trip over a fresh transport (transport-agnostic
+/// send closure for `call_with_resupply`).
+fn send_call(addr: &str, req: &RemoteCallRequest) -> RemoteCallResponse {
+    let msg = WireMessage::Call(req.clone());
+    match wire_roundtrip(addr, &msg) {
+        Ok(WireMessage::CallResponse(r)) => r,
+        Ok(other) => RemoteCallResponse {
+            result: Err(RemoteCallError::new(
+                RemoteErrorKind::RuntimeError,
+                format!(
+                    "remote server returned an unexpected reply ({:?})",
+                    std::mem::discriminant(&other),
+                ),
+            )),
+        },
+        Err(e) => RemoteCallResponse {
+            // Transport-layer failure (connect refused / DNS / send / read).
+            result: Err(RemoteCallError::new(RemoteErrorKind::RuntimeError, e)),
+        },
+    }
+}
+
+impl RemoteDispatcher for ProgramRemoteDispatcher<'_> {
+    fn call_remote(
+        &self,
+        addr: &str,
+        fn_ref: &KindedSlot,
+        args: &[KindedSlot],
+    ) -> Result<TypedReturn, String> {
+        let store = ephemeral_store()?;
+        let arguments = serialize_arg_pack(args, &store)?;
+
+        // Resolve the callee to a RemoteCallRequest. A named-function value is
+        // a `NativeKind::UInt64` inline id (PushConst(Constant::Function)); a
+        // closure value is a `Ptr(HeapKind::Closure)` block carrying captures.
+        let request = match fn_ref.kind() {
+            NativeKind::UInt64 => {
+                let function_id = fn_ref.raw() as u16;
+                build_call_request_by_id(self.program, function_id, arguments).map_err(|e| {
+                    format!("remote::call: could not resolve the target function: {e}")
+                })?
+            }
+            NativeKind::Ptr(HeapKind::Closure) => {
+                let (function_id, upvalues, upvalue_kinds) =
+                    extract_closure_captures(fn_ref, &store)?;
+                build_closure_call_request(
+                    self.program,
+                    function_id,
+                    arguments,
+                    upvalues,
+                    upvalue_kinds,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "remote::call: the callee must be a function or closure \
+                     reference, but has kind {other:?}",
+                ));
+            }
+        };
+
+        // Wire round-trip with the bounded retry-once missing-blob resupply.
+        let response = call_with_resupply(self.program, request, |req| send_call(addr, req));
+
+        match response.result {
+            Ok(value) => reply_to_typed_return(value),
+            // Q26: transport / protocol / remote failures raise as an ordinary
+            // runtime error (the `_raising` sibling's contract). The recoverable
+            // structured surface is the public `remote::call` primitive.
+            Err(e) => Err(format!(
+                "remote call to {addr} failed: {}",
+                e.message,
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,46 +545,74 @@ pub fn create_remote_module() -> ModuleExports {
         },
     );
 
-    // remote.__call(addr, fn_ref, args) -> Result<_, string>
+    // remote.__call_raising(addr, fn_ref, args) -> _
     //
-    // SURFACE-and-stop per ADR-006 §2.7.8 / Q10 cell-storage
-    // parallel-kind: closure handles (`fn_ref`) carry per-capture kind
-    // metadata that lives on the closure header. The pre-bulldozer
-    // path materialised that metadata via deleted `as_closure_handle`
-    // + `captures_as_values` accessors. The kind-threaded rebuild is
-    // bounded to the W17-typed-module-exports-followup sub-cluster
-    // (typed-payload-projection territory) — out of W17-typed-module-
-    // exports scope per audit §2.2. Body returns a structured error
-    // rather than dispatch a possibly-wrong call.
+    // Internal compiler-elaborated sibling of the public `remote::call`
+    // primitive (Q35 / OQ-11). Distributed §4.1.1: PER-ARITY typed native
+    // (addr: String, fn_ref: function-ref carrier, arg-pack) whose body reads
+    // the true `&[KindedSlot]` carriers (kinds from the §2.7.7 stack track)
+    // and delegates the whole transfer to the VM-provided `RemoteDispatcher`
+    // on `ModuleContext` (program access without the deleted `CURRENT_PROGRAM`
+    // thread-local clone, distributed R10). The variadic Bool-default path is
+    // refused (CLAUDE.md §Forbidden Patterns).
     //
-    // The registration is preserved so LSP signature help + completion
-    // continues to surface the export.
-    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
+    // `_raising`: on transport / protocol / remote failure the body returns a
+    // native `Err(String)` which the VM surfaces as an ordinary runtime error
+    // (Q26); on success it returns the bare callee value at its declared kind.
+    register_typed_fn_3_raw(
         &mut module,
-        "__call",
-        "Call a function on a remote Shape server",
-        // Signature uses (addr, fn_name) at the marshal-typed boundary
-        // for the W17-typed-module-exports landing; the heterogeneous
-        // `args: Array<_>` parameter projects through the followup
-        // sub-cluster. Body errors at the boundary if reached.
-        [("addr", "string"), ("fn_name", "string")],
-        ConcreteType::Named("Result<_, string>".to_string()),
-        |_addr, _fn_name, ctx| {
-            shape_runtime::module_exports::check_permission(
-                ctx,
-                shape_abi_v1::Permission::NetConnect,
-            )?;
-            Ok(TypedReturn::Err(ConcreteReturn::String(
-                "remote.__call() requires upvalue kind track \
-                 (ADR-006 §2.7.8 / Q10 cell-storage parallel-kind) — \
-                 not yet wired through the typed-module-exports boundary; \
-                 use remote.execute(addr, code) for source-level dispatch"
-                    .to_string(),
-            )))
-        },
+        "__call_raising",
+        "Call a function on a remote Shape server (internal `remote::call` sibling)",
+        [
+            ("addr", "string"),
+            ("fn_ref", "_"),
+            ("args", "Array<_>"),
+        ],
+        // Declared per-arity kinds. `fn_ref` is a callee reference — a
+        // `NativeKind::UInt64` inline function id (named function) or a
+        // `Ptr(HeapKind::Closure)` block; the body dispatches on the slot's
+        // stamped kind. `args` is the positional pack carrier (an Array).
+        [
+            NativeKind::String,
+            NativeKind::UInt64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        ],
+        ConcreteType::Named("_".to_string()),
+        remote_call_raising_body,
     );
 
     module
+}
+
+/// Native body for `remote::__call_raising` (§4.1.1). Checks `NetConnect`
+/// sender-side, then delegates the resolve-blobs + serialize + round-trip to
+/// the `ModuleContext`'s [`RemoteDispatcher`]. Absence of the dispatcher is a
+/// surface-and-stop machinery bug — never a silent local execution.
+fn remote_call_raising_body(
+    slots: &[KindedSlot],
+    ctx: &shape_runtime::module_exports::ModuleContext,
+) -> Result<TypedReturn, String> {
+    shape_runtime::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+
+    let addr_sv = slot_to_serializable(slots[0].raw(), slots[0].kind(), &ephemeral_store()?)
+        .map_err(|e| format!("remote::call: invalid address argument: {e}"))?;
+    let addr = match addr_sv {
+        SerializableVMValue::String(s) => s,
+        other => {
+            return Err(format!(
+                "remote::call: address must be a string, got {:?}",
+                std::mem::discriminant(&other),
+            ));
+        }
+    };
+
+    let dispatcher = ctx.remote_dispatch.ok_or_else(|| {
+        "remote::call: the runtime did not install a distributed-transfer \
+         dispatcher (internal error) — the call was not attempted"
+            .to_string()
+    })?;
+
+    dispatcher.call_remote(&addr, &slots[1], &slots[2..])
 }
 
 #[cfg(test)]
@@ -353,7 +625,8 @@ mod tests {
         assert_eq!(module.name, "std::core::remote");
         assert!(module.has_export("execute"));
         assert!(module.has_export("ping"));
-        assert!(module.has_export("__call"));
+        assert!(module.has_export("__call_raising"));
+        assert!(!module.has_export("__call"), "__call retired from surface (Q35/OQ-11)");
     }
 
     #[test]

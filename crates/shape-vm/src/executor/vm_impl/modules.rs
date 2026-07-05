@@ -692,6 +692,13 @@ impl VirtualMachine {
         let vm_state_snap = self.capture_vm_state();
         let schema_registry: &shape_runtime::type_schema::TypeSchemaRegistry =
             &self.program.type_schema_registry;
+        // Sender-side per-function distributed-transfer seam (distributed
+        // §4.1.1). A thin borrow of the live program — NOT a clone (the
+        // deleted `CURRENT_PROGRAM` thread-local's whole-program clone per
+        // dispatch is distributed R10). Coexists with `schema_registry`'s
+        // immutable borrow of `self.program`.
+        let remote_dispatcher =
+            crate::executor::builtins::remote_builtins::ProgramRemoteDispatcher::new(&self.program);
         // SAFETY: extend the borrow lifetime to 'ctx via transmute is
         // not needed here because `ModuleContext` is invariant on its
         // lifetime parameter and the body call below holds the borrow
@@ -711,6 +718,7 @@ impl VirtualMachine {
             scope_constraints: self.scope_constraints.clone(),
             set_pending_resume: None,
             set_pending_frame_resume: None,
+            remote_dispatch: Some(&remote_dispatcher),
         };
 
         match entry {
