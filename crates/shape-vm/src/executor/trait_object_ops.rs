@@ -728,8 +728,41 @@ impl VirtualMachine {
         // self argument) ONLY if we have a drop fn to call.
         let (bits, kind) = self.pop_kinded()?;
 
+        // Dispatch the user `Drop::drop` body (with error containment),
+        // consuming the popped `(bits, kind)` share exactly once. Factored
+        // so the closure-capture escape path (`op_drop_closure_captures`)
+        // reuses the same resolve + call + containment logic.
+        self.dispatch_user_drop(bits, kind, type_name_opt.as_deref(), is_async, ctx)
+    }
+
+    /// Run the user `Drop::drop` (or `drop_async`) body for a single
+    /// `(bits, kind)` receiver whose concrete type is `type_name_opt`,
+    /// consuming exactly one strong-count share of the receiver.
+    ///
+    /// Shared by `op_drop_call_impl` (scope-exit `DropCall`) and
+    /// `op_drop_closure_captures` (ADR-006 §2.7.30 escape-Drop-deferral,
+    /// WF-1C lane b). Contains any runtime error raised inside the drop body
+    /// (WF-1C fix (c)): the aborted drop frame is unwound, the error is
+    /// logged to the drop-error sink, and control returns `Ok(())` so the
+    /// remaining scope-exit drops still run and the scope's return value is
+    /// preserved.
+    ///
+    /// Contract: the caller transfers ownership of ONE strong-count share of
+    /// `(bits, kind)` into this call. If no `Drop` impl is registered for
+    /// `type_name_opt` the share is released via the canonical kind dispatch;
+    /// otherwise it is threaded as the `self` argument and retired by the
+    /// drop frame teardown. Either way the caller must NOT release the share
+    /// again.
+    fn dispatch_user_drop(
+        &mut self,
+        bits: u64,
+        kind: NativeKind,
+        type_name_opt: Option<&str>,
+        is_async: bool,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<(), VMError> {
         // Resolve the drop function name.
-        let drop_fn_name = type_name_opt.as_ref().and_then(|tn| {
+        let drop_fn_name = type_name_opt.and_then(|tn| {
             // Drop trait registered impl: function name is
             // `TypeName::drop` (or `TypeName::drop_async`). Async drop
             // tries the async variant first, then falls back to sync.
@@ -751,8 +784,8 @@ impl VirtualMachine {
         });
 
         let Some(fn_name) = drop_fn_name else {
-            // No drop impl. The kinded pop already released the
-            // share; we're done.
+            // No drop impl. Release the share via the canonical kind
+            // dispatch; we're done.
             drop_kinded(bits, kind);
             return Ok(());
         };
@@ -779,19 +812,69 @@ impl VirtualMachine {
         let self_arg = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         let args = vec![self_arg];
         let saved_depth = self.call_stack.len();
-        self.call_function_with_nb_args(function_id, &args)?;
-        // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
-        // post-fix the helper clones each arg into the new frame; let
-        // `args` drop normally to retire the caller-owned share.
-        self.execute_until_call_depth(saved_depth, ctx)?;
-        drop(args);
-        // Pop and discard the drop fn's return value (Drop::drop
-        // returns Unit; the kind dispatch on pop releases any
-        // refcount it carried).
-        let (rbits, rkind) = self.pop_kinded()?;
-        drop_kinded(rbits, rkind);
-        Ok(())
+        // WF-1C fix (c) — drop-error containment (ADR-006 §2.7.30).
+        // Capture the instruction pointer BEFORE frame setup. This is the
+        // exact `return_ip` the drop frame records
+        // (`call_function_with_nb_args` reads `self.ip` unchanged before its
+        // frame push). On the containment path `op_return` never runs for the
+        // aborted frame, so we restore `self.ip` ourselves — the outer
+        // dispatch loop then resumes at the instruction AFTER this `DropCall`,
+        // i.e. the NEXT scope-exit `DropCall`.
+        let saved_ip = self.ip;
+
+        // Drive the drop body. `call_function_with_nb_args` sets up the frame
+        // (cloning `args` into it) and `execute_until_call_depth` runs the
+        // body to its `op_return`. A runtime error anywhere in the drop body
+        // must NOT abort the program: it is contained so the remaining
+        // scope-exit drops still run and the scope's return value (sitting on
+        // the stack BENEATH the drop receivers) is preserved.
+        let drop_result = match self.call_function_with_nb_args(function_id, &args) {
+            Ok(()) => self.execute_until_call_depth(saved_depth, ctx),
+            Err(e) => Err(e),
+        };
+
+        match drop_result {
+            Ok(()) => {
+                // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
+                // the helper clones each arg into the new frame; let `args`
+                // drop normally to retire the caller-owned share.
+                drop(args);
+                // Pop and discard the drop fn's return value (Drop::drop
+                // returns Unit; the kind dispatch on pop releases any
+                // refcount it carried).
+                let (rbits, rkind) = self.pop_kinded()?;
+                drop_kinded(rbits, rkind);
+                Ok(())
+            }
+            Err(err) => {
+                // ---- Drop-error containment (WF-1C fix (c)). ----
+                // 1. Unwind every frame the aborted drop body pushed beyond
+                //    `saved_depth`. `unwind_call_frames_to` truncates each
+                //    frame's data stack to its base_pointer — releasing the
+                //    arg clones this call installed plus any drop-body
+                //    temporaries via the §2.7.7 kinded drop — and retires each
+                //    frame's closure-self keep-alive share. The scope's real
+                //    return value is untouched: it sits BELOW the drop
+                //    frame's base_pointer (the receiver was already popped at
+                //    `pop_kinded` above).
+                self.unwind_call_frames_to(saved_depth);
+                // 2. Restore the instruction pointer so the outer loop resumes
+                //    at the next scope-exit `DropCall` (op_return never ran).
+                self.ip = saved_ip;
+                // 3. Release the caller-owned self-arg share exactly once.
+                //    (Mirrors the Ok path's `drop(args)`; the frame's clone
+                //    was already retired by the unwind truncate above.)
+                drop(args);
+                // 4. Record + log the contained error. Do NOT pop a return
+                //    value here — the drop fn never returned one and the
+                //    unwind already restored the stack; popping would consume
+                //    the scope's real return value sitting beneath.
+                self.record_contained_drop_error(type_name_opt, &err);
+                Ok(())
+            }
+        }
     }
+
 }
 
 /// Local helper: release a `(bits, kind)` share via the canonical

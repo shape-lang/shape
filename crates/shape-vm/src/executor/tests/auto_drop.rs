@@ -648,3 +648,114 @@ w
          (declaration order must not change variant selection)"
     );
 }
+
+/// WF-1C fix (c) — drop-error containment (ADR-006 §2.7.30, audit §4.7c).
+///
+/// A runtime error raised inside a user `Drop::drop` body must be CONTAINED,
+/// not propagated: the program does not abort, every *remaining* scope-exit
+/// drop still runs, and the scope's return value is preserved. Pre-fix,
+/// `op_drop_call_impl` propagated the drop-body error with `?`, so the first
+/// failing drop aborted the whole VM — the remaining drops were skipped and
+/// the return value was lost.
+///
+/// Two `Bad` locals whose `drop()` bodies BOTH raise an out-of-bounds error.
+/// Reverse-order scope exit drops `b2` then `b1`. Containment must:
+///   - not surface the error out of `execute` (no abort),
+///   - preserve the `scope()` return value (`42`),
+///   - run BOTH drops (each contained error lands in the drop-error sink →
+///     `drop_errors().len() == 2`, proving `b1` still ran after `b2`'s error
+///     was contained).
+#[test]
+fn drop_error_is_contained_remaining_drops_run_and_return_preserved() {
+    use crate::VMConfig;
+    use crate::executor::VirtualMachine;
+    let src = r#"
+type Bad { id: int }
+impl Drop for Bad {
+  method drop() {
+    let a: Array<int> = []
+    let x: int = a[5]
+  }
+}
+fn scope() -> int {
+  let b1 = Bad { id: 1 }
+  let b2 = Bad { id: 2 }
+  42
+}
+scope()
+"#;
+    let bc = compile(src);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bc);
+    let result = vm.execute(None);
+    assert!(
+        result.is_ok(),
+        "drop-body error must be contained, not propagated; got {:?}",
+        result.err()
+    );
+    assert_eq!(
+        result.unwrap().as_i64(),
+        Some(42),
+        "scope() return value must survive drop-error containment"
+    );
+    assert_eq!(
+        vm.drop_errors().len(),
+        2,
+        "both scope-exit drops must run under containment; sink = {:?}",
+        vm.drop_errors()
+    );
+}
+
+/// WF-1C fix (c) — containment isolates ONLY the failing drop; the surrounding
+/// successful drops still run and the return value survives.
+///
+/// Mirrors the audit §4.7c repro: three locals `g1` (Good), `b` (Bad, errors),
+/// `g2` (Good). Reverse-order exit runs `g2` (ok), `b` (errors → contained),
+/// `g1` (ok). Exactly ONE contained error is recorded (the Bad drop); the two
+/// Good drops run without error and the scope returns `42`.
+#[test]
+fn drop_error_containment_isolates_only_failing_drop() {
+    use crate::VMConfig;
+    use crate::executor::VirtualMachine;
+    let src = r#"
+type Good { id: int }
+impl Drop for Good {
+  method drop() { let _keep: int = self.id }
+}
+type Bad { tag: int }
+impl Drop for Bad {
+  method drop() {
+    let a: Array<int> = []
+    let x: int = a[5]
+  }
+}
+fn scope() -> int {
+  let g1 = Good { id: 1 }
+  let b = Bad { tag: 0 }
+  let g2 = Good { id: 2 }
+  42
+}
+scope()
+"#;
+    let bc = compile(src);
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bc);
+    let result = vm.execute(None);
+    assert!(
+        result.is_ok(),
+        "only the failing drop should be contained; got {:?}",
+        result.err()
+    );
+    assert_eq!(
+        result.unwrap().as_i64(),
+        Some(42),
+        "return value must survive a contained drop between two Good drops"
+    );
+    assert_eq!(
+        vm.drop_errors().len(),
+        1,
+        "exactly the Bad drop must be contained; the Good drops must not error; \
+         sink = {:?}",
+        vm.drop_errors()
+    );
+}
