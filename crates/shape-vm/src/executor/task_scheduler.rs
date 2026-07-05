@@ -41,9 +41,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
+use shape_runtime::typed_module_exports::TypedReturn;
 use shape_value::heap_value::{HeapKind, TaskGroupData};
 use shape_value::{NativeKind, VMError};
+use tokio::task::AbortHandle;
 
 use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 
@@ -54,6 +57,27 @@ use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 /// heap-bearing kinds; producing a copy bumps it via `clone_with_kind`,
 /// dropping it releases via `drop_with_kind`.
 type Kinded = (u64, NativeKind);
+
+/// An async module-function task that is genuinely in flight on the shared
+/// background runtime (WF-2D real concurrency).
+///
+/// The `time::sleep`-style future was `spawn`ed onto
+/// [`crate::executor::async_runtime::shared_runtime`] the instant the async
+/// module call was evaluated; it is making progress on a worker thread right
+/// now. `completion` delivers the body's raw `Result<TypedReturn, String>`
+/// back to the interpreter thread (blocking `recv` for `await`, non-blocking
+/// `try_recv` for the `race`/`any` first-completion poll). `abort` lets
+/// `race`/`any` losers and `async scope` exit genuinely cancel the underlying
+/// tokio task rather than let it run to completion unobserved.
+pub struct PendingAsyncTask {
+    /// Delivers the async body result from the worker thread. Projection of
+    /// `TypedReturn` into a `KindedSlot` happens on the interpreter thread
+    /// (it needs the VM's schema registry), so the channel carries the raw
+    /// `TypedReturn` rather than a projected kinded pair.
+    pub completion: Receiver<Result<TypedReturn, String>>,
+    /// Cancels the in-flight tokio task (real cancellation).
+    pub abort: AbortHandle,
+}
 
 /// Completion status of a spawned task.
 #[derive(Debug, Clone)]
@@ -87,6 +111,12 @@ pub struct TaskScheduler {
     /// Used for remote calls and other externally-completed futures.
     /// Result is a kinded pair on success.
     external_receivers: HashMap<u64, tokio::sync::oneshot::Receiver<Result<Kinded, String>>>,
+
+    /// In-flight async module-function tasks (WF-2D real concurrency). Each
+    /// entry is a `time::sleep`-style future already running on the shared
+    /// background runtime; the interpreter thread collects the result via the
+    /// task's `completion` channel at `await`/`join` time.
+    pending_async: HashMap<u64, PendingAsyncTask>,
 }
 
 impl TaskScheduler {
@@ -96,7 +126,45 @@ impl TaskScheduler {
             callables: HashMap::new(),
             results: HashMap::new(),
             external_receivers: HashMap::new(),
+            pending_async: HashMap::new(),
         }
+    }
+
+    /// Record an in-flight async module-function task (WF-2D real concurrency).
+    ///
+    /// Called by `spawn_async_module_future` the instant an async module call
+    /// is evaluated: the future is already `spawn`ed onto the shared
+    /// background runtime and running. The scheduler marks the task `Pending`
+    /// so scope-tracking / `is_resolved` behave uniformly with the other task
+    /// kinds, and stores the completion channel + abort handle.
+    pub fn store_pending_async(&mut self, task_id: u64, task: PendingAsyncTask) {
+        self.results.insert(task_id, TaskStatus::Pending);
+        self.pending_async.insert(task_id, task);
+    }
+
+    /// Whether `task_id` names an in-flight async module-function task.
+    pub fn has_pending_async(&self, task_id: u64) -> bool {
+        self.pending_async.contains_key(&task_id)
+    }
+
+    /// Take (remove) the in-flight async task so the caller can drive its
+    /// completion channel. Ownership of the receiver + abort handle transfers
+    /// out.
+    pub fn take_pending_async(&mut self, task_id: u64) -> Option<PendingAsyncTask> {
+        self.pending_async.remove(&task_id)
+    }
+
+    /// Non-blocking poll of an in-flight async task's completion channel
+    /// WITHOUT removing the entry (used by the `race`/`any` first-completion
+    /// spin loop). Returns `None` if no such pending-async task exists.
+    #[allow(clippy::type_complexity)]
+    pub fn peek_pending_async_try_recv(
+        &mut self,
+        task_id: u64,
+    ) -> Option<Result<Result<TypedReturn, String>, std::sync::mpsc::TryRecvError>> {
+        self.pending_async
+            .get_mut(&task_id)
+            .map(|task| task.completion.try_recv())
     }
 
     /// Register a callable for a given task_id.
@@ -140,6 +208,12 @@ impl TaskScheduler {
 
     /// Mark a task as cancelled.
     pub fn cancel(&mut self, task_id: u64) {
+        // In-flight async module task: abort the underlying tokio task so a
+        // cancelled `time::sleep` really stops rather than run to completion
+        // unobserved (WF-2D real cancellation).
+        if let Some(task) = self.pending_async.remove(&task_id) {
+            task.abort.abort();
+        }
         // Only cancel if still pending
         if let Some(TaskStatus::Pending) = self.results.get(&task_id) {
             self.results.insert(task_id, TaskStatus::Cancelled);
@@ -384,6 +458,13 @@ impl Drop for TaskScheduler {
             if let TaskStatus::Completed((bits, kind)) = status {
                 drop_with_kind(bits, kind);
             }
+        }
+        // pending_async: abort any still-in-flight async module tasks so their
+        // background tokio tasks stop when the VM tears down (WF-2D). Dropping
+        // the receiver also closes the completion channel; the aborted task's
+        // send (if any) fails silently.
+        for (_, task) in self.pending_async.drain() {
+            task.abort.abort();
         }
         // external_receivers: Receivers do not own scheduler-side shares;
         // the share is in transit on the channel and the dropping receiver
