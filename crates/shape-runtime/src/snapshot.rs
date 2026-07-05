@@ -29,12 +29,20 @@ use shape_value::datatable::DataTable;
 /// decode a snapshot or need migration logic.
 ///
 /// Version history:
-/// - v5 (current): ValueWord-native serialization — `nanboxed_to_serializable`
+/// - v5: ValueWord-native serialization — `nanboxed_to_serializable`
 ///   and `serializable_to_nanboxed` operate on ValueWord directly without
 ///   intermediate ValueWord conversion. Format is wire-compatible with v4
 ///   (same `SerializableVMValue` enum), so v4 snapshots deserialize
 ///   correctly without migration.
-pub const SNAPSHOT_VERSION: u32 = 5;
+/// - v6 (current, WF-2B snapshot-resume Stage 0/1): per-frame
+///   `SerializableCallFrame.upvalue_kinds` wire field (retires the
+///   no-layout Bool-default fabrication at `executor/snapshot.rs`, ADR-006
+///   §2.7.8/Q10 — restore reads the recorded per-upvalue `NativeKind`
+///   instead of guessing) + `ExecutionSnapshot.code_manifest` / `label`
+///   envelope fields (CodeManifest blob-graph persistence, design §4.3).
+///   The bincode wire encoding is non-self-describing, so this is a hard
+///   version bump: older snapshots refuse cleanly, never Bool-default.
+pub const SNAPSHOT_VERSION: u32 = 6;
 
 pub(crate) const DEFAULT_CHUNK_LEN: usize = 4096;
 pub(crate) const BYTE_CHUNK_LEN: usize = 256 * 1024;
@@ -179,10 +187,149 @@ pub struct ExecutionSnapshot {
     pub semantic_hash: HashDigest,
     pub context_hash: HashDigest,
     pub vm_hash: Option<HashDigest>,
+    /// Transitional monolithic-program twin. Written alongside
+    /// [`code_manifest`](Self::code_manifest) through the staged migration
+    /// (design §4.3.1 / §4.3.3) so same-node resume lands before the
+    /// blob-graph load path is complete. Dropped at the cross-node close.
     pub bytecode_hash: Option<HashDigest>,
+    /// Content hash of the [`CodeManifest`] object (design §4.3.2 / Q16):
+    /// the authoritative code reference (per-`FunctionBlob` content hashes +
+    /// permission union). `Some` from Stage 1 onward; `None` on legacy
+    /// snapshots that predate the manifest.
+    #[serde(default)]
+    pub code_manifest: Option<HashDigest>,
     /// Path of the script that was executing when the snapshot was taken
     #[serde(default)]
     pub script_path: Option<String>,
+    /// Reserved for snapshot-management tooling (`shape snapshot list`,
+    /// design §4.12.2). Landed at the Stage-0/1 bump so list/inspect need
+    /// no later format change.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Content-addressed code manifest referenced by an [`ExecutionSnapshot`]
+/// (design §4.3.2, Q16 blob-graph persistence).
+///
+/// The manifest names the exact per-`FunctionBlob` content hashes a resume
+/// must verify and fetch, instead of pinning a single monolithic program
+/// blob. This is what lets snapshots of the same program dedup blobs, lets a
+/// remote node fetch code per-function, and lets permission re-verification
+/// happen at blob granularity. Portable by construction: every field is a
+/// fixed-width content hash or a permission name — no host pointers, no
+/// program-relative ids.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeManifest {
+    /// Content hash of this manifest's own (sorted) blob list — the
+    /// program identity a resume checks first.
+    pub program_root_hash: [u8; 32],
+    /// Sorted `FunctionBlob` content hashes — the transitive closure of the
+    /// code the snapshot references.
+    pub blobs: Vec<[u8; 32]>,
+    /// Blob containing the function that `VmSnapshot.ip` belongs to, when
+    /// known (content-addressed programs). `None` for non-content-addressed
+    /// programs where the monolithic `bytecode_hash` twin is authoritative.
+    #[serde(default)]
+    pub entry: Option<[u8; 32]>,
+    /// Linker union of the required permissions (permission names), recorded
+    /// so resume re-verifies `union ⊆ granted` before any bytecode executes
+    /// (design §4.7.3). Independently checkable because each blob's content
+    /// hash already covers its permission names.
+    #[serde(default)]
+    pub required_permissions: Vec<String>,
+}
+
+impl CodeManifest {
+    /// Build a manifest from a set of `FunctionBlob` content hashes, the
+    /// entry-function hash, and the linker permission union. Sorts the blob
+    /// list and derives `program_root_hash` from it so the same program
+    /// always produces the same root hash.
+    pub fn from_blobs(
+        mut blobs: Vec<[u8; 32]>,
+        entry: Option<[u8; 32]>,
+        mut required_permissions: Vec<String>,
+    ) -> Self {
+        blobs.sort_unstable();
+        blobs.dedup();
+        required_permissions.sort_unstable();
+        required_permissions.dedup();
+        let mut root_input = Vec::with_capacity(blobs.len() * 32);
+        for h in &blobs {
+            root_input.extend_from_slice(h);
+        }
+        let program_root_hash = crate::hashing::hash_bytes_to_array(&root_input);
+        Self {
+            program_root_hash,
+            blobs,
+            entry,
+            required_permissions,
+        }
+    }
+}
+
+/// Engine-owned envelope halves the dispatch loop cannot reach on its own
+/// (design §4.3.4). Installed on the VM by the host at program load, beside
+/// the snapshot store, so the in-loop suspension consumer can persist a
+/// complete envelope without re-entering engine state.
+#[derive(Debug, Clone)]
+pub struct SnapshotEnvelopeSeed {
+    /// Content hash of the (already-persisted) [`SemanticSnapshot`]. The host
+    /// writes the `SemanticSnapshot` object once at load and records its hash
+    /// here — `exported_symbols` are fixed after load.
+    pub semantic_hash: HashDigest,
+    /// Path of the executing script, for envelope metadata / tooling.
+    pub script_path: Option<String>,
+}
+
+/// Persist a captured VM snapshot as a complete content-addressed envelope
+/// (design §4.3.4). Free function so the dispatch shell can call it with what
+/// the loop already has (Constraint 8 keeps it off the JIT ABI).
+///
+/// Write ordering follows §4.3.5: content-addressed sub-objects first
+/// (idempotent — a content-addressed put is a no-op if present), the
+/// `ExecutionSnapshot` envelope last, so a crash never yields a
+/// referenced-but-missing object.
+#[allow(clippy::too_many_arguments)]
+pub fn persist_execution_state(
+    store: &SnapshotStore,
+    seed: &SnapshotEnvelopeSeed,
+    ctx: Option<&crate::context::ExecutionContext>,
+    vm_snapshot: &VmSnapshot,
+    manifest: &CodeManifest,
+    bytecode_hash: Option<HashDigest>,
+    label: Option<String>,
+) -> Result<HashDigest> {
+    // 1. Context envelope half. `None` (embedded paths without a persistent
+    //    context) is the NoPersistentContext barrier at the call site; here
+    //    we require a context to snapshot.
+    let context = match ctx {
+        Some(ctx) => ctx.snapshot(store)?,
+        None => {
+            return Err(anyhow::anyhow!(
+                "persist_execution_state: no execution context to snapshot"
+            ));
+        }
+    };
+    let context_hash = store.put_struct(&context)?;
+
+    // 2. Content-addressed sub-objects (idempotent puts).
+    let code_manifest_hash = store.put_struct(manifest)?;
+    let vm_hash = store.put_struct(vm_snapshot)?;
+
+    // 3. Envelope last (atomic entry point).
+    let snapshot = ExecutionSnapshot {
+        version: SNAPSHOT_VERSION,
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
+        semantic_hash: seed.semantic_hash.clone(),
+        context_hash,
+        vm_hash: Some(vm_hash),
+        bytecode_hash,
+        code_manifest: Some(code_manifest_hash),
+        script_path: seed.script_path.clone(),
+        label,
+    };
+    let snapshot_hash = store.put_snapshot(&snapshot)?;
+    Ok(snapshot_hash)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,6 +438,14 @@ pub struct SerializableCallFrame {
     /// absolute IP on restore. Only meaningful when `blob_hash` is `Some`.
     #[serde(default)]
     pub local_ip: Option<usize>,
+    /// Per-upvalue `NativeKind`, recorded at capture (design §4.2.4, ADR-006
+    /// §2.7.8/Q10). Retires the no-layout Bool-default fabrication: when a
+    /// frame's closure carries no layout side-table, restore reads the
+    /// recorded kind here instead of guessing `Bool`. `None` only when the
+    /// frame has no upvalues; a no-layout frame WITH upvalues always records
+    /// this so restore never fabricates a kind.
+    #[serde(default)]
+    pub upvalue_kinds: Option<Vec<shape_value::NativeKind>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1924,6 +2079,50 @@ fn link_promoted_reference(
         (Arc::into_raw(rt) as u64, projected_kind)
     };
     Ok((raw, NativeKind::Ptr(HeapKind::Reference)))
+}
+
+/// Derive the `expected_kind` for [`serializable_to_slot`] from a
+/// [`SerializableVMValue`] discriminator alone (design §4.2 / ADR-006
+/// §2.7.5.1: the SV variant is the authoritative carrier of the slot's kind).
+///
+/// Used by restore paths that do NOT persist a parallel kind track next to the
+/// value (the `ExecutionContext` variable scopes carry a `VarKind`, not a
+/// `NativeKind`). For carrier-ambiguous BODY arms (`SV::SharedCell`) the
+/// caller must instead thread the real per-slot kind via
+/// [`serializable_to_slot_ctx`]; this returns the cell carrier as the
+/// standalone default. Complex/unmappable arms return `NativeKind::Bool`, which
+/// makes [`serializable_to_slot`] surface a clean projection error rather than
+/// silently Bool-defaulting a real heap value (Constraint 3).
+pub fn expected_kind_from_serializable(sv: &SerializableVMValue) -> NativeKind {
+    use SerializableVMValue as SV;
+    match sv {
+        SV::Int(_) => NativeKind::Int64,
+        SV::Number(_) => NativeKind::Float64,
+        SV::Bool(_) => NativeKind::Bool,
+        SV::String(_) => NativeKind::String,
+        SV::None | SV::Unit => NativeKind::Null,
+        SV::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
+        SV::BigInt(_) => NativeKind::Ptr(HeapKind::BigInt),
+        SV::Char(_) => NativeKind::Ptr(HeapKind::Char),
+        SV::HashSet { .. } => NativeKind::Ptr(HeapKind::HashSet),
+        SV::PriorityQueueHeap { .. } => NativeKind::Ptr(HeapKind::PriorityQueue),
+        SV::AtomicI64 { .. } => NativeKind::Ptr(HeapKind::Atomic),
+        SV::ResultData { .. } | SV::OptionData { .. } => NativeKind::Ptr(HeapKind::TypedObject),
+        SV::IteratorOpaque => NativeKind::Ptr(HeapKind::Iterator),
+        SV::DequeOpaque { .. } => NativeKind::Ptr(HeapKind::Deque),
+        SV::ChannelOpaque { .. } => NativeKind::Ptr(HeapKind::Channel),
+        SV::Reference { .. } => NativeKind::Ptr(HeapKind::Reference),
+        SV::SharedCell { .. } => NativeKind::Ptr(HeapKind::SharedCell),
+        SV::SharedCellRef { .. } => NativeKind::Ptr(HeapKind::SharedCell),
+        SV::FilterExprOpaque => NativeKind::Ptr(HeapKind::FilterExpr),
+        SV::MutexOpaque { .. } => NativeKind::Ptr(HeapKind::Mutex),
+        SV::LazyOpaque { .. } => NativeKind::Ptr(HeapKind::Lazy),
+        SV::TypedObject { .. } => NativeKind::Ptr(HeapKind::TypedObject),
+        SV::Range { .. } => NativeKind::Ptr(HeapKind::Range),
+        SV::HashMap { .. } => NativeKind::Ptr(HeapKind::HashMap),
+        SV::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
+        _ => NativeKind::Bool,
+    }
 }
 
 pub fn serializable_to_slot(

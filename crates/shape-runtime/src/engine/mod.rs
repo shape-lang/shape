@@ -265,6 +265,36 @@ impl ShapeEngine {
         self.snapshot_store.as_ref()
     }
 
+    /// Build the snapshot persistence context for installation on a VM
+    /// before execution (design §4.3.4). Persists the `SemanticSnapshot`
+    /// once (idempotent, content-addressed) and returns the store handle +
+    /// envelope seed the in-loop `snapshot()` consumer needs. `Ok(None)`
+    /// when no store is configured (embedded / opt-out hosts) — the VM then
+    /// refuses `snapshot()` with the `NoStore` barrier rather than trapping.
+    pub fn snapshot_install_context(
+        &self,
+    ) -> Result<Option<(std::sync::Arc<SnapshotStore>, crate::snapshot::SnapshotEnvelopeSeed)>>
+    {
+        let Some(store) = self.snapshot_store.as_ref() else {
+            return Ok(None);
+        };
+        let semantic = SemanticSnapshot {
+            exported_symbols: self.exported_symbols.clone(),
+        };
+        let semantic_hash =
+            store
+                .put_struct(&semantic)
+                .map_err(|e| ShapeError::RuntimeError {
+                    message: format!("failed to persist SemanticSnapshot for snapshot seed: {e}"),
+                    location: None,
+                })?;
+        let seed = crate::snapshot::SnapshotEnvelopeSeed {
+            semantic_hash,
+            script_path: self.script_path.clone(),
+        };
+        Ok(Some((std::sync::Arc::new(store.clone()), seed)))
+    }
+
     /// Store a serializable blob in the snapshot store and return its hash.
     pub fn store_snapshot_blob<T: Serialize>(&self, value: &T) -> Result<HashDigest> {
         let store = self
@@ -313,7 +343,12 @@ impl ShapeEngine {
             context_hash,
             vm_hash,
             bytecode_hash,
+            // The engine-level path (REPL / legacy) does not build a
+            // CodeManifest; the in-loop snapshot consumer (design §4.3.4)
+            // writes the manifest. Left `None` here.
+            code_manifest: None,
             script_path: self.script_path.clone(),
+            label: None,
         };
 
         let snapshot_hash = store.put_snapshot(&snapshot)?;

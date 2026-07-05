@@ -441,6 +441,9 @@ pub async fn run_script(
         Err(e) if e.downcast_ref::<ShapeError>().is_some() => {
             if let Some(ShapeError::Interrupted { snapshot_hash }) = e.downcast_ref::<ShapeError>()
             {
+                // Design §4.4 exit-code contract: an interrupted run exits 130
+                // (128 + SIGINT) whether or not a snapshot was saved, so scripts
+                // can distinguish completed (0) from interrupted (130).
                 if let Some(hash) = snapshot_hash {
                     eprintln!("Snapshot saved: {}", hash);
                     if let Some(ref f) = file {
@@ -449,9 +452,9 @@ pub async fn run_script(
                         eprintln!("Resume with: shape --resume {}", hash);
                     }
                 } else {
-                    eprintln!("Interrupted (snapshot could not be saved)");
+                    eprintln!("Interrupted - no snapshot saved");
                 }
-                Ok(())
+                std::process::exit(130);
             } else {
                 exec_result
             }
@@ -1473,6 +1476,16 @@ async fn execute_file(
         match run_engine(engine, source, execution_mode, interrupt_flag, run_security).await {
             Ok(r) => r,
             Err(err) => {
+                // Ctrl+C interrupt-save (design §4.4): propagate `Interrupted`
+                // to the caller's handler, which prints the resume command and
+                // exits 130. The generic error path below exits 1 — reserved
+                // for real failures, not user interrupts.
+                if matches!(
+                    err.downcast_ref::<shape_runtime::error::ShapeError>(),
+                    Some(shape_runtime::error::ShapeError::Interrupted { .. })
+                ) {
+                    return Err(err);
+                }
                 let runtime_error = engine.get_runtime_mut().take_last_runtime_error();
                 print_shape_error(&err, runtime_error.as_ref());
                 std::process::exit(1);
