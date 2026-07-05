@@ -55,7 +55,7 @@ pub fn is_red(row) {
 /// @param threshold Optional maximum body-to-range ratio.
 /// @returns True when the candle is classified as a doji.
 pub fn is_doji(row, threshold) {
-    let thresh = if threshold == None then 0.001 else threshold;
+    let thresh = if threshold == None { 0.001 } else { threshold };
     let body_size = body(row);
     let range_size = range(row);
     range_size > 0 and (body_size / range_size) < thresh

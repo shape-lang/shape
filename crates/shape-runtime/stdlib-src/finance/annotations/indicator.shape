@@ -18,7 +18,7 @@
 ///     let rs = avg_gain / avg_loss
 ///     return 100 - (100 / (1 + rs))
 /// }
-annotation indicator() {
+pub annotation indicator() {
     // Called when a function with @indicator is defined
     // self = the annotated function
     on_define(ctx) {

@@ -1,9 +1,8 @@
 // Shape Standard Library - Candlestick Patterns
 // This module provides common candlestick pattern definitions
 
-module patterns {
-    // Import types for pattern analysis
-    from std::finance::types use { Candle };
+// Import types for pattern analysis
+from std::finance::types use { Candle };
 
     // Single candle patterns
 
@@ -13,7 +12,7 @@ module patterns {
 
     // Note: doji pattern is defined in patterns/doji.shape
 
-    pub fn dragonfly_doji(candle: Candle) -> boolean {
+    pub fn dragonfly_doji(candle: Candle) -> bool {
         let body = abs(candle.close - candle.open);
         let range = candle.high - candle.low;
         let lower_shadow = min(candle.open, candle.close) - candle.low;
@@ -24,7 +23,7 @@ module patterns {
                upper_shadow < range * 0.1;
     }
 
-    pub fn gravestone_doji(candle: Candle) -> boolean {
+    pub fn gravestone_doji(candle: Candle) -> bool {
         let body = abs(candle.close - candle.open);
         let range = candle.high - candle.low;
         let upper_shadow = candle.high - max(candle.open, candle.close);
@@ -35,14 +34,14 @@ module patterns {
                lower_shadow < range * 0.1;
     }
 
-    pub fn marubozu(candle: Candle) -> boolean {
+    pub fn marubozu(candle: Candle) -> bool {
         let body = abs(candle.close - candle.open);
         let range = candle.high - candle.low;
 
         return body > range * 0.95;
     }
 
-    pub fn spinning_top(candle: Candle) -> boolean {
+    pub fn spinning_top(candle: Candle) -> bool {
         let body = abs(candle.close - candle.open);
         let range = candle.high - candle.low;
         let upper_shadow = candle.high - max(candle.open, candle.close);
@@ -59,19 +58,19 @@ module patterns {
 
     // Note: bearish_engulfing pattern is defined in patterns/bearish_engulfing.shape
 
-    pub fn tweezer_top(candle: Candle) -> boolean {
+    pub fn tweezer_top(candle: Candle) -> bool {
         return candle[-1].high ~= candle[0].high and    // Same highs (fuzzy match)
                candle[-1].close > candle[-1].open and   // First is bullish
                candle[0].close < candle[0].open;        // Second is bearish
     }
 
-    pub fn tweezer_bottom(candle: Candle) -> boolean {
+    pub fn tweezer_bottom(candle: Candle) -> bool {
         return candle[-1].low ~= candle[0].low and      // Same lows (fuzzy match)
                candle[-1].close < candle[-1].open and   // First is bearish
                candle[0].close > candle[0].open;        // Second is bullish
     }
 
-    pub fn piercing_line(candle: Candle) -> boolean {
+    pub fn piercing_line(candle: Candle) -> bool {
         return candle[-1].close < candle[-1].open and   // Previous is bearish
                candle[0].close > candle[0].open and     // Current is bullish
                candle[0].open < candle[-1].low and      // Opens below previous low
@@ -79,7 +78,7 @@ module patterns {
                candle[0].close < candle[-1].open;       // Closes within previous body
     }
 
-    pub fn dark_cloud_cover(candle: Candle) -> boolean {
+    pub fn dark_cloud_cover(candle: Candle) -> bool {
         return candle[-1].close > candle[-1].open and   // Previous is bullish
                candle[0].close < candle[0].open and     // Current is bearish
                candle[0].open > candle[-1].high and     // Opens above previous high
@@ -89,7 +88,7 @@ module patterns {
 
     // Three candle patterns
 
-    pub fn morning_star(candle: Candle) -> boolean {
+    pub fn morning_star(candle: Candle) -> bool {
         let first_range = candle[-2].high - candle[-2].low;
         let first_body = abs(candle[-2].close - candle[-2].open);
         let star_body = abs(candle[-1].close - candle[-1].open);
@@ -108,7 +107,7 @@ module patterns {
                candle[0].close > midpoint;              // Closes at least halfway up first candle
     }
 
-    pub fn evening_star(candle: Candle) -> boolean {
+    pub fn evening_star(candle: Candle) -> bool {
         let first_range = candle[-2].high - candle[-2].low;
         let first_body = abs(candle[-2].close - candle[-2].open);
         let star_body = abs(candle[-1].close - candle[-1].open);
@@ -127,7 +126,7 @@ module patterns {
                candle[0].close < midpoint;              // Closes at least halfway down first candle
     }
 
-    pub fn three_white_soldiers(candle: Candle) -> boolean {
+    pub fn three_white_soldiers(candle: Candle) -> bool {
         // Three consecutive bullish candles
         return candle[-2].close > candle[-2].open and
                candle[-1].close > candle[-1].open and
@@ -142,7 +141,7 @@ module patterns {
                candle[0].close > candle[-1].close;
     }
 
-    pub fn three_black_crows(candle: Candle) -> boolean {
+    pub fn three_black_crows(candle: Candle) -> bool {
         // Three consecutive bearish candles
         return candle[-2].close < candle[-2].open and
                candle[-1].close < candle[-1].open and
@@ -159,7 +158,7 @@ module patterns {
 
     // Additional single candle patterns
 
-    pub fn bullish_marubozu(candle: Candle) -> boolean {
+    pub fn bullish_marubozu(candle: Candle) -> bool {
         let body = candle.close - candle.open;
         let range = candle.high - candle.low;
 
@@ -169,7 +168,7 @@ module patterns {
                candle.close ~= candle.high;    // Closes at high
     }
 
-    pub fn bearish_marubozu(candle: Candle) -> boolean {
+    pub fn bearish_marubozu(candle: Candle) -> bool {
         let body = candle.open - candle.close;
         let range = candle.high - candle.low;
 
@@ -179,7 +178,7 @@ module patterns {
                candle.close ~= candle.low;     // Closes at low
     }
 
-    pub fn long_legged_doji(candle: Candle) -> boolean {
+    pub fn long_legged_doji(candle: Candle) -> bool {
         let body = abs(candle.close - candle.open);
         let range = candle.high - candle.low;
         let upper_shadow = candle.high - max(candle.open, candle.close);
@@ -190,7 +189,7 @@ module patterns {
                lower_shadow > range * 0.4;     // Long lower shadow
     }
 
-    pub fn bullish_belt_hold(candle: Candle) -> boolean {
+    pub fn bullish_belt_hold(candle: Candle) -> bool {
         let body = candle.close - candle.open;
         let range = candle.high - candle.low;
 
@@ -199,7 +198,7 @@ module patterns {
                candle[-1].close < candle[-1].open;  // Previous bearish
     }
 
-    pub fn bearish_belt_hold(candle: Candle) -> boolean {
+    pub fn bearish_belt_hold(candle: Candle) -> bool {
         let body = candle.open - candle.close;
         let range = candle.high - candle.low;
 
@@ -210,7 +209,7 @@ module patterns {
 
     // Additional two candle patterns
 
-    pub fn harami(candle: Candle) -> boolean {
+    pub fn harami(candle: Candle) -> bool {
         let prev_body = abs(candle[-1].close - candle[-1].open);
         let curr_body = abs(candle[0].close - candle[0].open);
 
@@ -220,35 +219,35 @@ module patterns {
                curr_body < prev_body * 0.5;    // Current body is small
     }
 
-    pub fn bullish_harami(candle: Candle) -> boolean {
+    pub fn bullish_harami(candle: Candle) -> bool {
         // Harami pattern with bullish implications
         return harami(candle) and
                candle[-1].close < candle[-1].open and  // Previous bearish
                candle[0].close > candle[0].open;       // Current bullish
     }
 
-    pub fn bearish_harami(candle: Candle) -> boolean {
+    pub fn bearish_harami(candle: Candle) -> bool {
         // Harami pattern with bearish implications
         return harami(candle) and
                candle[-1].close > candle[-1].open and  // Previous bullish
                candle[0].close < candle[0].open;       // Current bearish
     }
 
-    pub fn on_neck_line(candle: Candle) -> boolean {
+    pub fn on_neck_line(candle: Candle) -> bool {
         return candle[-1].close < candle[-1].open and   // Previous bearish
                candle[0].close > candle[0].open and     // Current bullish
                candle[0].open < candle[-1].low and      // Opens below previous low
                candle[0].close ~= candle[-1].low;       // Closes near previous low
     }
 
-    pub fn in_neck_line(candle: Candle) -> boolean {
+    pub fn in_neck_line(candle: Candle) -> bool {
         return candle[-1].close < candle[-1].open and   // Previous bearish
                candle[0].close > candle[0].open and     // Current bullish
                candle[0].open < candle[-1].low and      // Opens below previous low
                candle[0].close ~= candle[-1].close;     // Closes near previous close
     }
 
-    pub fn thrusting_pattern(candle: Candle) -> boolean {
+    pub fn thrusting_pattern(candle: Candle) -> bool {
         return candle[-1].close < candle[-1].open and   // Previous bearish
                candle[0].close > candle[0].open and     // Current bullish
                candle[0].open < candle[-1].low and      // Opens below previous low
@@ -258,7 +257,7 @@ module patterns {
 
     // Additional three candle patterns
 
-    pub fn abandoned_baby_bullish(candle: Candle) -> boolean {
+    pub fn abandoned_baby_bullish(candle: Candle) -> bool {
         // First candle: bearish
         return candle[-2].close < candle[-2].open and
                // Second candle: doji with gap down
@@ -269,7 +268,7 @@ module patterns {
                candle[0].low > candle[-1].high;
     }
 
-    pub fn abandoned_baby_bearish(candle: Candle) -> boolean {
+    pub fn abandoned_baby_bearish(candle: Candle) -> bool {
         // First candle: bullish
         return candle[-2].close > candle[-2].open and
                // Second candle: doji with gap up
@@ -280,7 +279,7 @@ module patterns {
                candle[0].high < candle[-1].low;
     }
 
-    pub fn three_inside_up(candle: Candle) -> boolean {
+    pub fn three_inside_up(candle: Candle) -> bool {
         // Bullish harami followed by higher close
         return candle[-2].close < candle[-2].open and                         // First bearish
                max(candle[-1].open, candle[-1].close) < candle[-2].open and  // Second inside first
@@ -290,7 +289,7 @@ module patterns {
                candle[0].close > candle[-1].close;                           // Third closes higher
     }
 
-    pub fn three_inside_down(candle: Candle) -> boolean {
+    pub fn three_inside_down(candle: Candle) -> bool {
         // Bearish harami followed by lower close
         return candle[-2].close > candle[-2].open and                         // First bullish
                max(candle[-1].open, candle[-1].close) < candle[-2].close and // Second inside first
@@ -300,7 +299,7 @@ module patterns {
                candle[0].close < candle[-1].close;                           // Third closes lower
     }
 
-    pub fn three_outside_up(candle: Candle) -> boolean {
+    pub fn three_outside_up(candle: Candle) -> bool {
         // Bullish engulfing followed by higher close
         return candle[-2].close < candle[-2].open and   // First bearish
                candle[-1].close > candle[-1].open and   // Second bullish
@@ -310,7 +309,7 @@ module patterns {
                candle[0].close > candle[-1].close;      // Third closes higher
     }
 
-    pub fn three_outside_down(candle: Candle) -> boolean {
+    pub fn three_outside_down(candle: Candle) -> bool {
         // Bearish engulfing followed by lower close
         return candle[-2].close > candle[-2].open and   // First bullish
                candle[-1].close < candle[-1].open and   // Second bearish
@@ -320,7 +319,7 @@ module patterns {
                candle[0].close < candle[-1].close;      // Third closes lower
     }
 
-    pub fn bullish_tri_star(candle: Candle) -> boolean {
+    pub fn bullish_tri_star(candle: Candle) -> bool {
         // Three dojis with the middle one gapped
         return abs(candle[-2].close - candle[-2].open) < (candle[-2].high - candle[-2].low) * 0.1 and
                abs(candle[-1].close - candle[-1].open) < (candle[-1].high - candle[-1].low) * 0.1 and
@@ -329,7 +328,7 @@ module patterns {
                candle[0].low > candle[-1].high;        // Third gaps up
     }
 
-    pub fn bearish_tri_star(candle: Candle) -> boolean {
+    pub fn bearish_tri_star(candle: Candle) -> bool {
         // Three dojis with the middle one gapped
         return abs(candle[-2].close - candle[-2].open) < (candle[-2].high - candle[-2].low) * 0.1 and
                abs(candle[-1].close - candle[-1].open) < (candle[-1].high - candle[-1].low) * 0.1 and
@@ -340,11 +339,11 @@ module patterns {
 
     // Pattern helper functions
 
-    pub fn is_bullish(candle: Candle) -> boolean {
+    pub fn is_bullish(candle: Candle) -> bool {
         return candle[0].close > candle[0].open;
     }
 
-    pub fn is_bearish(candle: Candle) -> boolean {
+    pub fn is_bearish(candle: Candle) -> bool {
         return candle[0].close < candle[0].open;
     }
 
@@ -360,11 +359,11 @@ module patterns {
         return min(candle[0].open, candle[0].close) - candle[0].low;
     }
 
-    pub fn is_gap_up(candle: Candle) -> boolean {
+    pub fn is_gap_up(candle: Candle) -> bool {
         return candle[0].low > candle[-1].high;
     }
 
-    pub fn is_gap_down(candle: Candle) -> boolean {
+    pub fn is_gap_down(candle: Candle) -> bool {
         return candle[0].high < candle[-1].low;
     }
 
@@ -420,4 +419,3 @@ module patterns {
         }
         return sum / period;
     }
-}

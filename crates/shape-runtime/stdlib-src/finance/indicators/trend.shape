@@ -6,6 +6,7 @@ from std::finance::indicators::moving_averages use { ema }
 from std::finance::indicators::volatility use { atr }
 from std::core::utils::rolling use { linear_recurrence, rolling_mean }
 from std::core::utils::vector use { select }
+from std::finance::annotations::warmup use { @warmup }
 
 // Wilder's Smoothing (Running Moving Average)
 fn rma(series, period) {

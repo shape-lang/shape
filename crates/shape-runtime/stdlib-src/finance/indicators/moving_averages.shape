@@ -3,6 +3,7 @@
 /// High-performance moving average implementations using SIMD vector operations
 
 from std::core::utils::rolling use { rolling_mean, rolling_sum, linear_recurrence }
+from std::finance::annotations::warmup use { @warmup }
 
 /// Compute the simple moving average over `period`.
 ///

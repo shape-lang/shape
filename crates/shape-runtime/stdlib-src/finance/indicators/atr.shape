@@ -3,6 +3,8 @@
 // ATR measures market volatility by decomposing the entire range of an asset price
 // for that period. It was developed by J. Welles Wilder Jr.
 
+from std::finance::annotations::warmup use { @warmup }
+
 // Need one extra candle for true range calculation
 /// Compute ATR from the implicit `candle` series in candle-scoped indicator code.
 ///
