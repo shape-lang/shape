@@ -861,83 +861,84 @@ impl JITCompiler {
                     error = %e,
                     "jit-mir compile failed",
                 );
-                // Define a stub body so Cranelift doesn't panic on undefined symbol.
-                // The stub returns signal -1 (error), causing the caller to deopt.
+                // WF-1A signal-reexec fix (audit 2026-07-04 §4(a)): a function
+                // that fails Phase-4 JIT compile is demoted to the interpreter.
+                // We DO NOT define a runtime `-1` stub body for it.
                 //
-                // W12-jit-linker-resolve (`docs/cluster-audits/w12-jit-linker-audit.md`):
-                // Cranelift's `iconst` immediate-bounds rule requires the I32
-                // immediate to be the unsigned bit-pattern, not the signed
-                // value. `iconst.i32 -1` is rejected by the verifier because
-                // `-1i64 as u64 = 0xFFFFFFFFFFFFFFFF` exceeds the I32 mask
-                // `u32::MAX = 0xFFFFFFFF`. Pass the two's-complement unsigned
-                // bit pattern instead — see `cranelift-codegen/src/verifier/
-                // mod.rs:1644-1665` for the documented invariant.
+                // The old code defined a stub returning signal `-1`. Because the
+                // top-level frame (and any other body) was compiled BEFORE this
+                // failure was known — believing this function JIT-compatible per
+                // the Phase-1 preflight — it emitted a DIRECT Cranelift call to
+                // this function's pre-declared `FuncId`. At runtime the native
+                // frame ran its side effects (e.g. `print`) and THEN called the
+                // `-1` stub. `-1` is not a carved-out recoverable signal, so the
+                // executor took the outer-`Err` path (executor.rs:886) and
+                // re-ran the WHOLE program under the interpreter
+                // (executor.rs:201), DUPLICATING every already-executed side
+                // effect (the double-execution bug). A partially-executed native
+                // frame is not resumable, so a runtime `-1` arriving after side
+                // effects cannot be recovered by re-running — the only sound
+                // recovery is to fail the JIT compile up front, before `jit_fn`
+                // runs anything.
                 //
-                // Also: previously the stub `define_function` failure was
-                // silently swallowed via `let _ = ...`, which left the
-                // declared FuncId with no body and caused `finalize_definitions`
-                // to panic with `can't resolve symbol main_f{idx}_{name}` —
-                // the very surface this audit traced. Surface the stub
-                // failure under `SHAPE_JIT_DEBUG=1` so future regressions
-                // don't hide beneath the linker panic.
-                if let Some(&fid) = user_func_ids.get(&(idx as u16)) {
-                    let mut stub_sig = self.module.make_signature();
-                    stub_sig.params.push(AbiParam::new(types::I64));
-                    let effective_arity = func.captures_count + func.arity;
-                    for _ in 0..effective_arity {
-                        stub_sig.params.push(AbiParam::new(types::I64));
-                    }
-                    stub_sig.returns.push(AbiParam::new(types::I32));
-                    let mut stub_ctx = self.module.make_context();
-                    stub_ctx.func.signature = stub_sig;
-                    let mut stub_builder_ctx = FunctionBuilderContext::new();
-                    {
-                        let mut b = FunctionBuilder::new(&mut stub_ctx.func, &mut stub_builder_ctx);
-                        let block = b.create_block();
-                        b.append_block_params_for_function_params(block);
-                        b.switch_to_block(block);
-                        b.seal_block(block);
-                        // Cranelift I32 iconst convention: pass the unsigned
-                        // bit-pattern, not the signed value. `-1i32` is
-                        // `0xFFFFFFFF` as a `u32`.
-                        let neg = b.ins().iconst(types::I32, (-1i32 as u32) as i64);
-                        b.ins().return_(&[neg]);
-                        b.finalize();
-                    }
-                    if let Err(stub_err) = self.module.define_function(fid, &mut stub_ctx) {
-                        tracing::debug!(
-                            target: "shape_jit",
-                            func_name = %func.name,
-                            idx,
-                            fid = ?fid,
-                            error = ?stub_err,
-                            "jit-mir stub define_function failed",
-                        );
-                        // Surface-and-stop: a failed stub leaves the declared
-                        // FuncId with no body, which propagates to
-                        // `finalize_definitions` as a `can't resolve symbol`
-                        // panic. Convert to a structured error here so the
-                        // caller sees a typed JIT-compilation failure, not a
-                        // panic through `catch_unwind`. The stub itself was
-                        // supposed to be a recovery path; if recovery fails,
-                        // the whole JIT compilation is unsound.
-                        return Err(format!(
-                            "JIT stub fallback failed for function '{}' (idx={}): {:?}. \
-                             The Cranelift module is in an inconsistent state — \
-                             this is a JIT-compiler bug, not a user-code error. \
-                             See docs/cluster-audits/w12-jit-linker-audit.md.",
-                            func.name, idx, stub_err
-                        ));
-                    }
-                    self.module.clear_context(&mut stub_ctx);
-                }
+                // By leaving the failed function undefined, cranelift's
+                // `finalize_definitions` (below) reports it as an unresolved
+                // symbol IFF a natively-compiled body actually references it via
+                // a relocation — i.e. exactly the set of Phase-4 failures that
+                // would otherwise have reached the `-1` stub at runtime. That is
+                // caught below and turned into a COMPILE-STAGE deopt (before any
+                // side effect). An UNREFERENCED failure (e.g. an unused stdlib
+                // prelude function such as `std::core::math::mean`, of which a
+                // typical program carries 100+) leaves no relocation, so finalize
+                // succeeds and the rest of the program still JIT-runs — this must
+                // NOT deopt, or `--mode jit` would fall back for essentially
+                // every prelude-using program.
                 jit_compatible[idx] = false;
             }
         }
 
-        self.module
-            .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize definitions: {:?}", e))?;
+        // WF-1A signal-reexec fix (continued): finalize the module, converting a
+        // cranelift "can't resolve symbol" panic — raised when a natively-
+        // compiled body references a Phase-4-failed (now undefined) function —
+        // into a clean COMPILE-STAGE `Err`. Returning `Err` here aborts the JIT
+        // compile before `jit_fn` executes; `JITExecutor::execute_with_jit` maps
+        // it to the `[jit-fallback]` interpreter path, which runs the whole
+        // program ONCE (== `--mode vm` semantics) with no duplicated side
+        // effects. The panic is ALREADY caught one level up (the `catch_unwind`
+        // around `compile_program_selective` in executor.rs) — we catch it here
+        // only to (a) produce a structured error instead of the raw panic text
+        // and (b) silence the internal cranelift panic message on stderr for a
+        // program that then runs correctly under the fallback. The panic hook is
+        // suppressed ONLY across this single finalize call (compile stage is
+        // single-threaded). Do NOT reintroduce the runtime `-1` stub or carve
+        // `-1` out as "recoverable".
+        let prev_panic_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let finalize_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.module.finalize_definitions()
+        }));
+        std::panic::set_hook(prev_panic_hook);
+        match finalize_outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("Failed to finalize definitions: {:?}", e)),
+            Err(panic_payload) => {
+                let panic_msg = panic_payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown finalize panic".to_string());
+                return Err(format!(
+                    "WF-1A signal-reexec (audit 2026-07-04 §4(a)): JIT finalize could \
+                     not resolve a native reference to a function that failed Phase-4 \
+                     JIT compile ({}). Whole-program deopt to the bytecode interpreter \
+                     at COMPILE stage (before any native side effect); the demoted \
+                     function has no runtime `-1` stub, so the executor's outer-Err \
+                     interpreter re-run can no longer double already-executed side \
+                     effects.",
+                    panic_msg
+                ));
+            }
+        }
 
         let main_code_ptr = self.module.get_finalized_function(main_func_id);
         self.compiled_functions

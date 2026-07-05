@@ -13,12 +13,22 @@ use crate::compiler::JITCompiler;
 use crate::mixed_table::FunctionEntry;
 
 /// Compile Shape source end-to-end through the JIT. Returns the program
-/// + mixed table so tests can assert on per-function dispatch.
-fn compile_to_mixed_table(
+/// paired with the `compile_program_selective` OUTCOME: `Ok(table)`
+/// exposes the mixed table for per-function dispatch assertions;
+/// `Err(msg)` carries the compile failure verbatim.
+///
+/// The outcome is a `Result` (not an unconditional `.expect`) because the
+/// WF-1A signal-reexec fix (item 1, `compiler/program.rs`) makes
+/// `compile_program_selective` return `Err` — a whole-program COMPILE-stage
+/// deopt — whenever a natively-compiled body references a function that
+/// failed Phase-4 JIT compile. That replaced the pre-item-1 `-1` runtime
+/// stub (the double-execution defect the 2026-07-04 audit found). A test
+/// exercising such a program must observe the deopt, not `.expect(Ok)`.
+fn try_compile_to_mixed_table(
     source: &str,
 ) -> (
     shape_vm::bytecode::BytecodeProgram,
-    crate::mixed_table::MixedFunctionTable,
+    Result<crate::mixed_table::MixedFunctionTable, String>,
 ) {
     use shape_vm::BytecodeCompiler;
 
@@ -39,10 +49,10 @@ fn compile_to_mixed_table(
 
     let jit_config = JITConfig::default();
     let mut jit = JITCompiler::new(jit_config).expect("JIT init failed");
-    let (_jit_fn, mixed_table) = jit
+    let outcome = jit
         .compile_program_selective("main", &bytecode)
-        .expect("JIT compilation failed");
-    (bytecode, mixed_table)
+        .map(|(_jit_fn, mixed_table)| mixed_table);
+    (bytecode, outcome)
 }
 
 /// Returns `true` when `mixed_table` has at least one closure function
@@ -78,9 +88,28 @@ fn jit_run(source: &str) -> shape_wire::WireValue {
 #[test]
 fn a1e_jit_var_closure_body_is_natively_compiled() {
     // Minimal `var` counter closure. After A.1E, the closure body's
-    // `Load/StoreSharedCapture` opcodes pass JIT preflight, so the
-    // closure lands in the mixed table as `FunctionEntry::Native`.
-    // Under A.1D.2 (pre-A.1E) this would appear as `Interpreted(...)`.
+    // `Load/StoreSharedCapture` opcodes pass JIT preflight, so the closure
+    // FUNCTION is Phase-4-compilable. But calling it from `main` (`f()`)
+    // still exercises the pre-existing branch-wide Shared-capture
+    // closure-CALL Phase-4 regression (`project_jit_closure_fix.md`), so
+    // `main` itself fails Phase-4 JIT compile.
+    //
+    // Because the top-level frame natively references `main`, the WF-1A
+    // signal-reexec fix (item 1, `compiler/program.rs`) whole-program
+    // deopts at COMPILE stage: `compile_program_selective` returns Err
+    // instead of the pre-item-1 `-1`-stub-masked Ok. (Pre-item-1 this test
+    // observed a partial mixed table with the closure as Native and `main`
+    // as a runtime `-1` stub; that stub is exactly the double-execution
+    // defect the 2026-07-04 audit found, so item 1 deleted it.)
+    //
+    // The assertion therefore has two arms:
+    //  - Err  (CURRENT): pin item 1's whole-program compile-stage deopt —
+    //    NOT a `-1` runtime stub, NOT a silent partial compile.
+    //  - Ok   (FUTURE): once the Shared closure-CALL Phase-4 regression is
+    //    fixed and `main` compiles natively, the original A.1E contract —
+    //    the closure body lands as `FunctionEntry::Native` — must hold. The
+    //    Ok arm flips on automatically at that point, so this test stays a
+    //    live regression net for A.1E native dispatch.
     let source = r#"
         fn main() -> int {
             var x: int = 0
@@ -90,14 +119,26 @@ fn a1e_jit_var_closure_body_is_natively_compiled() {
         }
         main()
     "#;
-    let (program, table) = compile_to_mixed_table(source);
-    assert!(
-        has_native_closure(&program, &table),
-        "A.1E: closure body containing Load/StoreSharedCapture must \
-         JIT-compile to FunctionEntry::Native. native={} interpreted={}",
-        table.native_count(),
-        table.interpreted_count()
-    );
+    let (program, outcome) = try_compile_to_mixed_table(source);
+    match outcome {
+        Ok(table) => {
+            assert!(
+                has_native_closure(&program, &table),
+                "A.1E: closure body containing Load/StoreSharedCapture must \
+                 JIT-compile to FunctionEntry::Native. native={} interpreted={}",
+                table.native_count(),
+                table.interpreted_count()
+            );
+        }
+        Err(msg) => {
+            assert!(
+                msg.contains("signal-reexec") && msg.contains("failed Phase-4 JIT compile"),
+                "expected the WF-1A signal-reexec whole-program compile-stage \
+                 deopt (main's Shared closure-CALL fails Phase-4 while the \
+                 top-level frame natively references it), got: {msg}"
+            );
+        }
+    }
 }
 
 #[test]
