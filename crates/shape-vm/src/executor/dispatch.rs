@@ -170,18 +170,6 @@ impl VirtualMachine {
                 self.poll_tier_completions();
             }
 
-            // GC safepoint poll (gc feature only)
-            #[cfg(feature = "gc")]
-            if self.instruction_count & 0x3FF == 0 {
-                self.gc_safepoint_poll();
-
-                // Incremental marking: make bounded progress on the gray worklist
-                // when a marking cycle is active, without stopping the world.
-                if self.gc_heap.as_ref().map_or(false, |h| h.is_marking()) {
-                    self.gc_incremental_mark_step();
-                }
-            }
-
             // Time-travel capture check (debug path).
             if let Some(ref mut tt) = self.time_travel {
                 let current_ip = self.ip.saturating_sub(1);
@@ -328,18 +316,6 @@ impl VirtualMachine {
                 self.poll_tier_completions();
             }
 
-            // GC safepoint poll (gc feature only)
-            #[cfg(feature = "gc")]
-            if self.instruction_count & 0x3FF == 0 {
-                self.gc_safepoint_poll();
-
-                // Incremental marking: make bounded progress on the gray worklist
-                // when a marking cycle is active, without stopping the world.
-                if self.gc_heap.as_ref().map_or(false, |h| h.is_marking()) {
-                    self.gc_incremental_mark_step();
-                }
-            }
-
             let instruction = self.program.instructions[ip];
 
             // Record instruction in metrics (opt-in, near-zero cost when None)
@@ -462,18 +438,6 @@ impl VirtualMachine {
             // Check for Ctrl+C interrupt every 1024 instructions
             if self.instruction_count & 0x3FF == 0 && self.interrupt.load(Ordering::Relaxed) > 0 {
                 return Err(VMError::Interrupted);
-            }
-
-            // GC safepoint poll (gc feature only)
-            #[cfg(feature = "gc")]
-            if self.instruction_count & 0x3FF == 0 {
-                self.gc_safepoint_poll();
-
-                // Incremental marking: make bounded progress on the gray worklist
-                // when a marking cycle is active, without stopping the world.
-                if self.gc_heap.as_ref().map_or(false, |h| h.is_marking()) {
-                    self.gc_incremental_mark_step();
-                }
             }
 
             let instruction = self.program.instructions[ip];

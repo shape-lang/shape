@@ -1,7 +1,7 @@
 //! Memory management for Shape VM
 //!
-//! Without `gc` feature: stub using Arc reference counting (no-op GC).
-//! With `gc` feature: delegates to shape-gc's GcHeap for real collection.
+//! Arc reference counting is the memory model; the `GarbageCollector` here
+//! is bookkeeping-only (stats reporting), not a tracing collector.
 
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -116,20 +116,12 @@ impl GarbageCollector {
 /// Called when a heap pointer in an existing slot is overwritten.
 /// `old` is the NaN-boxed bits being replaced; `new` is the incoming bits.
 ///
-/// Without `gc` feature: no-op (compiles away entirely).
-/// With `gc` feature: enqueues the old reference into the SATB buffer
-/// and marks the new reference gray if an incremental marking cycle is active.
+/// No-op outside `gc_barrier_debug` builds (compiles away entirely).
 #[inline(always)]
 pub fn write_barrier_slot(_old: u64, _new: u64) {
     #[cfg(feature = "gc_barrier_debug")]
     {
         BARRIER_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    #[cfg(feature = "gc")]
-    {
-        // Will wire to shape_gc::barrier::SatbBuffer::enqueue() here.
-        // 1. `_old` may become unreachable (SATB enqueue)
-        // 2. `_new` has a new reference (mark gray)
     }
 }
 

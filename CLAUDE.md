@@ -36,7 +36,6 @@ The repo is a monorepo with several top-level projects:
 | **shape-jit** | `crates/shape-jit/` | Cranelift JIT compiler (tiered: baseline @ 100 calls, optimizing @ 10k) |
 | **shape-wire** | `crates/shape-wire/` | Serialization (MessagePack) and QUIC transport, wire protocol v1 |
 | **shape-abi-v1** | `crates/shape-abi-v1/` | Stable C ABI for native extensions, Permission enum (16 permissions), PermissionSet, ScopeConstraints |
-| **shape-gc** | `crates/shape-gc/` | GC infrastructure (currently no-op; Arc ref counting is sufficient) |
 | **shape-macros** | `crates/shape-macros/` | Procedural macros for builtin introspection |
 | **shape-viz** | `crates/shape-viz/` | Visualization (split: shape-viz-core + shape-viz-native) |
 | **shape-cli** | `bin/shape-cli/` | CLI: REPL, script runner, TUI editor, `wire-serve`, `ext install` |

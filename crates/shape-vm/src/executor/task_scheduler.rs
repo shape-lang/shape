@@ -369,28 +369,6 @@ impl TaskScheduler {
     }
 }
 
-#[cfg(feature = "gc")]
-impl TaskScheduler {
-    /// Scan all heap-referencing roots held by the scheduler.
-    ///
-    /// **Phase-2c rebuild pending — ADR-006 §2.7.4.** Pre-bulldozer this
-    /// fed each `ValueWord` callable through `shape_gc::roots::trace_nanboxed_bits`,
-    /// which decoded tag bits to find heap pointers. Post-§2.7.7 the scheduler
-    /// stores `(u64, NativeKind)` pairs; the kinded GC root walker that takes
-    /// `(bits, kind)` is part of the deferred Phase-2c GC rebuild and is not
-    /// yet wired through `shape_gc::roots`. Surface as `todo!` so a stale
-    /// no-op trace doesn't silently miss live heap roots when GC is enabled.
-    pub(crate) fn scan_roots(&self, _visitor: &mut dyn FnMut(*mut u8)) {
-        todo!(
-            "phase-2c — ADR-006 §2.7.4: kinded GC root walker for TaskScheduler. \
-             The pre-bulldozer trace_nanboxed_bits path decoded ValueWord tag \
-             bits; the kinded equivalent (parallel kinds track + per-HeapKind \
-             dispatch via slot.as_heap_value()) belongs to the Phase-2c GC \
-             rebuild and is out of R-async-time scope."
-        )
-    }
-}
-
 impl Drop for TaskScheduler {
     /// Release every heap-bearing share the scheduler still owns.
     ///

@@ -67,8 +67,6 @@ impl VirtualMachine {
             program_entry_ip: 0,
             resource_usage: None,
             time_travel: None,
-            #[cfg(feature = "gc")]
-            gc_heap: None,
             #[cfg(feature = "jit")]
             jit_compiled: false,
             #[cfg(feature = "jit")]
@@ -98,12 +96,6 @@ impl VirtualMachine {
             vm.metrics = Some(crate::metrics::VmMetrics::new());
         }
 
-        // Auto-initialise the tracing GC heap when requested.
-        #[cfg(feature = "gc")]
-        if vm.config.use_tracing_gc {
-            vm.init_gc_heap();
-        }
-
         vm
     }
 
@@ -113,22 +105,6 @@ impl VirtualMachine {
         usage.start();
         self.resource_usage = Some(usage);
         self
-    }
-
-    /// Initialize the GC heap for this VM instance (gc feature only).
-    ///
-    /// Sets up the GcHeap and registers it as the thread-local heap so
-    /// ValueWord::heap_box() and ValueSlot::from_heap() can allocate through it.
-    /// Also configures the GC threshold from the VM's GCConfig.
-    #[cfg(feature = "gc")]
-    pub fn init_gc_heap(&mut self) {
-        let heap = shape_gc::GcHeap::new();
-        self.gc_heap = Some(heap);
-        // Set thread-local GC heap pointer AFTER the move into self.gc_heap
-        // so the pointer remains valid for the VM's lifetime.
-        if let Some(ref mut heap) = self.gc_heap {
-            unsafe { shape_gc::set_thread_gc_heap(heap as *mut _) };
-        }
     }
 
     /// Set the interrupt flag (shared with Ctrl+C handler).

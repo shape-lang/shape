@@ -17,7 +17,6 @@ rust_decimal = { version = "1.36", features = ["serde-str"] }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-buffer = { workspace = true }
-shape-gc = { workspace = true, optional = true }
 thiserror = { workspace = true }
 ahash = { workspace = true }
 smallvec = "1"
@@ -26,4 +25,3 @@ tokio = { workspace = true }
 
 [features]
 default = []
-gc = ["shape-gc"]

@@ -159,12 +159,6 @@ pub struct VMConfig {
     /// Enable VM metrics collection (counters, tier/GC event ring buffers, histograms).
     /// When false (default), `VirtualMachine.metrics` is `None` for zero overhead.
     pub metrics_enabled: bool,
-    /// When true, automatically initialise the tracing GC heap (`shape-gc`) on
-    /// VM creation instead of relying on Arc reference counting.
-    ///
-    /// Requires the `gc` crate feature to be compiled in; otherwise this flag
-    /// is silently ignored.
-    pub use_tracing_gc: bool,
 }
 
 impl Default for VMConfig {
@@ -178,7 +172,6 @@ impl Default for VMConfig {
             auto_gc: true,
             gc_trigger_threshold: DEFAULT_GC_TRIGGER_THRESHOLD,
             metrics_enabled: false,
-            use_tracing_gc: false,
         }
     }
 }
@@ -462,10 +455,6 @@ pub struct VirtualMachine {
     /// Time-travel debugger for recording and navigating VM state history.
     /// `None` when time-travel debugging is not active.
     pub(crate) time_travel: Option<time_travel::TimeTravel>,
-
-    /// GC heap (only present when `gc` feature is enabled).
-    #[cfg(feature = "gc")]
-    gc_heap: Option<shape_gc::GcHeap>,
 
     /// Whether selective JIT compilation has been applied to the loaded program.
     #[cfg(feature = "jit")]
