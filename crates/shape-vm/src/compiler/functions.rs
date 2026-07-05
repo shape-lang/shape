@@ -1093,6 +1093,20 @@ impl BytecodeCompiler {
 
         // Check for annotation-based wrapping BEFORE compiling
         let annotations = self.find_compiled_annotations(&effective_def);
+        // WF-1A Item 3 (anno-jit-parity): the runtime before/after hooks are
+        // woven into the function's OWN bytecode by `compile_wrapped_function`
+        // / `compile_chained_annotations` below, NOT into a separate wrapper
+        // fn. The MIR cached into `Function.mir_data` further down was lowered
+        // from the UNWRAPPED body (`effective_def.body`) before this weave, so
+        // it does NOT contain the hooks. If the JIT compiled the callee from
+        // that MIR it would run the impl WITHOUT the before/after hooks,
+        // diverging from `--mode vm` (which runs the wrapped bytecode). Suppress
+        // mir_data for such functions so the JIT has no body for the wrapper and
+        // callers trampoline to / deopt onto the wrapped VM bytecode that DOES
+        // carry the hooks. `find_compiled_annotations` only returns annotations
+        // with a `before_handler`/`after_handler`, so a non-empty list means the
+        // wrapper carries runtime hooks.
+        let has_runtime_annotation_hooks = !annotations.is_empty();
         if annotations.len() == 1 {
             // SAFETY invariant: the `len() == 1` guard above guarantees
             // `.next()` yields `Some`. This is a compile-time structural
@@ -1113,7 +1127,18 @@ impl BytecodeCompiler {
         // Cache MIR data in the Function struct for JIT v2 (MirToIR compilation).
         // Clone from the compiler's caches so both the compiler (for diagnostics/LSP)
         // and the JIT (via Function.mir_data) have access.
-        if let Some(func_idx) = self.find_function(&effective_def.name) {
+        //
+        // WF-1A Item 3 (anno-jit-parity): skip mir_data for annotation-wrapper
+        // functions. Their MIR is the UNWRAPPED body (lowered above from
+        // `effective_def.body`), while the bytecode compiled under this name is
+        // the wrapper carrying the before/after hooks. Shipping the unwrapped MIR
+        // to the JIT would run the impl without the hooks — a VM/JIT divergence.
+        // Leaving mir_data as `None` forces the JIT to trampoline / deopt onto the
+        // wrapped VM bytecode. The compiler's own MIR caches
+        // (`self.mir_functions` etc.) are left intact for diagnostics/LSP.
+        if has_runtime_annotation_hooks {
+            // Intentionally leave `Function.mir_data` as `None` for the wrapper.
+        } else if let Some(func_idx) = self.find_function(&effective_def.name) {
             let mir_opt = self.mir_functions.get(&effective_def.name).cloned();
             let borrow_opt = self.mir_borrow_analyses.get(&effective_def.name).cloned();
             let storage_opt = self.mir_storage_plans.get(&effective_def.name).cloned();
