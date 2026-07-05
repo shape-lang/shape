@@ -1,0 +1,5 @@
+let maybe_id: Option<int> = Some(7)
+let missing: Option<int> = None
+
+print(maybe_id)   // Some(7)
+print(missing)    // None

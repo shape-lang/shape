@@ -1,0 +1,23 @@
+// Probe: basic runtime before/after annotation on function (annotations.mdx "Define an Annotation")
+annotation traced(tag) {
+  targets: [function]
+
+  before(args, ctx) {
+    print("[" + tag + "] before")
+    args
+  }
+
+  after(args, result, ctx) {
+    print("[" + tag + "] after")
+    result
+  }
+}
+
+@traced("math")
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+let r = add(2, 3)
+print(r)
+print("PROBE3_OK")

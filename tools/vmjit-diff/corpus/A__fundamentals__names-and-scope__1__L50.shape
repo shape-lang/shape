@@ -1,0 +1,7 @@
+fn render(user) {
+    let label = user.name
+    match user.role {
+        "admin" => label
+        other => other
+    }
+}

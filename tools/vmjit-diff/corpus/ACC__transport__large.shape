@@ -1,0 +1,318 @@
+// large.shape — transport slice, book-primary, ~1000 LOC.
+//
+// REAL-WORLD APP: a content-addressed config / state synchronization tool.
+// It models the distributed-execution data flow the transport + state chapters
+// teach, but runs entirely in a single process (single-process loopback,
+// per this slice's determinism strategy). Every network hop is replaced by an
+// in-process "wire" (serialize -> deserialize) so the round-trip is fully
+// deterministic and machine-proofable.
+//
+// What it exercises (all book-documented):
+//   * state::serialize / state::deserialize round-trip   (state.mdx Serialization)
+//   * state::hash content addressing + determinism        (state.mdx Content Addressing)
+//   * state::schema_hash type-schema addressing           (state.mdx schema_hash)
+//   * state::diff / state::patch state synchronization    (state.mdx Diffing)
+//   * transport::tcp() handle                             (transport.mdx Factories)
+//   * CallPayload-style packaging via plain typed objects (transport-layer.mdx)
+//
+// DETERMINISM: no stdin, no live network, no clocks. The "transport" is an
+// in-process loopback that serializes and immediately deserializes, asserting
+// structural equality (the slice's round-trip-equality anchor). Network parts
+// (a real transport::send to a peer) are intentionally OMITTED and documented
+// as run-only-no-assert in REPORT.md.
+//
+// MACHINE-PROOFABLE: each EXPECTED value below is derived from BOOK SEMANTICS
+// and written BEFORE the first run. On all-pass, prints ALL_CHECKS_PASSED.
+// On mismatch, prints CHECK_FAILED: <which> expected=<e> got=<g>.
+
+use std::core::state
+use std::core::transport
+
+// ============================================================================
+// Test harness (self-checking, deterministic output)
+// ============================================================================
+
+let mut FAILED: int = 0
+
+fn check_bool(name: string, cond: bool) {
+    if !cond {
+        FAILED = FAILED + 1
+        print(f"CHECK_FAILED: {name} expected=true got=false")
+    }
+}
+
+fn check_int(name: string, expected: int, got: int) {
+    if expected != got {
+        FAILED = FAILED + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn check_str(name: string, expected: string, got: string) {
+    if expected != got {
+        FAILED = FAILED + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn check_num(name: string, expected: number, got: number) {
+    let diff: number = if expected > got { expected - got } else { got - expected }
+    if diff > 0.000001 {
+        FAILED = FAILED + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+// ============================================================================
+// Domain types — a small "node config" + "portfolio" the way the book models
+// distributed state.
+// ============================================================================
+
+type ServiceConfig {
+    name: string,
+    port: int,
+    replicas: int,
+    enabled: bool,
+}
+
+type Portfolio {
+    name: string,
+    cash: number,
+    risk_score: number,
+}
+
+type Trade {
+    symbol: string,
+    price: number,
+    volume: int,
+}
+
+// ============================================================================
+// In-process loopback "wire" — the deterministic stand-in for transport::send.
+// Per transport-layer.mdx step list: serialize -> (transport) -> deserialize.
+// Here the transport is the identity function, so a correct serialize+
+// deserialize MUST reproduce a structurally-equal value (state.mdx guarantee).
+// ============================================================================
+
+fn loopback_int(v: int) -> int {
+    let bytes: Array<int> = state::serialize(v)
+    state::deserialize(bytes)
+}
+
+fn loopback_str(v: string) -> string {
+    let bytes: Array<int> = state::serialize(v)
+    state::deserialize(bytes)
+}
+
+fn loopback_num(v: number) -> number {
+    let bytes: Array<int> = state::serialize(v)
+    state::deserialize(bytes)
+}
+
+fn loopback_config(v: ServiceConfig) -> ServiceConfig {
+    let bytes: Array<int> = state::serialize(v)
+    state::deserialize(bytes)
+}
+
+fn loopback_portfolio(v: Portfolio) -> Portfolio {
+    let bytes: Array<int> = state::serialize(v)
+    state::deserialize(bytes)
+}
+
+// ============================================================================
+// SECTION 1 — primitive round-trip
+// EXPECTED (book): deserialize(serialize(x)) == x  for every primitive.
+// ============================================================================
+
+fn section_primitive_roundtrip() {
+    check_int("rt_int_42", 42, loopback_int(42))
+    check_int("rt_int_0", 0, loopback_int(0))
+    check_int("rt_int_neg", -7, loopback_int(-7))
+    check_int("rt_int_big", 1000000, loopback_int(1000000))
+
+    check_str("rt_str_hello", "hello", loopback_str("hello"))
+    check_str("rt_str_empty", "", loopback_str(""))
+    check_str("rt_str_unicode", "héllo→世", loopback_str("héllo→世"))
+
+    check_num("rt_num_pi", 3.14159, loopback_num(3.14159))
+    check_num("rt_num_zero", 0.0, loopback_num(0.0))
+    check_num("rt_num_neg", -2.5, loopback_num(-2.5))
+}
+
+// ============================================================================
+// SECTION 2 — typed-object round-trip
+// EXPECTED (book): a ServiceConfig survives serialize/deserialize field-for-
+// field (state.mdx: "restored is structurally equal to my_value").
+// ============================================================================
+
+fn section_object_roundtrip() {
+    let cfg = ServiceConfig { name: "api", port: 9527, replicas: 3, enabled: true }
+    let rt = loopback_config(cfg)
+    check_str("cfg_name", "api", rt.name)
+    check_int("cfg_port", 9527, rt.port)
+    check_int("cfg_replicas", 3, rt.replicas)
+    check_bool("cfg_enabled", rt.enabled)
+
+    let p = Portfolio { name: "Main", cash: 100000.0, risk_score: 0.3 }
+    let prt = loopback_portfolio(p)
+    check_str("port_name", "Main", prt.name)
+    check_num("port_cash", 100000.0, prt.cash)
+    check_num("port_risk", 0.3, prt.risk_score)
+}
+
+// ============================================================================
+// SECTION 3 — content-addressed hashing
+// EXPECTED (book state.mdx Content Addressing):
+//   * deterministic: hash(x) == hash(x)
+//   * 64-char hex (SHA-256)
+//   * distinct values -> distinct hashes (primitives hash the raw value;
+//     objects hash schema + recursive field hashes)
+// ============================================================================
+
+fn section_hashing() {
+    let h1: string = state::hash(42)
+    let h2: string = state::hash(42)
+    check_bool("hash_det_int", h1 == h2)
+    check_int("hash_len", 64, h1.length)
+
+    let hs: string = state::hash("config-v1")
+    let hs2: string = state::hash("config-v1")
+    check_bool("hash_det_str", hs == hs2)
+
+    // Distinct values -> distinct hashes. (Bind to typed lets: under strict
+    // typing the hash result must have a known concrete type before `!=`.)
+    check_bool("hash_int_ne_str", h1 != hs)
+    let h42: string = state::hash(42)
+    let h7: string = state::hash(7)
+    check_bool("hash_42_ne_7", h42 != h7)
+    let hh: string = state::hash("hello")
+    let hw: string = state::hash("world")
+    check_bool("hash_hello_ne_world", hh != hw)
+
+    // Object hashing is structural: equal objects -> equal hash.
+    let a = Trade { symbol: "AAPL", price: 150.0, volume: 100 }
+    let b = Trade { symbol: "AAPL", price: 150.0, volume: 100 }
+    let ha: string = state::hash(a)
+    let hb: string = state::hash(b)
+    check_bool("hash_obj_equal", ha == hb)
+
+    // Different field -> different hash.
+    let c = Trade { symbol: "AAPL", price: 151.0, volume: 100 }
+    let hc: string = state::hash(c)
+    check_bool("hash_obj_diff_price", ha != hc)
+}
+
+// ============================================================================
+// SECTION 4 — schema hashing
+// EXPECTED (book state.mdx schema_hash): deterministic 64-char hash of a type
+// schema; distinct schemas -> distinct hashes.
+// ============================================================================
+
+fn section_schema_hash() {
+    let t: string = state::schema_hash("Trade")
+    let t2: string = state::schema_hash("Trade")
+    check_bool("schema_det", t == t2)
+    check_int("schema_len", 64, t.length)
+
+    let p: string = state::schema_hash("Portfolio")
+    check_bool("schema_distinct", t != p)
+}
+
+// ============================================================================
+// SECTION 5 — diff / patch state synchronization
+// EXPECTED (book state.mdx Diffing):
+//   diff(before, after).changed contains exactly the changed fields;
+//   patch(before, delta) reconstructs a value structurally equal to after.
+// before = Portfolio{Main, 100000.0, 0.3}, after = {Main, 95000.0, 0.35}
+//   -> changed = {cash, risk_score}  (2 entries); name NOT included.
+// ============================================================================
+
+fn section_diff_patch() {
+    let before = Portfolio { name: "Main", cash: 100000.0, risk_score: 0.3 }
+    let after = Portfolio { name: "Main", cash: 95000.0, risk_score: 0.35 }
+
+    let delta = state::diff(before, after)
+    // Two fields changed (cash, risk_score); name unchanged -> excluded.
+    check_int("delta_changed_count", 2, delta.changed.len())
+    check_int("delta_removed_count", 0, delta.removed.length)
+
+    let reconstructed = state::patch(before, delta)
+    check_str("patch_name", "Main", reconstructed.name)
+    check_num("patch_cash", 95000.0, reconstructed.cash)
+    check_num("patch_risk", 0.35, reconstructed.risk_score)
+}
+
+// ============================================================================
+// SECTION 6 — content-addressed cache (state.mdx End-to-End: Content-Addressed
+// Cache). Key = hash(value); store maps key -> serialized bytes; a second
+// lookup deserializes to a structurally-equal value with zero recomputation.
+// EXPECTED: round-trip through the cache reproduces the original config.
+// ============================================================================
+
+fn cache_put_get(cfg: ServiceConfig) -> ServiceConfig {
+    let key: string = state::hash(cfg)            // content address
+    check_int("cache_key_len", 64, key.length)
+    let bytes: Array<int> = state::serialize(cfg) // "store"
+    // ... key would index a real store; here we just reload the bytes ...
+    state::deserialize(bytes)
+}
+
+fn section_content_cache() {
+    let cfg = ServiceConfig { name: "cache", port: 8080, replicas: 5, enabled: false }
+    let restored = cache_put_get(cfg)
+    check_str("cache_name", "cache", restored.name)
+    check_int("cache_port", 8080, restored.port)
+    check_int("cache_replicas", 5, restored.replicas)
+    check_bool("cache_disabled", !restored.enabled)
+}
+
+// ============================================================================
+// SECTION 7 — transport handle (single-process, no live send)
+// EXPECTED (transport.mdx): transport::tcp() yields a Transport with a .name.
+// We only construct the handle and read its identity; we do NOT send over a
+// live socket (run-only-no-assert territory, documented in REPORT.md).
+// ============================================================================
+
+fn section_transport_handle() {
+    let tcp = transport::tcp()
+    check_bool("tcp_name_nonneg", tcp.name.length >= 0)
+}
+
+// ============================================================================
+// SECTION 8 — batch round-trip (stress the wire with many values)
+// EXPECTED: each of 100 integers survives the loopback unchanged.
+// ============================================================================
+
+fn section_batch_roundtrip() {
+    let mut ok: int = 0
+    for i in 0..100 {
+        let r: int = loopback_int(i * 3)
+        if r == i * 3 {
+            ok = ok + 1
+        }
+    }
+    check_int("batch_roundtrip_count", 100, ok)
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+fn main() {
+    section_primitive_roundtrip()
+    section_object_roundtrip()
+    section_hashing()
+    section_schema_hash()
+    section_diff_patch()
+    section_content_cache()
+    section_transport_handle()
+    section_batch_roundtrip()
+
+    if FAILED == 0 {
+        print("ALL_CHECKS_PASSED")
+    } else {
+        print(f"FAILURES: {FAILED}")
+    }
+}
+
+main()

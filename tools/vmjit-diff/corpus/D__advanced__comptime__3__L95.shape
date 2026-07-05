@@ -1,0 +1,7 @@
+comptime fn normalize_uri(uri: string) {
+  uri.trim()
+}
+
+comptime {
+  let u = normalize_uri("  duckdb://analytics.db  ")
+}

@@ -1,0 +1,81 @@
+// small.shape — Book slice: stdlib/core/state
+// Exercises the chapter's content-addressing core: state::hash.
+//
+// Book semantics (state.mdx §Content Addressing → state::hash, lines 222-238):
+//   "Compute the SHA-256 hash of any value. Hashing is structural."
+//   "Same value → same hash, always" (book line 236, shown as an explicit assert).
+//   Implied content-addressing invariant (the entire chapter premise, lines 8-11):
+//   DISTINCT values must produce DISTINCT hashes, otherwise a hash cannot
+//   address content. The book hashes state::hash(my_trade) as "type hash +
+//   field hashes" (line 234) and uses hashes as cache keys (lines 295-299,
+//   483-484) — which only works if distinct values hash distinctly.
+//
+// Function Reference (book line 510): state::hash(value): (Any) -> string.
+//
+// Expected values derived from BOOK SEMANTICS, written BEFORE first run:
+//   - determinism:        hash(x) == hash(x)            -> true  (book line 236)
+//   - hash length:        SHA-256 hex string is 64      -> 64    (book line 224)
+//   - distinctness:       hash(42) != hash("hello")     -> true  (content-addr premise)
+//   - object distinctness: differing field => differ    -> true  (book line 234)
+//   - array distinctness:  differing element => differ   -> true  (book line 228)
+//
+// NOTE (book-gap): the chapter uses bare `assert(...)` (line 237) but never
+// shows how to import it; the `from std::core::utils::testing use { assert }`
+// path does not resolve under this build, so this program uses a local `check`
+// helper (what a real user would fall back to). Recorded as a book-gap.
+
+use std::core::state
+
+type Trade {
+    symbol: string,
+    price: number,
+    volume: int,
+}
+
+fn check(cond: bool, label: string) -> bool {
+    if !cond {
+        print(f"CHECK_FAILED: {label}")
+        return false
+    }
+    true
+}
+
+let mut ok: bool = true
+
+// --- Determinism: same value -> same hash (book line 236) ---
+let hi_a: string = state::hash(42)
+let hi_b: string = state::hash(42)
+if !check(hi_a == hi_b, "determinism expected=true") { ok = false }
+
+// --- Hash is a 64-char SHA-256 hex string (book line 224) ---
+if !check(hi_a.len() == 64, "hash_length expected=64") { ok = false }
+
+// --- Distinctness across primitive kinds (content-addressing premise) ---
+let hs: string = state::hash("hello")
+let hb: string = state::hash(true)
+let hf: string = state::hash(3.14)
+if !check(hi_a != hs, "distinct_int_vs_string expected=true") { ok = false }
+if !check(hi_a != hb, "distinct_int_vs_bool expected=true") { ok = false }
+if !check(hi_a != hf, "distinct_int_vs_float expected=true") { ok = false }
+
+// --- Object structural hashing (book line 234) ---
+let t1 = Trade { symbol: "AAPL", price: 150.0, volume: 100 }
+let t2 = Trade { symbol: "AAPL", price: 150.0, volume: 100 }
+let t3 = Trade { symbol: "MSFT", price: 150.0, volume: 100 }
+let ht1: string = state::hash(t1)
+let ht2: string = state::hash(t2)
+let ht3: string = state::hash(t3)
+if !check(ht1 == ht2, "object_determinism expected=true") { ok = false }
+if !check(ht1 != ht3, "object_distinctness expected=true") { ok = false }
+
+// --- Array structural hashing (book line 228) ---
+let a1: Array<int> = [1, 2, 3]
+let a2: Array<int> = [1, 2, 3]
+let a3: Array<int> = [1, 2, 4]
+let ha1: string = state::hash(a1)
+let ha2: string = state::hash(a2)
+let ha3: string = state::hash(a3)
+if !check(ha1 == ha2, "array_determinism expected=true") { ok = false }
+if !check(ha1 != ha3, "array_distinctness expected=true") { ok = false }
+
+if ok { print("ALL_CHECKS_PASSED") }

@@ -1,0 +1,4 @@
+fn apply(f, x) { f(x) }
+
+let double = |x| x * 2
+print(apply(double, 21))              // 42

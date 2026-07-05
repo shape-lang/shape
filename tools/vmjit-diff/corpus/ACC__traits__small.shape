@@ -1,0 +1,107 @@
+// small.shape — traits slice (book PRIMARY: fundamentals/traits.mdx)
+// Exercises the RUNNABLE core of the chapter:
+//   - Defining a trait (required signature)        — "Defining a Trait"
+//   - Implementing a trait (impl/method/self)       — "Implementing a Trait"
+//   - A second trait on the same type
+//   - Extend blocks                                 — "Extend Blocks"
+//   - Supertrait DECLARATION                        — "Supertraits"
+//   - Trait objects Vec<dyn Display> (monomorphic)  — "Trait Objects (dyn Trait)"
+//   - Primitive conversion via `as` / `as?`         — "Conversion Traits"
+//
+// Self-checking: each result compared to a BOOK-DERIVED expected value via a
+// check helper; prints CHECK_FAILED on mismatch, ALL_CHECKS_PASSED only if all
+// checks held. Method results are annotation-bound or f-string-interpolated,
+// matching the book's own idiom ("Implementing a Trait" feeds method results to
+// print(...); "Conversion Traits" recommends f"{...}" interpolation). See
+// REPORT.md book_gap #1: a method result used directly in `+` concatenation is
+// typed `unknown` (compile error) — the book never shows that pattern.
+
+trait Display {
+  fn display() -> string;
+}
+
+type User { name: string }
+
+impl Display for User {
+  method display() -> string { self.name }
+}
+
+trait Greeter {
+  fn greeting() -> string;
+}
+
+impl Greeter for User {
+  method greeting() -> string { f"Hi {self.name}" }
+}
+
+type Point { x: int, y: int }
+
+extend Point {
+  method magnitude_sq() -> int { self.x * self.x + self.y * self.y }
+  method sum() -> int { self.x + self.y }
+}
+
+// Supertrait declaration: a type impl'ing Printable must also impl
+// Describable + Comparable. Declaration-only form is runnable (book).
+trait Describable { fn describe() -> string; }
+trait Comparable { fn compare(other: int) -> int; }
+trait Printable : Describable + Comparable { fn print_it() -> string; }
+
+// Trait objects over a homogeneous (all-User) array literal — book idiom.
+fn count_displays(items: Vec<dyn Display>) -> int {
+  let mut n: int = 0
+  for item in items {
+    let _d: string = item.display()
+    n = n + 1
+  }
+  n
+}
+
+// Conversion trait TryInto via the book's exact parse_int pattern.
+fn parse_int(s: string) -> Result<int, AnyError> {
+  let n = (s as int?)?
+  Ok(n)
+}
+
+// check helpers (book documents no assert builtin — REPORT.md book_gap #3)
+fn ck_int(label: string, got: int, want: int) -> bool {
+  if got == want { true } else { print(f"CHECK_FAILED: {label} expected={want} got={got}"); false }
+}
+fn ck_str(label: string, got: string, want: string) -> bool {
+  if got == want { true } else { print(f"CHECK_FAILED: {label} expected={want} got={got}"); false }
+}
+
+let mut ok = true
+
+let u = User { name: "Alice" }
+// expected: self.name verbatim -> "Alice"
+let d: string = u.display()
+ok = ck_str("display", d, "Alice") && ok
+// expected: f"Hi {name}" -> "Hi Alice"
+let g: string = u.greeting()
+ok = ck_str("greeting", g, "Hi Alice") && ok
+
+let p = Point { x: 3, y: 4 }
+// expected: 3*3 + 4*4 = 25
+let m: int = p.magnitude_sq()
+ok = ck_int("magnitude_sq", m, 25) && ok
+// expected: 3 + 4 = 7
+let s: int = p.sum()
+ok = ck_int("sum", s, 7) && ok
+
+let users = [User { name: "Alice" }, User { name: "Bob" }]
+// expected: two elements iterated via dyn Display
+let n: int = count_displays(users)
+ok = ck_int("count_displays", n, 2) && ok
+
+// Primitive Into: true as number == 1.0 (book "Into / TryInto").
+let nb: number = true as number
+if nb == 1.0 { ok = ok && true } else { print("CHECK_FAILED: bool_as_number"); ok = false }
+
+// TryInto via parse_int (book pattern). expected: Ok(42)
+match parse_int("42") {
+  Ok(v) => { ok = ck_int("parse_int", v, 42) && ok }
+  Err(e) => { print("CHECK_FAILED: parse_int errored"); ok = false }
+}
+
+if ok { print("ALL_CHECKS_PASSED") }

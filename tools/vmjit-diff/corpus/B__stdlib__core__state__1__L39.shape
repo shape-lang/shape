@@ -1,0 +1,6 @@
+pub type FunctionRef {
+    hash: string,              // SHA-256 content hash
+    name: string,              // Human-readable name
+    param_types: Vec<string>,  // Content hashes of parameter types
+    return_type: string,       // Content hash of return type
+}

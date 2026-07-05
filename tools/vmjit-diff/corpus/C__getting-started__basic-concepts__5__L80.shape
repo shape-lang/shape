@@ -1,0 +1,4 @@
+let nums = [1, 2, 3, 4]
+
+let evens = nums.filter(|x| x % 2 == 0)   // x: int (inferred from nums)
+print(evens)

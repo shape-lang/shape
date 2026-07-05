@@ -16,7 +16,7 @@
 //! site. The contrast (E rejects implicit, C accepts explicit-with-same-result)
 //! is THE RULE.
 
-use shape_test::shape_test::ShapeTest;
+use crate::suite::ShapeTest;
 
 // =========================================================================
 // E.1 Width narrowing silently wraps (must reject without `as`)

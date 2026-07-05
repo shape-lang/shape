@@ -1,0 +1,8 @@
+type User {
+  id: int,
+  name: string,
+  active: bool
+}
+
+let u: User = { id: 1, name: "A", active: true }
+print(u.name)

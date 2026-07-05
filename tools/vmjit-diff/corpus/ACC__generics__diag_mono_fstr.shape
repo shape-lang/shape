@@ -1,0 +1,13 @@
+trait Display { fn display() -> string; }
+type User { name: string }
+impl Display for User { method display() -> string { self.name } }
+fn join_names(items: Vec<dyn Display>) -> string {
+  let mut acc = ""
+  for item in items {
+    let d: string = item.display()
+    acc = acc + d
+  }
+  acc
+}
+let users: Vec<dyn Display> = [User { name: "Al" }, User { name: "Bo" }]
+print(join_names(users))

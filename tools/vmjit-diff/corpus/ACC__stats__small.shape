@@ -1,0 +1,73 @@
+// small.shape -- stats slice (book-primary)
+// Chapters: stdlib/core/random.mdx, distributions.mdx, stochastic.mdx
+//
+// Methodology: written from BOOK SEMANTICS ONLY.
+// Determinism strategy for this slice: SEED all randomness, then assert
+// against statistical invariants that hold for ANY draw from a seeded stream
+// (reproducibility, range membership, length, monotone count), never against
+// a back-filled observed float.
+//
+// Book facts used (all from random.mdx Function Reference table + prose):
+//   - random()            -> number in [0, 1)                     (sec `random`)
+//   - random_int(lo, hi)  -> int in [lo, hi] inclusive both ends  (sec `random_int`)
+//   - random_seed(seed)   resets the stream: same seed => same    (sec `random_seed`)
+//     subsequent random() results (r1 == r2)
+//   - random_normal(m, s) -> number from N(mean, std)             (sec `random_normal`)
+//   - random_array(n)     -> Array<number> of length n in [0,1)   (sec `random_array`)
+//   - distributions::dist_uniform(lo, hi) -> single U(lo,hi) sample (distributions.mdx)
+//   - stochastic::random_walk(n, step) -> Array<number> length n  (stochastic.mdx)
+
+from std::core::random use { random, random_int, random_seed, random_normal, random_array }
+from std::core::distributions use { dist_uniform }
+from std::core::stochastic use { random_walk }
+
+let mut failures: int = 0
+
+fn check(name: string, cond: bool) -> int {
+  if cond {
+    return 0
+  }
+  print(f"CHECK_FAILED: {name}")
+  return 1
+}
+
+// --- Reproducibility: same seed => identical stream (random.mdx `random_seed`) ---
+random_seed(42)
+let r1: number = random()
+random_seed(42)
+let r2: number = random()
+failures = failures + check("seed_reproducible", r1 == r2)
+
+// random() is in [0, 1) (random.mdx `random`)
+failures = failures + check("random_in_unit_lo", r1 >= 0.0)
+failures = failures + check("random_in_unit_hi", r1 < 1.0)
+
+// --- random_int inclusive range (random.mdx `random_int`) ---
+random_seed(7)
+let d: int = random_int(1, 6)
+failures = failures + check("dice_ge_1", d >= 1)
+failures = failures + check("dice_le_6", d <= 6)
+
+// --- random_array length contract (random.mdx `random_array`) ---
+let arr: Array<number> = random_array(8)
+failures = failures + check("array_length", arr.length == 8)
+
+// --- random_normal returns a finite-ish number (random.mdx `random_normal`) ---
+let shock: number = random_normal(0.0, 1.0)
+failures = failures + check("normal_finite", shock > -1000.0 && shock < 1000.0)
+
+// --- distributions::dist_uniform single sample in [lo, hi) (distributions.mdx) ---
+random_seed(123)
+let u: number = dist_uniform(2.0, 5.0)
+failures = failures + check("uniform_lo", u >= 2.0)
+failures = failures + check("uniform_hi", u < 5.0)
+
+// --- stochastic::random_walk length contract (stochastic.mdx) ---
+let walk: Array<number> = random_walk(10, 1.0)
+failures = failures + check("walk_length", walk.length == 10)
+
+if failures == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILURES: {failures}")
+}

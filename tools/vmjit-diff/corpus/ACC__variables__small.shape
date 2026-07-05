@@ -1,0 +1,110 @@
+// small.shape — exercises the core of the Variables and Names-and-Scope chapters.
+// Covers: let / let mut / const, type inference, annotations, Option,
+// tuples, named types, type aliases, generic identity fn, lexical scope, moves.
+// Self-checking: every result is asserted against a value derived from book
+// semantics; prints ALL_CHECKS_PASSED on success.
+
+fn check_int(name: string, got: int, expected: int) {
+    if got != expected {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn check_bool(name: string, cond: bool) {
+    if !cond {
+        print(f"CHECK_FAILED: {name}")
+    }
+}
+
+// --- Binding forms (book: "Binding Forms" table) ---
+let x = 42                 // immutable owned
+let mut count = 0          // mutable owned
+count = count + 1          // book: "count = count + 1 OK"
+count = count + 9
+const LIMIT = 100          // compile-time constant (literal)
+
+check_int("let-x", x, 42)
+check_int("let-mut-count", count, 10)
+check_int("const-limit", LIMIT, 100)
+
+// --- let mut direct mutation (book: items.push(4), "Direct mutation") ---
+let mut items = [1, 2, 3]
+items.push(4)
+check_int("mut-push-len", items.len(), 4)
+
+// --- Move semantics (book: "Move: arr is consumed") ---
+let arr = [10, 20, 30]
+let arr2 = arr             // ownership moved to arr2
+check_int("move-len", arr2.len(), 3)
+
+// --- Type inference (book: "Type Inference" section) ---
+let inferred_int = 7       // int
+let ratio = 0.25           // number
+let name = "shape"         // string
+let enabled = true         // bool
+check_int("infer-int", inferred_int, 7)
+check_bool("infer-number", ratio == 0.25)
+check_bool("infer-string", name == "shape")
+check_bool("infer-bool", enabled)
+
+// --- Type annotations (book: "Type Annotations") ---
+let retries: int = 3
+let timeout_ms: int = 5000
+let factor: number = 1.5
+let flags: u8 = 0xFF
+check_int("annot-retries", retries, 3)
+check_int("annot-timeout", timeout_ms, 5000)
+check_bool("annot-number", factor == 1.5)
+check_int("annot-u8", flags, 255)
+
+// --- Option<T> match (book: "No Null Sentinel" — Some/None) ---
+let maybe_id: Option<int> = Some(7)
+let missing: Option<int> = None
+let id_val = match maybe_id {
+    Some(v) => v
+    None => -1
+}
+let missing_val = match missing {
+    Some(v) => v
+    None => -1
+}
+check_int("option-some", id_val, 7)
+check_int("option-none", missing_val, -1)
+
+// --- Tuple types (book: "Tuple Types") ---
+let pair: [int, int] = [3, 4]
+check_int("tuple-0", pair[0], 3)
+check_int("tuple-1", pair[1], 4)
+
+// --- Named types (book: "Named Types") ---
+type User { id: int, name: string, active: bool }
+let u: User = { id: 1, name: "A", active: true }
+check_int("named-id", u.id, 1)
+check_bool("named-active", u.active)
+
+// --- Type alias as constructor (book: "Type Aliases") ---
+type Point { x: int, y: int }
+type P = Point
+let origin = P { x: 0, y: 0 }
+check_int("alias-x", origin.x, 0)
+check_int("alias-y", origin.y, 0)
+
+// --- Generic identity fn (book: "Generic Parameters") ---
+fn id<T>(v: T) -> T { v }
+check_int("generic-id", id(3), 3)
+
+// --- Scope (book: "Scope" block + names-and-scope shadowing) ---
+let outer = 5
+{
+    let inner = 6
+    check_int("scope-outer-in", outer, 5)
+    check_int("scope-inner", inner, 6)
+}
+let s = 1
+{
+    let s = 2              // shadows outer s within block
+    check_int("shadow-inner", s, 2)
+}
+check_int("shadow-outer", s, 1)
+
+print("ALL_CHECKS_PASSED")

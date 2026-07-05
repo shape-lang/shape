@@ -1,0 +1,3 @@
+fn g() -> Result<int,string> { Ok(7) }
+fn use_it() -> int { match g() { Ok(Some(n)) => n + 1, Err(e) => -1 } }
+print(use_it())

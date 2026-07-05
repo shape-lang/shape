@@ -1,0 +1,69 @@
+// small.shape — Comptime System slice (book: advanced/comptime.mdx)
+// Exercises the chapter core, all v0.3.3-LIVE:
+//   - comptime { } expression form (evaluate now, embed literal)  [book "Comptime Blocks"]
+//   - comptime { } top-level side-effect form                     [book "Comptime Blocks"]
+//   - comptime fn helpers, callable from comptime contexts        [book "comptime fn Helpers"]
+//   - build_config() comptime builtin                             [book "Comptime Builtins"]
+//   - comptime fields on types + runtime fields                   [book "Comptime Fields on Types"]
+// Determinism: pure — every asserted value is a comptime-evaluated constant
+// baked at compile time, derived from book semantics BEFORE first run.
+
+comptime fn square(n: int) -> int {
+  n * n
+}
+
+comptime fn normalize_uri(uri: string) -> string {
+  uri.trim()
+}
+
+// top-level side-effect form: warning() is a no-op in v0.3.3 (book caution),
+// included to prove the side-effect form compiles and runs cleanly.
+comptime {
+  warning("compiling small.shape comptime demo")
+}
+
+// expression form: evaluate at compile time, embed literal result.
+let SQ = comptime { square(9) }                          // 9*9 = 81
+let URI = comptime { normalize_uri("  shape://demo  ") } // trimmed -> "shape://demo"
+
+// build_config() is compile-time-only; bake its fields into runtime literals.
+let OS = comptime { build_config().target_os }
+let ARCH = comptime { build_config().target_arch }
+let TARGET = f"{OS}-{ARCH}"
+
+// comptime fields: type-level metadata, excluded from runtime storage.
+type Unit {
+  comptime symbol: string = "m"
+  comptime precision: int = 2
+  value: float
+}
+
+let u = Unit { value: 42.0 }
+
+let mut passed = 0
+let mut failed = 0
+
+fn check(name: string, ok: bool) {
+  if ok {
+    passed = passed + 1
+  } else {
+    failed = failed + 1
+    print(f"CHECK_FAILED: {name}")
+  }
+}
+
+check("square_comptime", SQ == 81)
+check("normalize_uri_trim", URI == "shape://demo")
+check("build_target_nonempty", TARGET.length > 0)
+check("build_target_has_dash", TARGET.contains("-"))
+check("runtime_field_value", u.value == 42.0)
+
+// host build target is environment-specific; print run-only (no assert on the
+// exact triple — book says it is the host build target, which varies).
+print(f"build target = {TARGET}")
+
+if failed == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILED {failed} checks")
+}

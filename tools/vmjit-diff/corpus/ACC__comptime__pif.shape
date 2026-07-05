@@ -1,0 +1,6 @@
+let r = 5
+if r == 5 {
+  print("five")
+} else {
+  print("other")
+}

@@ -1,0 +1,2 @@
+let A = comptime { [10, 20, 30] }
+print(f"{A[0]}")

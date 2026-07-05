@@ -1,0 +1,681 @@
+// =============================================================================
+// large.shape — Deterministic Numeric Compute Engine
+// Book slice: advanced/jit-compilation.mdx  (JIT Compilation)
+// =============================================================================
+//
+// WHAT THIS EXERCISES (book-primary)
+// ----------------------------------
+// The JIT chapter's central, observable, machine-checkable claims are:
+//
+//   (1) "VM and JIT should produce identical stdout for any program that runs
+//        without runtime error in either mode" (§Verifying fall-through).
+//   (2) "Tier-up promotion is preserved on hot functions per the T1@100 /
+//        T2@10k thresholds ... tier promotion happens transparently on
+//        functions that cross the call-count thresholds" (§--mode jit
+//        semantics).  Crossing 100 and 10,000 calls must NOT change a result.
+//   (3) JIT-compatible functions contain "only supported operations
+//        (arithmetic, comparisons, local variable access, direct calls,
+//        control flow)" (§Scoped Per-Function JIT) and are compiled to native
+//        code; incompatible ones stay interpreted "with no penalty".
+//   (4) Generics are monomorphized; structs are #[repr(C)] fixed layouts;
+//        scalars are raw machine types (§Fully Typed Native Values).
+//
+// This program is a deterministic numeric engine: a battery of pure numeric
+// kernels (integer number theory + scalar floating point + small fixed-size
+// array reductions). Every kernel is a pure function of its arguments, so its
+// value cannot depend on which tier executed it. Each kernel is:
+//
+//   * unit-anchored: checked against a small set of hand-verified constants;
+//   * hot-driven: invoked in a driver loop that crosses the T1=100 boundary
+//     (and, for the cheapest kernels, the T2=10,000 boundary) so the SAME
+//     function is observed before and after tier promotion;
+//   * accumulator-checked: the running sum over the hot loop is asserted
+//     against a value computed by an INDEPENDENT external oracle BEFORE the
+//     first run (never back-filled from Shape output).
+//
+// If any tier transition ever perturbed a result, an accumulator would diverge
+// from its expected constant and we would print CHECK_FAILED. On success the
+// only line on stdout is ALL_CHECKS_PASSED, which keeps the VM-vs-JIT
+// byte-identical comparison trivially clean.
+//
+// NON-INTERACTIVE / DETERMINISTIC: no stdin, no network, no clock, no RNG.
+// All inputs are literals or loop indices.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// Section 0 — verification harness
+// -----------------------------------------------------------------------------
+// A tiny global failure latch is awkward without mutable global state, so each
+// check prints CHECK_FAILED immediately on mismatch (the orchestrator greps for
+// it) and we rely on reaching the final ALL_CHECKS_PASSED only when every check
+// upstream was silent. Integer checks are exact; float checks use an epsilon.
+
+fn check_int(label: string, got: int, want: int) {
+  if got != want {
+    print(f"CHECK_FAILED: {label} expected={want} got={got}")
+  }
+}
+
+fn check_bool(label: string, got: bool, want: bool) {
+  if got != want {
+    print(f"CHECK_FAILED: {label} expected={want} got={got}")
+  }
+}
+
+// Absolute value for number (no stdlib dependency, stays JIT-simple).
+fn fabs(x: number) -> number {
+  if x < 0.0 {
+    0.0 - x
+  } else {
+    x
+  }
+}
+
+// Approximate float equality within an absolute epsilon.
+fn approx(a: number, b: number, eps: number) -> bool {
+  fabs(a - b) < eps
+}
+
+fn check_approx(label: string, got: number, want: number, eps: number) {
+  if !approx(got, want, eps) {
+    print(f"CHECK_FAILED: {label} expected={want} got={got}")
+  }
+}
+
+
+// -----------------------------------------------------------------------------
+// Section 1 — integer number-theory kernels
+// (pure int arithmetic + while loops + branches: the canonical JIT-compatible
+//  shape per §Scoped Per-Function JIT)
+// -----------------------------------------------------------------------------
+
+// Euclidean GCD.
+fn gcd(a: int, b: int) -> int {
+  var x = a
+  var y = b
+  while y != 0 {
+    let t = y
+    y = x % y
+    x = t
+  }
+  x
+}
+
+// Least common multiple via gcd. Kept small to avoid i64 overflow.
+fn lcm(a: int, b: int) -> int {
+  let g = gcd(a, b)
+  (a / g) * b
+}
+
+// Modular exponentiation by squaring: base^exp mod m.
+fn modexp(base: int, exp: int, m: int) -> int {
+  var result = 1
+  var b = base % m
+  var e = exp
+  while e > 0 {
+    if e % 2 == 1 {
+      result = (result * b) % m
+    }
+    e = e / 2
+    b = (b * b) % m
+  }
+  result
+}
+
+// Fibonacci(n) mod m, iterative.
+fn fib_mod(n: int, m: int) -> int {
+  var a = 0
+  var b = 1
+  var i = 0
+  while i < n {
+    let t = (a + b) % m
+    a = b
+    b = t
+    i = i + 1
+  }
+  a
+}
+
+// Sum of base-10 digits.
+fn digit_sum(n: int) -> int {
+  var x = n
+  var s = 0
+  while x > 0 {
+    s = s + (x % 10)
+    x = x / 10
+  }
+  s
+}
+
+// n! mod m, iterative.
+fn fact_mod(n: int, m: int) -> int {
+  var r = 1
+  var i = 2
+  while i <= n {
+    r = (r * i) % m
+    i = i + 1
+  }
+  r
+}
+
+// Trial-division primality test.
+fn is_prime(n: int) -> bool {
+  if n < 2 {
+    return false
+  }
+  var i = 2
+  while i * i <= n {
+    if n % i == 0 {
+      return false
+    }
+    i = i + 1
+  }
+  true
+}
+
+// Count primes strictly below N.
+fn count_primes_below(n: int) -> int {
+  var c = 0
+  var k = 2
+  while k < n {
+    if is_prime(k) {
+      c = c + 1
+    }
+    k = k + 1
+  }
+  c
+}
+
+// Euler totient phi(n) via gcd counting (O(n) — fine for small n).
+fn totient(n: int) -> int {
+  var c = 0
+  var i = 1
+  while i <= n {
+    if gcd(i, n) == 1 {
+      c = c + 1
+    }
+    i = i + 1
+  }
+  c
+}
+
+// Collatz step count (classic JIT micro-benchmark).
+fn collatz_steps(n: int) -> int {
+  var x = n
+  var steps = 0
+  while x != 1 {
+    if x % 2 == 0 {
+      x = x / 2
+    } else {
+      x = 3 * x + 1
+    }
+    steps = steps + 1
+  }
+  steps
+}
+
+// Integer floor-sqrt by linear growth (kept branch-simple for the JIT).
+fn isqrt(n: int) -> int {
+  var x = 0
+  while (x + 1) * (x + 1) <= n {
+    x = x + 1
+  }
+  x
+}
+
+// Integer cube reduced mod m (used as a cheap T2 hot kernel).
+fn cube_mod(i: int, m: int) -> int {
+  ((i * i) % m * i) % m
+}
+
+
+// -----------------------------------------------------------------------------
+// Section 2 — scalar floating-point kernels
+// (raw f64 in XMM per §Fully Typed Native Values; arithmetic + while loops)
+// -----------------------------------------------------------------------------
+
+// Newton–Raphson square root. Converges to the IEEE sqrt for x > 0.
+fn newton_sqrt(x: number) -> number {
+  if x <= 0.0 {
+    return 0.0
+  }
+  var g = x
+  var i = 0
+  while i < 60 {
+    g = (g + x / g) / 2.0
+    i = i + 1
+  }
+  g
+}
+
+// Horner evaluation of p(x) = 3x^3 + 2x^2 - x + 5 (float coefficients).
+fn horner_poly(x: number) -> number {
+  ((3.0 * x + 2.0) * x - 1.0) * x + 5.0
+}
+
+// Same polynomial in exact integer arithmetic (for cross-checking).
+fn horner_poly_int(x: int) -> int {
+  ((3 * x + 2) * x - 1) * x + 5
+}
+
+// Geometric series partial sum: 1 + r + r^2 + ... + r^(n-1).
+fn geom_sum(r: number, n: int) -> number {
+  var s = 0.0
+  var term = 1.0
+  var i = 0
+  while i < n {
+    s = s + term
+    term = term * r
+    i = i + 1
+  }
+  s
+}
+
+// Leibniz partial sum for pi/4: sum_{k=0}^{n-1} (-1)^k / (2k+1).
+fn leibniz_pi_quarter(n: int) -> number {
+  var s = 0.0
+  var k = 0
+  var sign = 1.0
+  while k < n {
+    let denom = (2 * k + 1) as number
+    s = s + sign / denom
+    sign = 0.0 - sign
+    k = k + 1
+  }
+  s
+}
+
+// Factorial as a float (exact up to 2^53 for the small inputs used).
+fn factorial_f(n: int) -> number {
+  var r = 1.0
+  var i = 1
+  while i <= n {
+    r = r * (i as number)
+    i = i + 1
+  }
+  r
+}
+
+// exp(x) via Taylor series with a fixed term count (deterministic).
+fn exp_taylor(x: number, terms: int) -> number {
+  var sum = 1.0
+  var term = 1.0
+  var k = 1
+  while k < terms {
+    term = term * x / (k as number)
+    sum = sum + term
+    k = k + 1
+  }
+  sum
+}
+
+
+// -----------------------------------------------------------------------------
+// Section 3 — small fixed-size array reductions
+// (Array<number> -> TypedArray<f64> contiguous buffer per §Fully Typed Native
+//  Values; indexed reads in a counted loop)
+// -----------------------------------------------------------------------------
+
+fn dot_product(a: Array<number>, b: Array<number>, n: int) -> number {
+  var s = 0.0
+  var i = 0
+  while i < n {
+    s = s + a[i] * b[i]
+    i = i + 1
+  }
+  s
+}
+
+fn array_sum(a: Array<number>, n: int) -> number {
+  var s = 0.0
+  var i = 0
+  while i < n {
+    s = s + a[i]
+    i = i + 1
+  }
+  s
+}
+
+fn array_mean(a: Array<number>, n: int) -> number {
+  array_sum(a, n) / (n as number)
+}
+
+fn array_variance(a: Array<number>, n: int) -> number {
+  let mu = array_mean(a, n)
+  var acc = 0.0
+  var i = 0
+  while i < n {
+    let d = a[i] - mu
+    acc = acc + d * d
+    i = i + 1
+  }
+  acc / (n as number)
+}
+
+fn array_max(a: Array<number>, n: int) -> number {
+  var m = a[0]
+  var i = 1
+  while i < n {
+    if a[i] > m {
+      m = a[i]
+    }
+    i = i + 1
+  }
+  m
+}
+
+// L2 norm using the Newton sqrt kernel above.
+fn l2_norm(a: Array<number>, n: int) -> number {
+  newton_sqrt(dot_product(a, a, n))
+}
+
+
+// -----------------------------------------------------------------------------
+// Section 4 — integer array sort (bubble sort) + weighted checksum
+// -----------------------------------------------------------------------------
+// Bubble sort over an integer array, then a positional checksum sum(i*arr[i]).
+// We build a fresh array each call from a fixed permutation so the kernel is a
+// pure function of nothing (constant) — its output is invariant across tiers.
+
+fn weighted_sorted_checksum() -> int {
+  // Fixed permutation of 0..9.
+  var arr: Array<int> = [5, 3, 8, 1, 9, 2, 7, 4, 6, 0]
+  let n = 10
+  // Bubble sort ascending.
+  var i = 0
+  while i < n {
+    var j = 0
+    while j < n - 1 - i {
+      if arr[j] > arr[j + 1] {
+        let t = arr[j]
+        arr[j] = arr[j + 1]
+        arr[j + 1] = t
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  // Positional checksum: after sorting, arr == [0..9], so sum(i*i) = 285.
+  var cs = 0
+  var k = 0
+  while k < n {
+    cs = cs + k * arr[k]
+    k = k + 1
+  }
+  cs
+}
+
+
+// =============================================================================
+// Section 5 — UNIT ANCHORS
+// Hand-verified or externally-computed constants. Written BEFORE first run.
+// =============================================================================
+
+fn run_unit_anchors() {
+  // --- gcd / lcm ---
+  check_int("gcd(1071,462)", gcd(1071, 462), 21)
+  check_int("gcd(48,18)", gcd(48, 18), 6)
+  check_int("gcd(17,5)", gcd(17, 5), 1)
+  check_int("gcd(100,0)", gcd(100, 0), 100)
+  check_int("lcm(4,6)", lcm(4, 6), 12)
+  check_int("lcm(21,6)", lcm(21, 6), 42)
+
+  // --- modexp ---
+  check_int("modexp(7,13,11)", modexp(7, 13, 11), 2)
+  check_int("modexp(2,20,1000000007)", modexp(2, 20, 1000000007), 1048576)
+  check_int("modexp(3,0,7)", modexp(3, 0, 7), 1)
+  check_int("modexp(5,3,13)", modexp(5, 3, 13), 8)   // 125 mod 13 = 8
+
+  // --- fibonacci mod ---
+  check_int("fib_mod(10,1000000007)", fib_mod(10, 1000000007), 55)
+  check_int("fib_mod(20,1000000007)", fib_mod(20, 1000000007), 6765)
+  check_int("fib_mod(50,1000000007)", fib_mod(50, 1000000007), 586268941)
+  check_int("fib_mod(0,1000)", fib_mod(0, 1000), 0)
+  check_int("fib_mod(1,1000)", fib_mod(1, 1000), 1)
+
+  // --- digit sum ---
+  check_int("digit_sum(123456789)", digit_sum(123456789), 45)
+  check_int("digit_sum(1000)", digit_sum(1000), 1)
+  check_int("digit_sum(999)", digit_sum(999), 27)
+
+  // --- factorial mod ---
+  check_int("fact_mod(5,1000000007)", fact_mod(5, 1000000007), 120)
+  check_int("fact_mod(10,1000000007)", fact_mod(10, 1000000007), 3628800)
+  check_int("fact_mod(20,1000000007)", fact_mod(20, 1000000007), 146326063)
+
+  // --- primality ---
+  check_bool("is_prime(2)", is_prime(2), true)
+  check_bool("is_prime(17)", is_prime(17), true)
+  check_bool("is_prime(1)", is_prime(1), false)
+  check_bool("is_prime(91)", is_prime(91), false)   // 7*13
+  check_bool("is_prime(97)", is_prime(97), true)
+  check_int("count_primes_below(100)", count_primes_below(100), 25)
+  check_int("count_primes_below(1000)", count_primes_below(1000), 168)
+
+  // --- totient ---
+  check_int("totient(1)", totient(1), 1)
+  check_int("totient(10)", totient(10), 4)
+  check_int("totient(100)", totient(100), 40)
+
+  // --- collatz ---
+  check_int("collatz_steps(1)", collatz_steps(1), 0)
+  check_int("collatz_steps(3)", collatz_steps(3), 7)
+  check_int("collatz_steps(6)", collatz_steps(6), 8)
+  check_int("collatz_steps(27)", collatz_steps(27), 111)
+
+  // --- isqrt ---
+  check_int("isqrt(0)", isqrt(0), 0)
+  check_int("isqrt(15)", isqrt(15), 3)
+  check_int("isqrt(16)", isqrt(16), 4)
+  check_int("isqrt(99)", isqrt(99), 9)
+  check_int("isqrt(100)", isqrt(100), 10)
+
+  // --- horner (integer cross-check) ---
+  check_int("horner_poly_int(2)", horner_poly_int(2), 35)
+  check_int("horner_poly_int(5)", horner_poly_int(5), 425)
+  check_int("horner_poly_int(10)", horner_poly_int(10), 3195)
+
+  // --- bubble-sort checksum ---
+  check_int("weighted_sorted_checksum", weighted_sorted_checksum(), 285)
+}
+
+fn run_float_anchors() {
+  let eps = 0.0000001
+
+  // --- newton sqrt ---
+  check_approx("newton_sqrt(2)", newton_sqrt(2.0), 1.4142135623730951, eps)
+  check_approx("newton_sqrt(16)", newton_sqrt(16.0), 4.0, eps)
+  check_approx("newton_sqrt(2.25)", newton_sqrt(2.25), 1.5, eps)
+  check_approx("newton_sqrt(100)", newton_sqrt(100.0), 10.0, eps)
+  check_approx("newton_sqrt(0)", newton_sqrt(0.0), 0.0, eps)
+
+  // --- horner float == integer cross-check ---
+  check_approx("horner_poly(2)", horner_poly(2.0), 35.0, eps)
+  check_approx("horner_poly(5)", horner_poly(5.0), 425.0, eps)
+  check_approx("horner_poly(10)", horner_poly(10.0), 3195.0, eps)
+
+  // --- geometric series ---
+  // 1 + 0.5 + 0.25 + ... 10 terms = 2 - 2^-9 = 1.998046875 (exact in binary).
+  check_approx("geom_sum(0.5,10)", geom_sum(0.5, 10), 1.998046875, eps)
+  // ratio 2, 5 terms = 1+2+4+8+16 = 31.
+  check_approx("geom_sum(2,5)", geom_sum(2.0, 5), 31.0, eps)
+
+  // --- Leibniz pi/4 ---  converges slowly; 100k terms gets ~5 digits.
+  // pi/4 = 0.7853981633974483
+  check_approx("leibniz_pi_quarter(100000)",
+               leibniz_pi_quarter(100000), 0.7853981633974483, 0.00001)
+
+  // --- factorial as float ---
+  check_approx("factorial_f(5)", factorial_f(5), 120.0, eps)
+  check_approx("factorial_f(10)", factorial_f(10), 3628800.0, eps)
+
+  // --- exp Taylor --- e^1 ~ 2.718281828..., e^0 = 1
+  check_approx("exp_taylor(1,30)", exp_taylor(1.0, 30), 2.718281828459045, eps)
+  check_approx("exp_taylor(0,30)", exp_taylor(0.0, 30), 1.0, eps)
+  // e^2 = 7.38905609893065
+  check_approx("exp_taylor(2,40)", exp_taylor(2.0, 40), 7.38905609893065, eps)
+}
+
+fn run_array_anchors() {
+  let eps = 0.0000001
+
+  let u: Array<number> = [1.0, 2.0, 3.0, 4.0]
+  let v: Array<number> = [4.0, 3.0, 2.0, 1.0]
+  // 1*4 + 2*3 + 3*2 + 4*1 = 4+6+6+4 = 20
+  check_approx("dot_product(u,v)", dot_product(u, v, 4), 20.0, eps)
+  // sum u = 10
+  check_approx("array_sum(u)", array_sum(u, 4), 10.0, eps)
+
+  let d: Array<number> = [2.0, 4.0, 6.0, 8.0, 10.0]
+  check_approx("array_mean(d)", array_mean(d, 5), 6.0, eps)
+  // population variance = ((-4)^2+(-2)^2+0+2^2+4^2)/5 = (16+4+0+4+16)/5 = 8
+  check_approx("array_variance(d)", array_variance(d, 5), 8.0, eps)
+  check_approx("array_max(d)", array_max(d, 5), 10.0, eps)
+
+  // L2 norm of [3,4] = 5
+  let pyth: Array<number> = [3.0, 4.0]
+  check_approx("l2_norm([3,4])", l2_norm(pyth, 2), 5.0, eps)
+  // L2 norm of [1,2,2] = 3
+  let triple: Array<number> = [1.0, 2.0, 2.0]
+  check_approx("l2_norm([1,2,2])", l2_norm(triple, 3), 3.0, eps)
+}
+
+
+// =============================================================================
+// Section 6 — HOT DRIVER LOOPS (tier-up exercise)
+// Each accumulator constant was computed by an independent external oracle
+// BEFORE the first Shape run. Crossing T1=100 / T2=10k must not change them.
+// =============================================================================
+
+// gcd hot loop: sum gcd(i, 360) for i in 1..1000  (999 calls > T1).
+fn drive_gcd() {
+  var total = 0
+  var i = 1
+  while i < 1000 {
+    total = total + gcd(i, 360)
+    i = i + 1
+  }
+  check_int("hot_sum_gcd_i_360", total, 10278)
+}
+
+// digit_sum hot loop: sum digit_sum(i) for i in 1..1000 (999 calls > T1).
+fn drive_digit_sum() {
+  var total = 0
+  var i = 1
+  while i < 1000 {
+    total = total + digit_sum(i)
+    i = i + 1
+  }
+  check_int("hot_sum_digit_sum", total, 13500)
+}
+
+// collatz hot loop: sum collatz_steps(i) for i in 1..400 (399 calls > T1).
+fn drive_collatz() {
+  var total = 0
+  var i = 1
+  while i < 400 {
+    total = total + collatz_steps(i)
+    i = i + 1
+  }
+  check_int("hot_sum_collatz_1_399", total, 20114)
+}
+
+// isqrt hot loop: sum isqrt(i) for i in 1..1000 (999 calls > T1).
+fn drive_isqrt() {
+  var total = 0
+  var i = 1
+  while i < 1000 {
+    total = total + isqrt(i)
+    i = i + 1
+  }
+  check_int("hot_sum_isqrt_1_999", total, 20584)
+}
+
+// horner hot loop: sum horner_poly_int(i) for i in 1..101 (100 calls = T1).
+fn drive_horner() {
+  var total = 0
+  var i = 1
+  while i <= 100 {
+    total = total + horner_poly_int(i)
+    i = i + 1
+  }
+  check_int("hot_sum_horner_1_100", total, 77179650)
+}
+
+// modexp cube hot loop: sum modexp(i,3,M) for i in 1..500 (499 calls > T1).
+fn drive_modexp_cube() {
+  let m = 1000000007
+  var total = 0
+  var i = 1
+  while i < 500 {
+    total = (total + modexp(i, 3, m)) % m
+    i = i + 1
+  }
+  check_int("hot_sum_modexp_cube", total, 562562395)
+}
+
+// fib_mod hot loop: sum fib_mod(i,1000) for i in 1..31 (30 calls; anchor only).
+fn drive_fib_mod() {
+  var total = 0
+  var i = 1
+  while i <= 30 {
+    total = total + fib_mod(i, 1000)
+    i = i + 1
+  }
+  check_int("hot_sum_fibmod1000_1_30", total, 9308)
+}
+
+// VERY hot loop crossing the T2=10,000 threshold so the optimizing tier is
+// exercised on a function (cube_mod). Sum cube_mod(i%1000, 97) for i in 0..12000.
+// Pattern of i%1000 cycles 0..999 twelve times, plus a partial 0..0 (i=12000
+// excluded). So it is 12 full cycles of cube_mod(j,97) for j in 0..999.
+// One full cycle sum (j=0..999) computed by oracle = C; total = 12*C.
+fn drive_cube_mod_t2() {
+  let m = 97
+  var total = 0
+  var i = 0
+  while i < 12000 {
+    total = total + cube_mod(i % 1000, m)
+    i = i + 1
+  }
+  // oracle: 12 * sum_{j=0..999} (j^3 mod 97) = 12 * 47799 = 573588
+  check_int("hot_t2_cube_mod_12k", total, 573588)
+}
+
+// A second T2 crosser on a float kernel: accumulate horner_poly(i%50) for
+// i in 0..11000. 220 full cycles of j=0..49. Per-cycle sum is exact-ish;
+// we assert via epsilon against the oracle-derived float total.
+fn drive_horner_float_t2() {
+  var total = 0.0
+  var i = 0
+  while i < 11000 {
+    let x = (i % 50) as number
+    total = total + horner_poly(x)
+    i = i + 1
+  }
+  // oracle: 220 * sum_{j=0..49} (3j^3 + 2j^2 - j + 5) = 220 * 4581750 = 1007985000
+  check_approx("hot_t2_horner_float_11k", total, 1007985000.0, 1.0)
+}
+
+
+// =============================================================================
+// Section 7 — MAIN DRIVER (top-level statements; fn main is not auto-invoked
+// in script mode, so we call run-functions directly at module scope)
+// =============================================================================
+
+run_unit_anchors()
+run_float_anchors()
+run_array_anchors()
+
+drive_gcd()
+drive_digit_sum()
+drive_collatz()
+drive_isqrt()
+drive_horner()
+drive_modexp_cube()
+drive_fib_mod()
+drive_cube_mod_t2()
+drive_horner_float_t2()
+
+print("ALL_CHECKS_PASSED")

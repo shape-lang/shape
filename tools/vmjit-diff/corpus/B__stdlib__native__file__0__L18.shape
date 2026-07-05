@@ -1,0 +1,1 @@
+from std::core::file use { read_text, write_text, read_lines, append }

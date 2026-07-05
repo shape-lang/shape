@@ -1,0 +1,23 @@
+from std::core::intrinsics use { DateTime }
+
+let event_time = DateTime.parse("2024-06-15T14:30:45+00:00")
+
+print("=== A: f-string format on plain parsed dt ===")
+print(f"{event_time.format('%H:%M')}")
+
+print("=== B: f-string format on to_timezone dt, no loop ===")
+let local0 = event_time.to_timezone("America/New_York")
+print(f"{local0.format('%H:%M')}")
+
+print("=== C: f-string format on to_timezone dt, in loop with literal arg ===")
+let zones = ["America/New_York"]
+for tz in zones {
+    let local = event_time.to_timezone("America/New_York")
+    print(f"{local.format('%H:%M')}")
+}
+
+print("=== D: f-string format on to_timezone(tz) loopvar arg ===")
+for tz in zones {
+    let local = event_time.to_timezone(tz)
+    print(f"{local.format('%H:%M')}")
+}

@@ -1,0 +1,2 @@
+let line = Content.text("Hello").fg(Color.red).bold()
+print(line.toString())

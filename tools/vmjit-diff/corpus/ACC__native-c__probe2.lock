@@ -1,0 +1,28 @@
+version = "1"
+packages = []
+
+[[artifacts]]
+namespace = "external.native.library"
+key = "corpus@0.0.0::libm"
+producer = "shape-runtime/native_resolution@v1"
+inputs_hash = "sha256:1d21fb8b10b6014778990f74bee673da6573a801863724be81734428bcbe21e4"
+created_at = "2026-07-05T05:02:16.934975178+00:00"
+payload_json = '{"Object":{"alias":{"String":"libm"},"arch":{"String":"x86_64"},"available":{"Bool":true},"cache_key":"Null","cached":{"Bool":false},"declared_version":"Null","env":"Null","fingerprint":{"String":"system-name:libm.so.6:version:unspecified"},"load_target":{"String":"libm.so.6"},"os":{"String":"linux"},"package_key":{"String":"corpus@0.0.0"},"package_name":{"String":"corpus"},"package_version":{"String":"0.0.0"},"path_exists":{"Bool":false},"path_like":{"Bool":false},"provider":{"String":"system"},"resolved":{"String":"libm.so.6"},"target":{"String":"linux-x86_64"}}}'
+
+[artifacts.determinism]
+mode = "external"
+
+[artifacts.determinism.fingerprints]
+"native:linux-x86_64:corpus@0.0.0:libm:system" = "system-name:libm.so.6:version:unspecified"
+
+[artifacts.inputs]
+alias = "libm"
+arch = "x86_64"
+"external::native:linux-x86_64:corpus@0.0.0:libm:system" = "system-name:libm.so.6:version:unspecified"
+os = "linux"
+package_key = "corpus@0.0.0"
+package_name = "corpus"
+package_version = "0.0.0"
+provider = "system"
+resolved = "libm.so.6"
+target = "linux-x86_64"

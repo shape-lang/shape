@@ -1,0 +1,2 @@
+let n = true as number
+print(n)

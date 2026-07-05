@@ -1,0 +1,2 @@
+let quoted = """she said "hello" today""";
+// => she said "hello" today

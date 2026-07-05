@@ -1,0 +1,5 @@
+fn first_int(items: Vec<int>) -> int {
+  items[0]
+}
+
+print(first_int([1, 2, 3]))

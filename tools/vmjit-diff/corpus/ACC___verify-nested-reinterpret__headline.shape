@@ -1,0 +1,2 @@
+fn g() -> Result<int,string> { Ok(5) }
+match g() { Some(v) => print(v), None => print(-1) }

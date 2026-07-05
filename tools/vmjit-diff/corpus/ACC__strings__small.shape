@@ -1,0 +1,78 @@
+// small.shape — strings slice, book-primary.
+// Source: fundamentals/strings.mdx (+ stdlib/core/testing for `assert`).
+// Exercises: simple literals + escapes, triple-quote dedent, f-string interpolation,
+//            f-string fixed(N) spec, doubled-brace escaping, core methods.
+//
+// Written in script/top-level form: imported testing functions are only visible
+// at module top level (not inside `fn` bodies). Uses `assert(bool, msg)` because
+// the generic `assert_eq<T>` cannot infer T from method/property results under the
+// strict-flip checker. See REPORT book_gaps / book_wrong.
+
+from std::core::utils::testing use { assert }
+
+// --- Simple strings + escapes (book "Simple Strings") ---
+let plain = "plain text"
+assert(plain.length == 10, "plain length")?
+
+let escaped = "quote: \" | tab: \t"
+// "quote: "=7 + '"'=1 + " | tab: "=8 + '\t'=1 => 17
+assert(escaped.length == 17, "escaped length")?
+
+// --- f-string interpolation (book "Formatted Strings") ---
+let name = "Alice"
+let score = 42
+let msg = f"name={name}, score={score}"
+assert(msg == "name=Alice, score=42", "f-string interp")?
+
+// --- Doubled-brace literal (book: f"literal braces: {{value}}") ---
+let braces = f"literal braces: {{value}}"
+assert(braces == "literal braces: {value}", "doubled-brace")?
+
+// --- fixed(N) format spec (book "Typed format specs") ---
+let p = 12.3456
+let s = f"p={p:fixed(2)}"
+assert(s == "p=12.35", "fixed(2) spec")?
+
+// --- Triple-quoted dedent (book "Triple-Quoted Strings") ---
+let multi = """
+    this
+    is
+    a
+    multiline
+    """
+assert(multi == "this\nis\na\nmultiline", "triple dedent")?
+
+// Inline triple form (book: => "a quick multiline")
+let inline = """a quick multiline"""
+assert(inline == "a quick multiline", "inline triple")?
+
+// --- Methods (book "Methods") ---
+let csv = "Alice,Bob,Charlie"
+let items = csv.split(",")
+assert(items.length == 3, "split count")?
+assert(items[0] == "Alice", "split first")?
+assert(items[2] == "Charlie", "split last")?
+
+let normalized = "  HELLO  ".trim().toLowerCase()
+assert(normalized == "hello", "trim+lower")?
+
+let joined = ["hello", "shape"].join(" ")
+assert(joined == "hello shape", "join")?
+
+assert("Alice,Bob".contains("Bob"), "contains")?
+assert("hello".replace("l", "L") == "heLLo", "replace")?
+assert("hello".toUpperCase() == "HELLO", "toUpperCase")?
+
+// substring(start, end?) (book Methods section)
+assert("hello world".substring(0, 5) == "hello", "substring")?
+
+// char indexing `s[i]` (book llm_common_mistakes line 8: "Access chars via s[i]").
+// Verified working on current HEAD: "hello"[0] == "h". (A prior authoring pass
+// recorded this as hard-failing; that note was stale for this binary — re-verified
+// 2026-06-18 in both vm and jit modes.)
+let h = "hello"
+assert(h[0] == "h", "index 0")?
+assert(h[1] == "e", "index 1")?
+assert(h[4] == "o", "index 4")?
+
+print("ALL_CHECKS_PASSED")

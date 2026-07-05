@@ -1,0 +1,10 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+fn risky() -> Result<int> {
+    return Err("disk full");
+}
+
+match risky() {
+    Ok(v) => print(v),
+    Err(e) => print(e),   // prints: disk full
+}

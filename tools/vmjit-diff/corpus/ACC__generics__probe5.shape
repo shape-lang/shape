@@ -1,0 +1,14 @@
+trait Named {
+  fn val() -> int;
+}
+type User { name: string }
+impl Named for User {
+  method val() -> int { 7 }
+}
+let items: Vec<dyn Named> = [User { name: "Alice" }]
+for it in items {
+  let v = it.val()
+  print(v)            // does the raw int print?
+  let w = v + 1       // arithmetic on the dyn-returned int
+  print(w)
+}

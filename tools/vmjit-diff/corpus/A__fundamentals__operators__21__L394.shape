@@ -1,0 +1,6 @@
+for i in 0..5 {
+  print(i)
+}
+for j in 0..=3 {
+  print(j)
+}

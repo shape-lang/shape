@@ -1,0 +1,74 @@
+// small.shape — Ownership, References, and Borrowing
+// Exercises the core of fundamentals/references-borrowing.mdx:
+//   let / let mut, clone, &/&mut function params, inferred ref mode,
+//   auto-ref method calls, NLL, return-value-through-reference.
+// Self-checking: asserts every result; prints ALL_CHECKS_PASSED on success.
+
+var failures = 0
+fn check(name, got, want) {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
+    }
+}
+
+// --- let (immutable, uniquely owned) ---
+let x = 42
+check("let_x", x, 42)
+
+// --- let mut (mutable, uniquely owned, direct mutation) ---
+let mut count = 0
+count = count + 1
+count = count + 1
+check("let_mut_count", count, 2)
+
+// --- let mut array direct mutation via auto-ref method call ---
+let mut items = [1, 2, 3]
+items.push(4)                 // desugars to (&mut items).push(4)
+check("items_len", items.len(), 4)
+
+// --- clone keeps both bindings live ---
+let c = [4, 5, 6]
+let d = clone c
+check("c_len_after_clone", c.len(), 3)
+check("d_len_after_clone", d.len(), 3)
+
+// --- references as function parameters ---
+fn read_first(&arr) {
+    return arr[0]              // returns dereferenced value, not the reference
+}
+fn append(&mut arr, value) {
+    arr.push(value)
+}
+let mut buf = [10, 20, 30]
+let first = read_first(&buf)  // shared borrow for the call
+check("read_first", first, 10)
+append(&mut buf, 40)          // exclusive borrow for the call
+check("data_len_after_append", buf.len(), 4)
+check("data_last", buf[3], 40)
+
+// --- inferred reference mode (read-only param infers &) ---
+fn total(its) {
+    var sum = 0
+    for it in its { sum = sum + it }
+    return sum
+}
+check("total", total([1, 2, 3, 4]), 10)
+
+// --- return value through a reference ---
+fn read_val(&v) {
+    return v
+}
+let val = 99
+check("read_val", read_val(&val), 99)
+
+// --- Non-Lexical Lifetimes: borrow ends at last use ---
+let mut nums = [1, 2, 3]
+let r = &nums                 // shared borrow starts
+check("nll_r0", r[0], 1)      // last use of r — borrow ENDS here
+nums.push(4)                  // OK: no active borrows
+check("nll_nums_len", nums.len(), 4)
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+}

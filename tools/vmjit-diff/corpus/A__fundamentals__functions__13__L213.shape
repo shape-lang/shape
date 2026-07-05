@@ -1,0 +1,7 @@
+fn box_vol(w: int, h: int, d: int) -> int {
+  w * h * d
+}
+
+print(box_vol(w: 2, h: 3, d: 4))   // all-named            => 24
+print(box_vol(d: 4, w: 2, h: 3))   // out-of-order         => 24
+print(box_vol(2, h: 3, d: 4))      // positional-then-named => 24

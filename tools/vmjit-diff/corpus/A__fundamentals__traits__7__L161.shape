@@ -1,0 +1,6 @@
+trait Container<T> {
+  fn get(i: int) -> T;
+  fn len() -> int;
+}
+
+print("ok")

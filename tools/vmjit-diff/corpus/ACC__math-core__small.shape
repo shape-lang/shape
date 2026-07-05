@@ -1,0 +1,56 @@
+// math-core small program: exercises std::core::math statistics, constants,
+// trigonometry, helpers, and the bare global arithmetic builtins.
+// Expected values derived from book semantics (stdlib/core/math.mdx +
+// stdlib/native/math.mdx) BEFORE running.
+from std::core::math use { sum, mean, std, variance, PI, E, TAU, sin, cos, clamp, lerp, sign, degrees, radians, atan2 }
+
+let mut ok = true
+
+// --- Basic statistics (core/math.mdx Basic Statistics) ---
+if sum([1.0, 2.0, 3.0, 4.0]) != 10.0 { print("CHECK_FAILED: sum expected=10.0"); ok = false }
+if mean([10.0, 20.0, 30.0]) != 20.0 { print("CHECK_FAILED: mean expected=20.0"); ok = false }
+let series = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+if std(series) != 2.0 { print("CHECK_FAILED: std expected=2.0"); ok = false }
+if variance(series) != 4.0 { print("CHECK_FAILED: variance expected=4.0"); ok = false }
+
+// --- Constants (native/math.mdx Constants — functions, call with ()) ---
+if PI() != 3.141592653589793 { print("CHECK_FAILED: PI"); ok = false }
+if E() != 2.718281828459045 { print("CHECK_FAILED: E"); ok = false }
+if TAU() != 6.283185307179586 { print("CHECK_FAILED: TAU"); ok = false }
+
+// --- Bare global builtins (native/math.mdx) ---
+if sqrt(3.0 * 3.0 + 4.0 * 4.0) != 5.0 { print("CHECK_FAILED: sqrt expected=5.0"); ok = false }
+if pow(2.0, 10.0) != 1024.0 { print("CHECK_FAILED: pow expected=1024.0"); ok = false }
+if floor(3.7) != 3 { print("CHECK_FAILED: floor expected=3"); ok = false }
+if ceil(3.2) != 4 { print("CHECK_FAILED: ceil expected=4"); ok = false }
+if round(3.5) != 4 { print("CHECK_FAILED: round expected=4"); ok = false }
+if min(3.0, 7.0) != 3.0 { print("CHECK_FAILED: min expected=3.0"); ok = false }
+if max(3.0, 7.0) != 7.0 { print("CHECK_FAILED: max expected=7.0"); ok = false }
+
+// --- Trigonometry (radians) ---
+// sin(PI/2) == 1.0 exactly per book line 101 (~1.0); verify within tolerance.
+let half_pi = radians(90.0)
+let s = sin(half_pi)
+if s < 0.9999999999 || s > 1.0000000001 { print("CHECK_FAILED: sin(pi/2) expected~1.0"); ok = false }
+if cos(0.0) != 1.0 { print("CHECK_FAILED: cos(0) expected=1.0"); ok = false }
+// atan2(1,1) == PI/4
+let q = atan2(1.0, 1.0)
+let pi_over_4 = PI() / 4.0
+if q < pi_over_4 - 1e-12 || q > pi_over_4 + 1e-12 { print("CHECK_FAILED: atan2 expected=pi/4"); ok = false }
+
+// --- Helpers (native/math.mdx Helpers) ---
+if clamp(150.0, 0.0, 100.0) != 100.0 { print("CHECK_FAILED: clamp expected=100.0"); ok = false }
+if clamp(-5.0, 0.0, 100.0) != 0.0 { print("CHECK_FAILED: clamp-lo expected=0.0"); ok = false }
+if lerp(0.0, 10.0, 0.5) != 5.0 { print("CHECK_FAILED: lerp expected=5.0"); ok = false }
+if sign(-5) != -1 { print("CHECK_FAILED: sign(-5) expected=-1"); ok = false }
+if sign(0) != 0 { print("CHECK_FAILED: sign(0) expected=0"); ok = false }
+if sign(5) != 1 { print("CHECK_FAILED: sign(5) expected=1"); ok = false }
+if degrees(PI()) != 180.0 { print("CHECK_FAILED: degrees(PI) expected=180.0"); ok = false }
+// NOTE: written inline as `radians(180.0) != PI()` this trips a strict-typing
+// inference gap (call != call across two std::core::math fns). Binding each to a
+// let first gives them a concrete `number` type — the natural user workaround.
+let r180 = radians(180.0)
+let pi_val = PI()
+if r180 != pi_val { print("CHECK_FAILED: radians(180) expected=PI"); ok = false }
+
+if ok { print("ALL_CHECKS_PASSED") }

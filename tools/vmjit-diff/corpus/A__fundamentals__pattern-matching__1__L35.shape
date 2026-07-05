@@ -1,0 +1,6 @@
+fn normalize(value: int | string) -> string {
+  match value {
+    n: int => f"int:{n}"
+    s: string => f"str:{s}"
+  }
+}

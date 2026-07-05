@@ -1,0 +1,29 @@
+// rangevar-closure-repro.shape
+//
+// NEW finding (2026-06-22 independent pass): when a `for`-range loop
+// variable is passed into a let-bound closure and the closure's result is
+// used in INTEGER arithmetic, the closure-result's `int` kind is lost — the
+// result comes back as a float bit-pattern and the subsequent int add sees
+// garbage (1.0 -> raw bits 4607182418800017408), tripping the i64-overflow
+// guard.
+//
+// This is NOT a behavior the book claims works (the HOF section only ever
+// does `f(x)` returned directly, never `acc + f(rangevar)`), so it is an
+// ADJACENT strict-typing / kind-tracking defect rather than a BOOK-WRONG.
+// Identical failure under --mode vm and --mode jit (VM-level, not a JIT
+// divergence). The deliverable large.shape deliberately iterates over
+// Vec<int> ELEMENTS (which preserve int kind), so it is unaffected.
+//
+// FAILS (line 3): "integer addition overflow ... 4607182418800017408 ..."
+let sq = |x| x * x
+let mut total = 0
+for i in 0..4 { total = total + sq(i) }   // expected 0+1+4+9 = 14
+print(total)
+
+// CONTRAST (works, prints 14): same closure, but the argument is a Vec<int>
+// element rather than a bare range variable.
+//   let xs: Vec<int> = [0,1,2,3]
+//   let mut t = 0
+//   let mut i = 0
+//   while i < xs.len() { t = t + sq(xs[i]); i = i + 1 }
+//   print(t)   // 14

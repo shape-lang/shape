@@ -1,0 +1,12 @@
+trait Display {
+  fn display() -> string;
+}
+
+type User { name: string }
+
+impl Display for User {
+  method display() -> string { self.name }
+}
+
+let u = User { name: "Alice" }
+print(u.display())

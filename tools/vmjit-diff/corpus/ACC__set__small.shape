@@ -1,0 +1,56 @@
+// small.shape — set slice, book-primary (stdlib/core/set.mdx)
+// Exercises the chapter core: from_array dedup, add/remove, includes,
+// len, to_array, and set algebra (union/intersection/difference).
+//
+// Import form: the assigned chapter documents
+//   from std::core::set use { new, from_array, add, remove, includes,
+//                             union, intersection, difference, to_array, len }
+// (see set.mdx "Import"). We write it exactly as taught.
+
+from std::core::set use {
+  new, from_array, add, remove, includes, union,
+  intersection, difference, to_array, len
+}
+
+fn main() {
+  // Creating sets (set.mdx "Creating Sets")
+  let empty = new()
+  assert(len(empty) == 0)
+
+  // from_array deduplicates: ["a","b","c","b","a"] -> {"a","b","c"}
+  let s = from_array(["a", "b", "c", "b", "a"])
+  assert(len(s) == 3)
+
+  // Operations (set.mdx "Operations")
+  let base = from_array(["a", "b", "c"])
+  let s2 = add(base, "d")          // {"a","b","c","d"}
+  let s3 = remove(s2, "b")         // {"a","c","d"}
+
+  assert(includes(s3, "a") == true)
+  assert(includes(s3, "b") == false)
+  assert(len(s3) == 3)
+
+  // to_array round-trips membership (order unspecified)
+  let arr = to_array(s3)
+  assert(arr.len() == 3)
+
+  // Set Algebra (set.mdx "Set Algebra")
+  let a = from_array(["x", "y", "z"])
+  let b = from_array(["y", "z", "w"])
+
+  let u = union(a, b)          // {"x","y","z","w"}
+  let i = intersection(a, b)   // {"y","z"}
+  let d = difference(a, b)     // {"x"}
+
+  assert(len(u) == 4)
+  assert(len(i) == 2)
+  assert(len(d) == 1)
+  assert(includes(i, "y") == true)
+  assert(includes(i, "x") == false)
+  assert(includes(d, "x") == true)
+  assert(includes(d, "y") == false)
+
+  print("ALL_CHECKS_PASSED")
+}
+
+main()

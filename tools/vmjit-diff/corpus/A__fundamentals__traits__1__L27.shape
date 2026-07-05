@@ -1,0 +1,5 @@
+trait Display {
+  fn display() -> string;
+}
+
+print("ok")

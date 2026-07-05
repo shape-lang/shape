@@ -1,0 +1,9 @@
+let x = 42             // immutable — cannot reassign
+let mut count = 0      // mutable — count = count + 1 OK
+var shared = [1, 2, 3] // shared mutable — can be aliased
+const PI = 3.14159     // compile-time constant
+
+print(x)
+print(count)
+print(shared.len())
+print(PI)

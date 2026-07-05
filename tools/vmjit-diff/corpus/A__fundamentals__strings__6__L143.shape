@@ -1,0 +1,4 @@
+let pattern = """
+    (\d+)\n(\w+)
+    """;
+// => "(\d+)\n(\w+)"   (literal backslash-n, not a newline)

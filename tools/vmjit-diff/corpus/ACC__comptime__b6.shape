@@ -1,0 +1,6 @@
+annotation typed(name) {
+  comptime post(target, ctx, type_name) {
+    set return (type_name)
+  }
+}
+print("annotation-declared")

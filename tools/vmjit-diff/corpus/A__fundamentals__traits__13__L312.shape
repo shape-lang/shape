@@ -1,0 +1,10 @@
+type Point { x: int, y: int }
+
+extend Point {
+  method magnitude_sq() -> int { self.x * self.x + self.y * self.y }
+  method sum() -> int { self.x + self.y }
+}
+
+let p = Point { x: 3, y: 4 }
+print(p.magnitude_sq())
+print(p.sum())

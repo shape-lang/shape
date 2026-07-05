@@ -1,0 +1,8 @@
+// Every function compiles to a FunctionBlob:
+//   - Its own instructions (not shared with other functions)
+//   - Its own constant pool
+//   - Its own string pool
+//   - A list of dependencies (other functions it calls, by hash)
+//   - A SHA-256 content hash of all of the above
+//
+// A "program" is just an entry hash + a store of blobs.

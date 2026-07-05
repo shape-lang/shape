@@ -1,0 +1,11 @@
+type Point { x: int, y: int }
+
+extend Point {
+  method sum() -> int { self.x + self.y }
+}
+
+let p = Point { x: 3, y: 4 }
+// un-annotated binding of an int-returning method result
+let a = p.sum()
+let r = a + a
+print(r)

@@ -1,0 +1,69 @@
+// control-flow slice — small self-checking program.
+// Self-check uses ONLY chapter constructs: if-expressions + print.
+// Identifiers deliberately avoid keyword prefixes (if/while/for/loop/match)
+// in condition positions to sidestep the keyword-prefix parse defect
+// (see REPORT.md, book_wrong). Semantics per fundamentals/control-flow.mdx.
+
+var ok = true
+
+// --- if as an expression ---
+let score = 84
+let grade = if score >= 90 { "A" } else if score >= 80 { "B" } else { "C" }
+if grade != "B" { print(f"CHECK_FAILED: if-expression expected=B got={grade}") ; ok = false }
+
+// --- block returns last expression ---
+let value = {
+  let base = 10
+  base * 2
+}
+if value != 20 { print(f"CHECK_FAILED: block expected=20 got={value}") ; ok = false }
+
+// --- for over exclusive range 0..5 sums 0+1+2+3+4 = 10 ---
+var sumExcl = 0
+for i in 0..5 { sumExcl = sumExcl + i }
+if sumExcl != 10 { print(f"CHECK_FAILED: exclusive-range expected=10 got={sumExcl}") ; ok = false }
+
+// --- for over inclusive range 0..=5 sums 0..5 + 5 = 15 ---
+var sumIncl = 0
+for i in 0..=5 { sumIncl = sumIncl + i }
+if sumIncl != 15 { print(f"CHECK_FAILED: inclusive-range expected=15 got={sumIncl}") ; ok = false }
+
+// --- destructuring loop binding ---
+let points = [{x: 1, y: 2}, {x: 3, y: 4}]
+var coordSum = 0
+for {x, y} in points { coordSum = coordSum + x + y }
+if coordSum != 10 { print(f"CHECK_FAILED: destructuring expected=10 got={coordSum}") ; ok = false }
+
+// --- while loop ---
+var w = 0
+var iters = 0
+while w < 3 { iters = iters + 1 ; w = w + 1 }
+if iters != 3 { print(f"CHECK_FAILED: while expected=3 got={iters}") ; ok = false }
+
+// --- break/continue: skip 2, stop at 6 -> visits 0,1,3,4,5 = 13 ---
+var visited = 0
+for i in 0..10 {
+  if i == 2 { continue }
+  if i == 6 { break }
+  visited = visited + i
+}
+if visited != 13 { print(f"CHECK_FAILED: break-continue expected=13 got={visited}") ; ok = false }
+
+// --- loop with manual break ---
+var k = 0
+loop {
+  if k >= 5 { break }
+  k = k + 1
+}
+if k != 5 { print(f"CHECK_FAILED: loop-break expected=5 got={k}") ; ok = false }
+
+// --- break with value: first x=n*4 where x>10 is x=12 (n=3); 12*2=24 ---
+var n = 0
+let result = loop {
+  n = n + 1
+  let x = n * 4
+  if x > 10 { break x * 2 }
+}
+if result != 24 { print(f"CHECK_FAILED: break-value expected=24 got={result}") ; ok = false }
+
+if ok { print("ALL_CHECKS_PASSED") }

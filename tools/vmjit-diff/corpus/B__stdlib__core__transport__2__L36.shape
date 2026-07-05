@@ -1,0 +1,4 @@
+pub type Connection {
+    destination: string,
+    is_open: bool,
+}

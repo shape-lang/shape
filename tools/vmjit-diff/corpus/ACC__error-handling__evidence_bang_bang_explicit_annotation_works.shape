@@ -1,0 +1,23 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+fn find_user(id: int) -> Result<int> {
+  if id == 0 { return Err("no such user") }
+  return Ok(id * 10)
+}
+
+// explicit annotation on the binding
+fn lookup_annot(id: int) -> Result<int> {
+  let user_id: int = (find_user(id) !! "User not found")?
+  return Ok(user_id + 1)
+}
+
+let r = lookup_annot(5)
+match r {
+  Ok(v) => print(f"annot ok {v}"),
+  Err(e) => print("err"),
+}
+let r2 = lookup_annot(0)
+match r2 {
+  Ok(v) => print(f"annot ok {v}"),
+  Err(e) => print("annot err propagated"),
+}

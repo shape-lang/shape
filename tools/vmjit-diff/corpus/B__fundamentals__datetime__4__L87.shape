@@ -1,0 +1,3 @@
+from std::core::intrinsics use { DateTime }
+let date = @"2024-01-15"
+print(date.year())   // 2024

@@ -1,0 +1,5 @@
+let hypotenuse = sqrt(3.0 * 3.0 + 4.0 * 4.0)
+print(hypotenuse)  // 5.0
+
+let absolute = abs(-7)
+print(absolute)    // 7

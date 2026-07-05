@@ -1,0 +1,855 @@
+// large.shape — strings slice, book-primary.
+// A deterministic, non-interactive, machine-proofable TEMPLATE / MARKUP PROCESSOR.
+//
+// Source semantics: fundamentals/strings.mdx
+//   - immutable UTF-8 strings
+//   - literals "...", triple-quoted """...""", f"..." interpolation, fixed(N) spec
+//   - methods: .length, split(sep), join(sep), contains(sub), substring(start,end?),
+//     toUpperCase()/toLowerCase(), trim()/trimStart()/trimEnd(), replace(old,new)
+//
+// All expected values are derived from BOOK SEMANTICS and written BEFORE first run.
+//
+// IMPLEMENTATION NOTES (re-verified 2026-06-20 against this binary; see REPORT):
+//   * The `let x: string = method()` annotations and substring(i,i+1) char access
+//     below are belt-and-suspenders, NOT required: on this binary string-returning
+//     methods (trim/toUpperCase/substring/split[i]) concat with literals directly
+//     (`method() + "x"` works, no annotation), and `s[i]` char indexing returns a
+//     1-char string at runtime. A prior authoring pass recorded both as failing;
+//     that note was stale for this binary. The explicit forms are kept because they
+//     are equally correct and the program already passes byte-identically vm==jit.
+//   * imported testing fns are only visible at top level -> all asserts at top level.
+
+from std::core::utils::testing use { assert }
+
+// ============================================================================
+// SECTION 1 — Low-level string utilities
+// ============================================================================
+
+// Single character at position i (substring workaround for broken s[i]).
+fn char_at(s: string, i: int) -> string {
+    let c: string = s.substring(i, i + 1)
+    return c
+}
+
+// Repeat a string n times.
+fn repeat(s: string, n: int) -> string {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = out + s
+        i = i + 1
+    }
+    return out
+}
+
+// Index of first occurrence of needle in haystack, or -1. Empty needle => 0.
+fn index_of(haystack: string, needle: string) -> int {
+    let hn = haystack.length
+    let nn = needle.length
+    if nn == 0 {
+        return 0
+    }
+    let mut i = 0
+    while i + nn <= hn {
+        let piece: string = haystack.substring(i, i + nn)
+        if piece == needle {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn starts_with(s: string, prefix: string) -> bool {
+    let pn = prefix.length
+    if pn > s.length {
+        return false
+    }
+    let head: string = s.substring(0, pn)
+    return head == prefix
+}
+
+fn ends_with(s: string, suffix: string) -> bool {
+    let sn = s.length
+    let qn = suffix.length
+    if qn > sn {
+        return false
+    }
+    let tail: string = s.substring(sn - qn, sn)
+    return tail == suffix
+}
+
+// Count non-overlapping occurrences of needle in haystack.
+fn count_occurrences(haystack: string, needle: string) -> int {
+    let nn = needle.length
+    if nn == 0 {
+        return 0
+    }
+    let hn = haystack.length
+    let mut count = 0
+    let mut i = 0
+    while i + nn <= hn {
+        let piece: string = haystack.substring(i, i + nn)
+        if piece == needle {
+            count = count + 1
+            i = i + nn
+        } else {
+            i = i + 1
+        }
+    }
+    return count
+}
+
+// Left-pad s with pad char to reach width (no truncation if already wide).
+fn pad_left(s: string, width: int, pad: string) -> string {
+    let deficit = width - s.length
+    if deficit <= 0 {
+        return s
+    }
+    let fill: string = repeat(pad, deficit)
+    return fill + s
+}
+
+// Right-pad s with pad char to reach width.
+fn pad_right(s: string, width: int, pad: string) -> string {
+    let deficit = width - s.length
+    if deficit <= 0 {
+        return s
+    }
+    let fill: string = repeat(pad, deficit)
+    return s + fill
+}
+
+// Reverse a string (codepoint-wise via substring scan).
+fn reverse(s: string) -> string {
+    let n = s.length
+    let mut out = ""
+    let mut i = n
+    while i > 0 {
+        let ch: string = s.substring(i - 1, i)
+        out = out + ch
+        i = i - 1
+    }
+    return out
+}
+
+// Title-case a single word: first char upper, rest lower.
+fn title_word(w: string) -> string {
+    if w.length == 0 {
+        return w
+    }
+    let first: string = w.substring(0, 1)
+    let firstUp: string = first.toUpperCase()
+    let rest: string = w.substring(1, w.length)
+    let restLow: string = rest.toLowerCase()
+    return firstUp + restLow
+}
+
+// ============================================================================
+// SECTION 2 — Mustache-lite template engine: {{key}} substitution
+// ============================================================================
+// Variables are supplied as two parallel arrays of strings (keys, values).
+// We avoid HashMap (out of slice scope) and index-by-position lookup.
+
+fn lookup(keys: Array<string>, values: Array<string>, key: string) -> string {
+    let n = keys.length
+    let mut i = 0
+    while i < n {
+        let k: string = keys[i]
+        if k == key {
+            let v: string = values[i]
+            return v
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// Render: replace every {{key}} with its value. Unknown keys -> "".
+// Single-pass scan so values containing {{...}} are NOT re-expanded.
+fn render_template(tmpl: string, keys: Array<string>, values: Array<string>) -> string {
+    let n = tmpl.length
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        let mut two: string = ""
+        if i + 2 <= n {
+            two = tmpl.substring(i, i + 2)
+        }
+        if two == "{{" {
+            // find closing }}
+            let close = index_of_from(tmpl, "}}", i + 2)
+            if close < 0 {
+                // no close: emit rest literally
+                let restPart: string = tmpl.substring(i, n)
+                out = out + restPart
+                i = n
+            } else {
+                let key: string = tmpl.substring(i + 2, close)
+                let keyTrim: string = key.trim()
+                let val: string = lookup(keys, values, keyTrim)
+                out = out + val
+                i = close + 2
+            }
+        } else {
+            let ch: string = tmpl.substring(i, i + 1)
+            out = out + ch
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// index_of starting from a given offset.
+fn index_of_from(haystack: string, needle: string, start: int) -> int {
+    let hn = haystack.length
+    let nn = needle.length
+    if nn == 0 {
+        return start
+    }
+    let mut i = start
+    while i + nn <= hn {
+        let piece: string = haystack.substring(i, i + nn)
+        if piece == needle {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// ============================================================================
+// SECTION 3 — CSV-lite parser (split-based)
+// ============================================================================
+// Parse a single CSV record into fields, then re-emit a pipe-joined form.
+// split() pieces are `unknown`-typed, so we route them through f-strings.
+
+fn csv_field_count(record: string) -> int {
+    return record.split(",").length
+}
+
+// Re-join CSV fields with a different separator, trimming each.
+// Uses f-string interpolation (pieces are unknown-typed; only f-string/== work).
+fn csv_reformat(record: string, sep: string) -> string {
+    let fields = record.split(",")
+    let n = fields.length
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        let piece = fields[i]
+        let cell: string = f"{piece}"
+        let trimmed: string = cell.trim()
+        if i == 0 {
+            out = out + trimmed
+        } else {
+            out = out + sep + trimmed
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ============================================================================
+// SECTION 4 — Markdown-lite -> bracket-markup renderer
+// ============================================================================
+// Supported per line:
+//   "# Heading"      -> "[H1]Heading[/H1]"
+//   "## Heading"     -> "[H2]Heading[/H2]"
+//   "- item"         -> "[LI]item[/LI]"
+//   "**bold**" inline (whole-line bold token replaced) -> "[B]bold[/B]"
+//   plain line       -> "[P]line[/P]"
+// Bold replacement is a simple two-pass replace of the "**" delimiter:
+//   first "**" -> "[B]", next "**" -> "[/B]", repeated.
+
+fn render_bold(line: string) -> string {
+    let mut s: string = line
+    let mut toggleOpen = true
+    while count_occurrences_str(s, "**") > 0 {
+        if toggleOpen {
+            s = replace_first(s, "**", "[B]")
+            toggleOpen = false
+        } else {
+            s = replace_first(s, "**", "[/B]")
+            toggleOpen = true
+        }
+    }
+    return s
+}
+
+// count occurrences but with string arg already typed (helper wrapper)
+fn count_occurrences_str(haystack: string, needle: string) -> int {
+    return count_occurrences(haystack, needle)
+}
+
+// Replace only the first occurrence of old with new.
+fn replace_first(s: string, old: string, newv: string) -> string {
+    let pos = index_of(s, old)
+    if pos < 0 {
+        return s
+    }
+    let before: string = s.substring(0, pos)
+    let after: string = s.substring(pos + old.length, s.length)
+    return before + newv + after
+}
+
+fn render_md_line(line: string) -> string {
+    let t: string = line.trim()
+    if t.length == 0 {
+        return ""
+    }
+    if starts_with(t, "## ") {
+        let body: string = t.substring(3, t.length)
+        let bodyB: string = render_bold(body)
+        return f"[H2]{bodyB}[/H2]"
+    }
+    if starts_with(t, "# ") {
+        let body: string = t.substring(2, t.length)
+        let bodyB: string = render_bold(body)
+        return f"[H1]{bodyB}[/H1]"
+    }
+    if starts_with(t, "- ") {
+        let body: string = t.substring(2, t.length)
+        let bodyB: string = render_bold(body)
+        return f"[LI]{bodyB}[/LI]"
+    }
+    let bodyB: string = render_bold(t)
+    return f"[P]{bodyB}[/P]"
+}
+
+// Render a multi-line markdown document into joined bracket-markup, one
+// rendered line per source line, blank lines dropped.
+fn render_md_doc(doc: string) -> string {
+    let lines = doc.split("\n")
+    let n = lines.length
+    let mut out = ""
+    let mut first = true
+    let mut i = 0
+    while i < n {
+        let raw = lines[i]
+        let line: string = f"{raw}"
+        let rendered: string = render_md_line(line)
+        if rendered.length > 0 {
+            if first {
+                out = out + rendered
+                first = false
+            } else {
+                out = out + "\n" + rendered
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ============================================================================
+// SECTION 5 — word wrap
+// ============================================================================
+// Greedy word-wrap to a max width. Words are whitespace-separated (single
+// spaces assumed in fixtures). Returns lines joined by "\n".
+
+fn word_wrap(text: string, width: int) -> string {
+    let words = text.split(" ")
+    let n = words.length
+    let mut out = ""
+    let mut lineLen = 0
+    let mut firstWord = true
+    let mut i = 0
+    while i < n {
+        let raw = words[i]
+        let w: string = f"{raw}"
+        let wl = w.length
+        if firstWord {
+            out = out + w
+            lineLen = wl
+            firstWord = false
+        } else {
+            if lineLen + 1 + wl > width {
+                out = out + "\n" + w
+                lineLen = wl
+            } else {
+                out = out + " " + w
+                lineLen = lineLen + 1 + wl
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ============================================================================
+// SECTION 6 — slug + numeric formatting
+// ============================================================================
+
+// Turn a title into a lowercase hyphen slug. Spaces -> '-', drop nothing else
+// for our fixtures (alnum + spaces only).
+fn slugify(title: string) -> string {
+    let lower: string = title.toLowerCase()
+    let trimmed: string = lower.trim()
+    let dashed: string = trimmed.replace(" ", "-")
+    return dashed
+}
+
+// Format an integer with a fixed minimum width, zero-padded.
+fn zero_pad(value: int, width: int) -> string {
+    let s: string = f"{value}"
+    return pad_left(s, width, "0")
+}
+
+// ============================================================================
+// SECTION 7 — INI-style config parser (line + k=v split)
+// ============================================================================
+// Lines of "key = value"; blank lines and lines starting with ';' are skipped.
+// Returns the value for a key, or "" if absent. Whitespace around k and v is
+// trimmed. First '=' splits; later '=' chars belong to the value.
+
+fn config_get(text: string, wanted: string) -> string {
+    let lines = text.split("\n")
+    let n = lines.length
+    let mut i = 0
+    while i < n {
+        let raw = lines[i]
+        let line: string = f"{raw}"
+        let trimmed: string = line.trim()
+        if trimmed.length == 0 {
+            i = i + 1
+        } else {
+            let isComment: bool = starts_with(trimmed, ";")
+            if isComment {
+                i = i + 1
+            } else {
+                let eq = index_of(trimmed, "=")
+                if eq < 0 {
+                    i = i + 1
+                } else {
+                    let kpart: string = trimmed.substring(0, eq)
+                    let key: string = kpart.trim()
+                    if key == wanted {
+                        let vpart: string = trimmed.substring(eq + 1, trimmed.length)
+                        let value: string = vpart.trim()
+                        return value
+                    }
+                    i = i + 1
+                }
+            }
+        }
+    }
+    return ""
+}
+
+// Count the number of effective (non-blank, non-comment) config entries.
+fn config_count(text: string) -> int {
+    let lines = text.split("\n")
+    let n = lines.length
+    let mut count = 0
+    let mut i = 0
+    while i < n {
+        let raw = lines[i]
+        let line: string = f"{raw}"
+        let trimmed: string = line.trim()
+        let isComment: bool = starts_with(trimmed, ";")
+        if trimmed.length > 0 {
+            if !isComment {
+                if index_of(trimmed, "=") >= 0 {
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// ============================================================================
+// SECTION 8 — extended inline markdown: `code`, [text](url) links
+// ============================================================================
+// render_inline applies, in order: bold (**..**), code (`..`), links.
+
+fn render_code(line: string) -> string {
+    let mut s: string = line
+    let mut open = true
+    while count_occurrences(s, "`") > 0 {
+        if open {
+            s = replace_first(s, "`", "[C]")
+            open = false
+        } else {
+            s = replace_first(s, "`", "[/C]")
+            open = true
+        }
+    }
+    return s
+}
+
+// Last index of needle within haystack[0..before], or -1.
+fn last_index_before(haystack: string, needle: string, before: int) -> int {
+    let nn = needle.length
+    if nn == 0 {
+        return -1
+    }
+    let mut result = -1
+    let mut i = 0
+    while i + nn <= before {
+        let piece: string = haystack.substring(i, i + nn)
+        if piece == needle {
+            result = i
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// Render each [text](url) link to <text|url>. The opening '[' is found by
+// scanning back from "](" to the nearest preceding '[', so already-inserted
+// markup tags like [B]/[C] do not confuse link detection (order-independent).
+fn render_links(line: string) -> string {
+    let mut s: string = line
+    while index_of(s, "](") >= 0 {
+        let mid = index_of(s, "](")
+        let open = last_index_before(s, "[", mid + 1)
+        if open < 0 {
+            return s
+        }
+        let endParen = index_of_from(s, ")", mid)
+        if endParen < 0 {
+            return s
+        }
+        let before: string = s.substring(0, open)
+        let text: string = s.substring(open + 1, mid)
+        let url: string = s.substring(mid + 2, endParen)
+        let after: string = s.substring(endParen + 1, s.length)
+        let rebuilt: string = f"{before}<{text}|{url}>{after}"
+        s = rebuilt
+    }
+    return s
+}
+
+fn render_inline(line: string) -> string {
+    let b: string = render_bold(line)
+    let c: string = render_code(b)
+    let l: string = render_links(c)
+    return l
+}
+
+// ============================================================================
+// SECTION 9 — text statistics
+// ============================================================================
+
+fn word_count(text: string) -> int {
+    let trimmed: string = text.trim()
+    if trimmed.length == 0 {
+        return 0
+    }
+    // collapse is unnecessary for single-space fixtures
+    return trimmed.split(" ").length
+}
+
+fn line_count(text: string) -> int {
+    return text.split("\n").length
+}
+
+// Count vowels (a,e,i,o,u, case-insensitive) by scanning chars.
+fn vowel_count(text: string) -> int {
+    let lower: string = text.toLowerCase()
+    let n = lower.length
+    let mut count = 0
+    let mut i = 0
+    while i < n {
+        let ch: string = lower.substring(i, i + 1)
+        let isVowel: bool = ch == "a"
+        let v2: bool = ch == "e"
+        let v3: bool = ch == "i"
+        let v4: bool = ch == "o"
+        let v5: bool = ch == "u"
+        if isVowel || v2 || v3 || v4 || v5 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Build a comma+space joined list from an Array<string> using f-strings.
+fn join_csv(items: Array<string>) -> string {
+    let n = items.length
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        let raw = items[i]
+        let item: string = f"{raw}"
+        if i == 0 {
+            out = out + item
+        } else {
+            out = out + ", " + item
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ============================================================================
+// TOP-LEVEL: build fixtures, run, and ASSERT against book-derived expectations.
+// ============================================================================
+
+// ---- Section 1 utility checks ----
+assert(repeat("ab", 3) == "ababab", "repeat ab x3")?
+assert(repeat("-", 5) == "-----", "repeat dash x5")?
+assert(repeat("x", 0) == "", "repeat zero")?
+
+assert(char_at("shape", 0) == "s", "char_at 0")?
+assert(char_at("shape", 4) == "e", "char_at 4")?
+
+assert(index_of("hello world", "world") == 6, "index_of world")?
+assert(index_of("hello", "z") == -1, "index_of miss")?
+assert(index_of("aaa", "aa") == 0, "index_of first")?
+assert(index_of("abc", "") == 0, "index_of empty")?
+
+assert(starts_with("hello", "he"), "starts_with he")?
+assert(!starts_with("hello", "lo"), "not starts_with lo")?
+assert(starts_with("hi", "hi"), "starts_with full")?
+assert(!starts_with("hi", "hiya"), "starts_with too long")?
+
+assert(ends_with("hello", "lo"), "ends_with lo")?
+assert(!ends_with("hello", "he"), "not ends_with he")?
+assert(ends_with("file.txt", ".txt"), "ends_with ext")?
+
+assert(count_occurrences("aaaa", "aa") == 2, "count non-overlap aa")?
+assert(count_occurrences("ababab", "ab") == 3, "count ab")?
+assert(count_occurrences("xyz", "q") == 0, "count miss")?
+
+assert(pad_left("7", 3, "0") == "007", "pad_left 007")?
+assert(pad_left("abcd", 3, "0") == "abcd", "pad_left no-trunc")?
+assert(pad_right("7", 3, ".") == "7..", "pad_right 7..")?
+
+assert(reverse("abc") == "cba", "reverse abc")?
+assert(reverse("") == "", "reverse empty")?
+assert(reverse("racecar") == "racecar", "reverse palindrome")?
+
+assert(title_word("hELLO") == "Hello", "title hELLO")?
+assert(title_word("a") == "A", "title a")?
+assert(title_word("") == "", "title empty")?
+
+// ---- Section 2 template engine ----
+let keys = ["name", "count", "city"]
+let values = ["Alice", "5", "Vienna"]
+
+let t1 = "Hello {{name}}, you have {{count}} messages."
+let r1: string = render_template(t1, keys, values)
+// Book semantics: each {{key}} replaced by its value.
+assert(r1 == "Hello Alice, you have 5 messages.", "template basic")?
+
+let t2 = "{{name}} lives in {{city}}."
+let r2: string = render_template(t2, keys, values)
+assert(r2 == "Alice lives in Vienna.", "template two vars")?
+
+let t3 = "no vars here"
+let r3: string = render_template(t3, keys, values)
+assert(r3 == "no vars here", "template no vars")?
+
+let t4 = "unknown {{zzz}} key"
+let r4: string = render_template(t4, keys, values)
+// unknown key -> "" => "unknown  key" (two spaces)
+assert(r4 == "unknown  key", "template unknown key")?
+
+let t5 = "spaced {{ name }} key"
+let r5: string = render_template(t5, keys, values)
+// key trimmed -> "name" -> "Alice"
+assert(r5 == "spaced Alice key", "template spaced key")?
+
+let t6 = "literal { single brace"
+let r6: string = render_template(t6, keys, values)
+assert(r6 == "literal { single brace", "template single brace literal")?
+
+let t7 = "edge {{name}}"
+let r7: string = render_template(t7, keys, values)
+assert(r7 == "edge Alice", "template trailing var")?
+
+// values are NOT re-expanded: value "Vienna" has no braces, but prove via a
+// value that itself contains {{...}} text staying literal.
+let keys2 = ["a"]
+let values2 = ["{{b}}"]
+let t8 = "x {{a}} y"
+let r8: string = render_template(t8, keys2, values2)
+assert(r8 == "x {{b}} y", "template no re-expansion")?
+
+// ---- Section 3 CSV ----
+let rec = "Alice, Bob ,  Charlie"
+assert(csv_field_count(rec) == 3, "csv field count")?
+let reform: string = csv_reformat(rec, " | ")
+// trimmed fields joined by " | "
+assert(reform == "Alice | Bob | Charlie", "csv reformat")?
+
+let rec2 = "a,b,,c"
+assert(csv_field_count(rec2) == 4, "csv count empties")?
+let reform2: string = csv_reformat(rec2, "-")
+assert(reform2 == "a-b--c", "csv reformat empties")?
+
+let rec3 = "solo"
+assert(csv_field_count(rec3) == 1, "csv single")?
+let reform3: string = csv_reformat(rec3, ";")
+assert(reform3 == "solo", "csv reformat single")?
+
+// ---- Section 4 markdown ----
+assert(render_md_line("# Title") == "[H1]Title[/H1]", "md h1")?
+assert(render_md_line("## Sub") == "[H2]Sub[/H2]", "md h2")?
+assert(render_md_line("- item one") == "[LI]item one[/LI]", "md li")?
+assert(render_md_line("just text") == "[P]just text[/P]", "md p")?
+assert(render_md_line("   ") == "", "md blank")?
+
+// inline bold
+assert(replace_first("a**b", "**", "[B]") == "a[B]b", "replace_first")?
+assert(render_bold("say **hi** now") == "say [B]hi[/B] now", "render_bold one")?
+assert(render_bold("**a** and **b**") == "[B]a[/B] and [B]b[/B]", "render_bold two")?
+assert(render_bold("plain") == "plain", "render_bold none")?
+assert(render_md_line("# **Big** Title") == "[H1][B]Big[/B] Title[/H1]", "md h1 bold")?
+
+let doc = """
+    # Doc Title
+    intro line
+    ## Section
+    - first
+    - second **bold**
+    """
+let rendered: string = render_md_doc(doc)
+let expected_doc: string = "[H1]Doc Title[/H1]\n[P]intro line[/P]\n[H2]Section[/H2]\n[LI]first[/LI]\n[LI]second [B]bold[/B][/LI]"
+assert(rendered == expected_doc, "md doc render")?
+
+// ---- Section 5 word wrap ----
+let para = "the quick brown fox jumps over the lazy dog"
+let wrapped: string = word_wrap(para, 15)
+// Greedy at width 15:
+//   "the quick"      (9)         + " brown"(+6=15 ok)  -> "the quick brown"(15)
+//   next "fox": 15+1+3=19>15 -> new line "fox"
+//   "fox"(3)+" jumps"(+6=9)+" over"(+5=14)+" the"(+4=18>14? 14+1+3=18>15) -> wrap
+//     => "fox jumps over"(14), then "the"
+//   "the"(3)+" lazy"(+5=8? 3+1+4=8)+" dog"(8+1+3=12) -> "the lazy dog"
+let expected_wrap: string = "the quick brown\nfox jumps over\nthe lazy dog"
+assert(wrapped == expected_wrap, "word wrap 15")?
+
+let short = "one two"
+let wshort: string = word_wrap(short, 80)
+assert(wshort == "one two", "word wrap fits")?
+
+let single = "supercalifragilistic"
+let wsingle: string = word_wrap(single, 5)
+// single word longer than width: stays on its own line (no break mid-word)
+assert(wsingle == "supercalifragilistic", "word wrap long single")?
+
+// ---- Section 6 slug + numeric ----
+assert(slugify("Hello World") == "hello-world", "slug basic")?
+assert(slugify("  Mixed CASE Title  ") == "mixed-case-title", "slug trim+lower")?
+assert(slugify("single") == "single", "slug single")?
+
+assert(zero_pad(7, 3) == "007", "zero_pad 7")?
+assert(zero_pad(123, 3) == "123", "zero_pad exact")?
+assert(zero_pad(12345, 3) == "12345", "zero_pad overflow")?
+
+// ---- fixed(N) numeric format spec (book "Typed format specs") ----
+let pi = 3.14159
+let piStr: string = f"{pi:fixed(2)}"
+assert(piStr == "3.14", "fixed pi")?
+let money = 12.3456
+let moneyStr: string = f"{money:fixed(2)}"
+assert(moneyStr == "12.35", "fixed money round")?
+
+// ---- composite report assembly using only working primitives ----
+let title = "Quarterly Report"
+let slug: string = slugify(title)
+let band: string = repeat("=", title.length)
+let header: string = f"{title}\n{band}\nslug: {slug}"
+let expected_header: string = "Quarterly Report\n================\nslug: quarterly-report"
+assert(header == expected_header, "composite header")?
+
+// table-ish aligned rows via pad_right / pad_left
+let rowA: string = pad_right("Name", 8, " ") + pad_left("Score", 7, " ")
+// "Name"(4)->pad to 8 = "Name    "; "Score"(5)->pad_left to 7 = "  Score"
+assert(rowA == "Name      Score", "aligned header row")?
+let rowB: string = pad_right("Alice", 8, " ") + pad_left("42", 7, " ")
+assert(rowB == "Alice        42", "aligned data row")?
+
+// ---- Section 7 config parser ----
+let cfg = """
+    ; service config
+    host = localhost
+    port = 8080
+
+    name = my service
+    url = http://x/y=z
+    """
+assert(config_get(cfg, "host") == "localhost", "cfg host")?
+assert(config_get(cfg, "port") == "8080", "cfg port")?
+assert(config_get(cfg, "name") == "my service", "cfg multiword value")?
+// value containing '=' keeps everything after first '='
+assert(config_get(cfg, "url") == "http://x/y=z", "cfg value with eq")?
+assert(config_get(cfg, "missing") == "", "cfg missing")?
+// 4 effective entries (comment + blank line skipped)
+assert(config_count(cfg) == 4, "cfg count")?
+
+// ---- Section 8 extended inline markdown ----
+assert(render_code("use `len` here") == "use [C]len[/C] here", "code span")?
+assert(render_code("no code") == "no code", "code none")?
+assert(render_code("`a` and `b`") == "[C]a[/C] and [C]b[/C]", "code two")?
+
+assert(render_links("see [docs](http://d)") == "see <docs|http://d>", "link one")?
+assert(render_links("plain") == "plain", "link none")?
+assert(render_links("[a](u1) and [b](u2)") == "<a|u1> and <b|u2>", "link two")?
+
+assert(render_inline("**bold** and `code` and [t](u)") == "[B]bold[/B] and [C]code[/C] and <t|u>", "inline all")?
+
+// ---- Section 9 statistics ----
+assert(word_count("the quick brown fox") == 4, "word count 4")?
+assert(word_count("   ") == 0, "word count blank")?
+assert(word_count("solo") == 1, "word count 1")?
+
+let doc2 = """
+    line one
+    line two
+    line three
+    """
+assert(line_count(doc2) == 3, "line count 3")?
+
+assert(vowel_count("hello") == 2, "vowel hello")?
+assert(vowel_count("AEIOU") == 5, "vowel upper")?
+assert(vowel_count("xyz") == 0, "vowel none")?
+assert(vowel_count("Shape Language") == 6, "vowel phrase")?
+
+let names = ["Alice", "Bob", "Charlie"]
+assert(join_csv(names) == "Alice, Bob, Charlie", "join_csv three")?
+let one = ["solo"]
+assert(join_csv(one) == "solo", "join_csv one")?
+
+// ---- composite: a rendered "page" assembled from the pieces ----
+let pageTitle = "Release Notes"
+let pageSlug: string = slugify(pageTitle)
+let body = """
+    # Release Notes
+    welcome to **v1** with `fixed(2)` support
+    - see [guide](http://g)
+    """
+let lines3 = body.split("\n")
+let nl = lines3.length
+let mut page = ""
+let mut firstLine = true
+let mut idx = 0
+while idx < nl {
+    let raw3 = lines3[idx]
+    let line3: string = f"{raw3}"
+    let t3: string = line3.trim()
+    if t3.length > 0 {
+        // heading vs list vs paragraph, then inline pass
+        let mdLine: string = render_md_line(t3)
+        // render_md_line already does bold; apply code + links via render_code/render_links
+        let withCode: string = render_code(mdLine)
+        let withLinks: string = render_links(withCode)
+        if firstLine {
+            page = page + withLinks
+            firstLine = false
+        } else {
+            page = page + "\n" + withLinks
+        }
+    }
+    idx = idx + 1
+}
+let expected_page: string = "[H1]Release Notes[/H1]\n[P]welcome to [B]v1[/B] with [C]fixed(2)[/C] support[/P]\n[LI]see <guide|http://g>[/LI]"
+assert(page == expected_page, "composite page render")?
+assert(pageSlug == "release-notes", "page slug")?
+
+print("ALL_CHECKS_PASSED")

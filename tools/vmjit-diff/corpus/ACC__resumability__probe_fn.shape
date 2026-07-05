@@ -1,0 +1,13 @@
+from std::core::snapshot use { Snapshot }
+
+fn checkpointed(x) {
+  let s = snapshot()
+  match s {
+    Snapshot::Hash(id) => id,
+    Snapshot::Resumed => x + 1
+  }
+}
+
+print("calling checkpointed")
+let r = checkpointed(41)
+print(f"result={r}")

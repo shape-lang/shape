@@ -1,0 +1,13 @@
+let readme = """
+            this is
+            a multiline
+            string.
+              -it should indent
+              -but remove the block spaces
+            """;
+// Runtime value (no leading/trailing newline):
+// this is
+// a multiline
+// string.
+//   -it should indent
+//   -but remove the block spaces

@@ -1,0 +1,138 @@
+// Collections slice — small program.
+// Exercises Vec methods and HashMap from
+//   fundamentals/objects-arrays.mdx  (Vectors, Vector Methods, HashMap)
+//   stdlib/core/collections.mdx       (HashMap)
+// Every expected value is derived from book semantics BEFORE running.
+// Determinism: pure Vec/HashMap operations, asserted.
+
+fn check(name: string, got: int, expected: int) {
+    if got != expected {
+        print("CHECK_FAILED: " + name + " expected=" + expected.toString() + " got=" + got.toString())
+    }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) {
+    if got != expected {
+        print("CHECK_FAILED: " + name + " expected=" + expected.toString() + " got=" + got.toString())
+    }
+}
+
+// ---- Vectors and core methods (objects-arrays.mdx "Common Operations") ----
+let nums = [1, 2, 3, 4]
+
+// map: [1,2,3,4] -> *2 -> [2,4,6,8]; book: "nums.map(|x| x * 2)"
+let doubled = nums.map(|x| x * 2)
+check("map.first", doubled.first(), 2)
+check("map.last", doubled.last(), 8)
+check("map.len", doubled.len(), 4)
+
+// filter: keep evens -> [2,4]; book: "nums.filter(|x| x % 2 == 0)"
+let evens = nums.filter(|x| x % 2 == 0)
+check("filter.len", evens.len(), 2)
+check("filter.first", evens.first(), 2)
+check("filter.last", evens.last(), 4)
+
+// first/last/len (Vector Methods table)
+check("nums.first", nums.first(), 1)
+check("nums.last", nums.last(), 4)
+check("nums.len", nums.len(), 4)
+
+// findIndex: index of first element == 3 -> 2; -1 if none
+check("findIndex.hit", nums.findIndex(|x| x == 3), 2)
+check("findIndex.miss", nums.findIndex(|x| x == 99), -1)
+
+// some / every (existential / universal)
+check_bool("some.true", nums.some(|x| x > 3), true)
+check_bool("some.false", nums.some(|x| x > 100), false)
+check_bool("every.true", nums.every(|x| x > 0), true)
+check_bool("every.false", nums.every(|x| x > 2), false)
+
+// includes / indexOf
+check_bool("includes.true", nums.includes(2), true)
+check_bool("includes.false", nums.includes(7), false)
+check("indexOf.hit", nums.indexOf(3), 2)
+check("indexOf.miss", nums.indexOf(7), -1)
+
+// concat: [1,2,3,4] ++ [5,6] -> len 6, last 6
+let cat = nums.concat([5, 6])
+check("concat.len", cat.len(), 6)
+check("concat.last", cat.last(), 6)
+
+// take / drop / slice / reverse (Vector Methods table)
+check("take.len", nums.take(2).len(), 2)
+check("take.last", nums.take(2).last(), 2)
+check("drop.first", nums.drop(2).first(), 3)
+check("slice.len", nums.slice(1, 3).len(), 2)   // slice(1,3) -> [2,3]
+check("slice.first", nums.slice(1, 3).first(), 2)
+check("slice.last", nums.slice(1, 3).last(), 3)
+check("reverse.first", nums.reverse().first(), 4)
+check("reverse.last", nums.reverse().last(), 1)
+
+// join: ["1".."4"] joined with "," -> "1,2,3,4" (length 7)
+let joined = nums.join(",")
+check("join.len", joined.len(), 7)
+
+// closed-range slicing: nums[1..4] on [10,20,30,40,50] -> [20,30,40]
+let r = [10, 20, 30, 40, 50]
+let mid = r[1..4]
+check("range.len", mid.len(), 3)
+check("range.first", mid.first(), 20)
+check("range.last", mid.last(), 40)
+
+// ---- HashMap (objects-arrays.mdx "HashMap" / collections.mdx) ----
+// Immutable: chain .set() on one binding (book: "Chain on a single binding").
+let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
+check("hm.len", m.len(), 3)
+check_bool("hm.has.true", m.has("a"), true)
+check_bool("hm.has.false", m.has("z"), false)
+check_bool("hm.isEmpty", m.isEmpty(), false)
+
+// get returns Option<V>; pattern-match it.
+let gb = m.get("b")
+match gb {
+    Some(v) => check("hm.get.b", v, 2),
+    None => print("CHECK_FAILED: hm.get.b expected=2 got=None")
+}
+let gz = m.get("z")
+match gz {
+    Some(v) => print("CHECK_FAILED: hm.get.z expected=None got=" + v.toString()),
+    None => check_bool("hm.get.z.none", true, true)
+}
+
+// delete returns a NEW map without the key (immutable); original unchanged.
+let m2 = m.delete("a")
+check("hm.delete.len", m2.len(), 2)
+check_bool("hm.delete.gone", m2.has("a"), false)
+check("hm.original.len", m.len(), 3)          // original still has 3
+check_bool("hm.original.has", m.has("a"), true)
+
+// map transforms values: v*10. get("b") -> 20.
+let m3 = m.map(|k, v| v * 10)
+let mb = m3.get("b")
+match mb {
+    Some(v) => check("hm.map.b", v, 20),
+    None => print("CHECK_FAILED: hm.map.b expected=20 got=None")
+}
+
+// filter keeps entries where v > 1 -> {b,c} -> len 2.
+let m4 = m.filter(|k, v| v > 1)
+check("hm.filter.len", m4.len(), 2)
+
+// isEmpty on a populated, then fully-deleted map (keeps K,V pinned to string,int).
+let drained = m.delete("a").delete("b").delete("c")
+check_bool("hm.drained.isEmpty", drained.isEmpty(), true)
+
+// ---- for-in accumulation over a Vec (book control-flow idiom) ----
+var total = 0
+for x in nums {
+    total = total + x
+}
+check("forin.sum", total, 10)  // 1+2+3+4
+
+var mx = nums.first()
+for x in nums {
+    if x > mx { mx = x }
+}
+check("forin.max", mx, 4)
+
+print("ALL_CHECKS_PASSED")

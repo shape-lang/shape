@@ -1,0 +1,5 @@
+let nums: Vec<int> = [1, 2, 3, 4]
+let evens = nums.filter(|x| x % 2 == 0)    // x: int (inferred)
+let big   = nums.map(|x| x * 10)            // x: int (inferred)
+print(evens)
+print(big)

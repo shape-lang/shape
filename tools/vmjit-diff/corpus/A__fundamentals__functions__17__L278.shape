@@ -1,0 +1,6 @@
+fn no_mutate(const x: int) -> int {
+  // `x = x + 1` would be a compile error here.
+  x * 2
+}
+
+print(no_mutate(21))

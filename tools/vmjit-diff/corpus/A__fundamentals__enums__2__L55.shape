@@ -1,0 +1,8 @@
+enum Shape {
+    Circle(number),
+    Square(number),
+    Rectangle(number, number),
+}
+
+let s = Shape::Circle(5.0)
+let r = Shape::Rectangle(3.0, 4.0)

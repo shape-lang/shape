@@ -1,0 +1,23 @@
+// Probe: runtime before/after using f-strings (avoid the unknown+string concat issue)
+annotation traced(tag) {
+  targets: [function]
+
+  before(args, ctx) {
+    print(f"[{tag}] before")
+    args
+  }
+
+  after(args, result, ctx) {
+    print(f"[{tag}] after")
+    result
+  }
+}
+
+@traced("math")
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+let r = add(2, 3)
+print(r)
+print("PROBE4_OK")
