@@ -58,12 +58,6 @@
       "class": "jit-object-merge-field-add",
       "reason": "Both modes fail, differently: vm errors 'no method add on receiver kind Ptr(TypedObject) (line 736)' with empty stdout (exit 1); jit prints 'CHECK_FAILED: T.merge3_b expected=20 got=30' + 'T.merge3_c expected=30 got=4' (exit 1) after a c4-4B TryUnwrap SURFACE fallback. Classified DIVERGED. Verified per-id in the 2026-07-05 baseline run.",
       "cite": "WF-0B baseline-2026-07-05; same merge/operator family as ACC__operators__small"
-    },
-    {
-      "id": "ACC__pattern-matching__large.shape",
-      "class": "compile-blowup-timeout",
-      "reason": "Both modes SIGKILL at the 10s harness budget during COMPILE (identical behavior); with a 60s budget the vm run completes in ~27s and exits 1 with the compile error both modes would print ('E0100: cannot push a Tok value into an array whose element type is Tok'). Not a VM/JIT divergence — a known compile-time blowup exceeding the harness budget. Classified TIMEOUT. Verified per-id by a 60s hand run 2026-07-05.",
-      "cite": "docs/cluster-audits/audit-2026-07-04-claimed-vs-real.md 'Parser exponential blowup' (CONFIRMED), shape.pest:1099"
     }
   ],
   "notes": "All entries were pinned from the 2026-07-05 baseline run (tools/vmjit-diff/baseline-2026-07-05.txt) after PER-ID hand verification — no bulk import. Zero book-tier ids diverged in the 465-program baseline: the audit's book-tier double-execution/HashMap.filter classes do not trigger inside the 240 runnable-fence subset (earlier constructs force compile-time whole-program deopt, after which both modes agree deterministically), so those two classes are held live by the SYN__ synthetic repros instead. If a future run turns a known-red entry into MATCH, remove it here."
