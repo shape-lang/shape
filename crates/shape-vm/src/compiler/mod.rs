@@ -48,7 +48,7 @@ use crate::bytecode::{
     BuiltinFunction, BytecodeProgram, Constant, FunctionBlob, FunctionHash, Instruction, OpCode,
     Operand, Program as ContentAddressedProgram,
 };
-use crate::type_tracking::{TypeTracker, VariableTypeInfo};
+use crate::type_tracking::{NativeKind, TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
@@ -297,6 +297,7 @@ impl FunctionBlobBuilder {
         func: &crate::bytecode::Function,
         blob_name_to_hash: &HashMap<String, FunctionHash>,
         instr_end: usize,
+        capture_kinds: Vec<NativeKind>,
     ) -> FunctionBlob {
         use crate::bytecode::Operand;
 
@@ -495,6 +496,7 @@ impl FunctionBlobBuilder {
             ref_mutates: func.ref_mutates.clone(),
             mutable_captures: func.mutable_captures.clone(),
             frame_descriptor: func.frame_descriptor.clone(),
+            capture_kinds,
             required_permissions: self.required_permissions.clone(),
             instructions: local_instructions,
             constants: local_constants,

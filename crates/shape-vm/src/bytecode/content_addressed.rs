@@ -1,5 +1,5 @@
 use super::*;
-use crate::type_tracking::{FrameDescriptor, StorageHint};
+use crate::type_tracking::{FrameDescriptor, NativeKind, StorageHint};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FunctionHash(pub [u8; 32]);
@@ -51,6 +51,20 @@ pub struct FunctionBlob {
     /// Typed frame layout for this function's locals (propagated from compiler).
     #[serde(default)]
     pub frame_descriptor: Option<FrameDescriptor>,
+
+    /// Per-capture proven `NativeKind` for this function's upvalues, in
+    /// declaration order (distributed §4.4 / §4.8). Stamped at blob
+    /// construction from the compiler's proven capture kinds — the same proof
+    /// source as `frame_descriptor.slots` (the closure registry's
+    /// `capture_native_kinds`). Empty for non-closure functions.
+    ///
+    /// Included in `FunctionBlobHashInput`: a closure body that reads capture 0
+    /// as `Float64` is a different function from one that reads it as
+    /// `Ptr(TypedObject)` — capture layout is call-ABI identity exactly like
+    /// param kinds. Typed `NativeKind` only (ADR-006 §Forbidden Patterns — no
+    /// raw-bits / Bool-default).
+    #[serde(default)]
+    pub capture_kinds: Vec<NativeKind>,
 
     // -- code --
     /// This function's bytecode instructions.
@@ -105,6 +119,16 @@ struct FunctionBlobHashInput<'a> {
     ref_params: &'a [bool],
     ref_mutates: &'a [bool],
     mutable_captures: &'a [bool],
+    /// Typed frame layout (per-slot `NativeKind` + ABI return kind). Defines
+    /// the call ABI the remote-marshal path trusts — hash-covered so a
+    /// tampered/divergent descriptor cannot hide behind a matching hash
+    /// (distributed §4.8 / OQ-6). Added to the hash input in the WF-2A stage-0
+    /// window.
+    frame_descriptor: &'a Option<FrameDescriptor>,
+    /// Per-capture proven `NativeKind` — capture layout is call-ABI identity
+    /// exactly like param kinds (distributed §4.4 / §4.8). Added to the hash
+    /// input in the WF-2A stage-0 window.
+    capture_kinds: &'a [NativeKind],
     instructions: &'a [Instruction],
     constants: &'a [Constant],
     strings: &'a [String],
@@ -133,6 +157,8 @@ impl FunctionBlob {
             ref_params: &self.ref_params,
             ref_mutates: &self.ref_mutates,
             mutable_captures: &self.mutable_captures,
+            frame_descriptor: &self.frame_descriptor,
+            capture_kinds: &self.capture_kinds,
             instructions: &self.instructions,
             constants: &self.constants,
             strings: &self.strings,

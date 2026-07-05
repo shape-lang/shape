@@ -234,6 +234,25 @@ impl BytecodeCompiler {
         self.blob_cache = Some(cache);
     }
 
+    /// Proven per-capture `NativeKind` for the function at `func_idx`, sourced
+    /// from the closure registry — the same proof source as
+    /// `frame_descriptor.slots` (the registry layout's `capture_native_kinds`,
+    /// derived from the captures' proven `ConcreteType`s). Empty for
+    /// non-closure functions (no `closure_type_id` recorded). Stamped into
+    /// `FunctionBlob.capture_kinds` for content-hash identity (distributed
+    /// §4.8). Typed `NativeKind` only — no raw-bits / Bool-default.
+    pub(crate) fn capture_native_kinds_for_function(
+        &self,
+        func_idx: usize,
+    ) -> Vec<crate::type_tracking::NativeKind> {
+        self.closure_type_ids
+            .iter()
+            .find(|(fid, _)| *fid as usize == func_idx)
+            .and_then(|(_, tid)| self.closure_registry.get(*tid))
+            .map(|layout| layout.capture_native_kinds.clone())
+            .unwrap_or_default()
+    }
+
     /// Finalize the current blob builder for the function at `func_idx` and
     /// move it to `completed_blobs`. Called at the end of function body compilation.
     ///
@@ -247,8 +266,15 @@ impl BytecodeCompiler {
 
         if let Some(builder) = self.current_blob_builder.take() {
             let instr_end = self.program.instructions.len();
+            let capture_kinds = self.capture_native_kinds_for_function(func_idx);
             let func = &self.program.functions[func_idx];
-            let blob = builder.finalize(&self.program, func, &self.blob_name_to_hash, instr_end);
+            let blob = builder.finalize(
+                &self.program,
+                func,
+                &self.blob_name_to_hash,
+                instr_end,
+                capture_kinds,
+            );
             self.blob_name_to_hash
                 .insert(blob.name.clone(), blob.content_hash);
 
@@ -317,11 +343,14 @@ impl BytecodeCompiler {
                 mir_data: None,
             };
 
+            // __main__ is the synthetic top-level function; it never captures,
+            // so its `capture_kinds` are empty.
             let blob = main_builder.finalize(
                 &self.program,
                 &main_func,
                 &self.blob_name_to_hash,
                 instr_end,
+                Vec::new(),
             );
             self.blob_name_to_hash
                 .insert("__main__".to_string(), blob.content_hash);
