@@ -1,0 +1,8 @@
+// mylib/linalg.shape
+from std::core::intrinsics use { Vec }
+from mylib::stats use { mean }
+
+pub fn normalize(v: Vec<number>) -> Vec<number> {
+    let mu = mean(v)
+    v.map(|x| x - mu)
+}

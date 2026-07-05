@@ -1,0 +1,7 @@
+fn apply(f, x) { f(x) }
+fn double(n: int) -> int { n * 2 }
+fn main() {
+  let r = apply(double, 21)
+  print(r + 1.0)
+}
+main()

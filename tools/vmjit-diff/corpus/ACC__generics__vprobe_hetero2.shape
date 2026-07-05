@@ -1,0 +1,21 @@
+trait Shape2 { fn area() -> int; fn nm() -> string; }
+type Sq { s: int }
+impl Shape2 for Sq { method area() -> int { self.s * self.s } method nm() -> string { "sq" } }
+type Rc { w: int, h: int }
+impl Shape2 for Rc { method area() -> int { self.w * self.h } method nm() -> string { "rc" } }
+type Tr { a: int, b: int }
+impl Shape2 for Tr { method area() -> int { self.a * self.b / 2 } method nm() -> string { "tr" } }
+fn main() {
+  let xs: Vec<dyn Shape2> = [ Sq { s: 3 }, Rc { w: 4, h: 6 }, Tr { a: 3, b: 4 } ]
+  let mut sum: int = 0
+  let mut names: string = ""
+  let mut firstf: bool = true
+  for x in xs {
+    let a: int = x.area()
+    sum = sum + a
+    let n: string = x.nm()
+    if firstf { names = n; firstf = false } else { names = names + "," + n }
+  }
+  print(f"sum={sum} names={names}")
+}
+main()

@@ -1,0 +1,6 @@
+pub type OptimizeResult {
+    x: Array<number>,
+    fun: number,
+    converged: bool,
+    iterations: int,
+}

@@ -1,0 +1,8 @@
+fn clamp_non_negative(x: int) -> int {
+  if x < 0 { 0 } else { x }
+}
+
+let a = clamp_non_negative(-3)
+let b = clamp_non_negative(5)
+print(a)
+print(b)

@@ -1,0 +1,11 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+// Reproduce the book's §"Uncaught Exception Display" causal-chain example shape:
+// a None propagated with !! context, escaping to top level.
+fn read_file() -> Option<string> { return None; }
+fn load_config() -> Result<string> {
+    let text = (read_file() !! "high level context")?;
+    return Ok(text);
+}
+let cfg = load_config()?;
+print(cfg);

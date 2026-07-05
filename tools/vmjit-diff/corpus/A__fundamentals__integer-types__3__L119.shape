@@ -1,0 +1,15 @@
+type Pixel {
+  r: u8,
+  g: u8,
+  b: u8,
+  a: u8
+}
+
+type Sensor {
+  id: u16,
+  reading: i32,
+  flags: u8
+}
+
+let px = Pixel { r: 255u8, g: 128u8, b: 0u8, a: 255u8 }
+print(px.r)

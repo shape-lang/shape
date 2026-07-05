@@ -1,0 +1,12 @@
+// Probe: inline array literal built from a for-loop variable, passed to Array<int> param.
+fn takes(xs: Array<int>) -> int {
+  var s = 0
+  for x in xs { s = s + x }
+  s
+}
+var total = 0
+for e in 1..=3 {
+  let v = takes([e, e, e])   // inline literal from loop var, no annotation
+  total = total + v
+}
+print(total)

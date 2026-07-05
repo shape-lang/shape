@@ -1,0 +1,13 @@
+fn summarize(values: Vec<number>) -> string {
+  let count = values.len()
+  let total = values.sum()
+  let avg = total / (count as number)
+  f"count={count}, total={total}, avg={avg}"
+}
+
+fn main() {
+  let values = [3.2, 4.1, 3.8, 5.0, 4.4]
+  print(summarize(values))
+}
+
+main()

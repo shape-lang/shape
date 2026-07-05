@@ -1,0 +1,27 @@
+// SYN__jit-double-execution — WF-0B synthetic repro of audit 2026-07-04 §4(a):
+// a runtime JIT failure with un-carved-out signal -1 takes the outer-Err path
+// (shape-jit executor.rs:886-891) into a whole-program interpreter re-run,
+// duplicating already-executed side effects.
+//
+// Expected behavior at baseline (shape 0.3.2 @ 1fb805b3):
+//   vm : STEP1 STEP2 AFTER            (exit 0)
+//   jit: STEP1 STEP2 STEP1 STEP2 AFTER (exit 0) + [jit-fallback] "JIT execution
+//        error (code: -1)" on stderr — STEP1/STEP2 printed TWICE.
+// Classification: DIVERGED (stdout differs, both exit 0).
+//
+// Derived from the audit session's jit-sideeffect-verify/repro4.shape; the
+// while-loop int function call is what fails natively at runtime with the
+// generic -1 signal after the prints already executed.
+print("STEP1")
+print("STEP2")
+
+fn count(n: int) -> int {
+    let mut i = 0
+    while i < n {
+        i = i + 1
+    }
+    return i
+}
+
+let r = count(5)
+print("AFTER")

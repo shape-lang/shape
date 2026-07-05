@@ -1,0 +1,83 @@
+// small.shape — math::linalg core exercise (book-faithful)
+// Source: stdlib/math/linalg.mdx
+// Determinism: pure matrix/vector ops; assertions vs hand-computed values.
+//
+// Book teaches: use std::math::linalg, then linalg::dot/cross/norm/
+// normalize/distance/scale/add/sub on Array<number>.
+
+use std::math::linalg
+
+fn approx(a: number, b: number) -> bool {
+    let d: number = a - b
+    if d < 0.0 { (0.0 - d) < 0.000001 } else { d < 0.000001 }
+}
+
+fn main() {
+    // Book §dot: dot([1,2,3],[4,5,6]) == 32
+    let a: Array<number> = [1.0, 2.0, 3.0]
+    let b: Array<number> = [4.0, 5.0, 6.0]
+    let d: number = linalg::dot(a, b)
+    if !approx(d, 32.0) {
+        print(f"CHECK_FAILED: dot expected=32 got={d}\n")
+        return
+    }
+
+    // Book §norm: norm([3,4]) == 5
+    let v: Array<number> = [3.0, 4.0]
+    let n: number = linalg::norm(v)
+    if !approx(n, 5.0) {
+        print(f"CHECK_FAILED: norm expected=5 got={n}\n")
+        return
+    }
+
+    // Book §normalize: normalize([3,4]) == [0.6, 0.8]
+    let u: Array<number> = linalg::normalize(v)
+    if !approx(u[0], 0.6) || !approx(u[1], 0.8) {
+        print(f"CHECK_FAILED: normalize expected=[0.6,0.8] got=[{u[0]},{u[1]}]\n")
+        return
+    }
+
+    // Book §distance: distance([0,0],[3,4]) == 5
+    let z: Array<number> = [0.0, 0.0]
+    let dist: number = linalg::distance(z, v)
+    if !approx(dist, 5.0) {
+        print(f"CHECK_FAILED: distance expected=5 got={dist}\n")
+        return
+    }
+
+    // Book §cross: cross([1,0,0],[0,1,0]) == [0,0,1]
+    let ex: Array<number> = [1.0, 0.0, 0.0]
+    let ey: Array<number> = [0.0, 1.0, 0.0]
+    let cx: Array<number> = linalg::cross(ex, ey)
+    if !approx(cx[0], 0.0) || !approx(cx[1], 0.0) || !approx(cx[2], 1.0) {
+        print(f"CHECK_FAILED: cross expected=[0,0,1] got=[{cx[0]},{cx[1]},{cx[2]}]\n")
+        return
+    }
+
+    // Book §scale: scale([1,2,3],2) == [2,4,6]
+    let s: Array<number> = linalg::scale(a, 2.0)
+    if !approx(s[0], 2.0) || !approx(s[1], 4.0) || !approx(s[2], 6.0) {
+        print(f"CHECK_FAILED: scale expected=[2,4,6] got=[{s[0]},{s[1]},{s[2]}]\n")
+        return
+    }
+
+    // Book §add: add([1,2],[3,4]) == [4,6]
+    let p: Array<number> = [1.0, 2.0]
+    let q: Array<number> = [3.0, 4.0]
+    let sum: Array<number> = linalg::add(p, q)
+    if !approx(sum[0], 4.0) || !approx(sum[1], 6.0) {
+        print(f"CHECK_FAILED: add expected=[4,6] got=[{sum[0]},{sum[1]}]\n")
+        return
+    }
+
+    // Book §sub: sub([3,4],[1,2]) == [2,2]
+    let diff: Array<number> = linalg::sub(q, p)
+    if !approx(diff[0], 2.0) || !approx(diff[1], 2.0) {
+        print(f"CHECK_FAILED: sub expected=[2,2] got=[{diff[0]},{diff[1]}]\n")
+        return
+    }
+
+    print("ALL_CHECKS_PASSED\n")
+}
+
+main()

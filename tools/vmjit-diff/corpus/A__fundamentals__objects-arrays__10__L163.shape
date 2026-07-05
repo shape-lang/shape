@@ -1,0 +1,7 @@
+let user = {
+  id: 1,
+  name: "Ada"
+}
+
+print(user.name)
+print(user.id)

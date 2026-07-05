@@ -1,0 +1,7 @@
+let wide: int = 300
+let narrow = wide as i8   // truncates to low 8 bits → 44
+
+let signed: int = -1
+let unsigned = signed as u8  // reinterpret bits → 255
+print(narrow)
+print(unsigned)

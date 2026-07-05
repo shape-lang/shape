@@ -1,0 +1,4 @@
+fn adder(a) { |b| a + b }
+
+let plus10 = adder(10)
+print(plus10(5))                       // 15

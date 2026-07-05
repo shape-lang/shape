@@ -1,0 +1,2 @@
+let mut items = [1, 2, 3]
+items.push(4)          // Direct mutation — single owner, no copy needed

@@ -1,0 +1,9 @@
+var n = 0
+let result = loop {
+    n = n + 1
+    let x = n * 4
+    if x > 10 {
+        break x * 2
+    }
+}
+print(result) // first x * 2 where x > 10

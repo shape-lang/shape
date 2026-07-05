@@ -1,0 +1,53 @@
+// small.shape -- Annotations slice (book: advanced/annotations.mdx)
+//
+// Faithful to the book's "Define an Annotation" + "Apply Annotations" +
+// "before Return Contract" + "after Return Contract" sections.
+//
+// We use the runtime before/after lifecycle hooks on a function target and
+// assert the OBSERVABLE effects per the documented contracts:
+//   - `before` may rewrite args by returning an array (book before-return
+//     contract case 1).
+//   - `after` return value becomes the value seen by the caller (book
+//     after-return contract).
+//
+// EXPECTED VALUES (derived from BOOK SEMANTICS, written before first run):
+//   add(2, 3) wrapped by @doubling:
+//     before returns [a*2, b*2] -> rewritten args = [4, 6]   (array-rewrite)
+//     impl computes 4 + 6 = 10
+//     after returns result + 1 = 11                          (after replaces return)
+//   So add(2, 3) must yield 11.
+//
+//   add(10, 20):
+//     before -> [20, 40]; impl -> 60; after -> 61.
+//   So add(10, 20) must yield 61.
+
+annotation doubling() {
+  targets: [function]
+
+  before(args, ctx) {
+    // array form: rewrite args to doubled values (book contract case 1)
+    [args[0] * 2, args[1] * 2]
+  }
+
+  after(args, result, ctx) {
+    // after return becomes the caller-visible value (book contract)
+    result + 1
+  }
+}
+
+@doubling()
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+let r1 = add(2, 3)
+if r1 != 11 {
+  print(f"CHECK_FAILED: add(2,3) expected=11 got={r1}")
+} else {
+  let r2 = add(10, 20)
+  if r2 != 61 {
+    print(f"CHECK_FAILED: add(10,20) expected=61 got={r2}")
+  } else {
+    print("ALL_CHECKS_PASSED")
+  }
+}

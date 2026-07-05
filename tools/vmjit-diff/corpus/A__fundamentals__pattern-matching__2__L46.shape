@@ -1,0 +1,11 @@
+enum Status {
+  Ok(int),
+  Error(string)
+}
+
+fn render(status: Status) -> string {
+  match status {
+    Status::Ok(code) => f"ok({code})"
+    Status::Error(msg) => f"error({msg})"
+  }
+}

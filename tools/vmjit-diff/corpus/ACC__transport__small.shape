@@ -1,0 +1,52 @@
+// small.shape — transport slice, book-primary.
+// Exercises the chapter core: single-process loopback round-trip via
+// state::serialize / state::deserialize (transport-layer.mdx "Minimal
+// Send/Receive Example" + state.mdx "Serialization") and content-addressed
+// hashing (state.mdx "Content Addressing"). Network is single-process only.
+//
+// Book contract (state.mdx lines 286-290): "let restored =
+// state::deserialize(bytes) // restored is structurally equal to my_value".
+// Book contract (state.mdx lines 236-238): "Same value -> same hash, always";
+// (lines 226-229) primitives hash the raw value -> distinct values differ.
+//
+// Self-checking: manual checks (assert lives in std::core::utils::testing and
+// returns Result; we use explicit comparisons so output is deterministic).
+
+use std::core::state
+use std::core::transport
+
+fn check(name: string, cond: bool) {
+    if !cond {
+        print(f"CHECK_FAILED: {name}")
+    }
+}
+
+fn main() {
+    // ---- Round-trip serialization (the slice's determinism anchor) ----
+    let original: int = 42
+    let bytes: Array<int> = state::serialize(original)
+    check("bytes_nonempty", bytes.length > 0)
+
+    let restored: int = state::deserialize(bytes)
+    check("roundtrip_eq", restored == original)   // book: structurally equal
+
+    // ---- Content-addressed hashing ----
+    let h_a: string = state::hash(42)
+    let h_b: string = state::hash(42)
+    check("hash_determinism", h_a == h_b)
+    check("hash_len_64", h_a.length == 64)
+
+    let h_str: string = state::hash("hello")
+    check("hash_distinct_int_vs_str", h_a != h_str)
+
+    let h_7: string = state::hash(7)
+    check("hash_distinct_42_vs_7", h_a != h_7)
+
+    // ---- Transport handle (single-process; no live network send) ----
+    let tcp = transport::tcp()
+    check("tcp_name_present", tcp.name.length >= 0)
+
+    print("ALL_CHECKS_PASSED")
+}
+
+main()

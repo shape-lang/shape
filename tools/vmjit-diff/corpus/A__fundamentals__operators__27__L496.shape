@@ -1,0 +1,2 @@
+let n = 42 as number     // int → number
+print(n)

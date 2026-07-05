@@ -1,0 +1,6 @@
+fn total(items) {
+    // compiler sees items is only read → infers &items (shared)
+    var sum = 0
+    for item in items { sum = sum + item }
+    return sum
+}

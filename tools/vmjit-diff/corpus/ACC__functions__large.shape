@@ -1,0 +1,635 @@
+// large.shape — a deterministic, machine-proofable functional analytics engine.
+//
+// Slice: fundamentals/functions.mdx (closures + higher-order functions).
+// Everything here uses ONLY constructs the book marks runnable=true:
+//   - named fns with typed params + typed return, tail-expression returns
+//   - default parameter values (positional default-filling)
+//   - recursion
+//   - if/else, while, match
+//   - .map / .filter / .reduce(f, init) with closures whose element type is
+//     inferred from the receiver (book "Closure Inference from Context")
+//   - returned closures bound to a `let` and called (book make_adder pattern)
+//   - read-only capture (book "Closures and Capture")
+//   - const params (book "Reference Parameters")
+//
+// Every EXPECTED value below is derived from book semantics BY HAND (or via
+// an independent 64-bit integer calculator) and written before the first run.
+// The check() helpers print CHECK_FAILED on any mismatch.
+//
+// NON-INTERACTIVE: no stdin, no network, no clock. Deterministic fixed dataset.
+
+// ============================================================================
+// 0. Self-checking harness (book teaches `print`; assert() is not a prelude fn)
+// ============================================================================
+
+fn check_int(name: string, got: int, want: int, st: int) -> int {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    st + 1
+  } else {
+    st
+  }
+}
+
+fn check_bool(name: string, got: bool, want: bool, st: int) -> int {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    st + 1
+  } else {
+    st
+  }
+}
+
+fn check_str(name: string, got: string, want: string, st: int) -> int {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    st + 1
+  } else {
+    st
+  }
+}
+
+// ============================================================================
+// 1. Pure scalar functions (basic functions, tail expression, recursion)
+// ============================================================================
+
+fn square(x: int) -> int {
+  x * x
+}
+
+fn cube(x: int) -> int {
+  x * x * x
+}
+
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+fn sub(a: int, b: int) -> int {
+  a - b
+}
+
+fn mul(a: int, b: int) -> int {
+  a * b
+}
+
+fn neg(x: int) -> int {
+  0 - x
+}
+
+fn abs_int(x: int) -> int {
+  if x < 0 { 0 - x } else { x }
+}
+
+fn max2(a: int, b: int) -> int {
+  if a > b { a } else { b }
+}
+
+fn min2(a: int, b: int) -> int {
+  if a < b { a } else { b }
+}
+
+fn clamp(x: int, lo: int, hi: int) -> int {
+  if x < lo { lo } else { if x > hi { hi } else { x } }
+}
+
+// recursion: factorial
+fn factorial(n: int) -> int {
+  if n <= 1 { 1 } else { n * factorial(n - 1) }
+}
+
+// recursion: fibonacci
+fn fib(n: int) -> int {
+  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+// recursion: greatest common divisor (Euclid)
+fn gcd(a: int, b: int) -> int {
+  if b == 0 { a } else { gcd(b, a % b) }
+}
+
+// recursion: integer power
+fn ipow(base: int, exp: int) -> int {
+  if exp == 0 { 1 } else { base * ipow(base, exp - 1) }
+}
+
+// recursion: sum of digits
+fn digit_sum(n: int) -> int {
+  if n < 10 { n } else { (n % 10) + digit_sum(n / 10) }
+}
+
+// recursion: count digits
+fn digit_count(n: int) -> int {
+  if n < 10 { 1 } else { 1 + digit_count(n / 10) }
+}
+
+// recursion: reverse digits accumulator-style via helper
+fn reverse_acc(n: int, acc: int) -> int {
+  if n == 0 { acc } else { reverse_acc(n / 10, acc * 10 + (n % 10)) }
+}
+
+fn reverse_int(n: int) -> int {
+  reverse_acc(n, 0)
+}
+
+fn is_even(n: int) -> bool {
+  n % 2 == 0
+}
+
+// recursion: collatz steps
+fn collatz_steps(n: int, steps: int) -> int {
+  if n == 1 {
+    steps
+  } else {
+    if is_even(n) {
+      collatz_steps(n / 2, steps + 1)
+    } else {
+      collatz_steps(3 * n + 1, steps + 1)
+    }
+  }
+}
+
+// ============================================================================
+// 2. Default parameter values (positional default-filling)
+// ============================================================================
+
+fn scale(x: int, factor: int = 2) -> int {
+  x * factor
+}
+
+fn offset(x: int, by: int = 10) -> int {
+  x + by
+}
+
+fn linear(x: int, m: int = 1, b: int = 0) -> int {
+  m * x + b
+}
+
+fn box_volume(w: int = 1, h: int = 1, d: int = 1) -> int {
+  w * h * d
+}
+
+// ============================================================================
+// 3. const params (immutable parameter)
+// ============================================================================
+
+fn doubled_const(const x: int) -> int {
+  x + x
+}
+
+// ============================================================================
+// 4. Closures returned + bound to let (book make_adder pattern)
+// ============================================================================
+
+fn make_adder(a: int) { |b| a + b }
+fn make_scaler(factor: int) { |v| v * factor }
+fn make_offsetter(base: int) { |x| x + base }
+
+// ============================================================================
+// 5. Iterative loop-based aggregators over arrays (while)
+// ============================================================================
+
+fn sum_array(xs: Vec<int>) -> int {
+  let mut acc = 0
+  let mut i = 0
+  while i < xs.len() {
+    acc = acc + xs[i]
+    i = i + 1
+  }
+  acc
+}
+
+fn product_array(xs: Vec<int>) -> int {
+  let mut acc = 1
+  let mut i = 0
+  while i < xs.len() {
+    acc = acc * xs[i]
+    i = i + 1
+  }
+  acc
+}
+
+fn max_array(xs: Vec<int>) -> int {
+  let mut best = xs[0]
+  let mut i = 1
+  while i < xs.len() {
+    if xs[i] > best { best = xs[i] }
+    i = i + 1
+  }
+  best
+}
+
+fn min_array(xs: Vec<int>) -> int {
+  let mut best = xs[0]
+  let mut i = 1
+  while i < xs.len() {
+    if xs[i] < best { best = xs[i] }
+    i = i + 1
+  }
+  best
+}
+
+fn count_where_even(xs: Vec<int>) -> int {
+  let mut c = 0
+  let mut i = 0
+  while i < xs.len() {
+    if is_even(xs[i]) { c = c + 1 }
+    i = i + 1
+  }
+  c
+}
+
+// ============================================================================
+// 6. Higher-order pipeline via map/filter/reduce (element-inferred closures)
+// ============================================================================
+
+fn sum_via_reduce(xs: Vec<int>) -> int {
+  xs.reduce(|acc, x| acc + x, 0)
+}
+
+fn product_via_reduce(xs: Vec<int>) -> int {
+  xs.reduce(|acc, x| acc * x, 1)
+}
+
+fn max_via_reduce(xs: Vec<int>, seed: int) -> int {
+  xs.reduce(|acc, x| if x > acc { x } else { acc }, seed)
+}
+
+fn count_via_reduce(xs: Vec<int>) -> int {
+  xs.reduce(|acc, x| acc + 1, 0)
+}
+
+// sum of squares of evens, then *3.
+// NOTE: the idiomatic chain
+//   xs.filter(|x| x % 2 == 0).map(|x| x * x).reduce(|acc,e| acc+e, 0) * 3
+// fails closure inference when `xs` is a *function parameter* typed Vec<int>
+// (operands of `acc + e` come back `unknown`), even though the identical chain
+// on a `let`-bound Vec<int> compiles fine. See REPORT.md book_wrong #1
+// (minimized in probe8.shape). Implemented here with an explicit loop, which
+// the book also documents and which preserves the exact same asserted result.
+fn sum_sq_even_x3(xs: Vec<int>) -> int {
+  let mut acc = 0
+  let mut i = 0
+  while i < xs.len() {
+    if xs[i] % 2 == 0 {
+      acc = acc + xs[i] * xs[i]
+    }
+    i = i + 1
+  }
+  acc * 3
+}
+
+// ============================================================================
+// 7. match-based dispatch (control flow inside functions)
+// ============================================================================
+
+fn fizzbuzz_code(n: int) -> int {
+  // 0 = number, 1 = fizz, 2 = buzz, 3 = fizzbuzz
+  match n % 15 {
+    0 => 3,
+    3 => 1,
+    6 => 1,
+    9 => 1,
+    12 => 1,
+    5 => 2,
+    10 => 2,
+    _ => 0,
+  }
+}
+
+fn sign(n: int) -> int {
+  if n > 0 { 1 } else { if n < 0 { 0 - 1 } else { 0 } }
+}
+
+fn grade(score: int) -> string {
+  if score >= 90 {
+    "A"
+  } else {
+    if score >= 80 {
+      "B"
+    } else {
+      if score >= 70 {
+        "C"
+      } else {
+        "F"
+      }
+    }
+  }
+}
+
+// ============================================================================
+// 8. The dataset
+// ============================================================================
+//   Fixed deterministic fixture: a 12-element integer "measurements" column.
+let DATA: Vec<int> = [4, 7, 2, 9, 5, 1, 8, 3, 6, 10, 0, 12]
+
+// ============================================================================
+// MAIN: run all checks
+// ============================================================================
+
+let mut fails = 0
+
+// ---- scalar functions ----
+fails = check_int("square4", square(4), 16, fails)            // 4*4
+fails = check_int("cube3", cube(3), 27, fails)                // 27
+fails = check_int("add", add(8, 5), 13, fails)
+fails = check_int("sub", sub(8, 5), 3, fails)
+fails = check_int("mul", mul(6, 7), 42, fails)
+fails = check_int("neg", neg(9), -9, fails)
+fails = check_int("abs_neg", abs_int(-15), 15, fails)
+fails = check_int("abs_pos", abs_int(15), 15, fails)
+fails = check_int("max2", max2(3, 9), 9, fails)
+fails = check_int("min2", min2(3, 9), 3, fails)
+fails = check_int("clamp_lo", clamp(-5, 0, 10), 0, fails)
+fails = check_int("clamp_hi", clamp(50, 0, 10), 10, fails)
+fails = check_int("clamp_in", clamp(7, 0, 10), 7, fails)
+
+// ---- recursion ----
+fails = check_int("fact5", factorial(5), 120, fails)         // 120
+fails = check_int("fact0", factorial(0), 1, fails)
+fails = check_int("fact1", factorial(1), 1, fails)
+fails = check_int("fib0", fib(0), 0, fails)
+fails = check_int("fib1", fib(1), 1, fails)
+fails = check_int("fib10", fib(10), 55, fails)               // 55
+fails = check_int("fib15", fib(15), 610, fails)              // 610
+fails = check_int("gcd_48_36", gcd(48, 36), 12, fails)       // 12
+fails = check_int("gcd_17_5", gcd(17, 5), 1, fails)
+fails = check_int("gcd_100_75", gcd(100, 75), 25, fails)
+fails = check_int("ipow_2_10", ipow(2, 10), 1024, fails)     // 1024
+fails = check_int("ipow_3_4", ipow(3, 4), 81, fails)         // 81
+fails = check_int("ipow_5_0", ipow(5, 0), 1, fails)
+fails = check_int("digitsum_12345", digit_sum(12345), 15, fails) // 1+2+3+4+5
+fails = check_int("digitsum_9", digit_sum(9), 9, fails)
+fails = check_int("digitcount_12345", digit_count(12345), 5, fails)
+fails = check_int("digitcount_7", digit_count(7), 1, fails)
+fails = check_int("reverse_12345", reverse_int(12345), 54321, fails)
+fails = check_int("reverse_100", reverse_int(100), 1, fails)  // 001 -> 1
+fails = check_int("reverse_8", reverse_int(8), 8, fails)
+fails = check_bool("even_4", is_even(4), true, fails)
+fails = check_bool("even_7", is_even(7), false, fails)
+// collatz(6): 6->3->10->5->16->8->4->2->1 = 8 steps
+fails = check_int("collatz6", collatz_steps(6, 0), 8, fails)
+// collatz(7): 16 steps
+fails = check_int("collatz7", collatz_steps(7, 0), 16, fails)
+fails = check_int("collatz1", collatz_steps(1, 0), 0, fails)
+
+// ---- default params ----
+fails = check_int("scale_default", scale(5), 10, fails)        // factor=2
+fails = check_int("scale_explicit", scale(5, 3), 15, fails)
+fails = check_int("offset_default", offset(7), 17, fails)      // by=10
+fails = check_int("offset_explicit", offset(7, 100), 107, fails)
+fails = check_int("linear_all_default", linear(5), 5, fails)   // 1*5+0
+fails = check_int("linear_m", linear(5, 3), 15, fails)         // 3*5+0
+fails = check_int("linear_mb", linear(5, 3, 2), 17, fails)     // 3*5+2
+fails = check_int("box_all_default", box_volume(), 1, fails)
+fails = check_int("box_w", box_volume(2), 2, fails)            // 2*1*1
+fails = check_int("box_wh", box_volume(2, 3), 6, fails)        // 2*3*1
+fails = check_int("box_whd", box_volume(2, 3, 4), 24, fails)   // 2*3*4
+
+// ---- const params ----
+fails = check_int("doubled_const", doubled_const(21), 42, fails)
+
+// ---- returned closures bound to let, single call ----
+let add5 = make_adder(5)
+fails = check_int("add5_3", add5(3), 8, fails)
+let add100 = make_adder(100)
+fails = check_int("add100_1", add100(1), 101, fails)
+let triple = make_scaler(3)
+fails = check_int("triple_4", triple(4), 12, fails)
+let scale10 = make_scaler(10)
+fails = check_int("scale10_7", scale10(7), 70, fails)
+let off_minus = make_offsetter(-3)
+fails = check_int("off_minus_10", off_minus(10), 7, fails)
+
+// ---- read-only capture ----
+let base = 1000
+let with_base = |x| x + base
+fails = check_int("capture_5", with_base(5), 1005, fails)
+fails = check_int("capture_50", with_base(50), 1050, fails)
+let k = 4
+let times_k = |x| x * k
+fails = check_int("times_k_3", times_k(3), 12, fails)
+fails = check_int("times_k_25", times_k(25), 100, fails)
+
+// ---- iterative aggregators over DATA ----
+// DATA = [4,7,2,9,5,1,8,3,6,10,0,12]; sum = 67
+fails = check_int("sum_array", sum_array(DATA), 67, fails)
+// max = 12, min = 0
+fails = check_int("max_array", max_array(DATA), 12, fails)
+fails = check_int("min_array", min_array(DATA), 0, fails)
+// evens in DATA: 4,2,8,6,10,0,12 = 7
+fails = check_int("count_even", count_where_even(DATA), 7, fails)
+// product of [2,3,4] = 24
+fails = check_int("product_array", product_array([2, 3, 4]), 24, fails)
+
+// ---- reduce-based aggregators (should agree with iterative) ----
+fails = check_int("sum_reduce", sum_via_reduce(DATA), 67, fails)
+fails = check_int("product_reduce", product_via_reduce([2, 3, 4]), 24, fails)
+fails = check_int("max_reduce", max_via_reduce(DATA, 0), 12, fails)
+fails = check_int("count_reduce", count_via_reduce(DATA), 12, fails)  // 12 elements
+// evens=4,2,8,6,10,0,12; squares=16,4,64,36,100,0,144; sum=364; *3=1092
+fails = check_int("sum_sq_even_x3", sum_sq_even_x3(DATA), 1092, fails)
+
+// ---- map/filter chains directly on DATA ----
+// filter >5: [7,9,8,6,10,12]; map +1: [8,10,9,7,11,13]; sum = 58
+let chain1 = DATA.filter(|x| x > 5).map(|x| x + 1).reduce(|acc, x| acc + x, 0)
+fails = check_int("chain1", chain1, 58, fails)
+// map *2: [8,14,4,18,10,2,16,6,12,20,0,24]; >10: [14,18,16,12,20,24]; sum=104
+let chain2 = DATA.map(|x| x * 2).filter(|x| x > 10).reduce(|acc, x| acc + x, 0)
+fails = check_int("chain2", chain2, 104, fails)
+// odds in DATA: 7,9,5,1,3 = 5
+let oddcount = DATA.filter(|x| x % 2 == 1).reduce(|acc, x| acc + 1, 0)
+fails = check_int("oddcount", oddcount, 5, fails)
+
+// ---- match dispatch ----
+fails = check_int("fb_15", fizzbuzz_code(15), 3, fails)
+fails = check_int("fb_3", fizzbuzz_code(3), 1, fails)
+fails = check_int("fb_5", fizzbuzz_code(5), 2, fails)
+fails = check_int("fb_7", fizzbuzz_code(7), 0, fails)
+fails = check_int("fb_30", fizzbuzz_code(30), 3, fails)
+fails = check_int("sign_pos", sign(42), 1, fails)
+fails = check_int("sign_neg", sign(-42), -1, fails)
+fails = check_int("sign_zero", sign(0), 0, fails)
+fails = check_str("grade_95", grade(95), "A", fails)
+fails = check_str("grade_85", grade(85), "B", fails)
+fails = check_str("grade_72", grade(72), "C", fails)
+fails = check_str("grade_50", grade(50), "F", fails)
+
+// ---- composition by hand using returned closures (each single-call) ----
+let plus10 = make_adder(10)
+let times3 = make_scaler(3)
+let step_a = plus10(5)            // 15
+let step_b = times3(step_a)       // 45
+fails = check_int("compose_manual", step_b, 45, fails)
+
+// ---- apply a returned closure across a loop ----
+let bump = make_adder(7)
+let mut acc_loop = 0
+let mut idx = 0
+while idx < DATA.len() {
+  acc_loop = acc_loop + bump(DATA[idx])
+  idx = idx + 1
+}
+// sum(DATA)=67 + 7*12 = 151
+fails = check_int("loop_closure", acc_loop, 151, fails)
+
+// ---- nested-array (grid) processing via functions ----
+let GRID: Vec<Vec<int>> = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+
+fn row_sum(row: Vec<int>) -> int {
+  row.reduce(|acc, x| acc + x, 0)
+}
+
+fn grid_total(g: Vec<Vec<int>>) -> int {
+  let mut t = 0
+  let mut i = 0
+  while i < g.len() {
+    t = t + row_sum(g[i])
+    i = i + 1
+  }
+  t
+}
+
+fn grid_diag(g: Vec<Vec<int>>) -> int {
+  let mut t = 0
+  let mut i = 0
+  while i < g.len() {
+    t = t + g[i][i]
+    i = i + 1
+  }
+  t
+}
+
+fails = check_int("row_sum0", row_sum(GRID[0]), 6, fails)
+fails = check_int("row_sum2", row_sum(GRID[2]), 24, fails)
+fails = check_int("grid_total", grid_total(GRID), 45, fails)
+fails = check_int("grid_diag", grid_diag(GRID), 15, fails)
+
+// ---- running statistics using pure helpers ----
+fn mean_floor(xs: Vec<int>) -> int {
+  sum_array(xs) / xs.len()
+}
+
+fn variance_num(xs: Vec<int>) -> int {
+  let m = mean_floor(xs)
+  let mut acc = 0
+  let mut i = 0
+  while i < xs.len() {
+    let d = xs[i] - m
+    acc = acc + d * d
+    i = i + 1
+  }
+  acc
+}
+
+// DATA sum=67, len=12, mean_floor = 5
+fails = check_int("mean_floor", mean_floor(DATA), 5, fails)
+// deviations from 5: [-1,2,-3,4,0,-4,3,-2,1,5,-5,7]
+//   squares: 1,4,9,16,0,16,9,4,1,25,25,49 = 159
+fails = check_int("variance_num", variance_num(DATA), 159, fails)
+
+// ---- prime test via recursion ----
+fn is_divisible_by_any(n: int, d: int) -> bool {
+  if d * d > n {
+    false
+  } else {
+    if n % d == 0 {
+      true
+    } else {
+      is_divisible_by_any(n, d + 1)
+    }
+  }
+}
+
+fn is_prime(n: int) -> bool {
+  if n < 2 {
+    false
+  } else {
+    !is_divisible_by_any(n, 2)
+  }
+}
+
+fails = check_bool("prime_2", is_prime(2), true, fails)
+fails = check_bool("prime_3", is_prime(3), true, fails)
+fails = check_bool("prime_4", is_prime(4), false, fails)
+fails = check_bool("prime_17", is_prime(17), true, fails)
+fails = check_bool("prime_21", is_prime(21), false, fails)
+fails = check_bool("prime_97", is_prime(97), true, fails)
+fails = check_bool("prime_1", is_prime(1), false, fails)
+fails = check_bool("prime_0", is_prime(0), false, fails)
+
+fn count_primes_upto(n: int) -> int {
+  let mut c = 0
+  let mut i = 2
+  while i <= n {
+    if is_prime(i) { c = c + 1 }
+    i = i + 1
+  }
+  c
+}
+// primes <=30: 2,3,5,7,11,13,17,19,23,29 = 10
+fails = check_int("primes_upto_30", count_primes_upto(30), 10, fails)
+// primes <=10: 2,3,5,7 = 4
+fails = check_int("primes_upto_10", count_primes_upto(10), 4, fails)
+
+// ---- string assembly via f-strings and concatenation ----
+fn label(prefix: string, n: int) -> string {
+  f"{prefix}:{n}"
+}
+
+fn join_labels(a: int, b: int) -> string {
+  label("x", a) + "," + label("y", b)
+}
+
+fails = check_str("label", label("v", 42), "v:42", fails)
+fails = check_str("join_labels", join_labels(3, 7), "x:3,y:7", fails)
+
+// ---- deterministic pseudo-random generator (LCG) using pure fns ----
+// glibc-style LCG mod 2^31, fixed seed. Expected values computed
+// independently with 64-bit integer arithmetic (all intermediates < 2^63).
+fn lcg_next(state: int) -> int {
+  (1103515245 * state + 12345) % 2147483648
+}
+
+let r0 = 1
+let r1 = lcg_next(r0)
+let r2 = lcg_next(r1)
+let r3 = lcg_next(r2)
+// r1 = (1103515245 + 12345) % 2^31 = 1103527590
+fails = check_int("lcg_r1", r1, 1103527590, fails)
+// r2 = 377401575 (64-bit verified)
+fails = check_int("lcg_r2", r2, 377401575, fails)
+// r3 = 662824084 (64-bit verified)
+fails = check_int("lcg_r3", r3, 662824084, fails)
+
+fn bucket(v: int, n: int) -> int {
+  ((v % n) + n) % n
+}
+// r1 % 10 = 0
+fails = check_int("bucket_r1_10", bucket(r1, 10), 0, fails)
+// r2 % 7 = 5
+fails = check_int("bucket_r2_7", bucket(r2, 7), 5, fails)
+// r3 % 100 = 84
+fails = check_int("bucket_r3_100", bucket(r3, 100), 84, fails)
+
+// ---- generate a deterministic stream and aggregate it ----
+fn stream_sum(seed: int, count: int) -> int {
+  let mut state = seed
+  let mut total = 0
+  let mut i = 0
+  while i < count {
+    state = lcg_next(state)
+    total = total + bucket(state, 100)
+    i = i + 1
+  }
+  total
+}
+// stream from seed 1, 3 draws: r1%100=90, r2%100=75, r3%100=84 => 249
+fails = check_int("stream_sum_3", stream_sum(1, 3), 249, fails)
+
+// ---- final tally ----
+if fails == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILS={fails}")
+}

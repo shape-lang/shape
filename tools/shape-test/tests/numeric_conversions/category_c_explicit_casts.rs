@@ -16,7 +16,7 @@
 //! and the int-family `as int`/`as number` rejections. The width-target casts
 //! already work today (GREEN) and are pinned against regression.
 
-use shape_test::shape_test::ShapeTest;
+use crate::suite::ShapeTest;
 
 // =========================================================================
 // C.1 int <-> number explicit casts (spec §3.2 / §3.3) — RED today (G3/G4)

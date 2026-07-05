@@ -1,0 +1,174 @@
+// small.shape - Security & Permissions (book: advanced/security-permissions.mdx)
+//
+// CONTEXT: This chapter documents a HOST-SIDE (Rust) security API. None of
+// `PermissionSet`, `Permission`, `ResourceLimits`, `PermissionGrant`, or
+// `ScopeConstraints` is reachable from Shape program code - every one resolves
+// to "Undefined variable: ..." (see REPORT.md, BOOK-WRONG findings). The
+// book's "Practical Examples" (`compile`, `vm.load_program_with_permissions`,
+// `PermissionSet.readonly()`, `ResourceLimits.sandboxed()`) do NOT run.
+//
+// A book-faithful, machine-proofable test therefore MODELS the book's
+// FULLY-SPECIFIED, DETERMINISTIC data + set algebra in pure Shape and asserts
+// outcomes against values DERIVED FROM THE BOOK'S OWN TABLES (written before
+// the first run). The permission set is modeled as an integer bitset, which
+// exactly mirrors the book's "deterministic set" semantics
+// (PermissionSet API, lines 269-296).
+//
+// NOTE: an array-of-string model is the more natural encoding, but typed
+// string/int arrays are broken in this strict-flip worktree
+// (op_new_array(0) SURFACE stub + SIGABRT on typed-array drop - V3-S5 ckpt-5/6
+// incomplete). The integer-bitset encoding sidesteps that and is byte-identical
+// VM vs JIT. See REPORT.md "Environmental blocker".
+
+// Permission indices follow the book "Permission Enum" table order (lines 231-263):
+//  0 fs.read   1 fs.write   2 fs.scoped
+//  3 net.connect 4 net.listen 5 net.scoped
+//  6 sys.process 7 sys.env  8 sys.time 9 sys.random
+// 10 sandbox.vfs 11 sandbox.deterministic 12 sandbox.capture
+// 13 sandbox.mem_limited 14 sandbox.time_limited 15 sandbox.output_limited
+
+fn perm_name(i: int) -> string {
+    match i {
+        0 => "fs.read",      1 => "fs.write",      2 => "fs.scoped",
+        3 => "net.connect",  4 => "net.listen",    5 => "net.scoped",
+        6 => "sys.process",  7 => "sys.env",       8 => "sys.time",  9 => "sys.random",
+        10 => "sandbox.vfs", 11 => "sandbox.deterministic", 12 => "sandbox.capture",
+        13 => "sandbox.mem_limited", 14 => "sandbox.time_limited", 15 => "sandbox.output_limited",
+        _ => "unknown"
+    }
+}
+
+fn perm_desc(i: int) -> string {
+    match i {
+        0 => "Read files and directories",
+        1 => "Write, create, and delete files and directories",
+        3 => "Open outbound network connections",
+        _ => "unknown"
+    }
+}
+
+// ---- Book "PermissionSet" set algebra (lines 284-296), bitset encoding ----
+fn bit(i: int) -> int { return 1 << i }
+fn contains(set: int, i: int) -> bool { return (set & bit(i)) != 0 }     // a.contains(perm)
+fn union(a: int, b: int) -> int { return a | b }                         // a.union(b)
+fn intersection(a: int, b: int) -> int { return a & b }                  // a.intersection(b)
+fn difference(a: int, b: int) -> int { return a & (~b) }                 // a.difference(b)
+fn is_subset(a: int, b: int) -> bool { return (a & b) == a }             // a.is_subset(b)
+fn is_empty(set: int) -> bool { return set == 0 }                        // a.is_empty()
+fn len(set: int) -> int {                                                 // a.len()
+    let mut n = 0
+    let mut s = set
+    while s != 0 {
+        n = n + (s & 1)
+        s = s >> 1
+    }
+    return n
+}
+
+// ---- Book "Constructors" (lines 276-281) ----
+fn perm_pure() -> int { return 0 }                                       // empty set
+fn perm_full() -> int { return (1 << 16) - 1 }                           // all 16 perms
+fn perm_readonly() -> int {                                              // FsRead + Env + Time
+    return bit(0) | bit(7) | bit(8)
+}
+
+// ---- Tier-2 guard: book "check_permission" pseudocode (lines 120-134) ----
+// Returns "" on allow; else the book deny format (line 130):
+//   "Permission denied: <description> (<name>)"
+fn check_permission(granted: int, i: int) -> string {
+    if contains(granted, i) { return "" }
+    return f"Permission denied: {perm_desc(i)} ({perm_name(i)})"
+}
+
+fn main() {
+    // EVERY expected value below is derived from BOOK SEMANTICS, pre-run.
+
+    // full() = all 16 (book line 280)
+    if len(perm_full()) != 16 {
+        print(f"CHECK_FAILED: full_len expected=16 got={len(perm_full())}")
+        return
+    }
+    // pure() empty (book line 278)
+    if !is_empty(perm_pure()) {
+        print("CHECK_FAILED: pure_empty expected=true got=false")
+        return
+    }
+    if len(perm_pure()) != 0 {
+        print(f"CHECK_FAILED: pure_len expected=0 got={len(perm_pure())}")
+        return
+    }
+    // readonly() = FsRead+Env+Time = 3 (book line 279)
+    if len(perm_readonly()) != 3 {
+        print(f"CHECK_FAILED: readonly_len expected=3 got={len(perm_readonly())}")
+        return
+    }
+
+    // is_subset: readonly subset-of full ; full not-subset-of readonly (book lines 289)
+    if !is_subset(perm_readonly(), perm_full()) {
+        print("CHECK_FAILED: readonly_subset_full expected=true got=false")
+        return
+    }
+    if is_subset(perm_full(), perm_readonly()) {
+        print("CHECK_FAILED: full_subset_readonly expected=false got=true")
+        return
+    }
+    // empty set is a subset of everything
+    if !is_subset(perm_pure(), perm_readonly()) {
+        print("CHECK_FAILED: pure_subset expected=true got=false")
+        return
+    }
+
+    // difference(full, readonly) = 16 - 3 = 13 (book line 288)
+    if len(difference(perm_full(), perm_readonly())) != 13 {
+        print(f"CHECK_FAILED: diff_full_readonly expected=13 got={len(difference(perm_full(), perm_readonly()))}")
+        return
+    }
+    // intersection(readonly, full) = readonly = 3 (book line 287)
+    if len(intersection(perm_readonly(), perm_full())) != 3 {
+        print(f"CHECK_FAILED: inter expected=3 got={len(intersection(perm_readonly(), perm_full()))}")
+        return
+    }
+    // union(readonly, {fs.write}) = 4 (fs.write new) (book line 286)
+    if len(union(perm_readonly(), bit(1))) != 4 {
+        print(f"CHECK_FAILED: union_write expected=4 got={len(union(perm_readonly(), bit(1)))}")
+        return
+    }
+    // union idempotent: readonly union {fs.read} = readonly = 3
+    if len(union(perm_readonly(), bit(0))) != 3 {
+        print(f"CHECK_FAILED: union_idem expected=3 got={len(union(perm_readonly(), bit(0)))}")
+        return
+    }
+
+    // ---- Tier-2 runtime gating (book lines 137-162, 405-455) ----
+    // io::open("data.csv","r") needs FsRead -> readonly allows (book lines 137-138, 150-151)
+    if check_permission(perm_readonly(), 0) != "" {
+        print(f"CHECK_FAILED: readonly_allows_fsread got={check_permission(perm_readonly(), 0)}")
+        return
+    }
+    // io::write_file needs FsWrite -> readonly denies (book line 72)
+    let want_w = "Permission denied: Write, create, and delete files and directories (fs.write)"
+    if check_permission(perm_readonly(), 1) != want_w {
+        print(f"CHECK_FAILED: write_deny got={check_permission(perm_readonly(), 1)}")
+        return
+    }
+    // io::tcp_connect needs NetConnect -> readonly denies (book line 159)
+    let want_n = "Permission denied: Open outbound network connections (net.connect)"
+    if check_permission(perm_readonly(), 3) != want_n {
+        print(f"CHECK_FAILED: net_deny got={check_permission(perm_readonly(), 3)}")
+        return
+    }
+    // full() grants everything -> tcp_connect allowed
+    if check_permission(perm_full(), 3) != "" {
+        print("CHECK_FAILED: full_allows_net expected_empty")
+        return
+    }
+    // pure() grants nothing -> even fs.read denied (non-empty message)
+    if check_permission(perm_pure(), 0) == "" {
+        print("CHECK_FAILED: pure_denies_fsread expected_deny got_empty")
+        return
+    }
+
+    print("ALL_CHECKS_PASSED")
+}
+
+main()

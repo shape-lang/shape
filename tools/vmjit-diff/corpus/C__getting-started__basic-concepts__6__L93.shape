@@ -1,0 +1,9 @@
+fn describe(value: int | string) -> string {
+  match value {
+    n: int => f"int({n})"
+    s: string => f"string({s})"
+  }
+}
+
+print(describe(7))
+print(describe("hi"))

@@ -1,0 +1,5 @@
+let items = [10, 20, 30]
+
+print(items.first())
+print(items.last())
+print(items.len())

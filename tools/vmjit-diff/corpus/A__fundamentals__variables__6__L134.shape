@@ -1,0 +1,9 @@
+let retries: int = 3
+let timeout_ms: int = 5000
+let factor: number = 1.5
+let flags: u8 = 0xFF
+
+print(retries)
+print(timeout_ms)
+print(factor)
+print(flags)

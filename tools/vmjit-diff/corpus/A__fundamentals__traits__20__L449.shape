@@ -1,0 +1,9 @@
+trait Display {
+  fn display() -> string;
+}
+
+fn process(value: dyn Display + Serializable) -> string {
+  value.display()
+}
+
+print("ok")

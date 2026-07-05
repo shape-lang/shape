@@ -1,0 +1,4 @@
+let values = [20, 21, 19, 24, 22]
+
+print(values[0])                  // first
+print(values[values.len() - 1])   // last

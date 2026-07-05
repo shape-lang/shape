@@ -1,0 +1,7 @@
+let summary = Content.text("Report").bold()
+let table = Content.table(["name", "value"], [["test", "142.5"]])
+let chart = Content.chart("line").add("trend", [[1, 10], [2, 20]])
+
+print(summary.toString())
+print(table.toString())
+print(chart.toString())

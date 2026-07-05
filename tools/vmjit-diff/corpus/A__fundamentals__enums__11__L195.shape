@@ -1,0 +1,12 @@
+fn parse_port(s: string) -> Result<int, string> {
+    let n: int = (s as int?)?
+    if n < 1 or n > 65535 {
+        return Err(f"port out of range: {n}")
+    }
+    Ok(n)
+}
+
+match parse_port("8080") {
+    Ok(port) => print(f"listening on port {port}"),
+    Err(msg) => print(f"invalid: {msg}"),
+}

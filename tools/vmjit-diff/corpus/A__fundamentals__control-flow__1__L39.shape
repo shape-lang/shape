@@ -1,0 +1,6 @@
+let value = {
+  let base = 10
+  base * 2
+}
+
+print(value) // 20

@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "description": "Allowlist of EXPECTED VM-vs-JIT divergences, pinned by corpus id (WF-0B). A non-MATCH on a listed id is reported but does not fail the run; a MATCH on a listed id is flagged for removal. Add entries ONLY with an audit/issue citation — this file must never become a dumping ground that greens a red gate.",
+  "knownClasses": {
+    "jit-double-execution": "Audit 2026-07-04 §4(a): runtime JIT failure with un-carved-out signal -1 re-runs the whole program under the interpreter, duplicating side effects (print('BEFORE') twice); 19/738 book programs hit this path. Shows up as DIVERGED (stdout duplicated under jit).",
+    "i64-overflow-wrap": "Audit 2026-07-04 §4(b) / D3 ruling 2026-06-01: default-mode JIT emits plain iadd/isub/imul and wraps where the VM raises the checked overflow error. Shows up as VM_FAIL (vm exit 1, jit exit 0, different stdout).",
+    "annotation-hooks-dropped": "Audit 2026-07-04 §4(c): annotation before/after hooks silently dropped when the caller JIT-compiles (JIT calls the un-wrapped impl). Shows up as DIVERGED.",
+    "hashmap-filter-garbage": "Audit 2026-07-04 §4(d): arity-2 HashMap.filter/map rewritten to Array-only filterIndexed/mapIndexed; vm errors cleanly, jit prints a different pointer-like integer each run with exit 0. Shows up as VM_FAIL or DIVERGED (nondeterministic jit stdout).",
+    "hof-return-kind-raw-bits": "WF-0B baseline 2026-07-05 (repro: acceptance program finding_s1_unknown_hof_return_kind_confusion): a higher-order-function return whose kind is unproven is printed as a raw f64 bit pattern under jit (vm '6.0' vs jit '4618441417868443648'), both exit 0. Shows up as DIVERGED, deterministic.",
+    "jit-object-merge-field-add": "WF-0B baseline 2026-07-05: object merge `a + b` with overlapping keys computes wrong field values under --mode jit (partial-native top-level + SURFACE fallbacks on stderr: W39 F1 LoadModuleBinding / c4-4B TryUnwrap) while vm produces documented merge-override semantics (or its own clean error). Deterministic across runs; verified by hand 2026-07-05.",
+    "compile-blowup-timeout": "Audit 2026-07-04 'Parser exponential blowup' (CONFIRMED, shape.pest:1099): compile phase alone exceeds the 10s/mode harness budget in BOTH modes; with a 60s budget the program produces the identical compile error in both modes (would be MATCH). Harness-budget artifact of a known compiler-performance bug, not a VM/JIT divergence."
+  },
+  "entries": [
+    {
+      "id": "SYN__i64-overflow-wrap.shape",
+      "class": "i64-overflow-wrap",
+      "reason": "Synthetic repro committed by WF-0B: add_pair(i64::MAX, 1) — vm raises checked overflow (exit 1), jit prints -9223372036854775808 (exit 0). Classified VM_FAIL.",
+      "cite": "docs/cluster-audits/audit-2026-07-04-claimed-vs-real.md §4(b), crates/shape-jit rvalues.rs:1559-1563"
+    },
+    {
+      "id": "SYN__jit-double-execution.shape",
+      "class": "jit-double-execution",
+      "reason": "Synthetic repro committed by WF-0B baseline 2026-07-05: vm prints STEP1 STEP2 AFTER; jit fails natively at runtime with signal -1 after the prints, re-runs the whole program under the interpreter and prints STEP1 STEP2 STEP1 STEP2 AFTER (exit 0). Classified DIVERGED. Verified by hand against the worktree binary.",
+      "cite": "docs/cluster-audits/audit-2026-07-04-claimed-vs-real.md §4(a), shape-jit executor.rs:886-891"
+    },
+    {
+      "id": "SYN__hashmap-filter-garbage.shape",
+      "class": "hashmap-filter-garbage",
+      "reason": "Synthetic repro committed by WF-0B baseline 2026-07-05: vm errors 'no method filterIndexed on receiver kind Ptr(HashMap)' (exit 1); jit prints a different garbage integer each run (exit 0) — e.g. 4816060185762492416 vs 4816146652915635200 on consecutive runs. Classified VM_FAIL, jit stdout nondeterministic. Verified by hand against the worktree binary.",
+      "cite": "docs/cluster-audits/audit-2026-07-04-claimed-vs-real.md §4(d), shape-runtime function_calls.rs:4714"
+    },
+    {
+      "id": "ACC__annotations__probe4.shape",
+      "class": "annotation-hooks-dropped",
+      "reason": "vm prints the @math before/after hook lines then '5 / PROBE4_OK'; jit prints only '5 / PROBE4_OK' — the annotation hooks are silently dropped when the caller JIT-compiles. Classified DIVERGED, both exit 0. Verified per-id in the 2026-07-05 baseline run.",
+      "cite": "docs/cluster-audits/audit-2026-07-04-claimed-vs-real.md §4(c)"
+    },
+    {
+      "id": "ACC__functions__finding_s1_unknown_hof_return_kind_confusion.shape",
+      "class": "hof-return-kind-raw-bits",
+      "reason": "vm prints '6.0'; jit prints '4618441417868443648' (a raw f64 bit pattern) — the acceptance-gate S1 finding this probe program was written to capture. Classified DIVERGED, both exit 0, deterministic. Verified per-id in the 2026-07-05 baseline run.",
+      "cite": "docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/finding_s1_unknown_hof_return_kind_confusion.shape (probe committed as the finding's repro); WF-0B baseline-2026-07-05"
+    },
+    {
+      "id": "ACC__objects-arrays__small.shape",
+      "class": "jit-object-merge-field-add",
+      "reason": "vm prints ALL_CHECKS_PASSED (exit 0); jit prints 'CHECK_FAILED: merge.x expected=1 got=3' (exit 1) with a W39 F1 LoadModuleBinding SURFACE fallback on stderr — overlapping-key object merge misbehaves in jit mode. Classified JIT_FAIL, deterministic. Verified per-id in the 2026-07-05 baseline run.",
+      "cite": "WF-0B baseline-2026-07-05; stderr cites ADR-006 §2.7.14 W39 F1 module-binding SURFACE"
+    },
+    {
+      "id": "ACC__operators__small.shape",
+      "class": "jit-object-merge-field-add",
+      "reason": "vm prints ALL_CHECKS_PASSED (exit 0); jit prints 'CHECK_FAILED: merge_collide_keep' + 'CHECK_FAILED: merge_collide_override' (exit 1) with a c4-4B TryUnwrap SURFACE fallback on stderr — `{x:1,y:2} + {y:20,z:30}` loses merge-override semantics in jit mode. Classified JIT_FAIL, deterministic (re-run twice by hand 2026-07-05).",
+      "cite": "WF-0B baseline-2026-07-05; stderr cites ADR-006 §2.7.14 c4-4B TryUnwrap SURFACE"
+    },
+    {
+      "id": "ACC__operators__large.shape",
+      "class": "jit-object-merge-field-add",
+      "reason": "Both modes fail, differently: vm errors 'no method add on receiver kind Ptr(TypedObject) (line 736)' with empty stdout (exit 1); jit prints 'CHECK_FAILED: T.merge3_b expected=20 got=30' + 'T.merge3_c expected=30 got=4' (exit 1) after a c4-4B TryUnwrap SURFACE fallback. Classified DIVERGED. Verified per-id in the 2026-07-05 baseline run.",
+      "cite": "WF-0B baseline-2026-07-05; same merge/operator family as ACC__operators__small"
+    }
+  ],
+  "notes": "All entries were pinned from the 2026-07-05 baseline run (tools/vmjit-diff/baseline-2026-07-05.txt) after PER-ID hand verification — no bulk import. Zero book-tier ids diverged in the 465-program baseline: the audit's book-tier double-execution/HashMap.filter classes do not trigger inside the 240 runnable-fence subset (earlier constructs force compile-time whole-program deopt, after which both modes agree deterministically), so those two classes are held live by the SYN__ synthetic repros instead. If a future run turns a known-red entry into MATCH, remove it here."
+}

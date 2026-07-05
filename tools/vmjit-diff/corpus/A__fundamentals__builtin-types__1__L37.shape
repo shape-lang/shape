@@ -1,0 +1,2 @@
+// Prelude convenience does not change module ownership.
+print("ok")

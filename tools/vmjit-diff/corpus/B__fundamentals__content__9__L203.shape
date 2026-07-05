@@ -1,0 +1,7 @@
+let headers = ["name", "value"]
+let rows = [
+    ["test", "142.5"],
+    ["prod", "378.2"],
+]
+let table = Content.table(headers, rows)
+print(table.toString())

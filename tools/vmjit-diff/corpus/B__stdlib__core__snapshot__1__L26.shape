@@ -1,0 +1,4 @@
+pub enum Snapshot {
+    Hash(string),   // process was just snapshotted; payload is the Hash ID
+    Resumed,        // execution resumed from a previous snapshot
+}

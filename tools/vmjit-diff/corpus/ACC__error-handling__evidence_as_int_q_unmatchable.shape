@@ -1,0 +1,9 @@
+fn mk() -> Result<int> { return Ok(5); }
+fn main() {
+    // matching a normal Result works fine:
+    match mk() { Ok(v) => print(f"normal ok {v}"), Err(e) => print("e") }
+    // binding as int? to an explicitly Result<int> typed var, then match:
+    let r: Result<int> = ("77" as int?);
+    match r { Ok(v) => print(f"cast ok {v}"), Err(e) => print("cast err") }
+}
+main();

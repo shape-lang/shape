@@ -1,0 +1,6 @@
+from std::core::snapshot use { Snapshot, snapshot }
+
+match snapshot() {
+    Snapshot::Hash(id) => { print("hash:" + id) },
+    Snapshot::Resumed => { print("resumed") },
+}

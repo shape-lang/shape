@@ -1,0 +1,3 @@
+fn g() -> Option<int> { Some(5) }
+fn h() -> Option<int> { let x = g()?; Some(x) }
+match h() { Some(v) => print(v), None => print(-1) }

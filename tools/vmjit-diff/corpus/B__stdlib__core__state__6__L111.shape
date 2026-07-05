@@ -1,0 +1,5 @@
+pub type CallPayload<T> {
+    function: FunctionRef,
+    args: Vec<T>,
+    upvalues: Vec<T>?,
+}

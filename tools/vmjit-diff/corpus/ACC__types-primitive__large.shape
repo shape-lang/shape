@@ -1,0 +1,889 @@
+// large.shape — types-primitive slice
+// ===========================================================================
+// A deterministic BINARY PROTOCOL CODEC + FIXED-POINT MATH library.
+//
+// Rooted in the two assigned chapters:
+//   fundamentals/builtin-types.mdx  (int / number / bool / string scalars)
+//   fundamentals/integer-types.mdx  (width-typed ints, literal suffixes,
+//                                    `as` bit-level casting: narrowing keeps
+//                                    low bits; signed/unsigned reinterpret)
+//
+// The codec packs structured records into a byte stream (Vec<int> where each
+// element is a 0..255 byte), reads them back, and verifies integrity with a
+// Fletcher-16 checksum and an RLE codec. A Q16.16 fixed-point module exercises
+// int<->number conversion via `as`.
+//
+// NON-INTERACTIVE + DETERMINISTIC: no stdin, no time, no network. Every
+// EXPECTED value below was computed by hand from book semantics BEFORE the
+// first run. On all-pass prints ALL_CHECKS_PASSED.
+// ===========================================================================
+
+let mut failures = 0
+
+fn fail(name: string, want: int, got: int) {
+  print(f"CHECK_FAILED: {name} expected={want} got={got}")
+  failures = failures + 1
+}
+
+fn check(name: string, got: int, want: int) {
+  if got != want {
+    fail(name, want, got)
+  }
+}
+
+fn check_bool(name: string, got: bool, want: bool) {
+  if got != want {
+    let gi = if got { 1 } else { 0 }
+    let wi = if want { 1 } else { 0 }
+    fail(name, wi, gi)
+  }
+}
+
+// ===========================================================================
+// SECTION 1 — Byte primitives
+// A "byte" is an int constrained to 0..255. We model masking with `as u8`
+// (book: narrowing keeps low 8 bits) re-widened with `as int`.
+// ===========================================================================
+
+fn to_byte(v: int) -> int {
+  // Bit-level narrow to 8 bits then re-widen. Per integer-types.mdx
+  // "Explicit Casting": `300 as i8` keeps low bits. u8 keeps unsigned low 8.
+  return (v as u8) as int
+}
+
+fn byte_lo(v: int) -> int {
+  return (v as u8) as int
+}
+
+fn byte_hi(v: int) -> int {
+  // high byte of a 16-bit value
+  return ((v / 256) as u8) as int
+}
+
+fn combine16(hi: int, lo: int) -> int {
+  return hi * 256 + lo
+}
+
+fn section1_tests() {
+  // 300 as u8 -> low 8 bits of 300 (0x12C) = 0x2C = 44
+  check("to_byte_300", to_byte(300), 44)
+  // 255 stays 255
+  check("to_byte_255", to_byte(255), 255)
+  // 256 wraps to 0
+  check("to_byte_256", to_byte(256), 0)
+  // 511 (0x1FF) low byte = 0xFF = 255
+  check("to_byte_511", to_byte(511), 255)
+  // -1 as u8 = 255 (book: signed/unsigned reinterpret)
+  check("to_byte_neg1", to_byte(-1), 255)
+  // -2 as u8 = 254
+  check("to_byte_neg2", to_byte(-2), 254)
+
+  // 0xABCD = 43981. lo = 0xCD = 205, hi = 0xAB = 171
+  check("byte_lo_ABCD", byte_lo(43981), 205)
+  check("byte_hi_ABCD", byte_hi(43981), 171)
+  check("combine_ABCD", combine16(171, 205), 43981)
+}
+
+// ===========================================================================
+// SECTION 2 — Q16.16 fixed-point arithmetic
+// A fixed-point number is an int storing value * 65536.
+// Exercises number->int (`as int`, truncation) and int->number (`as number`).
+// ===========================================================================
+
+let FP_SHIFT = 65536   // 2^16
+
+fn fp_from_int(n: int) -> int {
+  return n * FP_SHIFT
+}
+
+fn fp_from_number(x: number) -> int {
+  // multiply then truncate toward zero (book: number as int truncates)
+  return (x * 65536.0) as int
+}
+
+fn fp_to_number(fp: int) -> number {
+  return (fp as number) / 65536.0
+}
+
+fn fp_add(a: int, b: int) -> int {
+  return a + b
+}
+
+fn fp_mul(a: int, b: int) -> int {
+  // (a/2^16)*(b/2^16)*2^16 = a*b/2^16
+  return (a * b) / FP_SHIFT
+}
+
+fn fp_to_int_floor(fp: int) -> int {
+  return fp / FP_SHIFT
+}
+
+fn section2_tests() {
+  // 3 in Q16.16 = 3 * 65536 = 196608
+  check("fp_from_int_3", fp_from_int(3), 196608)
+  // 1.5 -> 1.5*65536 = 98304
+  check("fp_from_number_1_5", fp_from_number(1.5), 98304)
+  // 0.25 -> 16384
+  check("fp_from_number_0_25", fp_from_number(0.25), 16384)
+  // 2.75 -> 2.75*65536 = 180224
+  check("fp_from_number_2_75", fp_from_number(2.75), 180224)
+
+  // 1.5 + 2.75 = 4.25 -> 4.25*65536 = 278528
+  let s = fp_add(fp_from_number(1.5), fp_from_number(2.75))
+  check("fp_add_4_25", s, 278528)
+
+  // 1.5 * 2.0 = 3.0 -> 196608
+  let m = fp_mul(fp_from_number(1.5), fp_from_int(2))
+  check("fp_mul_3_0", m, 196608)
+
+  // 0.5 * 0.5 = 0.25 -> 16384
+  let m2 = fp_mul(fp_from_number(0.5), fp_from_number(0.5))
+  check("fp_mul_0_25", m2, 16384)
+
+  // floor(4.25) = 4
+  check("fp_floor_4_25", fp_to_int_floor(278528), 4)
+
+  // round-trip 3.0 back to number then to int
+  let back = fp_to_number(196608)
+  check("fp_to_number_3", back as int, 3)
+}
+
+// ===========================================================================
+// SECTION 3 — Byte buffer writer (big-endian)
+// Builds a Vec<int> of bytes. Each push goes through to_byte for masking.
+// ===========================================================================
+
+fn write_u8(buf: Vec<int>, v: int) -> Vec<int> {
+  buf.push(to_byte(v))
+  return buf
+}
+
+fn write_u16(buf: Vec<int>, v: int) -> Vec<int> {
+  buf.push(byte_hi(v))
+  buf.push(byte_lo(v))
+  return buf
+}
+
+fn write_u32(buf: Vec<int>, v: int) -> Vec<int> {
+  // big-endian 4 bytes
+  let b0 = to_byte(v / 16777216)   // v >> 24
+  let b1 = to_byte(v / 65536)      // v >> 16
+  let b2 = to_byte(v / 256)        // v >> 8
+  let b3 = to_byte(v)              // v
+  buf.push(b0)
+  buf.push(b1)
+  buf.push(b2)
+  buf.push(b3)
+  return buf
+}
+
+fn read_u16(buf: Vec<int>, off: int) -> int {
+  return combine16(buf[off], buf[off + 1])
+}
+
+fn read_u32(buf: Vec<int>, off: int) -> int {
+  let b0 = buf[off]
+  let b1 = buf[off + 1]
+  let b2 = buf[off + 2]
+  let b3 = buf[off + 3]
+  return ((b0 * 256 + b1) * 256 + b2) * 256 + b3
+}
+
+fn section3_tests() {
+  let mut buf: Vec<int> = []
+  buf = write_u8(buf, 0x41)        // 'A' = 65
+  buf = write_u16(buf, 0xABCD)     // 171, 205
+  buf = write_u32(buf, 0x01020304) // 1,2,3,4
+
+  // total bytes = 1 + 2 + 4 = 7
+  check("buf_len", buf.len(), 7)
+  check("buf_0", buf[0], 65)
+  check("buf_1", buf[1], 171)
+  check("buf_2", buf[2], 205)
+  check("buf_3", buf[3], 1)
+  check("buf_4", buf[4], 2)
+  check("buf_5", buf[5], 3)
+  check("buf_6", buf[6], 4)
+
+  // read back
+  check("read_u16_at_1", read_u16(buf, 1), 43981)   // 0xABCD
+  check("read_u32_at_3", read_u32(buf, 3), 16909060) // 0x01020304
+}
+
+// ===========================================================================
+// SECTION 4 — Fletcher-16 checksum
+// Classic checksum over a byte buffer. sum1, sum2 mod 255.
+// ===========================================================================
+
+fn fletcher16(buf: Vec<int>) -> int {
+  let mut sum1 = 0
+  let mut sum2 = 0
+  for b in buf {
+    sum1 = (sum1 + b) % 255
+    sum2 = (sum2 + sum1) % 255
+  }
+  return sum2 * 256 + sum1
+}
+
+fn section4_tests() {
+  // Hand-computed Fletcher-16 over bytes [1,2,3,4]:
+  // b=1: sum1=1, sum2=1
+  // b=2: sum1=3, sum2=4
+  // b=3: sum1=6, sum2=10
+  // b=4: sum1=10, sum2=20
+  // result = sum2*256 + sum1 = 20*256 + 10 = 5130
+  let buf1: Vec<int> = [1, 2, 3, 4]
+  check("fletcher_1234", fletcher16(buf1), 5130)
+
+  // Over "abcde" = [97,98,99,100,101]:
+  // b=97 : sum1=97,  sum2=97
+  // b=98 : sum1=195, sum2=292%255=37
+  // b=99 : sum1=294%255=39, sum2=37+39=76
+  // b=100: sum1=139, sum2=76+139=215
+  // b=101: sum1=240, sum2=215+240=455%255=200
+  // result = 200*256 + 240 = 51440
+  let buf2: Vec<int> = [97, 98, 99, 100, 101]
+  check("fletcher_abcde", fletcher16(buf2), 51440)
+
+  // empty buffer -> sum1=0, sum2=0 -> 0
+  let buf3: Vec<int> = []
+  check("fletcher_empty", fletcher16(buf3), 0)
+}
+
+// ===========================================================================
+// SECTION 5 — Run-Length Encoding codec over byte buffers
+// Encode: pairs of (count, value). Decode reverses. Round-trip must equal.
+// ===========================================================================
+
+fn rle_encode(buf: Vec<int>) -> Vec<int> {
+  let mut out: Vec<int> = []
+  let n = buf.len()
+  if n == 0 {
+    return out
+  }
+  let mut i = 0
+  while i < n {
+    let v = buf[i]
+    // count the run of equal bytes, capped at 255 per run
+    let mut count = 1
+    while ((i + count) < n) && (buf[i + count] == v) && (count < 255) {
+      count = count + 1
+    }
+    out.push(count)
+    out.push(to_byte(v))
+    i = i + count
+  }
+  return out
+}
+
+fn rle_decode(buf: Vec<int>) -> Vec<int> {
+  let mut out: Vec<int> = []
+  let n = buf.len()
+  let mut i = 0
+  while i < n {
+    let count = buf[i]
+    let v = buf[i + 1]
+    let mut k = 0
+    while k < count {
+      out.push(v)
+      k = k + 1
+    }
+    i = i + 2
+  }
+  return out
+}
+
+fn vec_eq(a: Vec<int>, b: Vec<int>) -> bool {
+  if a.len() != b.len() {
+    return false
+  }
+  let mut i = 0
+  while i < a.len() {
+    if a[i] != b[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+fn section5_tests() {
+  // [7,7,7,9,9,4] -> runs: (3,7),(2,9),(1,4) -> [3,7,2,9,1,4]
+  let src: Vec<int> = [7, 7, 7, 9, 9, 4]
+  let enc = rle_encode(src)
+  check("rle_enc_len", enc.len(), 6)
+  check("rle_enc_0", enc[0], 3)
+  check("rle_enc_1", enc[1], 7)
+  check("rle_enc_2", enc[2], 2)
+  check("rle_enc_3", enc[3], 9)
+  check("rle_enc_4", enc[4], 1)
+  check("rle_enc_5", enc[5], 4)
+
+  let dec = rle_decode(enc)
+  check_bool("rle_roundtrip", vec_eq(dec, src), true)
+
+  // all-same [5,5,5,5] -> (4,5) -> [4,5]; decode back
+  let src2: Vec<int> = [5, 5, 5, 5]
+  let enc2 = rle_encode(src2)
+  check("rle2_len", enc2.len(), 2)
+  check("rle2_count", enc2[0], 4)
+  check("rle2_val", enc2[1], 5)
+  check_bool("rle2_roundtrip", vec_eq(rle_decode(enc2), src2), true)
+
+  // single element
+  let src3: Vec<int> = [42]
+  let enc3 = rle_encode(src3)
+  check("rle3_len", enc3.len(), 2)
+  check_bool("rle3_roundtrip", vec_eq(rle_decode(enc3), src3), true)
+
+  // empty
+  let src4: Vec<int> = []
+  let enc4 = rle_encode(src4)
+  check("rle4_len", enc4.len(), 0)
+}
+
+// ===========================================================================
+// SECTION 6 — Record codec: pack a struct into bytes and read it back.
+// Record { magic: u16, kind: u8, value: u32 } -> 7-byte frame + checksum byte
+// ===========================================================================
+
+type Record { magic: int, kind: int, value: int }
+
+fn encode_record(r: Record) -> Vec<int> {
+  let mut buf: Vec<int> = []
+  buf = write_u16(buf, r.magic)
+  buf = write_u8(buf, r.kind)
+  buf = write_u32(buf, r.value)
+  // append low byte of Fletcher sum1 as trailer
+  let cs = fletcher16(buf)
+  buf = write_u8(buf, byte_lo(cs))
+  return buf
+}
+
+fn decode_record(buf: Vec<int>) -> Record {
+  let magic = read_u16(buf, 0)
+  let kind = buf[2]
+  let value = read_u32(buf, 3)
+  return Record { magic: magic, kind: kind, value: value }
+}
+
+fn section6_tests() {
+  let r = Record { magic: 0xCAFE, kind: 7, value: 0xDEADBEEF }
+  let frame = encode_record(r)
+  // 2 + 1 + 4 + 1 trailer = 8 bytes
+  check("rec_frame_len", frame.len(), 8)
+  // magic 0xCAFE -> hi 0xCA=202, lo 0xFE=254
+  check("rec_magic_hi", frame[0], 202)
+  check("rec_magic_lo", frame[1], 254)
+  check("rec_kind", frame[2], 7)
+  // value 0xDEADBEEF = 3735928559 -> bytes 0xDE,0xAD,0xBE,0xEF = 222,173,190,239
+  check("rec_v0", frame[3], 222)
+  check("rec_v1", frame[4], 173)
+  check("rec_v2", frame[5], 190)
+  check("rec_v3", frame[6], 239)
+
+  let r2 = decode_record(frame)
+  check("rec_dec_magic", r2.magic, 0xCAFE)
+  check("rec_dec_kind", r2.kind, 7)
+  check("rec_dec_value", r2.value, 3735928559)
+}
+
+// ===========================================================================
+// SECTION 7 — Bit-width boundary behavior via `as`
+// Verify the book's exact casting claims across a table of cases.
+// ===========================================================================
+
+fn section7_tests() {
+  // i8 range -128..127. 128 as i8 -> low 8 bits = 0x80 -> signed = -128
+  check("cast_128_i8", (128 as i8) as int, -128)
+  // 127 stays 127
+  check("cast_127_i8", (127 as i8) as int, 127)
+  // 255 as i8 -> 0xFF -> -1
+  check("cast_255_i8", (255 as i8) as int, -1)
+  // 256 as i8 -> 0x100 low 8 = 0 -> 0
+  check("cast_256_i8", (256 as i8) as int, 0)
+  // -128 as u8 -> 0x80 -> 128. NOTE: `as` binds tighter than unary minus,
+  // so `-128 as u8` parses as -(128 as u8); the book idiom is to bind the
+  // negative value to a variable first (see REPORT book_gaps).
+  let neg128: int = -128
+  check("cast_neg128_u8", (neg128 as u8) as int, 128)
+  // 65535 as u16 stays 65535
+  check("cast_65535_u16", (65535 as u16) as int, 65535)
+  // 65536 as u16 -> 0
+  check("cast_65536_u16", (65536 as u16) as int, 0)
+  // 70000 as u16 -> 70000 - 65536 = 4464
+  check("cast_70000_u16", (70000 as u16) as int, 4464)
+  // -1 as u16 -> 65535
+  let neg1a: int = -1
+  check("cast_neg1_u16", (neg1a as u16) as int, 65535)
+  // i32: 2147483648 as i32 -> -2147483648
+  check("cast_2pow31_i32", (2147483648 as i32) as int, -2147483648)
+  // -1 as u32 -> 4294967295
+  let neg1b: int = -1
+  check("cast_neg1_u32", (neg1b as u32) as int, 4294967295)
+}
+
+// ===========================================================================
+// SECTION 8 — Bool truth table (no truthiness; strict bool conditions)
+// builtin-types.mdx: bool is true/false. Strict Shape: conditions are bool.
+// ===========================================================================
+
+fn xor(a: bool, b: bool) -> bool {
+  return (a || b) && !(a && b)
+}
+
+fn section8_tests() {
+  check_bool("and_tt", true && true, true)
+  check_bool("and_tf", true && false, false)
+  check_bool("or_ff", false || false, false)
+  check_bool("or_tf", true || false, true)
+  check_bool("not_t", !true, false)
+  check_bool("not_f", !false, true)
+  check_bool("xor_tt", xor(true, true), false)
+  check_bool("xor_tf", xor(true, false), true)
+  check_bool("xor_ft", xor(false, true), true)
+  check_bool("xor_ff", xor(false, false), false)
+
+  // comparison operators yield bool
+  check_bool("lt", 3 < 5, true)
+  check_bool("gt", 3 > 5, false)
+  check_bool("le_eq", 5 <= 5, true)
+  check_bool("ge", 6 >= 7, false)
+  check_bool("eq", 4 == 4, true)
+  check_bool("ne", 4 != 5, true)
+}
+
+// ===========================================================================
+// SECTION 9 — Integer arithmetic identities (int is i64, exact)
+// ===========================================================================
+
+fn ipow(base: int, exp: int) -> int {
+  let mut result = 1
+  let mut e = exp
+  let mut b = base
+  while e > 0 {
+    if e % 2 == 1 {
+      result = result * b
+    }
+    b = b * b
+    e = e / 2
+  }
+  return result
+}
+
+fn gcd(a: int, b: int) -> int {
+  let mut x = a
+  let mut y = b
+  while y != 0 {
+    let t = y
+    y = x % y
+    x = t
+  }
+  return x
+}
+
+fn factorial(n: int) -> int {
+  let mut acc = 1
+  let mut i = 2
+  while i <= n {
+    acc = acc * i
+    i = i + 1
+  }
+  return acc
+}
+
+fn section9_tests() {
+  check("ipow_2_10", ipow(2, 10), 1024)
+  check("ipow_3_5", ipow(3, 5), 243)
+  check("ipow_10_9", ipow(10, 9), 1000000000)
+  check("ipow_7_0", ipow(7, 0), 1)
+  check("gcd_48_36", gcd(48, 36), 12)
+  check("gcd_17_5", gcd(17, 5), 1)
+  check("gcd_100_25", gcd(100, 25), 25)
+  check("fact_5", factorial(5), 120)
+  check("fact_10", factorial(10), 3628800)
+  check("fact_0", factorial(0), 1)
+
+  // signed division truncates toward zero
+  check("div_neg7_2", -7 / 2, -3)
+  check("mod_neg7_2", -7 % 2, -1)
+  check("div_7_neg2", 7 / -2, -3)
+
+  // large i64 product stays exact within range
+  // 1000000 * 1000000 = 10^12 (well under i64::MAX ~9.2*10^18)
+  check("big_mul", 1000000 * 1000000, 1000000000000)
+}
+
+// ===========================================================================
+// SECTION 10 — number (f64) arithmetic + number/int interplay
+// ===========================================================================
+
+fn approx_eq(a: number, b: number, eps: number) -> bool {
+  let d = if a > b { a - b } else { b - a }
+  return d < eps
+}
+
+fn section10_tests() {
+  let half = 0.5
+  let quarter = 0.25
+  check_bool("num_add", approx_eq(half + quarter, 0.75, 0.0001), true)
+  check_bool("num_mul", approx_eq(half * half, 0.25, 0.0001), true)
+  check_bool("num_div", approx_eq(1.0 / 4.0, 0.25, 0.0001), true)
+
+  // int -> number widening via `as number`
+  let three = 3
+  let three_n = three as number
+  check_bool("int_to_number", approx_eq(three_n, 3.0, 0.0001), true)
+
+  // number -> int truncation table
+  check("trunc_3_9", (3.9 as int), 3)
+  check("trunc_3_1", (3.1 as int), 3)
+  check("trunc_0_99", (0.99 as int), 0)
+  // negative truncation toward zero
+  check("trunc_neg3_9", (-3.9 as int), -3)
+  check("trunc_neg0_5", (-0.5 as int), 0)
+
+  // round-trip int->number->int for exact ints
+  check("roundtrip_42", ((42 as number) as int), 42)
+  check("roundtrip_1000", ((1000 as number) as int), 1000)
+}
+
+// ===========================================================================
+// SECTION 11 — End-to-end: encode a batch of records, checksum the stream,
+// RLE-compress, decompress, decode, verify all values survive.
+// ===========================================================================
+
+fn section11_tests() {
+  // Build three records
+  let recs: Vec<Record> = [
+    Record { magic: 0x0001, kind: 1, value: 100 },
+    Record { magic: 0x0002, kind: 2, value: 200 },
+    Record { magic: 0x0003, kind: 3, value: 300 }
+  ]
+
+  // Encode all into one stream (record body only, 7 bytes each, no trailer)
+  let mut stream: Vec<int> = []
+  for r in recs {
+    stream = write_u16(stream, r.magic)
+    stream = write_u8(stream, r.kind)
+    stream = write_u32(stream, r.value)
+  }
+  // 3 records * 7 bytes = 21 bytes
+  check("e2e_stream_len", stream.len(), 21)
+
+  // Decode record at offset 7 (second record)
+  let m1 = read_u16(stream, 7)
+  let k1 = stream[9]
+  let v1 = read_u32(stream, 10)
+  check("e2e_rec1_magic", m1, 2)
+  check("e2e_rec1_kind", k1, 2)
+  check("e2e_rec1_value", v1, 200)
+
+  // Checksum the stream (deterministic). Hand-trace not required; we verify
+  // stability by re-checksumming a round-tripped copy must match.
+  let cs_orig = fletcher16(stream)
+
+  // RLE round-trip the stream then re-checksum
+  let compressed = rle_encode(stream)
+  let restored = rle_decode(compressed)
+  check_bool("e2e_rle_roundtrip", vec_eq(restored, stream), true)
+  let cs_restored = fletcher16(restored)
+  check("e2e_checksum_stable", cs_restored, cs_orig)
+
+  // Decode all three records from restored stream
+  let mut off = 0
+  let mut idx = 0
+  let mut sum_values = 0
+  while off < restored.len() {
+    let v = read_u32(restored, off + 3)
+    sum_values = sum_values + v
+    off = off + 7
+    idx = idx + 1
+  }
+  check("e2e_record_count", idx, 3)
+  // 100 + 200 + 300 = 600
+  check("e2e_sum_values", sum_values, 600)
+}
+
+// ===========================================================================
+// SECTION 12 — Base-N integer formatter / parser (pure int arithmetic)
+// Formats a non-negative int into base 2..16 using a digit table, and parses
+// it back. Exercises % and / digit extraction and string building. The
+// digit characters come from a fixed table string (string-index returns a
+// 1-char string).
+// ===========================================================================
+
+let DIGITS = "0123456789ABCDEF"
+
+fn digit_char(d: int) -> string {
+  return DIGITS[d]
+}
+
+fn digit_value(ch: string) -> int {
+  // linear scan of the digit table; -1 if not found
+  let mut i = 0
+  while i < 16 {
+    if DIGITS[i] == ch {
+      return i
+    }
+    i = i + 1
+  }
+  return -1
+}
+
+fn format_base(value: int, base: int) -> string {
+  if value == 0 {
+    return "0"
+  }
+  // collect digits least-significant first into a Vec, then reverse-build
+  let mut rem = value
+  let mut chars: Vec<string> = []
+  while rem > 0 {
+    let d = rem % base
+    chars.push(digit_char(d))
+    rem = rem / base
+  }
+  // build string most-significant first
+  let mut out = ""
+  let mut i = chars.len() - 1
+  let mut done = false
+  while !done {
+    out = out + chars[i]
+    if i == 0 {
+      done = true
+    } else {
+      i = i - 1
+    }
+  }
+  return out
+}
+
+fn parse_base(text: string, base: int) -> int {
+  let mut acc = 0
+  let mut i = 0
+  while i < text.len() {
+    let d = digit_value(text[i])
+    acc = acc * base + d
+    i = i + 1
+  }
+  return acc
+}
+
+fn str_eq(a: string, b: string) -> bool {
+  return a == b
+}
+
+fn check_str(name: string, got: string, want: string) {
+  if !str_eq(got, want) {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    failures = failures + 1
+  }
+}
+
+fn section12_tests() {
+  // decimal
+  check_str("fmt_255_dec", format_base(255, 10), "255")
+  check_str("fmt_0_dec", format_base(0, 10), "0")
+  check_str("fmt_1000000_dec", format_base(1000000, 10), "1000000")
+  // hex
+  check_str("fmt_255_hex", format_base(255, 16), "FF")
+  check_str("fmt_43981_hex", format_base(43981, 16), "ABCD")  // 0xABCD
+  check_str("fmt_3735928559_hex", format_base(3735928559, 16), "DEADBEEF")
+  // binary
+  check_str("fmt_10_bin", format_base(10, 2), "1010")
+  check_str("fmt_255_bin", format_base(255, 2), "11111111")
+  // octal
+  check_str("fmt_63_oct", format_base(63, 8), "77")
+
+  // parse round-trips
+  check("parse_FF_hex", parse_base("FF", 16), 255)
+  check("parse_ABCD_hex", parse_base("ABCD", 16), 43981)
+  check("parse_1010_bin", parse_base("1010", 2), 10)
+  check("parse_77_oct", parse_base("77", 8), 63)
+  check("parse_255_dec", parse_base("255", 10), 255)
+
+  // full round-trip: value -> hex string -> value
+  let v = 0x0BADF00D   // 195948557
+  check("hex_const", v, 195948557)
+  let s = format_base(v, 16)
+  check_str("fmt_BADF00D", s, "BADF00D")
+  check("parse_back_BADF00D", parse_base(s, 16), 195948557)
+
+  // digit_value of unknown char is -1
+  check("digit_value_unknown", digit_value("Z"), -1)
+}
+
+// ===========================================================================
+// SECTION 13 — Extended width-cast boundary matrix
+// Systematic verification of `as` bit-level semantics across all width types.
+// Every expected value derived from: narrowing keeps low N bits; signed types
+// reinterpret the top bit as sign.
+// ===========================================================================
+
+fn u8_of(v: int) -> int { return (v as u8) as int }
+fn i8_of(v: int) -> int { return (v as i8) as int }
+fn u16_of(v: int) -> int { return (v as u16) as int }
+fn i16_of(v: int) -> int { return (v as i16) as int }
+fn u32_of(v: int) -> int { return (v as u32) as int }
+fn i32_of(v: int) -> int { return (v as i32) as int }
+
+fn section13_tests() {
+  // u8: keep low 8 bits, unsigned 0..255
+  check("u8_0", u8_of(0), 0)
+  check("u8_255", u8_of(255), 255)
+  check("u8_256", u8_of(256), 0)
+  check("u8_257", u8_of(257), 1)
+  check("u8_513", u8_of(513), 1)       // 513 = 2*256+1
+  let neg5: int = -5
+  check("u8_neg5", u8_of(neg5), 251)   // 256-5
+  let neg256: int = -256
+  check("u8_neg256", u8_of(neg256), 0)
+
+  // i8: keep low 8 bits, signed -128..127
+  check("i8_127", i8_of(127), 127)
+  check("i8_128", i8_of(128), -128)
+  check("i8_200", i8_of(200), -56)     // 200-256
+  check("i8_255", i8_of(255), -1)
+  check("i8_256", i8_of(256), 0)
+  check("i8_384", i8_of(384), -128)    // 384 low8 = 128 -> -128
+
+  // u16 / i16
+  check("u16_65535", u16_of(65535), 65535)
+  check("u16_65536", u16_of(65536), 0)
+  check("u16_100000", u16_of(100000), 34464)   // 100000-65536
+  check("i16_32767", i16_of(32767), 32767)
+  check("i16_32768", i16_of(32768), -32768)
+  check("i16_40000", i16_of(40000), -25536)    // 40000-65536
+  let negk: int = -1
+  check("i16_neg1", i16_of(negk), -1)
+  check("u16_neg1", u16_of(negk), 65535)
+
+  // u32 / i32
+  check("u32_max", u32_of(4294967295), 4294967295)
+  check("u32_overflow", u32_of(4294967296), 0)
+  check("i32_max", i32_of(2147483647), 2147483647)
+  check("i32_min", i32_of(2147483648), -2147483648)
+  let neg1c: int = -1
+  check("u32_neg1", u32_of(neg1c), 4294967295)
+  check("i32_neg1", i32_of(neg1c), -1)
+
+  // chained narrowing: 0x1234 as u8 then widen = 0x34 = 52
+  check("chain_narrow", u8_of(0x1234), 52)
+}
+
+// ===========================================================================
+// SECTION 14 — Saturating byte arithmetic (clamp into 0..255)
+// Models pixel-channel math: add/sub/mul then clamp. Pure int + bool.
+// ===========================================================================
+
+fn clamp_byte(v: int) -> int {
+  if v < 0 {
+    return 0
+  }
+  if v > 255 {
+    return 255
+  }
+  return v
+}
+
+fn sat_add(a: int, b: int) -> int { return clamp_byte(a + b) }
+fn sat_sub(a: int, b: int) -> int { return clamp_byte(a - b) }
+fn sat_mul(a: int, b: int) -> int { return clamp_byte(a * b) }
+
+fn section14_tests() {
+  check("sat_add_norm", sat_add(100, 50), 150)
+  check("sat_add_over", sat_add(200, 100), 255)   // 300 clamped
+  check("sat_add_edge", sat_add(255, 0), 255)
+  check("sat_sub_norm", sat_sub(100, 40), 60)
+  check("sat_sub_under", sat_sub(10, 40), 0)       // -30 clamped
+  check("sat_sub_zero", sat_sub(0, 0), 0)
+  check("sat_mul_norm", sat_mul(10, 10), 100)
+  check("sat_mul_over", sat_mul(20, 20), 255)      // 400 clamped
+  check("clamp_neg", clamp_byte(-5), 0)
+  check("clamp_high", clamp_byte(999), 255)
+  check("clamp_mid", clamp_byte(128), 128)
+}
+
+// ===========================================================================
+// SECTION 15 — Q16.16 fixed-point 2D affine transform pipeline
+// Applies a fixed-point rotation-by-scale + translation to integer points,
+// proving the int<->number boundary (`as`) round-trips deterministically.
+// Uses only +, *, / on Q16.16 ints (no trig — fixed coefficients).
+// ===========================================================================
+
+type Point { x: int, y: int }     // integer pixel coordinates
+
+// Affine: x' = (a*x + b*y)/2^16 + tx ; y' = (c*x + d*y)/2^16 + ty
+// Coefficients are Q16.16 fixed-point. Here a=d=2.0 (scale x2), b=c=0,
+// translation tx=10, ty=-5 (in integer pixel units).
+let FP_2_0 = 131072   // 2.0 * 65536
+let FP_0_5 = 32768    // 0.5 * 65536
+
+fn affine_scale2(p: Point, tx: int, ty: int) -> Point {
+  let nx = (FP_2_0 * p.x) / 65536 + tx
+  let ny = (FP_2_0 * p.y) / 65536 + ty
+  return Point { x: nx, y: ny }
+}
+
+fn affine_half(p: Point) -> Point {
+  // scale by 0.5 in Q16.16
+  let nx = (FP_0_5 * p.x) / 65536
+  let ny = (FP_0_5 * p.y) / 65536
+  return Point { x: nx, y: ny }
+}
+
+fn section15_tests() {
+  let p = Point { x: 3, y: 8 }
+  // scale x2 + translate (10,-5): x'=6+10=16, y'=16-5=11
+  let q = affine_scale2(p, 10, -5)
+  check("affine_qx", q.x, 16)
+  check("affine_qy", q.y, 11)
+
+  // half of (10, 20) -> (5, 10)
+  let h = affine_half(Point { x: 10, y: 20 })
+  check("affine_hx", h.x, 5)
+  check("affine_hy", h.y, 10)
+
+  // compose: scale2 then half is identity-on-scale (10/2=... ) check
+  // p(4,6) -> scale2 no-translate -> (8,12) -> half -> (4,6)
+  let p2 = Point { x: 4, y: 6 }
+  let s = affine_scale2(p2, 0, 0)
+  check("compose_sx", s.x, 8)
+  check("compose_sy", s.y, 12)
+  let back = affine_half(s)
+  check("compose_bx", back.x, 4)
+  check("compose_by", back.y, 6)
+
+  // number-derived coefficient: 1.25 in Q16.16 via number cast
+  let coeff = (1.25 * 65536.0) as int    // 81920
+  check("fp_coeff_1_25", coeff, 81920)
+  // apply 1.25 to x=8 -> 10
+  let scaled = (coeff * 8) / 65536
+  check("fp_apply_1_25", scaled, 10)
+}
+
+// ===========================================================================
+// DRIVER
+// ===========================================================================
+
+section1_tests()
+section2_tests()
+section3_tests()
+section4_tests()
+section5_tests()
+section6_tests()
+section7_tests()
+section8_tests()
+section9_tests()
+section10_tests()
+section11_tests()
+section12_tests()
+section13_tests()
+section14_tests()
+section15_tests()
+
+if failures == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"TOTAL_FAILURES: {failures}")
+}

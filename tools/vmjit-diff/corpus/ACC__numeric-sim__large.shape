@@ -1,0 +1,526 @@
+// =============================================================================
+// numeric-sim large program: a deterministic numerical-simulation lab.
+//
+// Real-world, non-interactive, machine-proofable application rooted in the
+// monte_carlo + ode chapters. It is a "physics & risk simulation harness":
+//
+//   PART A. ODE integrators validated against CLOSED-FORM analytic solutions
+//           (exponential decay, logistic growth, harmonic oscillator, two-body
+//            linear system) using euler / rk4 / euler_system / rk4_system /
+//            rk45 / rk45_system.
+//   PART B. Monte Carlo estimators validated against KNOWN analytic
+//           expectations (pi via the unit circle, the mean/variance of a
+//           uniform, a control-variate integral, antithetic & stratified
+//           estimators), all seeded for reproducibility.
+//
+// Book sources (book-PRIMARY):
+//   stdlib/core/ode.mdx          -- euler, rk4, euler_system, rk4_system,
+//                                  rk45, rk45_system ; "returns array of {t,y}"
+//   stdlib/core/monte_carlo.mdx  -- monte_carlo, monte_carlo_antithetic,
+//                                  monte_carlo_control_variate,
+//                                  monte_carlo_stratified, monte_carlo_stats,
+//                                  MonteCarloConfig{ seed, collect_results }
+//   stdlib/core/random.mdx       -- random, random_seed (determinism primitive)
+//
+// EVERY expected value below is derived from analytic mathematics or book text
+// BEFORE running -- never back-filled from output.
+// On all-pass: prints ALL_CHECKS_PASSED.
+// =============================================================================
+
+use std::core::ode
+use std::core::monte_carlo
+from std::core::random use { random, random_seed, random_normal }
+
+// -----------------------------------------------------------------------------
+// Tiny assertion harness (the program is its own proof checker).
+// -----------------------------------------------------------------------------
+let mut g_failures: int = 0
+let mut g_checks: int = 0
+
+fn fabs(x: number) -> number {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn fmax(a: number, b: number) -> number {
+    if a > b { a } else { b }
+}
+
+fn fmin(a: number, b: number) -> number {
+    if a < b { a } else { b }
+}
+
+// exp via series fallback only used to compute some analytic constants below;
+// but we hard-code the analytic constants where possible to avoid drift.
+fn approx(a: number, b: number, tol: number) -> bool {
+    fabs(a - b) <= tol
+}
+
+// -----------------------------------------------------------------------------
+// PART A -- ODE integrators vs analytic solutions
+// -----------------------------------------------------------------------------
+
+// A1. Exponential decay: dy/dt = -y, y(0)=1  ->  y(t)=e^{-t}.
+//     Analytic: y(1)=e^{-1}=0.36787944117144233
+//               y(5)=e^{-5}=0.006737946999085467
+fn check_exp_decay() -> bool {
+    let f = |t: number, y: number| 0.0 - y
+    let mut ok = true
+
+    // RK4 is 4th-order; with dt=0.001 over [0,5] it tracks e^{-t} tightly.
+    let traj = ode::rk4(f, 1.0, 0.0, 5.0, 0.001)
+    let yend = traj[traj.length - 1].y
+    let analytic5 = 0.006737946999085467
+    g_checks = g_checks + 1
+    if !approx(yend, analytic5, 0.000001) {
+        print(f"CHECK_FAILED: exp_decay_rk4_y5 expected={analytic5} got={yend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+
+    // Euler is 1st-order; book annotates ~0.0067, accept a looser band.
+    let etraj = ode::euler(f, 1.0, 0.0, 5.0, 0.001)
+    let eyend = etraj[etraj.length - 1].y
+    g_checks = g_checks + 1
+    if !approx(eyend, analytic5, 0.0005) {
+        print(f"CHECK_FAILED: exp_decay_euler_y5 expected={analytic5} got={eyend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+
+    // RK4 should be strictly more accurate than Euler here.
+    let err_rk4 = fabs(yend - analytic5)
+    let err_eul = fabs(eyend - analytic5)
+    g_checks = g_checks + 1
+    if !(err_rk4 <= err_eul) {
+        print(f"CHECK_FAILED: exp_decay_rk4_beats_euler rk4err={err_rk4} eulerr={err_eul}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+
+    // Trajectory starts at t=0, y=1 exactly.
+    let first = traj[0]
+    g_checks = g_checks + 1
+    if !(approx(first.t, 0.0, 0.000001) && approx(first.y, 1.0, 0.000001)) {
+        print(f"CHECK_FAILED: exp_decay_initial t={first.t} y={first.y}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+
+    ok
+}
+
+// A2. Logistic growth: dy/dt = r y (1 - y/K), y(0)=y0.
+//     Analytic: y(t) = K / (1 + ((K - y0)/y0) e^{-r t}).
+//     Choose r=1, K=1, y0=0.1.
+//       A = (K - y0)/y0 = 9.
+//       y(5) = 1 / (1 + 9 e^{-5}) = 1 / (1 + 9*0.006737946999) = 1/1.060641523 = 0.942823...
+//     Compute analytic exactly here:
+fn logistic_analytic(t: number) -> number {
+    // r=1, K=1, y0=0.1, A=9
+    // e^{-t} computed via the same rk4 we test? No -- derive constant for t=5.
+    // We hard-code e^{-5}.
+    let e_neg5 = 0.006737946999085467
+    1.0 / (1.0 + 9.0 * e_neg5)
+}
+
+fn check_logistic() -> bool {
+    let r = 1.0
+    let cap = 1.0
+    let f = |t: number, y: number| { r * y * (1.0 - y / cap) }
+    let traj = ode::rk4(f, 0.1, 0.0, 5.0, 0.001)
+    let yend = traj[traj.length - 1].y
+    let analytic = logistic_analytic(5.0)   // 0.9428230...
+    let mut ok = true
+    g_checks = g_checks + 1
+    if !approx(yend, analytic, 0.00001) {
+        print(f"CHECK_FAILED: logistic_rk4_y5 expected={analytic} got={yend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+
+    // Logistic is monotone increasing toward K=1 from y0=0.1: y end < 1, > 0.9.
+    g_checks = g_checks + 1
+    if !(yend < 1.0 && yend > 0.9) {
+        print(f"CHECK_FAILED: logistic_bounds got={yend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// A3. Harmonic oscillator (vector): y0'=y1, y1'=-k y0, k=1.
+//     IC x=1, v=0  ->  x(t)=cos(t), v(t)=-sin(t).
+//     Analytic at t=2pi: x=1, v=0 (full period).
+//     Energy E = 0.5 v^2 + 0.5 k x^2 is conserved = 0.5.
+fn check_oscillator() -> bool {
+    let k = 1.0
+    let f = |t: number, y: Array<number>| [y[1], 0.0 - k * y[0]]
+    // Integrate exactly one period 2*pi = 6.283185307179586.
+    let period = 6.283185307179586
+    let traj = ode::rk4_system(f, [1.0, 0.0], 0.0, period, 0.0001)
+    let last = traj[traj.length - 1]
+    let xend = last.y[0]
+    let vend = last.y[1]
+    let mut ok = true
+
+    // After one full period, x ~ 1, v ~ 0.
+    g_checks = g_checks + 1
+    if !approx(xend, 1.0, 0.001) {
+        print(f"CHECK_FAILED: oscillator_x_period expected=1.0 got={xend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    g_checks = g_checks + 1
+    if !approx(vend, 0.0, 0.001) {
+        print(f"CHECK_FAILED: oscillator_v_period expected=0.0 got={vend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+
+    // Energy conservation across the whole trajectory: max deviation small.
+    let mut max_dev = 0.0
+    let mut idx = 0
+    while idx < traj.length {
+        let st = traj[idx].y
+        let e = 0.5 * st[1] * st[1] + 0.5 * k * st[0] * st[0]
+        max_dev = fmax(max_dev, fabs(e - 0.5))
+        idx = idx + 1
+    }
+    g_checks = g_checks + 1
+    if !(max_dev < 0.001) {
+        print(f"CHECK_FAILED: oscillator_energy max_dev={max_dev}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// A4. euler_system on the same oscillator (lower-order; loose tolerance).
+fn check_euler_system() -> bool {
+    let f = |t: number, y: Array<number>| [y[1], 0.0 - y[0]]
+    let traj = ode::euler_system(f, [1.0, 0.0], 0.0, 1.0, 0.0001)
+    let last = traj[traj.length - 1]
+    // Analytic at t=1: x=cos(1)=0.5403023058681398, v=-sin(1)=-0.8414709848078965
+    let mut ok = true
+    g_checks = g_checks + 1
+    if !approx(last.y[0], 0.5403023058681398, 0.001) {
+        print(f"CHECK_FAILED: euler_system_x1 expected=0.5403023 got={last.y[0]}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    g_checks = g_checks + 1
+    if !approx(last.y[1], 0.0 - 0.8414709848078965, 0.001) {
+        print(f"CHECK_FAILED: euler_system_v1 expected=-0.8414710 got={last.y[1]}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// A5. Adaptive RK45 scalar on exponential decay; same analytic target.
+fn check_rk45() -> bool {
+    let f = |t: number, y: number| 0.0 - y
+    let traj = ode::rk45(f, 1.0, 0.0, 5.0)
+    let yend = traj[traj.length - 1].y
+    let analytic5 = 0.006737946999085467
+    let mut ok = true
+    g_checks = g_checks + 1
+    if !approx(yend, analytic5, 0.0001) {
+        print(f"CHECK_FAILED: rk45_y5 expected={analytic5} got={yend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // The last recorded t should reach ~5.0 (end of interval).
+    let tend = traj[traj.length - 1].t
+    g_checks = g_checks + 1
+    if !approx(tend, 5.0, 0.01) {
+        print(f"CHECK_FAILED: rk45_tend expected=5.0 got={tend}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// A6. Adaptive RK45 vector on the oscillator over one period.
+fn check_rk45_system() -> bool {
+    let f = |t: number, y: Array<number>| [y[1], 0.0 - y[0]]
+    let period = 6.283185307179586
+    let traj = ode::rk45_system(f, [1.0, 0.0], 0.0, period)
+    let last = traj[traj.length - 1]
+    let mut ok = true
+    g_checks = g_checks + 1
+    if !approx(last.y[0], 1.0, 0.01) {
+        print(f"CHECK_FAILED: rk45_system_x expected=1.0 got={last.y[0]}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    g_checks = g_checks + 1
+    if !approx(last.y[1], 0.0, 0.01) {
+        print(f"CHECK_FAILED: rk45_system_v expected=0.0 got={last.y[1]}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// -----------------------------------------------------------------------------
+// PART B -- Monte Carlo estimators vs analytic expectations (all seeded)
+// -----------------------------------------------------------------------------
+
+// B1. Estimate pi by sampling the unit square and counting hits inside the
+//     quarter circle: P(x^2+y^2 < 1) = pi/4. With N samples, mean(indicator)
+//     -> pi/4 = 0.7853981633974483. We assert the SCALED estimate ~ pi with a
+//     statistical band appropriate to N.
+fn check_pi() -> bool {
+    random_seed(12345)
+    let report = monte_carlo::monte_carlo(20000, |i, cfg| {
+        let x = random()
+        let y = random()
+        if x * x + y * y < 1.0 { 1.0 } else { 0.0 }
+    })
+    let stats = monte_carlo::monte_carlo_stats(report.results)
+    let pi_est = 4.0 * stats.mean
+    let mut ok = true
+    // For N=20000, std error of the fraction ~ sqrt(0.785*0.215/20000) ~ 0.0029,
+    // so 4*that ~ 0.0116; a 0.08 band is ~7 sigma -- safe and deterministic.
+    g_checks = g_checks + 1
+    if !approx(pi_est, 3.141592653589793, 0.08) {
+        print(f"CHECK_FAILED: pi_estimate expected=3.14159 got={pi_est}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    g_checks = g_checks + 1
+    if !(report.simulations == 20000) {
+        print(f"CHECK_FAILED: pi_sims expected=20000 got={report.simulations}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// B2. Mean of a Uniform(0,1): E[U]=0.5, and stats.count must equal N.
+//     Seeded determinism: same seed -> identical mean across runs (we run twice).
+fn check_uniform_mean() -> bool {
+    random_seed(777)
+    let r1 = monte_carlo::monte_carlo(5000, |i, cfg| random())
+    let s1 = monte_carlo::monte_carlo_stats(r1.results)
+
+    random_seed(777)
+    let r2 = monte_carlo::monte_carlo(5000, |i, cfg| random())
+    let s2 = monte_carlo::monte_carlo_stats(r2.results)
+
+    let mut ok = true
+    // Reproducibility: identical seed -> identical mean (book guarantee).
+    g_checks = g_checks + 1
+    if !approx(s1.mean, s2.mean, 0.0000000001) {
+        print(f"CHECK_FAILED: uniform_reproducible s1={s1.mean} s2={s2.mean}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // E[U]=0.5; N=5000 std-error ~ 0.0041; 0.03 band is ~7 sigma.
+    g_checks = g_checks + 1
+    if !approx(s1.mean, 0.5, 0.03) {
+        print(f"CHECK_FAILED: uniform_mean expected=0.5 got={s1.mean}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // count must equal N.
+    g_checks = g_checks + 1
+    if !(s1.count == 5000) {
+        print(f"CHECK_FAILED: uniform_count expected=5000 got={s1.count}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // min/max within [0,1).
+    g_checks = g_checks + 1
+    if !(s1.min >= 0.0 && s1.max < 1.0) {
+        print(f"CHECK_FAILED: uniform_range min={s1.min} max={s1.max}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // median p50 near 0.5.
+    g_checks = g_checks + 1
+    if !approx(s1.p50, 0.5, 0.05) {
+        print(f"CHECK_FAILED: uniform_p50 expected=0.5 got={s1.p50}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// B3. Antithetic estimator of E[U] = 0.5. Pairing U with 1-U gives an EXACT
+//     pair-average of 0.5 every time, so variance -> 0 and the mean is 0.5
+//     essentially exactly. sim_fn(i, is_antithetic) returns a number.
+fn check_antithetic() -> bool {
+    random_seed(2024)
+    let report = monte_carlo::monte_carlo_antithetic(3000, |i, is_anti| {
+        let u = random()
+        u
+    })
+    let stats = monte_carlo::monte_carlo_stats(report.results)
+    let mut ok = true
+    // Each pair average of U and 1-U is exactly 0.5, so the mean of results
+    // is 0.5 to floating-point precision regardless of the draws.
+    g_checks = g_checks + 1
+    if !approx(stats.mean, 0.5, 0.00001) {
+        print(f"CHECK_FAILED: antithetic_mean expected=0.5 got={stats.mean}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// B4. Control-variate integral. Estimate E[f(U)] with f(u)=u^2 (true value 1/3)
+//     using control g(u)=u with known mean 0.5. sim_fn returns
+//     { value, control }. The book says the returned record has adjusted_mean
+//     and variance_reduction. We assert adjusted_mean ~ 1/3 and
+//     0 <= variance_reduction <= 1.
+fn check_control_variate() -> bool {
+    random_seed(99)
+    let report = monte_carlo::monte_carlo_control_variate(8000, |i| {
+        let u = random()
+        { value: u * u, control: u }
+    }, 0.5)
+    let mut ok = true
+    // E[U^2] = 1/3 = 0.3333333333333333.
+    g_checks = g_checks + 1
+    if !approx(report.adjusted_mean, 0.3333333333333333, 0.02) {
+        print(f"CHECK_FAILED: cv_adjusted_mean expected=0.3333 got={report.adjusted_mean}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // variance_reduction is a fraction in [0,1].
+    g_checks = g_checks + 1
+    if !(report.variance_reduction >= 0.0 && report.variance_reduction <= 1.0) {
+        print(f"CHECK_FAILED: cv_var_reduction_range got={report.variance_reduction}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// B5. Stratified estimator of integral of u over [0,1] = 0.5.
+//     sim_fn(i, u) gets u in [i/n,(i+1)/n). Stratification gives a very tight
+//     estimate of the mean.
+fn check_stratified() -> bool {
+    random_seed(55)
+    let report = monte_carlo::monte_carlo_stratified(4000, |i, u| u)
+    let stats = monte_carlo::monte_carlo_stats(report.results)
+    let mut ok = true
+    // Mean of u over the unit interval = 0.5; stratified is very accurate.
+    g_checks = g_checks + 1
+    if !approx(stats.mean, 0.5, 0.01) {
+        print(f"CHECK_FAILED: stratified_mean expected=0.5 got={stats.mean}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// B6. Normal-shock risk model: simulate cumulative returns r_i ~ N(0, 0.02),
+//     portfolio value V = 100 * prod(1+r_i) over a short horizon. We assert the
+//     mean terminal value is near 100 (zero-mean shocks) within a band, and the
+//     standard deviation is positive (there IS dispersion). Seeded.
+fn check_normal_risk() -> bool {
+    random_seed(31337)
+    let report = monte_carlo::monte_carlo(4000, |i, cfg| {
+        let mut v = 100.0
+        let mut step = 0
+        while step < 5 {
+            let shock = random_normal(0.0, 0.02)
+            v = v * (1.0 + shock)
+            step = step + 1
+        }
+        v
+    })
+    let stats = monte_carlo::monte_carlo_stats(report.results)
+    let mut ok = true
+    // E[V] ~ 100 * E[(1+r)]^5 = 100 (since E[r]=0). Band 2.0 (~few sigma/sqrt N).
+    g_checks = g_checks + 1
+    if !approx(stats.mean, 100.0, 2.0) {
+        print(f"CHECK_FAILED: risk_mean expected~100 got={stats.mean}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // There must be real dispersion (std > 0).
+    g_checks = g_checks + 1
+    if !(stats.std > 0.0) {
+        print(f"CHECK_FAILED: risk_std_positive got={stats.std}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // 5th percentile below the median below the 95th percentile (ordering).
+    g_checks = g_checks + 1
+    if !(stats.p5 <= stats.p50 && stats.p50 <= stats.p95) {
+        print(f"CHECK_FAILED: risk_percentile_order p5={stats.p5} p50={stats.p50} p95={stats.p95}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    // Confidence interval brackets the mean.
+    g_checks = g_checks + 1
+    if !(stats.ci_low <= stats.mean && stats.mean <= stats.ci_high) {
+        print(f"CHECK_FAILED: risk_ci_bracket low={stats.ci_low} mean={stats.mean} high={stats.ci_high}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// -----------------------------------------------------------------------------
+// Cross-validation: an ODE-driven Monte Carlo. Simulate exponential decay with
+// a random initial condition y0 ~ Uniform(0.5,1.5); by linearity the expected
+// terminal value E[y(5)] = E[y0] * e^{-5} = 1.0 * e^{-5}. Seeded.
+// -----------------------------------------------------------------------------
+fn check_ode_mc_coupling() -> bool {
+    random_seed(8675309)
+    let report = monte_carlo::monte_carlo(400, |i, cfg| {
+        let y0 = 0.5 + random()      // Uniform(0.5, 1.5), mean 1.0
+        let traj = ode::rk4(|t: number, y: number| 0.0 - y, y0, 0.0, 5.0, 0.01)
+        traj[traj.length - 1].y
+    })
+    let stats = monte_carlo::monte_carlo_stats(report.results)
+    let expected = 0.006737946999085467   // 1.0 * e^{-5}
+    let mut ok = true
+    // E[y0]=1.0, so E[terminal]=e^{-5}. Band scaled by variance of y0 / sqrt(N).
+    g_checks = g_checks + 1
+    if !approx(stats.mean, expected, 0.001) {
+        print(f"CHECK_FAILED: ode_mc_mean expected={expected} got={stats.mean}")
+        ok = false
+        g_failures = g_failures + 1
+    }
+    ok
+}
+
+// -----------------------------------------------------------------------------
+// Driver
+// -----------------------------------------------------------------------------
+fn main() {
+    let a1 = check_exp_decay()
+    let a2 = check_logistic()
+    let a3 = check_oscillator()
+    let a4 = check_euler_system()
+    let a5 = check_rk45()
+    let a6 = check_rk45_system()
+
+    let b1 = check_pi()
+    let b2 = check_uniform_mean()
+    let b3 = check_antithetic()
+    let b4 = check_control_variate()
+    let b5 = check_stratified()
+    let b6 = check_normal_risk()
+
+    let c1 = check_ode_mc_coupling()
+
+    print(f"checks_run={g_checks} failures={g_failures}")
+
+    let all = a1 && a2 && a3 && a4 && a5 && a6
+        && b1 && b2 && b3 && b4 && b5 && b6 && c1
+
+    if all && g_failures == 0 {
+        print("ALL_CHECKS_PASSED")
+    } else {
+        print("SOME_CHECKS_FAILED")
+    }
+}
+
+main()

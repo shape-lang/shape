@@ -1,0 +1,57 @@
+// FINDING PROBE -- async-drop variant selection must follow the EXECUTION
+// CONTEXT, not the DECLARATION ORDER of the sync/async `impl Drop` methods.
+//
+// Book fundamentals/resource-management.mdx (drop-variant-selection table):
+//   Type has "Both sync and async":
+//     Async context => DropCallAsync (prefers async)
+//     Sync  context => DropCall      (sync fallback)
+//
+// PRE-FIX BUG (2026-06): the impl-block lowering registered BOTH the sync
+//   `drop` and the async `drop_async` under the SAME trait-method symbol key
+//   (`Drop::<Type>::__default__::drop`), so the LAST-declared variant
+//   overwrote the first. With the sync impl declared first, a sync `DropCall`
+//   wrongly resolved to (and ran) the ASYNC drop body -- contradicting the
+//   spec table's "sync context => sync fallback" row.
+//
+// FIX: register the async variant under `drop_async` (matching `func_def.name`
+//   and the runtime `op_drop_call_impl` lookup) so the sync `DropCall` always
+//   resolves to the sync `drop`. Variant selection is now keyed on the
+//   compiler's execution-context flag (`current_function_is_async`), NOT on
+//   which `impl` method happened to be declared first.
+//
+// EXPECTED (spec semantics, written before running):
+//   sync context, sync-declared-first   -> SYNC drop  (marker 1)
+//   sync context, async-declared-first  -> SYNC drop  (marker 1)  <- the fix
+//   async context (either order)        -> ASYNC drop (marker 2)
+
+let mut WHICH_SYNC_SF: int = 0   // sync ctx, sync impl declared first
+let mut WHICH_SYNC_AF: int = 0   // sync ctx, async impl declared first
+
+type ResSF { id: int }
+impl Drop for ResSF {
+  method drop() { WHICH_SYNC_SF = 1 }
+  async method drop() { WHICH_SYNC_SF = 2 }
+}
+
+type ResAF { id: int }
+impl Drop for ResAF {
+  async method drop() { WHICH_SYNC_AF = 2 }
+  method drop() { WHICH_SYNC_AF = 1 }
+}
+
+fn use_sf() { let r = ResSF { id: 1 } }
+fn use_af() { let r = ResAF { id: 1 } }
+
+use_sf()
+use_af()
+
+let mut ok = true
+if WHICH_SYNC_SF != 1 {
+  ok = false
+  print(f"CHECK_FAILED: sync-ctx sync-first expected=1 got={WHICH_SYNC_SF}")
+}
+if WHICH_SYNC_AF != 1 {
+  ok = false
+  print(f"CHECK_FAILED: sync-ctx async-first expected=1 got={WHICH_SYNC_AF}")
+}
+if ok { print("ALL_CHECKS_PASSED") }

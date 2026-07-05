@@ -1,0 +1,9 @@
+let outer = "outside"
+
+{
+  let inner = "inside"
+  print(outer)
+  print(inner)
+}
+
+// print(inner) // compile error

@@ -1,0 +1,106 @@
+// Pattern matching small program — exercises the chapter's core:
+// where-guards, type-based matching, enum matching, constructor patterns,
+// match-as-expression, wildcard.
+
+enum Status {
+  Ok(int),
+  Error(string)
+}
+
+// Basic match with where-guards + wildcard (book: "Basic Match")
+fn sign(n: int) -> string {
+  match n {
+    x: int where x < 0 => "negative"
+    x: int where x == 0 => "zero"
+    _ => "positive"
+  }
+}
+
+// Type-based matching on a union type (book: "Type-Based Matching")
+fn normalize(value: int | string) -> string {
+  match value {
+    n: int => f"int:{n}"
+    s: string => f"str:{s}"
+  }
+}
+
+// Enum matching (book: "Enum Matching")
+fn render(status: Status) -> string {
+  match status {
+    Status::Ok(code) => f"ok({code})"
+    Status::Error(msg) => f"error({msg})"
+  }
+}
+
+// Constructor patterns on Option (book: "Constructor Patterns")
+fn unwrap_or(opt: Option<int>, default: int) -> int {
+  match opt {
+    Some(v) => v
+    None => default
+  }
+}
+
+// Constructor patterns on Result (book: "Constructor Patterns")
+fn describe(result: Result<string>) -> string {
+  match result {
+    Ok(value) => f"success: {value}"
+    Err(e) => f"failed: {e}"
+  }
+}
+
+// Match-as-expression returning an int (book: "Match Is an Expression")
+fn bucket(n: int) -> int {
+  match n {
+    x: int where x < 10 => 0
+    x: int where x < 100 => 1
+    _ => 2
+  }
+}
+
+let mut ok = true
+
+fn check_str(name: string, got: string, want: string) -> bool {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    return false
+  }
+  return true
+}
+
+fn check_int(name: string, got: int, want: int) -> bool {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    return false
+  }
+  return true
+}
+
+if !check_str("sign(-5)", sign(-5), "negative") { ok = false }
+if !check_str("sign(0)", sign(0), "zero") { ok = false }
+if !check_str("sign(42)", sign(42), "positive") { ok = false }
+
+if !check_str("normalize(7)", normalize(7), "int:7") { ok = false }
+if !check_str("normalize(hi)", normalize("hi"), "str:hi") { ok = false }
+
+if !check_str("render(Ok)", render(Status::Ok(200)), "ok(200)") { ok = false }
+if !check_str("render(Error)", render(Status::Error("boom")), "error(boom)") { ok = false }
+
+if !check_int("unwrap_or(Some 9)", unwrap_or(Some(9), 0), 9) { ok = false }
+if !check_int("unwrap_or(None)", unwrap_or(None, -1), -1) { ok = false }
+
+if !check_str("describe(Ok)", describe(Ok("yay")), "success: yay") { ok = false }
+if !check_str("describe(Err)", describe(Err("nope")), "failed: nope") { ok = false }
+
+if !check_int("bucket(3)", bucket(3), 0) { ok = false }
+if !check_int("bucket(50)", bucket(50), 1) { ok = false }
+if !check_int("bucket(999)", bucket(999), 2) { ok = false }
+
+let label = match 5 {
+  x: int where x < 3 => "small"
+  _ => "big"
+}
+if !check_str("label", label, "big") { ok = false }
+
+if ok {
+  print("ALL_CHECKS_PASSED")
+}

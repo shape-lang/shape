@@ -1,0 +1,22 @@
+// Conceptual structure (actual Rust struct):
+type FunctionBlob {
+    content_hash: string,        // SHA-256 identity
+
+    // Metadata
+    name: string,
+    arity: int,
+    param_names: Array<string>,
+    locals_count: int,
+    is_closure: bool,
+    is_async: bool,
+
+    // Self-contained bytecode
+    instructions: Array<Instruction>,  // THIS function only
+    constants: Array<Constant>,        // THIS function only
+    strings: Array<string>,            // THIS function only
+
+    // Dependencies
+    dependencies: Array<string>,       // Content hashes of called functions
+    foreign_dependencies: Array<string>, // Content hashes of foreign (polyglot) functions
+    type_schemas: Array<TypeSchema>,   // Types this function constructs
+}

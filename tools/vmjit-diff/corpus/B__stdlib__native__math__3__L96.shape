@@ -1,0 +1,5 @@
+from std::core::math use { clamp, radians, sin }
+
+let bounded = clamp(150.0, 0.0, 100.0)   // 100.0
+let half_pi = radians(90.0)
+print(sin(half_pi))                       // ~1.0

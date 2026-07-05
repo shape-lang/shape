@@ -1,0 +1,13 @@
+annotation ai() {
+  targets: [type]
+
+  comptime post(target, ctx) {
+    comptime for field in target.fields {
+      comptime for ann in field.annotations {
+        if ann.name == "description" {
+          // ann.args[0] is "The user's query" etc.
+        }
+      }
+    }
+  }
+}

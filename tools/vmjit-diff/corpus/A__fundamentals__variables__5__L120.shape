@@ -1,0 +1,9 @@
+let count = 42         // int
+let ratio = 0.25       // number
+let name = "shape"     // string
+let enabled = true     // bool
+
+print(count)
+print(ratio)
+print(name)
+print(enabled)

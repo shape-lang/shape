@@ -16,7 +16,7 @@
 //! assert the value is preserved. `expect_number` reads both `Integer`- and
 //! `Number`-tagged results.
 
-use shape_test::shape_test::ShapeTest;
+use crate::suite::ShapeTest;
 
 // =========================================================================
 // A.1 Signed widening: i8 ⊂ i16 ⊂ i32 ⊂ int(i64)

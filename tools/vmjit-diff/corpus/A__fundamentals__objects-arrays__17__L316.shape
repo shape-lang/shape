@@ -1,0 +1,6 @@
+let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
+
+print(m.get("b"))
+print(m.has("a"))
+print(m.len())
+print(m.isEmpty())

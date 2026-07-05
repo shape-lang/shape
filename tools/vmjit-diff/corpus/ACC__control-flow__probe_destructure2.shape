@@ -1,0 +1,6 @@
+// Probe: is the object-literal numeric field inferred as `number` even outside a loop?
+let p = {x: 1, y: 2}
+let xx = p.x
+var t = 0
+t = t + xx
+print(t)

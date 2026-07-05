@@ -1,0 +1,6 @@
+fn append(xs) { xs.push(4) }
+
+let nums = [1, 2, 3]
+append(nums)             // v0.3.3: `nums` is shared by value, not consumed
+print(nums.len())        // 4 — `nums` is still usable; the push is caller-visible
+print(nums[3])           // 4 — mutation through the by-value param reached the caller

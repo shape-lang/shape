@@ -82,6 +82,21 @@ pub fn range(start_line: u32, start_char: u32, end_line: u32, end_char: u32) -> 
 // Builder
 // ---------------------------------------------------------------------------
 
+/// Which executor `eval_with_output` drives the program through.
+///
+/// `Vm` is the bytecode interpreter (`shape_vm::BytecodeExecutor`) — the
+/// historical, default mode of every ShapeTest assertion. `Jit` drives the
+/// same program through `shape_jit::JITExecutor`, mirroring the release
+/// binary's `--mode jit` path (AOT selective compilation with interpreter
+/// fall-through), so integration suites can assert VM/JIT behavioral parity
+/// in-process. Added for WF-0B (VM-vs-JIT differential measurement).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecMode {
+    #[default]
+    Vm,
+    Jit,
+}
+
 pub struct ShapeTest {
     text: String,
     position: Position,
@@ -90,6 +105,7 @@ pub struct ShapeTest {
     snapshot_dir: Option<tempfile::TempDir>,
     permission_set: Option<shape_abi_v1::PermissionSet>,
     resource_limits: Option<shape_vm::resource_limits::ResourceLimits>,
+    exec_mode: ExecMode,
 }
 
 impl ShapeTest {
@@ -106,7 +122,15 @@ impl ShapeTest {
             snapshot_dir: None,
             permission_set: None,
             resource_limits: None,
+            exec_mode: ExecMode::Vm,
         }
+    }
+
+    /// Execute through the JIT executor (`--mode jit` equivalent) instead of
+    /// the bytecode interpreter. See [`ExecMode`].
+    pub fn with_jit(mut self) -> Self {
+        self.exec_mode = ExecMode::Jit;
+        self
     }
 
     /// Enable stdlib loading for runtime assertions.
@@ -252,6 +276,31 @@ impl ShapeTest {
         let (adapter, captured_lines) = CaptureAdapter::new();
         if let Some(ctx) = engine.runtime.persistent_context_mut() {
             ctx.set_output_adapter(Box::new(adapter));
+        }
+
+        // JIT mode: drive the program through shape_jit::JITExecutor —
+        // the same ProgramExecutor the release binary uses for `--mode jit`
+        // (AOT selective compilation, interpreter fall-through on deopt).
+        // Resource limits / permissions are wired through the embedded
+        // bytecode_executor exactly as bin/shape-cli's script_cmd does.
+        if self.exec_mode == ExecMode::Jit {
+            let mut executor = shape_jit::JITExecutor::new();
+            executor.bytecode_executor.set_resource_limits(Some(
+                self.resource_limits
+                    .clone()
+                    .unwrap_or_else(Self::default_resource_limits),
+            ));
+            if let Some(pset) = &self.permission_set {
+                executor
+                    .bytecode_executor
+                    .set_permission_set(Some(pset.clone()));
+            }
+            let result = engine
+                .execute(&mut executor, &self.text)
+                .map_err(|e| e.to_string())?;
+            let value = serde_json::to_value(&result.value).map_err(|e| e.to_string())?;
+            let output = captured_lines.lock().unwrap().clone();
+            return Ok((value, output));
         }
 
         let mut executor = BytecodeExecutor::new();

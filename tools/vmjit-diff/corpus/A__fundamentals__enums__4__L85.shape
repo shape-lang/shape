@@ -1,0 +1,8 @@
+enum Message {
+    Quit,
+    Move { x: int, y: int },
+    Write(string),
+    ChangeColor { r: int, g: int, b: int },
+}
+
+let msg = Message::Move { x: 10, y: 20 }

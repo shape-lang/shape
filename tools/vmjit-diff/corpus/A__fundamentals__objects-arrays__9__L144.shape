@@ -1,0 +1,6 @@
+let xs = [0, 1, 2, 3, 4]
+let squares = xs.map(|x| x * x)
+let evens = xs.filter(|x| x % 2 == 0)
+
+print(squares)
+print(evens)

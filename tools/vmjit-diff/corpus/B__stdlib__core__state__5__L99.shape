@@ -1,0 +1,4 @@
+pub type ModuleState<T> {
+    bindings: HashMap<string, T>,
+    schemas: HashMap<string, string>,  // Type name → content hash
+}

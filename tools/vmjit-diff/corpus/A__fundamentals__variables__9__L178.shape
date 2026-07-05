@@ -1,0 +1,5 @@
+let mut point = { x: 1 }
+point.y = 2
+
+let sum = point.x + point.y
+print(sum)

@@ -1,0 +1,68 @@
+// small.shape — Content slice (book: fundamentals/content.mdx, v0.3.3 surface)
+// Exercises the chapter's runnable core: Content.text + style methods + Color,
+// Content.table(headers, rows) + border styles, and .toString()/.to_string().
+// Determinism strategy (per slice): assert the EXACT rendered string of each
+// Content builder. Expected values are derived from the book's visual
+// references (Tables / Border-Styles) and the documented Style-Methods table,
+// written BEFORE first run. Box-drawing glyphs and the ESC byte are embedded as
+// literal UTF-8 / control bytes (Shape has no \u{...} escape — see REPORT).
+
+let esc = ""
+let mut failures = 0
+fn check(cond: bool, label: string) {
+    if !cond {
+        print(f"CHECK_FAILED: {label}")
+        failures = failures + 1
+    }
+}
+
+// --- Plain text renders to its text (book intro lines 8-13) -----------------
+check(Content.text("hello").toString() == "hello", "plain text == hello")
+// .to_string() is an alias of .toString() (book line 12)
+check(Content.text("hi").to_string() == "hi", "to_string alias == hi")
+
+// --- Styled text: red + bold => CSI 1;31 m <text> CSI 0 m -------------------
+// book "Style Methods": .bold() bold weight, .fg(Color.red) red fg.
+// SGR codes: bold=1, red fg=31, reset=0.
+let line = Content.text("Hello").fg(Color.red).bold().toString()
+check(line == esc + "[1;31mHello" + esc + "[0m", "red+bold ANSI exact")
+
+// Distinct named colors emit distinct SGR codes (Color namespace, lines 158-171)
+check(Content.text("X").fg(Color.green).toString() == esc + "[32mX" + esc + "[0m", "green fg == 32")
+check(Content.text("X").fg(Color.blue).toString() == esc + "[34mX" + esc + "[0m", "blue fg == 34")
+check(Content.text("X").fg(Color.yellow).toString() == esc + "[33mX" + esc + "[0m", "yellow fg == 33")
+
+// Decoration codes: underline=4, italic=3, dim=2 (Style-Methods table, 186-196)
+check(Content.text("D").underline().toString() == esc + "[4mD" + esc + "[0m", "underline == 4")
+check(Content.text("E").italic().toString() == esc + "[3mE" + esc + "[0m", "italic == 3")
+check(Content.text("F").dim().toString() == esc + "[2mF" + esc + "[0m", "dim == 2")
+
+// RGB background: bg rgb => 48;2;r;g;b (book line 170 Color.rgb; line 191 .bg)
+check(Content.text("G").bg(Color.rgb(40, 0, 0)).toString() == esc + "[48;2;40;0;0mG" + esc + "[0m", "bg rgb exact")
+
+// --- Tables: default rounded border (book "Tables" visual reference) --------
+// .toString() ends each rendered table with a trailing newline (probe-confirmed).
+let headers = ["name", "value"]
+let rows = [["test", "142.5"], ["prod", "378.2"]]
+let expectedRounded = "╭──────┬───────╮\n│ name │ value │\n├──────┼───────┤\n│ test │ 142.5 │\n│ prod │ 378.2 │\n╰──────┴───────╯\n"
+check(Content.table(headers, rows).toString() == expectedRounded, "rounded table exact")
+
+// Sharp border (book "Border Styles": ┌──┬──┐)
+let expectedSharp = "┌───┬───┐\n│ a │ b │\n├───┼───┤\n│ 1 │ 2 │\n└───┴───┘\n"
+check(Content.table(["a", "b"], [["1", "2"]]).border(Border.sharp).toString() == expectedSharp, "sharp table exact")
+
+// Border.none: cells joined by two spaces, no rules (probe-confirmed)
+check(Content.table(["a", "b"], [["1", "2"]]).border(Border.none).toString() == "a  b\n1  2\n", "none border exact")
+
+// --- Chart: title appears in terminal rendering (book "Charts" 301-322) -----
+let chart = Content.chart("line")
+    .add("Revenue", [[1, 100], [2, 200], [3, 350]])
+    .title("Quarterly Revenue")
+    .toString()
+check(chart.contains("Quarterly Revenue"), "chart title in rendering")
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"FAILURES: {failures}")
+}

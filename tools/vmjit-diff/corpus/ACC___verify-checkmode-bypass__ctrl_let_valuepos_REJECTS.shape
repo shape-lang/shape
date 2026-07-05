@@ -1,0 +1,3 @@
+type Point { x: int, y: int }
+fn use_it() -> int { let g: Result<Point,string> = Ok(Point{x:7,y:9}); match g { Ok(Some(n)) => n, Err(e) => -1 } }
+print(use_it())

@@ -1,0 +1,13 @@
+// Probe 4: just declare the Table and print it (no methods)
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+let events: Table<Event> =
+    [1, 50.0,  "alpha"],
+    [2, 75.5,  "beta"],
+    [3, 120.0, "gamma"]
+
+print(events)

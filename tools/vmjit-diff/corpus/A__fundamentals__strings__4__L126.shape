@@ -1,0 +1,2 @@
+let inline = """a quick multiline""";
+// => "a quick multiline"

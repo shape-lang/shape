@@ -1,0 +1,62 @@
+// Ownership Deep Dive — small program.
+// Exercises the chapter's core: the three bindings (let / let mut / var),
+// Copy vs move, clone deep-copy, first-class references, auto-ref method
+// dispatch through a stored reference, and v0.3.3 call-argument by-value
+// sharing (the "Share in v0.3.3, Consume in v0.4" section).
+// All expected values derive from book semantics, written before first run.
+
+type Point { x: int, y: int }
+
+fn check(cond: bool, name: string) {
+    if cond { print(f"ok {name}") } else { print(f"CHECK_FAILED: {name}") }
+}
+
+// Copy semantics: scalars are implicitly Copy, never moved (book table)
+let n = 7
+let m = n
+check(n + m == 14, "scalar-copy")
+
+// var smart-default: stack-mutable Direct (book: "var counter = 0")
+var counter = 0
+counter = counter + 5
+check(counter == 5, "var-direct-mutate")
+
+// Move on `let q = p` for a heap struct; q owns it, p is consumed
+let p = Point { x: 1, y: 2 }
+let q = p
+check(q.x == 1, "struct-move")
+
+// Clone: explicit deep copy keeps both bindings live and independent
+let mut a = [10, 20, 30]
+let b = clone a
+a.push(40)
+check(a.len() == 4, "clone-source-grew")
+check(b.len() == 3, "clone-target-unchanged")
+check(b[0] == 10, "clone-deep-value")
+
+// First-class references: store a ref, read through it via DerefLoad
+let x = 42
+let r = &x
+let val = r + 1
+check(val == 43, "ref-read")
+
+// Auto-ref method/index dispatch through a stored reference
+let arr = [10, 20, 30]
+let rr = &arr
+check(rr.len() == 3, "ref-method-dispatch")
+check(rr[0] == 10, "ref-index-dispatch")
+
+// Returning a value (not the ref) through a &-parameter is fine
+fn read_val(&v) -> int { return v }
+let z = 99
+check(read_val(&z) == 99, "deref-load-return")
+
+// v0.3.3 call-argument sharing: heap arg shared by value, caller-visible
+// mutation; argument binding stays usable after the call
+fn append(xs) { xs.push(4) }
+let nums = [1, 2, 3]
+append(nums)
+check(nums.len() == 4, "call-arg-shared-grew")
+check(nums[3] == 4, "call-arg-mutation-visible")
+
+print("ALL_CHECKS_PASSED")

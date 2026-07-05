@@ -1,0 +1,3 @@
+comptime fn even(n: int) -> bool { n % 2 == 0 }
+let B = comptime { even(10) }
+print(if B { "even" } else { "odd" })

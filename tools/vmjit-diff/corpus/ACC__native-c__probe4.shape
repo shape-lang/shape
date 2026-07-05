@@ -1,0 +1,16 @@
+---
+name = "probe4"
+
+[native-dependencies]
+stub = { provider = "path", path = "./libstub.so" }
+---
+from std::core::native use { ptr_new_cell, ptr_free_cell, ptr_read, ptr_write }
+
+extern C fn stub_product(a: i64, b: i64, out_prod: ptr) -> i32 from "stub" as "stub_product";
+
+let cell = ptr_new_cell()
+ptr_write(cell, 0)
+stub_product(6, 7, cell)
+let prod = ptr_read(cell)
+ptr_free_cell(cell)
+print(prod)

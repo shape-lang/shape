@@ -1,0 +1,700 @@
+// large.shape — Comptime-driven Unit-Conversion & Physics-Constants Engine
+// Book: advanced/comptime.mdx
+//
+// Real-world application rooted in the COMPTIME slice: a deterministic
+// unit-conversion / derived-constants engine where EVERY conversion factor and
+// derived physical constant is computed at COMPILE TIME via `comptime fn`
+// helpers and `comptime { }` expression blocks, then baked into runtime literals.
+// Runtime code applies those baked constants to perform conversions and asserts
+// each result against an EXPECTED value derived from book semantics + textbook
+// physics (written BEFORE the first run — never back-filled from output).
+//
+// Comptime features exercised (all v0.3.3-LIVE per book):
+//   - `comptime fn` helpers (int + float + string returns, branches, nesting)
+//   - `comptime { }` expression form (evaluate now, embed literal)
+//   - `comptime { }` top-level side-effect form (warning(), no-op in v0.3.3)
+//   - build_config() comptime builtin
+//   - comptime fields on types (unit metadata, excluded from runtime storage)
+//
+// Determinism strategy: PURE. No I/O, no clock, no randomness. All asserted
+// values are compile-time-baked constants or pure-function results of them.
+
+// =====================================================================
+// SECTION 0 — Self-check harness (assert() is not a prelude builtin here)
+// =====================================================================
+
+let mut g_failed = 0
+let mut g_total = 0
+
+fn fabs(x: float) -> float {
+  if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn approx(a: float, b: float, eps: float) -> bool {
+  fabs(a - b) < eps
+}
+
+fn check_bool(name: string, ok: bool) {
+  g_total = g_total + 1
+  if !ok {
+    g_failed = g_failed + 1
+    print(f"CHECK_FAILED: {name} expected=true got=false")
+  }
+}
+
+fn check_int(name: string, got: int, expected: int) {
+  g_total = g_total + 1
+  if got != expected {
+    g_failed = g_failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn check_float(name: string, got: float, expected: float, eps: float) {
+  g_total = g_total + 1
+  if !approx(got, expected, eps) {
+    g_failed = g_failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn check_str(name: string, got: string, expected: string) {
+  g_total = g_total + 1
+  if got != expected {
+    g_failed = g_failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+// =====================================================================
+// SECTION 1 — Top-level comptime side-effect form (book "Comptime Blocks")
+// =====================================================================
+// warning() is a no-op in v0.3.3 (book caution) but the side-effect form must
+// compile and run without producing runtime output.
+
+comptime {
+  warning("building unit-conversion engine: factors baked at compile time")
+}
+
+// =====================================================================
+// SECTION 2 — Compile-time math primitives (comptime fn helpers)
+// =====================================================================
+// These run ONLY at compile time; results below are embedded as literals.
+
+comptime fn ct_pi() -> float {
+  3.141592653589793
+}
+
+comptime fn ct_pow_int(base: int, exp: int) -> int {
+  let mut acc = 1
+  let mut i = 0
+  while i < exp {
+    acc = acc * base
+    i = i + 1
+  }
+  acc
+}
+
+comptime fn ct_pow_float(base: float, exp: int) -> float {
+  let mut acc = 1.0
+  let mut i = 0
+  while i < exp {
+    acc = acc * base
+    i = i + 1
+  }
+  acc
+}
+
+comptime fn ct_factorial(n: int) -> int {
+  let mut acc = 1
+  let mut i = 2
+  while i <= n {
+    acc = acc * i
+    i = i + 1
+  }
+  acc
+}
+
+// Float-typed factorial: computed purely with float arithmetic so the result can
+// be baked as a `float` literal WITHOUT an int->float `as` cast. (This build's
+// int->float cast path is unimplemented — see REPORT.md; we route around it.)
+comptime fn ct_factorial_f(n: float) -> float {
+  let mut acc = 1.0
+  let mut i = 2.0
+  while i <= n {
+    acc = acc * i
+    i = i + 1.0
+  }
+  acc
+}
+
+comptime fn ct_gcd(a: int, b: int) -> int {
+  let mut x = a
+  let mut y = b
+  while y != 0 {
+    let t = y
+    y = x - (x / y) * y
+    x = t
+  }
+  x
+}
+
+comptime fn ct_min_int(a: int, b: int) -> int {
+  if a < b { a } else { b }
+}
+
+comptime fn ct_max_int(a: int, b: int) -> int {
+  if a > b { a } else { b }
+}
+
+comptime fn ct_abs_int(a: int) -> int {
+  if a < 0 { 0 - a } else { a }
+}
+
+comptime fn ct_sum_to(n: int) -> int {
+  // sum 1..=n  ==  n*(n+1)/2  (computed iteratively to exercise comptime loops)
+  let mut acc = 0
+  let mut i = 1
+  while i <= n {
+    acc = acc + i
+    i = i + 1
+  }
+  acc
+}
+
+// =====================================================================
+// SECTION 3 — Compile-time angle / length / mass conversion factors
+// =====================================================================
+// Each factor is computed once at comptime and embedded as a literal.
+
+comptime fn ct_deg_to_rad() -> float {
+  ct_pi() / 180.0
+}
+
+comptime fn ct_rad_to_deg() -> float {
+  180.0 / ct_pi()
+}
+
+// Imperial / metric length factors (exact definitions).
+comptime fn ct_inch_to_cm() -> float {
+  2.54
+}
+
+comptime fn ct_foot_to_cm() -> float {
+  // 1 ft = 12 in, 1 in = 2.54 cm
+  12.0 * ct_inch_to_cm()
+}
+
+comptime fn ct_yard_to_cm() -> float {
+  // 1 yd = 3 ft
+  3.0 * ct_foot_to_cm()
+}
+
+comptime fn ct_mile_to_cm() -> float {
+  // 1 mile = 5280 ft
+  5280.0 * ct_foot_to_cm()
+}
+
+comptime fn ct_mile_to_km() -> float {
+  ct_mile_to_cm() / 100000.0
+}
+
+// Mass factors.
+comptime fn ct_pound_to_gram() -> float {
+  453.59237
+}
+
+comptime fn ct_ounce_to_gram() -> float {
+  // 1 lb = 16 oz
+  ct_pound_to_gram() / 16.0
+}
+
+comptime fn ct_stone_to_gram() -> float {
+  // 1 stone = 14 lb
+  14.0 * ct_pound_to_gram()
+}
+
+// =====================================================================
+// SECTION 4 — Bake the compile-time factors into runtime constants
+// =====================================================================
+// `comptime { ... }` expression form: evaluate now, embed literal result.
+
+let PI       = comptime { ct_pi() }
+let DEG2RAD  = comptime { ct_deg_to_rad() }
+let RAD2DEG  = comptime { ct_rad_to_deg() }
+
+let INCH_CM  = comptime { ct_inch_to_cm() }
+let FOOT_CM  = comptime { ct_foot_to_cm() }
+let YARD_CM  = comptime { ct_yard_to_cm() }
+let MILE_CM  = comptime { ct_mile_to_cm() }
+let MILE_KM  = comptime { ct_mile_to_km() }
+
+let LB_G     = comptime { ct_pound_to_gram() }
+let OZ_G     = comptime { ct_ounce_to_gram() }
+let STONE_G  = comptime { ct_stone_to_gram() }
+
+// Integer compile-time constants.
+let TWO_POW_10 = comptime { ct_pow_int(2, 10) }   // 1024
+let TWO_POW_16 = comptime { ct_pow_int(2, 16) }   // 65536
+let TEN_FACT   = comptime { ct_factorial(10) }    // 3628800
+let GCD_48_36  = comptime { ct_gcd(48, 36) }      // 12
+let SUM_100    = comptime { ct_sum_to(100) }      // 5050
+
+// Float compile-time constants.
+let PI_SQUARED = comptime { ct_pow_float(ct_pi(), 2) }       // ~9.8696
+let TWO_POW_8F = comptime { ct_pow_float(2.0, 8) }           // 256.0
+
+// =====================================================================
+// SECTION 5 — build_config() (compile-time host build target)
+// =====================================================================
+
+let BUILD_OS   = comptime { build_config().target_os }
+let BUILD_ARCH = comptime { build_config().target_arch }
+let BUILD_DBG  = comptime { build_config().debug }
+let BUILD_VER  = comptime { build_config().version }
+
+// =====================================================================
+// SECTION 6 — Comptime fields on types (book "Comptime Fields on Types")
+// =====================================================================
+// Comptime fields are type-level metadata, excluded from runtime storage.
+// The runtime-stored field (`magnitude`) is the only one that occupies layout.
+
+type Length {
+  comptime unit_name: string = "meter"
+  comptime si_symbol: string = "m"
+  magnitude: float
+}
+
+type Mass {
+  comptime unit_name: string = "kilogram"
+  comptime si_symbol: string = "kg"
+  magnitude: float
+}
+
+type Angle {
+  comptime unit_name: string = "radian"
+  comptime si_symbol: string = "rad"
+  magnitude: float
+}
+
+// =====================================================================
+// SECTION 7 — Runtime conversion functions (apply baked constants)
+// =====================================================================
+
+fn inches_to_cm(inches: float) -> float {
+  inches * INCH_CM
+}
+
+fn feet_to_cm(feet: float) -> float {
+  feet * FOOT_CM
+}
+
+fn yards_to_meters(yards: float) -> float {
+  (yards * YARD_CM) / 100.0
+}
+
+fn miles_to_km(miles: float) -> float {
+  miles * MILE_KM
+}
+
+fn km_to_miles(km: float) -> float {
+  km / MILE_KM
+}
+
+fn pounds_to_kg(lb: float) -> float {
+  (lb * LB_G) / 1000.0
+}
+
+fn ounces_to_grams(oz: float) -> float {
+  oz * OZ_G
+}
+
+fn stones_to_kg(st: float) -> float {
+  (st * STONE_G) / 1000.0
+}
+
+fn degrees_to_radians(deg: float) -> float {
+  deg * DEG2RAD
+}
+
+fn radians_to_degrees(rad: float) -> float {
+  rad * RAD2DEG
+}
+
+// Build a Length value from centimeters.
+fn length_from_cm(cm: float) -> Length {
+  Length { magnitude: cm / 100.0 }
+}
+
+// =====================================================================
+// SECTION 8 — A small deterministic Taylor-series sine (uses comptime PI)
+// =====================================================================
+// sin(x) via Taylor expansion around 0; reduces argument using comptime PI.
+// All coefficients are derived at runtime from the comptime factorial table,
+// but the table itself is comptime-baked.
+
+// Integer factorials (asserted directly).
+let FACT_3  = comptime { ct_factorial(3) }   // 6
+let FACT_5  = comptime { ct_factorial(5) }   // 120
+let FACT_7  = comptime { ct_factorial(7) }   // 5040
+let FACT_9  = comptime { ct_factorial(9) }   // 362880
+let FACT_11 = comptime { ct_factorial(11) }  // 39916800
+
+// Float factorials baked for the Taylor coefficients (no int->float cast).
+let FACT_3F  = comptime { ct_factorial_f(3.0) }   // 6.0
+let FACT_5F  = comptime { ct_factorial_f(5.0) }   // 120.0
+let FACT_7F  = comptime { ct_factorial_f(7.0) }   // 5040.0
+let FACT_9F  = comptime { ct_factorial_f(9.0) }   // 362880.0
+let FACT_11F = comptime { ct_factorial_f(11.0) }  // 39916800.0
+
+fn taylor_sin(x: float) -> float {
+  // x - x^3/3! + x^5/5! - x^7/7! + x^9/9! - x^11/11!
+  let x2 = x * x
+  let x3 = x2 * x
+  let x5 = x3 * x2
+  let x7 = x5 * x2
+  let x9 = x7 * x2
+  let x11 = x9 * x2
+  x - (x3 / FACT_3F) + (x5 / FACT_5F) - (x7 / FACT_7F) + (x9 / FACT_9F) - (x11 / FACT_11F)
+}
+
+// =====================================================================
+// SECTION 9 — Compile-time temperature-scale offsets/factors
+// =====================================================================
+
+comptime fn ct_c_to_f_factor() -> float {
+  9.0 / 5.0
+}
+
+comptime fn ct_c_to_f_offset() -> float {
+  32.0
+}
+
+let C2F_FACTOR = comptime { ct_c_to_f_factor() }  // 1.8
+let C2F_OFFSET = comptime { ct_c_to_f_offset() }  // 32.0
+
+fn celsius_to_fahrenheit(c: float) -> float {
+  c * C2F_FACTOR + C2F_OFFSET
+}
+
+fn fahrenheit_to_celsius(f: float) -> float {
+  (f - C2F_OFFSET) / C2F_FACTOR
+}
+
+fn celsius_to_kelvin(c: float) -> float {
+  c + 273.15
+}
+
+// =====================================================================
+// SECTION 10 — Comptime string helpers (classification / formatting)
+// =====================================================================
+
+comptime fn ct_sign_label(n: int) -> string {
+  if n < 0 {
+    "negative"
+  } else if n == 0 {
+    "zero"
+  } else {
+    "positive"
+  }
+}
+
+comptime fn ct_size_class(n: int) -> string {
+  if n < 10 {
+    "small"
+  } else if n < 1000 {
+    "medium"
+  } else {
+    "large"
+  }
+}
+
+// Build a fixed separator at compile time via straight-line concatenation.
+// (A loop-based string-concat comptime fn destabilises this build — see
+// REPORT.md "ct_repeat" finding — so we concatenate fixed literals instead.)
+comptime fn ct_quad(s: string) -> string {
+  s + s + s + s
+}
+
+let SIGN_NEG  = comptime { ct_sign_label(0 - 5) }   // "negative"
+let SIGN_ZERO = comptime { ct_sign_label(0) }       // "zero"
+let SIGN_POS  = comptime { ct_sign_label(7) }       // "positive"
+let CLASS_BIG = comptime { ct_size_class(5000) }    // "large"
+let DASHES    = comptime { ct_quad("--") }          // "--------" (4 x "--")
+
+// =====================================================================
+// SECTION 11 — Runtime numeric-table builder (arrays are runtime, not comptime)
+// =====================================================================
+// NOTE: comptime-produced arrays that ESCAPE are corrupted in this build
+// (documented in REPORT.md). So tables are built at RUNTIME from comptime
+// SCALAR constants, which is the supported path.
+
+fn build_power_table(n: int) -> Array<int> {
+  let mut t: Array<int> = []
+  let mut i = 0
+  let mut v = 1
+  while i < n {
+    t.push(v)
+    v = v * 2
+    i = i + 1
+  }
+  t
+}
+
+fn sum_array(a: Array<int>) -> int {
+  let mut s = 0
+  let mut i = 0
+  while i < a.len() {
+    s = s + a[i]
+    i = i + 1
+  }
+  s
+}
+
+// =====================================================================
+// SECTION 11b — More compile-time conversion families
+// =====================================================================
+// Every factor below is derived at COMPILE TIME from exact unit definitions and
+// composed from earlier comptime fns, then baked as a runtime literal.
+
+// --- Volume (US liquid) ---
+comptime fn ct_gallon_to_litre() -> float {
+  3.785411784        // 1 US gal (exact, by definition: 231 cu in * 2.54^3 / 1000)
+}
+comptime fn ct_quart_to_litre() -> float {
+  ct_gallon_to_litre() / 4.0    // 1 gal = 4 qt
+}
+comptime fn ct_pint_to_litre() -> float {
+  ct_gallon_to_litre() / 8.0    // 1 gal = 8 pt
+}
+comptime fn ct_cup_to_litre() -> float {
+  ct_gallon_to_litre() / 16.0   // 1 gal = 16 cups (US)
+}
+
+// --- Data size (binary, IEC) ---
+comptime fn ct_kib() -> int { ct_pow_int(2, 10) }   // 1024
+comptime fn ct_mib() -> int { ct_pow_int(2, 20) }   // 1048576
+comptime fn ct_gib() -> int { ct_pow_int(2, 30) }   // 1073741824
+
+// --- Time (seconds) ---
+comptime fn ct_minute_s() -> int { 60 }
+comptime fn ct_hour_s() -> int { ct_minute_s() * 60 }            // 3600
+comptime fn ct_day_s() -> int { ct_hour_s() * 24 }              // 86400
+comptime fn ct_week_s() -> int { ct_day_s() * 7 }               // 604800
+
+// --- Energy ---
+comptime fn ct_cal_to_joule() -> float { 4.184 }                // thermochemical cal
+comptime fn ct_kcal_to_joule() -> float { ct_cal_to_joule() * 1000.0 }
+
+// --- Pressure ---
+comptime fn ct_atm_to_pascal() -> float { 101325.0 }            // standard atmosphere
+comptime fn ct_bar_to_pascal() -> float { 100000.0 }
+comptime fn ct_atm_to_bar() -> float { ct_atm_to_pascal() / ct_bar_to_pascal() }
+
+// --- Compile-time polynomial hash (deterministic, integer-only) ---
+// Horner-style hash of a small fixed digit sequence; pure comptime arithmetic.
+comptime fn ct_poly_hash() -> int {
+  let mut h = 0
+  let mut i = 1
+  while i <= 6 {
+    h = h * 31 + i
+    i = i + 1
+  }
+  h
+}
+
+// Bake the new factors into runtime constants.
+let GAL_L   = comptime { ct_gallon_to_litre() }
+let QT_L    = comptime { ct_quart_to_litre() }
+let PT_L    = comptime { ct_pint_to_litre() }
+let CUP_L   = comptime { ct_cup_to_litre() }
+
+let KIB     = comptime { ct_kib() }
+let MIB     = comptime { ct_mib() }
+let GIB     = comptime { ct_gib() }
+
+let MIN_S   = comptime { ct_minute_s() }
+let HOUR_S  = comptime { ct_hour_s() }
+let DAY_S   = comptime { ct_day_s() }
+let WEEK_S  = comptime { ct_week_s() }
+
+let CAL_J   = comptime { ct_cal_to_joule() }
+let KCAL_J  = comptime { ct_kcal_to_joule() }
+
+let ATM_PA  = comptime { ct_atm_to_pascal() }
+let BAR_PA  = comptime { ct_bar_to_pascal() }
+let ATM_BAR = comptime { ct_atm_to_bar() }
+
+let POLY_HASH = comptime { ct_poly_hash() }
+
+// Runtime conversion wrappers applying the baked factors.
+fn gallons_to_litres(g: float) -> float { g * GAL_L }
+fn litres_to_gallons(l: float) -> float { l / GAL_L }
+fn bytes_to_mib(b: int) -> int { b / MIB }
+fn hours_to_seconds(h: int) -> int { h * HOUR_S }
+fn kcal_to_joules(k: float) -> float { k * KCAL_J }
+fn atm_to_bar(a: float) -> float { a * ATM_BAR }
+
+// =====================================================================
+// SECTION 12 — RUNTIME ASSERTIONS
+// Expected values derived from book semantics + textbook constants BEFORE run.
+// =====================================================================
+
+// --- 12a: comptime integer math ---
+check_int("two_pow_10", TWO_POW_10, 1024)
+check_int("two_pow_16", TWO_POW_16, 65536)
+check_int("ten_factorial", TEN_FACT, 3628800)
+check_int("gcd_48_36", GCD_48_36, 12)
+check_int("sum_1_to_100", SUM_100, 5050)
+check_int("fact_3", FACT_3, 6)
+check_int("fact_5", FACT_5, 120)
+check_int("fact_7", FACT_7, 5040)
+check_int("fact_9", FACT_9, 362880)
+check_int("fact_11", FACT_11, 39916800)
+
+// --- 12b: comptime float constants ---
+check_float("pi", PI, 3.141592653589793, 0.000000001)
+check_float("pi_squared", PI_SQUARED, 9.869604401089358, 0.000001)
+check_float("two_pow_8_float", TWO_POW_8F, 256.0, 0.0000001)
+check_float("deg2rad", DEG2RAD, 0.017453292519943295, 0.000000001)
+check_float("rad2deg", RAD2DEG, 57.29577951308232, 0.0000001)
+
+// --- 12c: length conversion factors (exact definitions) ---
+check_float("inch_cm", INCH_CM, 2.54, 0.0000001)
+check_float("foot_cm", FOOT_CM, 30.48, 0.0000001)
+check_float("yard_cm", YARD_CM, 91.44, 0.0000001)
+check_float("mile_cm", MILE_CM, 160934.4, 0.001)
+check_float("mile_km", MILE_KM, 1.609344, 0.0000001)
+
+// --- 12d: length conversions applied at runtime ---
+check_float("3in_to_cm", inches_to_cm(3.0), 7.62, 0.0000001)
+check_float("6ft_to_cm", feet_to_cm(6.0), 182.88, 0.0000001)
+check_float("100yd_to_m", yards_to_meters(100.0), 91.44, 0.0000001)
+check_float("5mi_to_km", miles_to_km(5.0), 8.04672, 0.0000001)
+// round-trip: km -> miles -> km
+check_float("roundtrip_10km", miles_to_km(km_to_miles(10.0)), 10.0, 0.0000001)
+
+// --- 12e: mass conversions ---
+check_float("lb_g", LB_G, 453.59237, 0.000001)
+check_float("oz_g", OZ_G, 28.349523125, 0.000001)
+check_float("stone_g", STONE_G, 6350.29318, 0.0001)
+check_float("10lb_to_kg", pounds_to_kg(10.0), 4.5359237, 0.0000001)
+check_float("16oz_to_g", ounces_to_grams(16.0), 453.59237, 0.000001)
+check_float("2stone_to_kg", stones_to_kg(2.0), 12.70058636, 0.000001)
+
+// --- 12f: angle conversions ---
+check_float("90deg_to_rad", degrees_to_radians(90.0), 1.5707963267948966, 0.000000001)
+check_float("180deg_to_rad", degrees_to_radians(180.0), PI, 0.000000001)
+check_float("pi_to_deg", radians_to_degrees(PI), 180.0, 0.0000001)
+check_float("halfpi_to_deg", radians_to_degrees(PI / 2.0), 90.0, 0.0000001)
+// round-trip angle
+check_float("roundtrip_45deg", radians_to_degrees(degrees_to_radians(45.0)), 45.0, 0.0000001)
+
+// --- 12g: temperature conversions ---
+check_float("c2f_factor", C2F_FACTOR, 1.8, 0.0000001)
+check_float("0c_to_f", celsius_to_fahrenheit(0.0), 32.0, 0.0000001)
+check_float("100c_to_f", celsius_to_fahrenheit(100.0), 212.0, 0.0000001)
+check_float("37c_to_f", celsius_to_fahrenheit(37.0), 98.6, 0.0000001)
+check_float("212f_to_c", fahrenheit_to_celsius(212.0), 100.0, 0.0000001)
+check_float("0c_to_k", celsius_to_kelvin(0.0), 273.15, 0.0000001)
+// round-trip temperature
+check_float("roundtrip_25c", fahrenheit_to_celsius(celsius_to_fahrenheit(25.0)), 25.0, 0.0000001)
+
+// --- 12h: Taylor sine using comptime factorial table ---
+// sin(0) = 0
+check_float("sin_0", taylor_sin(0.0), 0.0, 0.0000001)
+// sin(pi/6) = 0.5
+check_float("sin_pi_over_6", taylor_sin(PI / 6.0), 0.5, 0.000001)
+// sin(pi/2) = 1.0  (Taylor truncation error small for x<pi)
+check_float("sin_pi_over_2", taylor_sin(PI / 2.0), 1.0, 0.0001)
+// sin(pi/4) = sqrt(2)/2 ~ 0.70710678
+check_float("sin_pi_over_4", taylor_sin(PI / 4.0), 0.7071067811865476, 0.00001)
+
+// --- 12i: comptime string classification ---
+check_str("sign_neg", SIGN_NEG, "negative")
+check_str("sign_zero", SIGN_ZERO, "zero")
+check_str("sign_pos", SIGN_POS, "positive")
+check_str("class_big", CLASS_BIG, "large")
+check_str("dashes", DASHES, "--------")
+check_int("dashes_len", DASHES.length, 8)
+
+// --- 12j: comptime fields on types (runtime field stored; magnitude usable) ---
+let len1 = length_from_cm(254.0)
+check_float("length_from_254cm", len1.magnitude, 2.54, 0.0000001)
+let m1 = Mass { magnitude: 5.0 }
+check_float("mass_magnitude", m1.magnitude, 5.0, 0.0000001)
+let a1 = Angle { magnitude: degrees_to_radians(90.0) }
+check_float("angle_magnitude", a1.magnitude, 1.5707963267948966, 0.000000001)
+
+// --- 12k: build_config() host target ---
+check_bool("build_os_nonempty", BUILD_OS.length > 0)
+check_bool("build_arch_nonempty", BUILD_ARCH.length > 0)
+check_bool("build_version_nonempty", BUILD_VER.length > 0)
+// debug flag is a bool either way; assert it is one of the two
+check_bool("build_debug_is_bool", BUILD_DBG == true || BUILD_DBG == false)
+
+// --- 12l: runtime power table built from doubling (mirrors comptime pow) ---
+let ptab = build_power_table(11)            // [1,2,4,...,1024]
+check_int("ptab_len", ptab.len(), 11)
+check_int("ptab_first", ptab[0], 1)
+check_int("ptab_last", ptab[10], 1024)
+check_int("ptab_matches_comptime_pow", ptab[10], TWO_POW_10)
+// sum of 2^0..2^10 = 2^11 - 1 = 2047
+check_int("ptab_sum", sum_array(ptab), 2047)
+
+// --- 12m: cross-check comptime int helpers ---
+check_int("min_int", comptime { ct_min_int(7, 3) }, 3)
+check_int("max_int", comptime { ct_max_int(7, 3) }, 7)
+check_int("abs_neg", comptime { ct_abs_int(0 - 42) }, 42)
+check_int("gcd_coprime", comptime { ct_gcd(17, 5) }, 1)
+
+// --- 12n: volume conversion factors (US liquid, exact definitions) ---
+check_float("gal_l", GAL_L, 3.785411784, 0.000000001)
+check_float("qt_l", QT_L, 0.946352946, 0.000000001)        // gal / 4
+check_float("pt_l", PT_L, 0.473176473, 0.000000001)        // gal / 8
+check_float("cup_l", CUP_L, 0.2365882365, 0.000000001)     // gal / 16
+check_float("2gal_to_l", gallons_to_litres(2.0), 7.570823568, 0.000000001)
+check_float("roundtrip_gal", litres_to_gallons(GAL_L), 1.0, 0.000000001)
+
+// --- 12o: data-size (binary/IEC) factors ---
+check_int("kib", KIB, 1024)
+check_int("mib", MIB, 1048576)
+check_int("gib", GIB, 1073741824)
+check_int("gib_eq_kib_cubed_over_mib", GIB / MIB, KIB)     // 2^30 / 2^20 = 2^10
+check_int("2mib_to_mib", bytes_to_mib(2097152), 2)
+
+// --- 12p: time factors ---
+check_int("min_s", MIN_S, 60)
+check_int("hour_s", HOUR_S, 3600)
+check_int("day_s", DAY_S, 86400)
+check_int("week_s", WEEK_S, 604800)
+check_int("3h_to_s", hours_to_seconds(3), 10800)
+check_int("week_eq_7day", WEEK_S, DAY_S * 7)
+
+// --- 12q: energy factors ---
+check_float("cal_j", CAL_J, 4.184, 0.0000001)
+check_float("kcal_j", KCAL_J, 4184.0, 0.0001)
+check_float("2kcal_to_j", kcal_to_joules(2.0), 8368.0, 0.0001)
+
+// --- 12r: pressure factors ---
+check_float("atm_pa", ATM_PA, 101325.0, 0.001)
+check_float("bar_pa", BAR_PA, 100000.0, 0.001)
+check_float("atm_bar", ATM_BAR, 1.01325, 0.0000001)
+check_float("2atm_to_bar", atm_to_bar(2.0), 2.0265, 0.0000001)
+
+// --- 12s: compile-time polynomial hash (Horner, integer-only) ---
+// h=0; (((((0*31+1)*31+2)*31+3)*31+4)*31+5)*31+6 = 30569571
+check_int("poly_hash", POLY_HASH, 30569571)
+
+// =====================================================================
+// SECTION 13 — Report
+// =====================================================================
+
+print(f"build target = {BUILD_OS}-{BUILD_ARCH}")
+print(f"checks run = {g_total}")
+
+if g_failed == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILED {g_failed} checks")
+}

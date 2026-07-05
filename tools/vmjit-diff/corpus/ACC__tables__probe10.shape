@@ -1,0 +1,28 @@
+// Probe 10: orderBy desc vs asc on shuffled data, by value (number) and id (int)
+from std::core::queryable use { Queryable }
+
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+impl Queryable for Table {
+    method orderBy(key_fn, direction) { self.orderBy(key_fn, direction) }
+    method forEach(f) { self.forEach(f) }
+    method execute() { self }
+}
+
+let events: Table<Event> =
+    [3, 120.0, "gamma"],
+    [1, 50.0,  "alpha"],
+    [2, 75.5,  "beta"]
+
+print("--- value asc ---")
+events.orderBy(|row| row.value, "asc").forEach(|row| print(f"{row.value}"))
+print("--- value desc ---")
+events.orderBy(|row| row.value, "desc").forEach(|row| print(f"{row.value}"))
+print("--- id asc ---")
+events.orderBy(|row| row.id, "asc").forEach(|row| print(f"{row.id}"))
+print("--- id desc ---")
+events.orderBy(|row| row.id, "desc").forEach(|row| print(f"{row.id}"))

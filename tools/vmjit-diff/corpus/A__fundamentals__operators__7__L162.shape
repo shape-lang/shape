@@ -1,0 +1,5 @@
+let value: int | string = 42
+
+if value instanceof int {
+  print("is an int")
+}

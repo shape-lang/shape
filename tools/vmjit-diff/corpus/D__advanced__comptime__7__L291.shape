@@ -1,0 +1,8 @@
+type Prompt {
+  @description("The user's query")
+  query: string
+
+  @description("Creativity level")
+  @range(0.0, 1.0)
+  temperature: float
+}

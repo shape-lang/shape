@@ -1,0 +1,22 @@
+type Money { cents: int }
+
+impl Eq for Money {
+  method eq(other: Money) -> bool {
+    self.cents == other.cents
+  }
+}
+
+impl Ord for Money {
+  method cmp(other: Money) -> int {
+    self.cents - other.cents
+  }
+}
+
+let a = Money { cents: 100 }
+let b = Money { cents: 250 }
+let c = Money { cents: 100 }
+
+print(a == c)   // true
+print(a == b)   // false
+print(a < b)    // true
+print(b > a)    // true

@@ -1,0 +1,4 @@
+let half = 50%       // 0.5 (number)
+let tax  = 7.5%      // 0.075
+print(half)
+print(tax)

@@ -1,0 +1,978 @@
+// =====================================================================
+// Collections slice — large program (~1000 LOC).
+//
+// A deterministic, non-interactive, MACHINE-PROOFABLE INVENTORY & SALES
+// ANALYTICS ENGINE built entirely on BOOK-DOCUMENTED, VERIFIED-WORKING
+// collection features from:
+//   fundamentals/objects-arrays.mdx : Vec literals, index access, closed-range
+//       slicing, .map/.filter/.first/.last/.len/.take/.drop/.slice/.reverse/
+//       .concat/.join/.includes/.indexOf/.findIndex/.some/.every, anonymous
+//       objects, nested objects, object merge (+, disjoint keys), typed
+//       objects (flat), HashMap (chained .set + .get/.has/.len/.isEmpty).
+//   stdlib/core/collections.mdx     : HashMap API.
+//
+// EVERY expected value is hand-derived from the fixed dataset + book semantics
+// in the comment immediately above each check, BEFORE the first run. No
+// expected value is back-filled from observed output.
+//
+// Determinism: fixed in-memory dataset, pure transforms, no stdin / network /
+// time / randomness.
+//
+// SELF-CHECK CONTRACT: prints "ALL_CHECKS_PASSED" iff every check holds; on any
+// mismatch prints "CHECK_FAILED: <name> expected=<e> got=<g>" and suppresses
+// the pass banner.
+//
+// -- DESIGN NOTES (real-user workarounds, each tied to a recorded defect) --
+//  * `assert` is NOT a builtin in this build, so checks use an explicit
+//    if-mismatch-print pattern (matches the slice's small.shape).
+//  * Numeric record fields are kept as PARALLEL COLUMNS (`Array<int>` /
+//    `Array<string>`) rather than int fields on typed objects, because
+//    projecting an int field off a typed object into an arithmetic context
+//    ("for e in es { tot = tot + e.s }" / "es.map(|e| e.s)" then summing)
+//    fails on this build ("no method 'add' on receiver kind Int64").
+//    Parallel-column aggregation is a faithful, book-only workaround that
+//    exercises the same Vec methods.
+//  * HashMaps are keyed by STRING LITERALS only. Keying a HashMap by a string
+//    drawn from array iteration fails ("HashMap key must be a string (got kind
+//    StringV2)"), so frequency tables are built with explicit literal-keyed
+//    .set() chains and manual counting, not loop-driven inserts.
+//  * HashMap VALUES are consumed via match -> typed-int equality check, never
+//    via free arithmetic on a match-bound payload (arithmetic on a Some(x)
+//    payload fails inference: "operand types are unknown and int").
+// =====================================================================
+
+
+// =====================================================================
+// SECTION 0 — assertion + small numeric helpers.
+// =====================================================================
+
+// Module-scope failure counter so the pass banner can be gated on zero
+// failures (the self-check contract: print ALL_CHECKS_PASSED iff every check
+// holds). `let mut` at module scope + rebind is the book-documented mutable
+// binding form.
+let mut failures = 0
+
+fn check_int(name: string, got: int, expected: int) {
+    if got != expected {
+        print("CHECK_FAILED: " + name + " expected=" + expected.toString() + " got=" + got.toString())
+        failures = failures + 1
+    }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) {
+    if got != expected {
+        print("CHECK_FAILED: " + name + " expected=" + expected.toString() + " got=" + got.toString())
+        failures = failures + 1
+    }
+}
+
+fn check_str(name: string, got: string, expected: string) {
+    if got != expected {
+        print("CHECK_FAILED: " + name + " expected=" + expected + " got=" + got)
+        failures = failures + 1
+    }
+}
+
+// Sum of a plain int column (Vec<int>) via book for-in accumulation.
+fn sum_col(xs: Array<int>) -> int {
+    var t = 0
+    for v in xs { t = t + v }
+    return t
+}
+
+// Max of a non-empty int column.
+fn max_col(xs: Array<int>) -> int {
+    var m = xs.first()
+    for v in xs { if v > m { m = v } }
+    return m
+}
+
+// Min of a non-empty int column.
+fn min_col(xs: Array<int>) -> int {
+    var m = xs.first()
+    for v in xs { if v < m { m = v } }
+    return m
+}
+
+// Count of column entries strictly greater than a threshold.
+fn count_gt(xs: Array<int>, thr: int) -> int {
+    var c = 0
+    for v in xs { if v > thr { c = c + 1 } }
+    return c
+}
+
+// Count of column entries equal to a target.
+fn count_eq(xs: Array<int>, target: int) -> int {
+    var c = 0
+    for v in xs { if v == target { c = c + 1 } }
+    return c
+}
+
+// Integer mean (truncating) of a non-empty column.
+fn mean_col(xs: Array<int>) -> int {
+    let total = sum_col(xs)
+    let n = xs.len()
+    return total / n
+}
+
+// Dot product of two equal-length int columns.
+fn dot_col(a: Array<int>, b: Array<int>) -> int {
+    var t = 0
+    var i = 0
+    let n = a.len()
+    while i < n {
+        t = t + a[i] * b[i]
+        i = i + 1
+    }
+    return t
+}
+
+// Elementwise sum of two equal-length columns -> new column.
+fn add_cols(a: Array<int>, b: Array<int>) -> Array<int> {
+    var out = [a[0] + b[0]]
+    var i = 1
+    let n = a.len()
+    while i < n {
+        out = out.concat([a[i] + b[i]])
+        i = i + 1
+    }
+    return out
+}
+
+// Scale a column by a factor -> new column (via .map).
+fn scale_col(xs: Array<int>, k: int) -> Array<int> {
+    return xs.map(|x| x * k)
+}
+
+// Clamp helper.
+fn clamp(v: int, lo: int, hi: int) -> int {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+// Absolute value.
+fn abs_int(v: int) -> int {
+    if v < 0 { return 0 - v }
+    return v
+}
+
+
+// =====================================================================
+// SECTION 1 — FIXTURE.
+//
+// A warehouse with 10 SKUs. Records are stored as parallel columns so that
+// numeric aggregation runs over Vec<int> (the verified-working path).
+//
+// Index : 0     1      2      3      4       5       6      7       8      9
+// sku   : W01   W02    W03    G01    G02     Z01     Z02    P01     P02    P03
+// dept  : ware  ware   ware   gadg   gadg    gizm    gizm   part    part   part
+// qty   : 40    12     7      25     3       60      18     90      5      33
+// price : 5     12     30     8      150     2       45     1       220    9
+// (price is unit price in whole currency units)
+//
+// Hand-derived column facts (used throughout):
+//   qty   = [40, 12, 7, 25, 3, 60, 18, 90, 5, 33]
+//   price = [5, 12, 30, 8, 150, 2, 45, 1, 220, 9]
+//   sum(qty)   = 40+12+7+25+3+60+18+90+5+33 = 293
+//   sum(price) = 5+12+30+8+150+2+45+1+220+9 = 482
+//   max(qty)=90  min(qty)=3   max(price)=220  min(price)=1
+//   value_i = qty_i * price_i:
+//     200, 144, 210, 200, 450, 120, 810, 90, 1100, 297
+//   sum(value) = dot(qty,price)
+//     = 200+144+210+200+450+120+810+90+1100+297 = 3621
+// =====================================================================
+
+// NOTE (defect workaround): the string-column literals are explicitly
+// annotated `let v: Array<string> = ...` to ANCHOR their element-type
+// variable. Without an anchor, this build unifies the element type of EVERY
+// `Array<...>` literal that appears in a function-return position across the
+// whole module, so the int columns below would be rejected with
+// "cannot push int into array whose element type is string". The annotation
+// form is itself book-documented (objects-arrays.mdx: `let a: Array<T> = ...`).
+// Recorded as the headline FN-REG-CORRECTNESS defect in REPORT.md.
+fn sku_col() -> Array<string> {
+    let v: Array<string> = ["W01", "W02", "W03", "G01", "G02", "Z01", "Z02", "P01", "P02", "P03"]
+    return v
+}
+
+fn dept_col() -> Array<string> {
+    let v: Array<string> = ["ware", "ware", "ware", "gadg", "gadg", "gizm", "gizm", "part", "part", "part"]
+    return v
+}
+
+fn qty_col() -> Array<int> {
+    return [40, 12, 7, 25, 3, 60, 18, 90, 5, 33]
+}
+
+fn price_col() -> Array<int> {
+    return [5, 12, 30, 8, 150, 2, 45, 1, 220, 9]
+}
+
+
+// =====================================================================
+// SECTION 2 — Column shape and basic Vec accessors.
+// objects-arrays.mdx "Vectors", "Index Access and Bounds".
+// =====================================================================
+
+fn section_basics() {
+    let sku = sku_col()
+    let qty = qty_col()
+    let price = price_col()
+    let dept = dept_col()
+
+    // len: 10 SKUs.
+    check_int("s2.sku.len", sku.len(), 10)
+    check_int("s2.qty.len", qty.len(), 10)
+    check_int("s2.price.len", price.len(), 10)
+    check_int("s2.dept.len", dept.len(), 10)
+
+    // index access (zero-based). qty[0]=40, qty[9]=33, price[4]=150.
+    check_int("s2.qty[0]", qty[0], 40)
+    check_int("s2.qty[9]", qty[9], 33)
+    check_int("s2.price[4]", price[4], 150)
+    check_int("s2.price[8]", price[8], 220)
+
+    // first / last (book: .first() / .last()).
+    check_int("s2.qty.first", qty.first(), 40)
+    check_int("s2.qty.last", qty.last(), 33)
+    check_int("s2.price.first", price.first(), 5)
+    check_int("s2.price.last", price.last(), 9)
+    check_str("s2.sku.first", sku.first(), "W01")
+    check_str("s2.sku.last", sku.last(), "P03")
+    check_str("s2.dept.first", dept.first(), "ware")
+}
+
+
+// =====================================================================
+// SECTION 3 — Aggregations over columns.
+// objects-arrays.mdx "Common Operations" + for-in idiom.
+// =====================================================================
+
+fn section_aggregations() {
+    let qty = qty_col()
+    let price = price_col()
+
+    // sum(qty) = 293, sum(price) = 482 (hand-derived above).
+    check_int("s3.sum.qty", sum_col(qty), 293)
+    check_int("s3.sum.price", sum_col(price), 482)
+
+    // max/min.
+    check_int("s3.max.qty", max_col(qty), 90)
+    check_int("s3.min.qty", min_col(qty), 3)
+    check_int("s3.max.price", max_col(price), 220)
+    check_int("s3.min.price", min_col(price), 1)
+
+    // mean (truncating int division): 293/10 = 29, 482/10 = 48.
+    check_int("s3.mean.qty", mean_col(qty), 29)
+    check_int("s3.mean.price", mean_col(price), 48)
+
+    // total inventory VALUE = dot(qty, price) = 3621.
+    check_int("s3.value.total", dot_col(qty, price), 3621)
+
+    // count of SKUs with qty > 20: indices 0(40),3(25),5(60),7(90),9(33) = 5.
+    check_int("s3.count.qty.gt20", count_gt(qty, 20), 5)
+
+    // count of SKUs with price > 100: indices 4(150),8(220) = 2.
+    check_int("s3.count.price.gt100", count_gt(price, 100), 2)
+
+    // count of SKUs with qty exactly 7: index 2 = 1.
+    check_int("s3.count.qty.eq7", count_eq(qty, 7), 1)
+}
+
+
+// =====================================================================
+// SECTION 4 — map / filter / scale on int columns.
+// objects-arrays.mdx "Common Operations" + "Vector Methods".
+// =====================================================================
+
+fn section_map_filter() {
+    let qty = qty_col()
+    let price = price_col()
+
+    // value column via add-of-products: value_i = qty_i * price_i.
+    // Build it with dot per element is overkill; verify scale + map instead.
+
+    // double the qty column: map(|x| x*2). qty[0]=40 -> 80; sum doubles -> 586.
+    let dbl = qty.map(|x| x * 2)
+    check_int("s4.dbl[0]", dbl[0], 80)
+    check_int("s4.dbl.last", dbl.last(), 66)         // 33*2
+    check_int("s4.dbl.sum", sum_col(dbl), 586)       // 293*2
+
+    // scale price by 3 via helper: price[4]=150 -> 450; sum 482*3 = 1446.
+    let p3 = scale_col(price, 3)
+    check_int("s4.p3[4]", p3[4], 450)
+    check_int("s4.p3.sum", sum_col(p3), 1446)
+
+    // filter qty for restock candidates (qty < 10): indices 2(7),4(3),8(5) = 3.
+    let low = qty.filter(|x| x < 10)
+    check_int("s4.low.len", low.len(), 3)
+    // low = [7, 3, 5] in source order; sum = 15; first=7; last=5.
+    check_int("s4.low.sum", sum_col(low), 15)
+    check_int("s4.low.first", low.first(), 7)
+    check_int("s4.low.last", low.last(), 5)
+
+    // filter price for premium (price >= 45): indices 4(150),6(45),8(220) = 3.
+    let prem = price.filter(|x| x >= 45)
+    check_int("s4.prem.len", prem.len(), 3)
+    check_int("s4.prem.sum", sum_col(prem), 415)     // 150+45+220
+
+    // chained map then filter: qty*2 then keep > 50.
+    // qty*2 = [80,24,14,50,6,120,36,180,10,66]; > 50 -> 80,120,180,66 = 4.
+    let chain = qty.map(|x| x * 2).filter(|x| x > 50)
+    check_int("s4.chain.len", chain.len(), 4)
+    check_int("s4.chain.sum", sum_col(chain), 446)   // 80+120+180+66
+    check_int("s4.chain.max", max_col(chain), 180)
+}
+
+
+// =====================================================================
+// SECTION 5 — slicing, take, drop, reverse, concat.
+// objects-arrays.mdx "Slicing" (closed-range), "Vector Methods".
+// =====================================================================
+
+fn section_slicing() {
+    let qty = qty_col()
+
+    // closed-range slice qty[2..5] = [7, 25, 3]  (indices 2,3,4).
+    let s = qty[2..5]
+    check_int("s5.slice.len", s.len(), 3)
+    check_int("s5.slice.first", s.first(), 7)
+    check_int("s5.slice.last", s.last(), 3)
+    check_int("s5.slice.sum", sum_col(s), 35)        // 7+25+3
+
+    // take(3) -> [40,12,7]; sum 59.
+    let t = qty.take(3)
+    check_int("s5.take.len", t.len(), 3)
+    check_int("s5.take.sum", sum_col(t), 59)
+
+    // drop(7) -> [90,5,33]; sum 128; first 90.
+    let d = qty.drop(7)
+    check_int("s5.drop.len", d.len(), 3)
+    check_int("s5.drop.first", d.first(), 90)
+    check_int("s5.drop.sum", sum_col(d), 128)
+
+    // method-form slice(1,4) -> [12,7,25]; sum 44.
+    let m = qty.slice(1, 4)
+    check_int("s5.mslice.len", m.len(), 3)
+    check_int("s5.mslice.sum", sum_col(m), 44)
+
+    // reverse -> first becomes 33 (was last), last becomes 40.
+    let r = qty.reverse()
+    check_int("s5.rev.first", r.first(), 33)
+    check_int("s5.rev.last", r.last(), 40)
+    check_int("s5.rev.sum", sum_col(r), 293)         // reverse preserves sum
+
+    // concat two columns: take(2) ++ drop(8) = [40,12] ++ [5,33] = len 4, sum 90.
+    let c = qty.take(2).concat(qty.drop(8))
+    check_int("s5.concat.len", c.len(), 4)
+    check_int("s5.concat.sum", sum_col(c), 90)       // 40+12+5+33
+    check_int("s5.concat.last", c.last(), 33)
+}
+
+
+// =====================================================================
+// SECTION 6 — array membership / search methods.
+// objects-arrays.mdx "Vector Methods": includes, indexOf, findIndex,
+// some, every.
+// =====================================================================
+
+fn section_search() {
+    let qty = qty_col()
+    let price = price_col()
+
+    // includes: qty contains 90 (yes), 99 (no).
+    check_bool("s6.inc.90", qty.includes(90), true)
+    check_bool("s6.inc.99", qty.includes(99), false)
+
+    // indexOf: first index of 25 is 3; of 999 is -1.
+    check_int("s6.idx.25", qty.indexOf(25), 3)
+    check_int("s6.idx.999", qty.indexOf(999), -1)
+
+    // findIndex: first qty > 50 -> index 5 (value 60). first qty > 1000 -> -1.
+    check_int("s6.find.gt50", qty.findIndex(|x| x > 50), 5)
+    check_int("s6.find.gt1000", qty.findIndex(|x| x > 1000), -1)
+
+    // some: any price > 200 (yes, 220). any price > 500 (no).
+    check_bool("s6.some.gt200", price.some(|x| x > 200), true)
+    check_bool("s6.some.gt500", price.some(|x| x > 500), false)
+
+    // every: all qty > 0 (yes). all qty > 5 (no, has 3 and 5).
+    check_bool("s6.every.gt0", qty.every(|x| x > 0), true)
+    check_bool("s6.every.gt5", qty.every(|x| x > 5), false)
+}
+
+
+// =====================================================================
+// SECTION 7 — elementwise column algebra.
+// dot / add / scale built from book index access + while + concat.
+// =====================================================================
+
+fn section_column_algebra() {
+    let qty = qty_col()
+    let price = price_col()
+
+    // value column = qty .* price, elementwise; then sum.
+    // We build value via add_cols of scaled pieces? Simpler: dot already
+    // verified. Here verify elementwise ADD of qty and price.
+    // qty+price = [45,24,37,33,153,62,63,91,225,42]; sum = 293+482 = 775.
+    let vsum = add_cols(qty, price)
+    check_int("s7.add.len", vsum.len(), 10)
+    check_int("s7.add[0]", vsum[0], 45)              // 40+5
+    check_int("s7.add[4]", vsum[4], 153)             // 3+150
+    check_int("s7.add[8]", vsum[8], 225)             // 5+220
+    check_int("s7.add.sum", sum_col(vsum), 775)
+
+    // dot(qty, price) reverified = 3621.
+    check_int("s7.dot", dot_col(qty, price), 3621)
+
+    // dot(qty, qty) = sum of squares of qty.
+    // 40^2+12^2+7^2+25^2+3^2+60^2+18^2+90^2+5^2+33^2
+    // = 1600+144+49+625+9+3600+324+8100+25+1089 = 15565.
+    check_int("s7.dot.qq", dot_col(qty, qty), 15565)
+
+    // scale qty by 0 -> all zero -> sum 0.
+    check_int("s7.scale0.sum", sum_col(scale_col(qty, 0)), 0)
+}
+
+
+// =====================================================================
+// SECTION 8 — HashMap as a literal-keyed lookup table.
+// objects-arrays.mdx "HashMap" + collections.mdx HashMap API.
+// All keys are STRING LITERALS (per design note).
+// =====================================================================
+
+fn dept_reorder_levels() -> HashMap<string, int> {
+    // Per-department reorder thresholds.
+    return HashMap()
+        .set("ware", 15)
+        .set("gadg", 10)
+        .set("gizm", 25)
+        .set("part", 20)
+}
+
+fn lookup_or(m: HashMap<string, int>, key: string, dflt: int) -> int {
+    let v = m.get(key)
+    match v {
+        Some(x) => { return x }
+        None => { return dflt }
+    }
+}
+
+fn section_hashmap() {
+    let levels = dept_reorder_levels()
+
+    // len = 4 entries; not empty.
+    check_int("s8.len", levels.len(), 4)
+    check_bool("s8.isEmpty", levels.isEmpty(), false)
+
+    // has / get.
+    check_bool("s8.has.ware", levels.has("ware"), true)
+    check_bool("s8.has.none", levels.has("nope"), false)
+    check_int("s8.get.gadg", lookup_or(levels, "gadg", -1), 10)
+    check_int("s8.get.gizm", lookup_or(levels, "gizm", -1), 25)
+    check_int("s8.get.missing", lookup_or(levels, "missing", 777), 777)
+
+    // immutability: set returns NEW map, original unchanged.
+    let bumped = levels.set("ware", 50)
+    check_int("s8.bumped.ware", lookup_or(bumped, "ware", -1), 50)
+    check_int("s8.original.ware", lookup_or(levels, "ware", -1), 15)
+    check_int("s8.bumped.len", bumped.len(), 4)      // key existed, replace
+
+    // adding a new key grows the map.
+    let added = levels.set("misc", 5)
+    check_int("s8.added.len", added.len(), 5)
+    check_int("s8.original.len.again", levels.len(), 4)
+
+    // delete returns a NEW map without the key; original unchanged.
+    let dropped = levels.delete("part")
+    check_int("s8.dropped.len", dropped.len(), 3)
+    check_bool("s8.dropped.has.part", dropped.has("part"), false)
+    check_bool("s8.original.has.part", levels.has("part"), true)
+
+    // drain to empty via chained delete -> isEmpty true.
+    let drained = levels.delete("ware").delete("gadg").delete("gizm").delete("part")
+    check_bool("s8.drained.isEmpty", drained.isEmpty(), true)
+    check_int("s8.drained.len", drained.len(), 0)
+
+    // filter values > 12: ware(15) gizm(25) part(20) -> 3 entries.
+    let big = levels.filter(|k, v| v > 12)
+    check_int("s8.filter.len", big.len(), 3)
+    check_bool("s8.filter.has.gadg", big.has("gadg"), false)   // 10 filtered out
+    check_bool("s8.filter.has.ware", big.has("ware"), true)
+}
+
+
+// =====================================================================
+// SECTION 9 — Department reorder analysis: join columns to the HashMap.
+// Combines per-SKU qty (parallel column) with per-dept thresholds (HashMap,
+// literal-keyed) by indexing the dept column and looking up by a KNOWN set
+// of literal department keys (no loop-built string keys).
+// =====================================================================
+
+fn dept_total_qty(dept: Array<string>, qty: Array<int>, target: string) -> int {
+    var t = 0
+    var i = 0
+    let n = dept.len()
+    while i < n {
+        if dept[i] == target { t = t + qty[i] }
+        i = i + 1
+    }
+    return t
+}
+
+fn section_dept_rollup() {
+    let dept = dept_col()
+    let qty = qty_col()
+
+    // Per-department total qty (hand-derived from fixture):
+    //   ware = 40+12+7   = 59
+    //   gadg = 25+3      = 28
+    //   gizm = 60+18     = 78
+    //   part = 90+5+33   = 128
+    //   grand total      = 293 (== sum(qty))
+    check_int("s9.ware.qty", dept_total_qty(dept, qty, "ware"), 59)
+    check_int("s9.gadg.qty", dept_total_qty(dept, qty, "gadg"), 28)
+    check_int("s9.gizm.qty", dept_total_qty(dept, qty, "gizm"), 78)
+    check_int("s9.part.qty", dept_total_qty(dept, qty, "part"), 128)
+
+    let grand = dept_total_qty(dept, qty, "ware")
+        + dept_total_qty(dept, qty, "gadg")
+        + dept_total_qty(dept, qty, "gizm")
+        + dept_total_qty(dept, qty, "part")
+    check_int("s9.grand", grand, 293)
+
+    // Build a per-dept total HashMap with literal keys, then assert lookups.
+    let totals = HashMap()
+        .set("ware", dept_total_qty(dept, qty, "ware"))
+        .set("gadg", dept_total_qty(dept, qty, "gadg"))
+        .set("gizm", dept_total_qty(dept, qty, "gizm"))
+        .set("part", dept_total_qty(dept, qty, "part"))
+    check_int("s9.map.len", totals.len(), 4)
+    check_int("s9.map.part", lookup_or(totals, "part", -1), 128)
+    check_int("s9.map.gizm", lookup_or(totals, "gizm", -1), 78)
+
+    // Reorder decision: dept needs reorder if its total qty < threshold.
+    // thresholds: ware15 gadg10 gizm25 part20.
+    // totals:     ware59 gadg28 gizm78 part128 -> NONE below threshold.
+    let levels = dept_reorder_levels()
+    let ware_need = dept_total_qty(dept, qty, "ware") < lookup_or(levels, "ware", 0)
+    let gadg_need = dept_total_qty(dept, qty, "gadg") < lookup_or(levels, "gadg", 0)
+    check_bool("s9.ware.reorder", ware_need, false)
+    check_bool("s9.gadg.reorder", gadg_need, false)
+}
+
+
+// =====================================================================
+// SECTION 10 — Anonymous + nested objects + object merge.
+// objects-arrays.mdx "Objects", "Nested Objects", "Object Merge".
+// =====================================================================
+
+fn section_objects() {
+    // anonymous object field access.
+    let item = { sku: "W01", qty: 40, price: 5 }
+    check_str("s10.item.sku", item.sku, "W01")
+    check_int("s10.item.qty", item.qty, 40)
+    check_int("s10.item.price", item.price, 5)
+
+    // nested object.
+    let cfg = {
+        warehouse: { name: "central", capacity: 1000 },
+        policy: { reorder: true, lead_days: 7 }
+    }
+    check_str("s10.cfg.wh.name", cfg.warehouse.name, "central")
+    check_int("s10.cfg.wh.cap", cfg.warehouse.capacity, 1000)
+    check_int("s10.cfg.policy.lead", cfg.policy.lead_days, 7)
+    check_bool("s10.cfg.policy.reorder", cfg.policy.reorder, true)
+
+    // object merge with DISJOINT keys (right side adds new fields).
+    let base = { sku: "G02", qty: 3 }
+    let extra = { price: 150, dept: "gadg" }
+    let full = base + extra
+    check_str("s10.merge.sku", full.sku, "G02")
+    check_int("s10.merge.qty", full.qty, 3)
+    check_int("s10.merge.price", full.price, 150)
+    check_str("s10.merge.dept", full.dept, "gadg")
+
+    // chained disjoint merges.
+    let a = { x: 1 }
+    let b = { y: 2 }
+    let c = { z: 3 }
+    let abc = a + b + c
+    check_int("s10.abc.x", abc.x, 1)
+    check_int("s10.abc.y", abc.y, 2)
+    check_int("s10.abc.z", abc.z, 3)
+}
+
+
+// =====================================================================
+// SECTION 11 — Typed objects (flat).
+// objects-arrays.mdx "Typed Objects". Field access is statically checked.
+// (Numeric fields are READ and COMPARED, not summed during iteration, per
+//  the design note.)
+// =====================================================================
+
+type Sku { code: string, qty: int, price: int }
+
+fn section_typed_objects() {
+    let a = Sku { code: "W01", qty: 40, price: 5 }
+    let b = Sku { code: "P02", qty: 5, price: 220 }
+
+    // direct field access.
+    check_str("s11.a.code", a.code, "W01")
+    check_int("s11.a.qty", a.qty, 40)
+    check_int("s11.a.price", a.price, 5)
+    check_str("s11.b.code", b.code, "P02")
+    check_int("s11.b.price", b.price, 220)
+
+    // arithmetic combining two distinct typed-object reads (NOT iterated):
+    // value = a.qty * a.price = 40*5 = 200; b.qty*b.price = 5*220 = 1100.
+    check_int("s11.a.value", a.qty * a.price, 200)
+    check_int("s11.b.value", b.qty * b.price, 1100)
+
+    // field comparison drives a branch.
+    let a_cheaper = a.price < b.price
+    check_bool("s11.a.cheaper", a_cheaper, true)
+
+    // typed object inside an array, queried by string field (the working path).
+    let stock = [
+        Sku { code: "W01", qty: 40, price: 5 },
+        Sku { code: "G02", qty: 3, price: 150 },
+        Sku { code: "P02", qty: 5, price: 220 }
+    ]
+    check_int("s11.stock.len", stock.len(), 3)
+    check_str("s11.stock.first.code", stock.first().code, "W01")
+    check_str("s11.stock.last.code", stock.last().code, "P02")
+
+    // count stock entries whose code starts with a known literal via ==.
+    var pcount = 0
+    for s in stock { if s.code == "P02" { pcount = pcount + 1 } }
+    check_int("s11.stock.p02count", pcount, 1)
+}
+
+
+// =====================================================================
+// SECTION 12 — string column build + join (report rendering).
+// objects-arrays.mdx "Vector Methods": map, join.
+// =====================================================================
+
+fn section_report() {
+    let sku = sku_col()
+
+    // join the SKU codes with "," .
+    // "W01,W02,W03,G01,G02,Z01,Z02,P01,P02,P03" -> length 39
+    //   (10 codes * 3 chars = 30) + (9 separators) = 39.
+    let line = sku.join(",")
+    check_int("s12.join.len", line.len(), 39)
+    check_str("s12.join.head", sku.take(3).join(","), "W01,W02,W03")
+
+    // build a derived string column via map (uppercase-ish tag) then join.
+    // map each code to code + "!" ; first becomes "W01!".
+    let tagged = sku.map(|c| c + "!")
+    check_str("s12.tagged.first", tagged.first(), "W01!")
+    check_str("s12.tagged.last", tagged.last(), "P03!")
+    // joined with "|": each token is 4 chars; 10*4 + 9 = 49.
+    check_int("s12.tagged.join.len", tagged.join("|").len(), 49)
+
+    // slice the code column and join.
+    let mid: Array<string> = sku.slice(3, 7)   // [G01,G02,Z01,Z02]
+    check_int("s12.mid.len", mid.len(), 4)
+    check_str("s12.mid.join", mid.join("-"), "G01-G02-Z01-Z02")
+}
+
+
+// =====================================================================
+// SECTION 13 — histogram / bucketing via manual literal-keyed counts.
+// Buckets qty into LOW (<10), MID (10..50), HIGH (>=50) using plain int
+// counters, then stores the result in a literal-keyed HashMap.
+// =====================================================================
+
+fn bucket_counts(qty: Array<int>) -> Array<int> {
+    var lo = 0
+    var mid = 0
+    var hi = 0
+    for v in qty {
+        if v < 10 {
+            lo = lo + 1
+        } else {
+            if v < 50 { mid = mid + 1 } else { hi = hi + 1 }
+        }
+    }
+    return [lo, mid, hi]
+}
+
+fn section_histogram() {
+    let qty = qty_col()
+
+    // qty = [40,12,7,25,3,60,18,90,5,33]
+    //   LOW  (<10):  7,3,5            -> 3
+    //   MID  (10..50): 40,12,25,18,33 -> 5
+    //   HIGH (>=50): 60,90            -> 2
+    //   total = 10.
+    let b = bucket_counts(qty)
+    check_int("s13.low", b[0], 3)
+    check_int("s13.mid", b[1], 5)
+    check_int("s13.high", b[2], 2)
+    check_int("s13.total", b[0] + b[1] + b[2], 10)
+    check_int("s13.total.eq.len", b[0] + b[1] + b[2], qty.len())
+
+    // store histogram in a literal-keyed HashMap.
+    let hist = HashMap()
+        .set("low", b[0])
+        .set("mid", b[1])
+        .set("high", b[2])
+    check_int("s13.hist.low", lookup_or(hist, "low", -1), 3)
+    check_int("s13.hist.mid", lookup_or(hist, "mid", -1), 5)
+    check_int("s13.hist.high", lookup_or(hist, "high", -1), 2)
+    check_int("s13.hist.len", hist.len(), 3)
+
+    // the modal bucket is MID (count 5).
+    let modal_is_mid = b[1] >= b[0] && b[1] >= b[2]
+    check_bool("s13.modal.mid", modal_is_mid, true)
+}
+
+
+// =====================================================================
+// SECTION 14 — running totals / prefix sums via index + while.
+// =====================================================================
+
+fn prefix_sums(xs: Array<int>) -> Array<int> {
+    var out = [xs[0]]
+    var i = 1
+    let n = xs.len()
+    while i < n {
+        // `prev: int` annotation required: out.last() does not carry the
+        // element type into the following arithmetic on this build (the
+        // .first()/.last() element-type gap — see REPORT.md).
+        let prev: int = out.last()
+        let next: int = prev + xs[i]
+        let cell: Array<int> = [next]
+        out = out.concat(cell)
+        i = i + 1
+    }
+    return out
+}
+
+fn section_prefix() {
+    let qty = qty_col()
+
+    // prefix sums of qty = [40,12,7,25,3,60,18,90,5,33]:
+    //  40, 52, 59, 84, 87, 147, 165, 255, 260, 293
+    let ps = prefix_sums(qty)
+    check_int("s14.ps.len", ps.len(), 10)
+    check_int("s14.ps[0]", ps[0], 40)
+    check_int("s14.ps[1]", ps[1], 52)
+    check_int("s14.ps[4]", ps[4], 87)
+    check_int("s14.ps.last", ps.last(), 293)         // == sum(qty)
+    check_int("s14.ps.last.eq.sum", ps.last(), sum_col(qty))
+
+    // strictly increasing (all qty positive).
+    var increasing = true
+    var i = 1
+    while i < ps.len() {
+        if ps[i] <= ps[i - 1] { increasing = false }
+        i = i + 1
+    }
+    check_bool("s14.ps.increasing", increasing, true)
+}
+
+
+// =====================================================================
+// SECTION 15 — sorting a small int column with an explicit selection sort.
+// (Book's .sort(cmp) is documented as surfacing a comparator-inference gap,
+//  so a real user writes a manual sort over index access — exercised here.)
+// =====================================================================
+
+// pick the value for output position k given a planned swap of (i, minIdx).
+fn swapped_at(work: Array<int>, k: int, i: int, minIdx: int) -> int {
+    if k == i { return work[minIdx] }
+    if k == minIdx { return work[i] }
+    return work[k]
+}
+
+fn selection_sort(xs: Array<int>) -> Array<int> {
+    // returns a NEW ascending column without mutating xs.
+    // NOTE: empty array literals (`[]`) are NOT runtime-constructible on this
+    // build (op_new_array(0) SURFACE — see REPORT.md + objects-arrays.mdx
+    // V3-S5 ckpt-5 caveat), so every array is SEEDED with element 0 and grown
+    // by concat from index 1.
+    var work = [xs[0]]
+    var z = 1
+    let n = xs.len()
+    while z < n {
+        work = work.concat([xs[z]])
+        z = z + 1
+    }
+
+    var i = 0
+    while i < n {
+        // find index of the minimum in work[i..n].
+        var minIdx = i
+        var j = i + 1
+        while j < n {
+            if work[j] < work[minIdx] { minIdx = j }
+            j = j + 1
+        }
+        // rebuild `work` with positions i and minIdx exchanged (seeded copy).
+        var rebuilt = [swapped_at(work, 0, i, minIdx)]
+        var k = 1
+        while k < n {
+            rebuilt = rebuilt.concat([swapped_at(work, k, i, minIdx)])
+            k = k + 1
+        }
+        work = rebuilt
+        i = i + 1
+    }
+    return work
+}
+
+fn section_sort() {
+    let qty = qty_col()
+
+    // sorted qty ascending:
+    //   original [40,12,7,25,3,60,18,90,5,33]
+    //   sorted   [3,5,7,12,18,25,33,40,60,90]
+    let sorted = selection_sort(qty)
+    check_int("s15.sorted.len", sorted.len(), 10)
+    check_int("s15.sorted.first", sorted.first(), 3)
+    check_int("s15.sorted.last", sorted.last(), 90)
+    check_int("s15.sorted[0]", sorted[0], 3)
+    check_int("s15.sorted[1]", sorted[1], 5)
+    check_int("s15.sorted[2]", sorted[2], 7)
+    check_int("s15.sorted[5]", sorted[5], 25)
+    check_int("s15.sorted.sum", sum_col(sorted), 293)   // permutation preserves sum
+
+    // median (n=10 even) = avg of sorted[4],sorted[5] = (18+25)/2 = 21 (trunc).
+    let median = (sorted[4] + sorted[5]) / 2
+    check_int("s15.median", median, 21)
+
+    // ascending invariant.
+    var asc = true
+    var i = 1
+    while i < sorted.len() {
+        if sorted[i] < sorted[i - 1] { asc = false }
+        i = i + 1
+    }
+    check_bool("s15.ascending", asc, true)
+
+    // original column UNCHANGED by sort (immutability via concat-copy).
+    check_int("s15.original.first", qty.first(), 40)
+    check_int("s15.original.last", qty.last(), 33)
+}
+
+
+// =====================================================================
+// SECTION 16 — numeric utility checks (clamp / abs / mean compositions).
+// =====================================================================
+
+fn section_numeric_utils() {
+    // clamp.
+    check_int("s16.clamp.hi", clamp(150, 0, 100), 100)
+    check_int("s16.clamp.lo", clamp(-7, 0, 100), 0)
+    check_int("s16.clamp.in", clamp(42, 0, 100), 42)
+
+    // abs.
+    check_int("s16.abs.neg", abs_int(0 - 17), 17)
+    check_int("s16.abs.pos", abs_int(17), 17)
+    check_int("s16.abs.zero", abs_int(0), 0)
+
+    // mean composed with scale: mean(scale(qty,2)) = 2*mean? 293*2/10 = 58.
+    let qty = qty_col()
+    check_int("s16.mean.scaled", mean_col(scale_col(qty, 2)), 58)
+
+    // clamp every qty to [10, 50] then sum:
+    //   [40,12,7->10,25,3->10,60->50,18,90->50,5->10,33]
+    //   = 40,12,10,25,10,50,18,50,10,33 = 258.
+    var clamped_sum = 0
+    for v in qty { clamped_sum = clamped_sum + clamp(v, 10, 50) }
+    check_int("s16.clamped.sum", clamped_sum, 258)
+}
+
+
+// =====================================================================
+// SECTION 17 — cross-section invariants (integration).
+// Re-derive a few headline numbers two different ways and assert equality.
+// =====================================================================
+
+fn section_invariants() {
+    let qty = qty_col()
+    let price = price_col()
+    let dept = dept_col()
+
+    // total qty three ways: sum_col, prefix-sum last, dept rollup sum.
+    let a = sum_col(qty)
+    let ps = prefix_sums(qty)
+    let b = ps.last()
+    let c = dept_total_qty(dept, qty, "ware")
+        + dept_total_qty(dept, qty, "gadg")
+        + dept_total_qty(dept, qty, "gizm")
+        + dept_total_qty(dept, qty, "part")
+    check_int("s17.qty.way1", a, 293)
+    check_int("s17.qty.way2", b, 293)
+    check_int("s17.qty.way3", c, 293)
+    check_bool("s17.qty.agree12", a == b, true)
+    check_bool("s17.qty.agree13", a == c, true)
+
+    // total value two ways: dot, and elementwise build+sum.
+    let v1 = dot_col(qty, price)
+    // build value column elementwise then sum.
+    var value = [qty[0] * price[0]]
+    var i = 1
+    while i < qty.len() {
+        value = value.concat([qty[i] * price[i]])
+        i = i + 1
+    }
+    let v2 = sum_col(value)
+    check_int("s17.value.way1", v1, 3621)
+    check_int("s17.value.way2", v2, 3621)
+    check_bool("s17.value.agree", v1 == v2, true)
+
+    // histogram total == column length == 10.
+    // `bktot: int` anchors the indexed-sum's type: an `Array<int>` element
+    // read via `bk[i]` does not carry `int` into a bare `==` comparison on
+    // this build (same .first()/index element-type gap — see REPORT.md).
+    let bk = bucket_counts(qty)
+    let bktot: int = bk[0] + bk[1] + bk[2]
+    check_int("s17.hist.total", bktot, 10)
+    check_bool("s17.hist.eq.len", bktot == qty.len(), true)
+
+    // sorted permutation preserves both sum and length.
+    let sorted: Array<int> = selection_sort(qty)
+    let ssum: int = sum_col(sorted)
+    let qsum: int = sum_col(qty)
+    let slen: int = sorted.len()
+    let qlen: int = qty.len()
+    check_bool("s17.sort.sum", ssum == qsum, true)
+    check_bool("s17.sort.len", slen == qlen, true)
+}
+
+
+// =====================================================================
+// DRIVER — top-level (script mode runs top-level statements; fn main is NOT
+// auto-invoked). Each section prints CHECK_FAILED on any mismatch and bumps the
+// module-scope `failures` counter; the pass banner prints ONLY when
+// failures == 0 (self-check contract honored).
+// =====================================================================
+
+section_basics()
+section_aggregations()
+section_map_filter()
+section_slicing()
+section_search()
+section_column_algebra()
+section_hashmap()
+section_dept_rollup()
+section_objects()
+section_typed_objects()
+section_report()
+section_histogram()
+section_prefix()
+section_sort()
+section_numeric_utils()
+section_invariants()
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print("RUN_HAD_FAILURES: " + failures.toString())
+}

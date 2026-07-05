@@ -1,0 +1,854 @@
+// large.shape — async slice (book: fundamentals/async.mdx)
+// =====================================================================
+// REAL-WORLD APPLICATION: a deterministic CONCURRENT JOB-ORCHESTRATION
+// engine ("mini task scheduler / ETL pipeline simulator").
+//
+// Rooted in the async chapter. Models the way a real async workload is
+// structured in Shape, using ONLY the constructs the book teaches that
+// the language actually supports:
+//   - async fn + await                       (book "Await")
+//   - async let concurrent bindings + await  (book "Async Let")
+//   - direct `await fn()`                     (book "Await")
+//   - top-level await                         (book "scripts/REPL")
+//   - join race  (primary/backup selection)   (book "Join Strategies/race")
+//   - join any   (first-success selection)    (book "Join Strategies/any")
+//
+// DETERMINISM STRATEGY (per slice directive): every "task" is a pure
+// arithmetic function of its inputs — no clocks, no rng, no network. We
+// assert FINAL AGGREGATES, never timing. `join race`/`join any` are
+// deterministic here: each branch is a pure function with a fixed value,
+// and the engine resolves them by the documented first-branch order, so
+// the aggregate is reproducible and VM==JIT byte-identical.
+//
+// MACHINE-PROOFABLE: every EXPECTED value below is derived from the
+// arithmetic SEMANTICS written in the comment beside it, computed BEFORE
+// the first run. On all-pass prints ALL_CHECKS_PASSED; any mismatch
+// prints CHECK_FAILED with which/expected/got.
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// SECTION 0. Global check accounting.
+// We thread a running (passed,total) pair through the program by mutable
+// module-scope counters and a check() helper. Each check compares an
+// observed value to a pre-derived expected value.
+// ---------------------------------------------------------------------
+
+let mut g_pass = 0
+let mut g_total = 0
+let mut g_failed_name = "none"
+
+fn check(name: string, got: int, expected: int) {
+  g_total = g_total + 1
+  if got == expected {
+    g_pass = g_pass + 1
+  } else {
+    // Record only the FIRST failure name for a clean single-line report.
+    if g_failed_name == "none" {
+      g_failed_name = name
+    }
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 1. Primitive async "tasks".
+// Each is a pure async fn. In a real system these would be I/O calls;
+// here they are deterministic arithmetic so results are reproducible.
+// ---------------------------------------------------------------------
+
+// Identity task — the simplest possible async unit of work.
+async fn task_identity(x: int) -> int {
+  x
+}
+
+// Increment task.
+async fn task_inc(x: int) -> int {
+  x + 1
+}
+
+// Doubling task.
+async fn task_double(x: int) -> int {
+  x * 2
+}
+
+// Triple task.
+async fn task_triple(x: int) -> int {
+  x * 3
+}
+
+// Square task.
+async fn task_square(x: int) -> int {
+  x * x
+}
+
+// Negate task.
+async fn task_negate(x: int) -> int {
+  0 - x
+}
+
+// Add-constant task (curried-style via two args).
+async fn task_add(x: int, k: int) -> int {
+  x + k
+}
+
+// Multiply-constant task.
+async fn task_mul(x: int, k: int) -> int {
+  x * k
+}
+
+// Clamp-to-nonneg task (uses if/else inside an async body).
+async fn task_relu(x: int) -> int {
+  if x < 0 {
+    0
+  } else {
+    x
+  }
+}
+
+// Bucket/classify task (uses match inside an async body).
+async fn task_bucket(x: int) -> int {
+  match x {
+    0 => 100,
+    1 => 200,
+    2 => 300,
+    _ => 400,
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 2. Composed async pipelines.
+// Each pipeline awaits several stages in sequence — the canonical
+// `let r = await stage()` shape from the book "Await" section.
+// ---------------------------------------------------------------------
+
+// 2-stage pipeline: inc then double.   f(x) = 2*(x+1)
+async fn pipe_inc_double(x: int) -> int {
+  let a = await task_inc(x)
+  let b = await task_double(a)
+  b
+}
+
+// 3-stage pipeline: inc, double, triple.  f(x) = 3*(2*(x+1)) = 6x+6
+async fn pipe_three(x: int) -> int {
+  let a = await task_inc(x)
+  let b = await task_double(a)
+  let c = await task_triple(b)
+  c
+}
+
+// square-then-negate.  f(x) = -(x*x)
+async fn pipe_sq_neg(x: int) -> int {
+  let s = await task_square(x)
+  let n = await task_negate(s)
+  n
+}
+
+// pipeline whose middle stage is itself a pipeline (nested await).
+// f(x) = pipe_inc_double(x) + 1 = 2*(x+1) + 1 = 2x+3
+async fn pipe_nested(x: int) -> int {
+  let inner = await pipe_inc_double(x)
+  let r = await task_inc(inner)
+  r
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 3. CONCURRENT stages via `async let` (book "Async Let").
+// "Multiple async let bindings run concurrently." We spawn independent
+// branches, then await each, then combine. Result is order-independent
+// (pure functions), so deterministic.
+// ---------------------------------------------------------------------
+
+// Fan out into double + square, sum the results.  g(x) = 2x + x^2
+async fn fanout_sum(x: int) -> int {
+  async let d = task_double(x)
+  async let s = task_square(x)
+  let rd = await d
+  let rs = await s
+  rd + rs
+}
+
+// Fan out into three independent tasks, sum.
+//   h(x) = (x+1) + (3x) + (-x) = 3x + 1
+async fn fanout_three(x: int) -> int {
+  async let a = task_inc(x)
+  async let b = task_triple(x)
+  async let c = task_negate(x)
+  let ra = await a
+  let rb = await b
+  let rc = await c
+  ra + rb + rc
+}
+
+// Fan out where each branch is itself a composed pipeline.
+//   k(x) = pipe_inc_double(x) + pipe_sq_neg(x)
+//        = 2*(x+1) + (-(x*x)) = 2x + 2 - x^2
+async fn fanout_pipelines(x: int) -> int {
+  async let p = pipe_inc_double(x)
+  async let q = pipe_sq_neg(x)
+  let rp = await p
+  let rq = await q
+  rp + rq
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 4. Fallback selection via `join race` / `join any`.
+// (book "Join Strategies": race -> fastest; any -> first ok).
+// Here each branch is a pure deterministic function, and the engine
+// resolves first-branch order, so primary always wins -> deterministic.
+// ---------------------------------------------------------------------
+
+// Primary/backup pattern. Primary returns a smaller, "fast" value.
+async fn svc_primary(x: int) -> int {
+  x + 1
+}
+async fn svc_backup(x: int) -> int {
+  x + 1000
+}
+
+// race picks the primary branch deterministically here.
+//   race(x) = svc_primary(x) = x + 1
+async fn raced(x: int) -> int {
+  let r = await join race {
+    svc_primary(x),
+    svc_backup(x)
+  }
+  r
+}
+
+// any picks the first successful branch (primary).
+//   anyd(x) = x + 1
+async fn anyd(x: int) -> int {
+  let r = await join any {
+    svc_primary(x),
+    svc_backup(x)
+  }
+  r
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 5. BATCH PROCESSING via while-loops + await.
+// A real scheduler drains a work queue. We model the queue as an integer
+// range [lo, hi) and process each item through a chosen async pipeline,
+// accumulating a checksum. (We use while, not `for ... in range`, because
+// the latter combined with await-in-body is not supported.)
+// ---------------------------------------------------------------------
+
+// Sum of pipe_inc_double over [lo, hi).  Each term = 2*(i+1).
+async fn batch_inc_double(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 0
+  while i < hi {
+    acc = acc + await pipe_inc_double(i)
+    i = i + 1
+  }
+  acc
+}
+
+// Sum of fanout_sum over [lo, hi).  Each term = 2i + i^2.
+async fn batch_fanout(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 0
+  while i < hi {
+    acc = acc + await fanout_sum(i)
+    i = i + 1
+  }
+  acc
+}
+
+// Sum of raced over [lo, hi).  Each term = i + 1.
+async fn batch_raced(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 0
+  while i < hi {
+    acc = acc + await raced(i)
+    i = i + 1
+  }
+  acc
+}
+
+// Count of items in [lo, hi) whose bucket equals a target.
+async fn batch_count_bucket(lo: int, hi: int, target: int) -> int {
+  let mut i = lo
+  let mut count = 0
+  while i < hi {
+    let b = await task_bucket(i)
+    if b == target {
+      count = count + 1
+    }
+    i = i + 1
+  }
+  count
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 6. MAP-REDUCE style: two concurrent batches, then combine.
+// Demonstrates async let over whole sub-batches (coarse-grained tasks).
+// ---------------------------------------------------------------------
+
+// Split [lo,hi) at mid; run the two halves as concurrent async-let tasks;
+// sum results. Total == batch_inc_double(lo, hi) by additivity.
+async fn mapreduce_inc_double(lo: int, mid: int, hi: int) -> int {
+  async let left = batch_inc_double(lo, mid)
+  async let right = batch_inc_double(mid, hi)
+  let l = await left
+  let r = await right
+  l + r
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 7. Async recursion: divide-and-conquer sum of a pipeline over
+// a range, splitting into two concurrent recursive halves.
+// Total == sum of pipe_inc_double over [lo, hi).
+// ---------------------------------------------------------------------
+
+async fn dc_sum(lo: int, hi: int) -> int {
+  if hi - lo <= 1 {
+    if lo < hi {
+      let v = await pipe_inc_double(lo)
+      v
+    } else {
+      0
+    }
+  } else {
+    let mid = lo + (hi - lo) / 2
+    async let left = dc_sum(lo, mid)
+    async let right = dc_sum(mid, hi)
+    let l = await left
+    let r = await right
+    l + r
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 8. A small async "fibonacci" — classic recursive-await shape,
+// proves nested awaits and recursion in an async body.
+// ---------------------------------------------------------------------
+
+async fn afib(n: int) -> int {
+  if n < 2 {
+    n
+  } else {
+    async let a = afib(n - 1)
+    async let b = afib(n - 2)
+    let ra = await a
+    let rb = await b
+    ra + rb
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 9. A deterministic "retry with fallback" workflow that mixes
+// race-based selection with a sequential pipeline — models the kind of
+// resilient call a real async service makes.
+//   workflow(x) = pipe_inc_double( raced(x) )
+//               = 2*((x+1) + 1) = 2x + 4
+// ---------------------------------------------------------------------
+
+async fn workflow(x: int) -> int {
+  let chosen = await raced(x)          // x + 1
+  let processed = await pipe_inc_double(chosen)  // 2*((x+1)+1)
+  processed
+}
+
+async fn batch_workflow(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 0
+  while i < hi {
+    acc = acc + await workflow(i)
+    i = i + 1
+  }
+  acc
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 9b. ASYNC ACCUMULATOR PATTERNS.
+// A scheduler frequently folds a sequence through an async transform.
+// We model several fold shapes, all via while + await.
+// ---------------------------------------------------------------------
+
+// Async sum of squares over [lo,hi): sum i^2.
+async fn fold_sumsq(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 0
+  while i < hi {
+    acc = acc + await task_square(i)
+    i = i + 1
+  }
+  acc
+}
+
+// Async product over [lo,hi): product of (i+1) (so no zero factor).
+async fn fold_product(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 1
+  while i < hi {
+    acc = acc * await task_inc(i)
+    i = i + 1
+  }
+  acc
+}
+
+// Async max over [lo,hi) of task_bucket(i). Buckets are 100/200/300/400.
+async fn fold_maxbucket(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut best = 0
+  while i < hi {
+    let b = await task_bucket(i)
+    if b > best {
+      best = b
+    }
+    i = i + 1
+  }
+  best
+}
+
+// Async count of evens (i % 2 == 0) processed through a no-op task.
+async fn fold_count_even(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut count = 0
+  while i < hi {
+    let v = await task_identity(i)
+    if v % 2 == 0 {
+      count = count + 1
+    }
+    i = i + 1
+  }
+  count
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 9c. ASYNC "SERVICE MESH" — layered fan-out with concurrent
+// dependencies. Models a request that fans out to several backend
+// services concurrently (async let), each of which itself composes a
+// small pipeline. Then an aggregation stage combines them.
+// ---------------------------------------------------------------------
+
+// Backend A: pipe_inc_double.    A(x) = 2x + 2
+async fn svc_a(x: int) -> int {
+  let r = await pipe_inc_double(x)
+  r
+}
+
+// Backend B: fanout_sum.         B(x) = 2x + x^2
+async fn svc_b(x: int) -> int {
+  let r = await fanout_sum(x)
+  r
+}
+
+// Backend C: raced primary.      C(x) = x + 1
+async fn svc_c(x: int) -> int {
+  let r = await raced(x)
+  r
+}
+
+// Aggregator fans out to A, B, C concurrently, then sums.
+//   mesh(x) = (2x+2) + (2x+x^2) + (x+1) = x^2 + 5x + 3
+async fn mesh(x: int) -> int {
+  async let a = svc_a(x)
+  async let b = svc_b(x)
+  async let c = svc_c(x)
+  let ra = await a
+  let rb = await b
+  let rc = await c
+  ra + rb + rc
+}
+
+// Batched mesh over [lo,hi).
+async fn batch_mesh(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 0
+  while i < hi {
+    acc = acc + await mesh(i)
+    i = i + 1
+  }
+  acc
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 9d. ASYNC PIPELINE COMPOSITION OPERATORS.
+// Compose two async pipelines (sequential) and (parallel-then-sum),
+// proving that await composition is associative for pure tasks.
+// ---------------------------------------------------------------------
+
+// Sequential compose: feed output of inc_double into sq_neg.
+//   seqc(x) = -( (2*(x+1))^2 )
+async fn seq_compose(x: int) -> int {
+  let mid = await pipe_inc_double(x)
+  let out = await pipe_sq_neg(mid)
+  out
+}
+
+// Parallel compose: run two pipelines concurrently, sum.
+//   parc(x) = pipe_inc_double(x) + pipe_three(x)
+//           = (2x+2) + (6x+6) = 8x + 8
+async fn par_compose(x: int) -> int {
+  async let p = pipe_inc_double(x)
+  async let q = pipe_three(x)
+  let rp = await p
+  let rq = await q
+  rp + rq
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 9e. ASYNC STATE MACHINE — a multi-step workflow that branches
+// on intermediate results, modeling a real conditional async flow.
+//   step1: inc
+//   if even -> double, else -> triple
+//   step3: add 7
+// ---------------------------------------------------------------------
+
+async fn state_machine(x: int) -> int {
+  let s1 = await task_inc(x)        // x+1
+  let s2 = if s1 % 2 == 0 {
+    await task_double(s1)           // even branch
+  } else {
+    await task_triple(s1)           // odd branch
+  }
+  let s3 = await task_add(s2, 7)
+  s3
+}
+
+async fn batch_state_machine(lo: int, hi: int) -> int {
+  let mut i = lo
+  let mut acc = 0
+  while i < hi {
+    acc = acc + await state_machine(i)
+    i = i + 1
+  }
+  acc
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 9f. ASYNC RETRY LADDER — try primary; the engine resolves the
+// first-ordered branch deterministically, so we model a "retry budget"
+// purely arithmetically: total cost is fixed.
+//   ladder(x) = raced(x) + anyd(x) = 2*(x+1)
+// ---------------------------------------------------------------------
+
+async fn retry_ladder(x: int) -> int {
+  async let r1 = raced(x)
+  async let r2 = anyd(x)
+  let a = await r1
+  let b = await r2
+  a + b
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 9g. DIVIDE-AND-CONQUER over fanout_sum (different pipeline),
+// proving the d&c additivity invariant generalizes.
+//   dc_fanout(lo,hi) == batch_fanout(lo,hi)
+// ---------------------------------------------------------------------
+
+async fn dc_fanout(lo: int, hi: int) -> int {
+  if hi - lo <= 1 {
+    if lo < hi {
+      let v = await fanout_sum(lo)
+      v
+    } else {
+      0
+    }
+  } else {
+    let mid = lo + (hi - lo) / 2
+    async let left = dc_fanout(lo, mid)
+    async let right = dc_fanout(mid, hi)
+    let l = await left
+    let r = await right
+    l + r
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 10. THE DRIVER. Runs every scenario and checks each result.
+// All expected values are derived from the formulas in the comments,
+// computed by hand BEFORE the first run.
+// ---------------------------------------------------------------------
+
+async fn driver() -> int {
+
+  // --- 10.1 Primitive tasks --------------------------------------
+  // task_identity(7) = 7
+  check("identity_7", await task_identity(7), 7)
+  // task_inc(7) = 8
+  check("inc_7", await task_inc(7), 8)
+  // task_double(7) = 14
+  check("double_7", await task_double(7), 14)
+  // task_triple(7) = 21
+  check("triple_7", await task_triple(7), 21)
+  // task_square(7) = 49
+  check("square_7", await task_square(7), 49)
+  // task_negate(7) = -7
+  check("negate_7", await task_negate(7), 0 - 7)
+  // task_add(7, 5) = 12
+  check("add_7_5", await task_add(7, 5), 12)
+  // task_mul(7, 5) = 35
+  check("mul_7_5", await task_mul(7, 5), 35)
+  // task_relu(-3) = 0 ; task_relu(4) = 4
+  check("relu_neg3", await task_relu(0 - 3), 0)
+  check("relu_4", await task_relu(4), 4)
+  // task_bucket: 0->100,1->200,2->300,else->400
+  check("bucket_0", await task_bucket(0), 100)
+  check("bucket_1", await task_bucket(1), 200)
+  check("bucket_2", await task_bucket(2), 300)
+  check("bucket_9", await task_bucket(9), 400)
+
+  // --- 10.2 Sequential pipelines ---------------------------------
+  // pipe_inc_double(x) = 2*(x+1)
+  check("pid_0", await pipe_inc_double(0), 2)    // 2*1
+  check("pid_3", await pipe_inc_double(3), 8)    // 2*4
+  check("pid_10", await pipe_inc_double(10), 22) // 2*11
+  // pipe_three(x) = 6x + 6
+  check("p3_0", await pipe_three(0), 6)          // 6*0+6
+  check("p3_1", await pipe_three(1), 12)         // 6+6
+  check("p3_5", await pipe_three(5), 36)         // 30+6
+  // pipe_sq_neg(x) = -(x*x)
+  check("psn_3", await pipe_sq_neg(3), 0 - 9)
+  check("psn_5", await pipe_sq_neg(5), 0 - 25)
+  // pipe_nested(x) = 2x + 3
+  check("pn_0", await pipe_nested(0), 3)
+  check("pn_4", await pipe_nested(4), 11)        // 8+3
+
+  // --- 10.3 Concurrent fan-out (async let) -----------------------
+  // fanout_sum(x) = 2x + x^2
+  check("fs_0", await fanout_sum(0), 0)
+  check("fs_3", await fanout_sum(3), 15)         // 6 + 9
+  check("fs_5", await fanout_sum(5), 35)         // 10 + 25
+  // fanout_three(x) = 3x + 1
+  check("ft_0", await fanout_three(0), 1)        // 0+1
+  check("ft_4", await fanout_three(4), 13)       // 12+1
+  check("ft_10", await fanout_three(10), 31)     // 30+1
+  // fanout_pipelines(x) = 2x + 2 - x^2
+  check("fp_0", await fanout_pipelines(0), 2)    // 0+2-0
+  check("fp_2", await fanout_pipelines(2), 2)    // 4+2-4
+  check("fp_3", await fanout_pipelines(3), 0 - 1)// 6+2-9 = -1
+
+  // --- 10.4 race / any fallback ----------------------------------
+  // raced(x) = x + 1 ; anyd(x) = x + 1
+  check("raced_0", await raced(0), 1)
+  check("raced_9", await raced(9), 10)
+  check("anyd_0", await anyd(0), 1)
+  check("anyd_41", await anyd(41), 42)
+
+  // --- 10.5 while-loop batches -----------------------------------
+  // batch_inc_double(0,4): sum 2*(i+1) for i in 0..3
+  //   = 2*1 + 2*2 + 2*3 + 2*4 = 2+4+6+8 = 20
+  check("bid_0_4", await batch_inc_double(0, 4), 20)
+  // batch_inc_double(0,5): + 2*5 = 20 + 10 = 30
+  check("bid_0_5", await batch_inc_double(0, 5), 30)
+  // batch_inc_double(2,5): 2*3 + 2*4 + 2*5 = 6+8+10 = 24
+  check("bid_2_5", await batch_inc_double(2, 5), 24)
+  // empty range -> 0
+  check("bid_empty", await batch_inc_double(5, 5), 0)
+
+  // batch_fanout(0,4): sum (2i + i^2) for i in 0..3
+  //   i=0:0, i=1:2+1=3, i=2:4+4=8, i=3:6+9=15  => 0+3+8+15 = 26
+  check("bf_0_4", await batch_fanout(0, 4), 26)
+  // batch_fanout(0,5): + (2*4+16)=24 => 26+24 = 50
+  check("bf_0_5", await batch_fanout(0, 5), 50)
+
+  // batch_raced(0,5): sum (i+1) for i in 0..4 = 1+2+3+4+5 = 15
+  check("br_0_5", await batch_raced(0, 5), 15)
+  // batch_raced(10,13): 11+12+13 = 36
+  check("br_10_13", await batch_raced(10, 13), 36)
+
+  // batch_count_bucket(0,10, 400): buckets 0..2 are 100/200/300,
+  //   3..9 (i.e. i=3..9, 7 items) are 400. => 7
+  check("bcb_400", await batch_count_bucket(0, 10, 400), 7)
+  // target 100 over [0,10): only i=0 => 1
+  check("bcb_100", await batch_count_bucket(0, 10, 100), 1)
+  // target 300 over [0,10): only i=2 => 1
+  check("bcb_300", await batch_count_bucket(0, 10, 300), 1)
+  // target 999 (none) => 0
+  check("bcb_none", await batch_count_bucket(0, 10, 999), 0)
+
+  // --- 10.6 map-reduce additivity --------------------------------
+  // mapreduce_inc_double(0,2,5) must equal batch_inc_double(0,5)=30
+  check("mr_0_2_5", await mapreduce_inc_double(0, 2, 5), 30)
+  // mapreduce_inc_double(0,4,4) == batch_inc_double(0,4)=20
+  //   (right half empty)
+  check("mr_0_4_4", await mapreduce_inc_double(0, 4, 4), 20)
+  // mapreduce_inc_double(1,3,6) == batch_inc_double(1,6)
+  //   sum 2*(i+1) i in 1..5 = 4+6+8+10+12 = 40
+  check("mr_1_3_6", await mapreduce_inc_double(1, 3, 6), 40)
+
+  // --- 10.7 divide-and-conquer recursion -------------------------
+  // dc_sum(0,4) == batch_inc_double(0,4) = 20
+  check("dc_0_4", await dc_sum(0, 4), 20)
+  // dc_sum(0,5) == 30
+  check("dc_0_5", await dc_sum(0, 5), 30)
+  // dc_sum(0,8): sum 2*(i+1) i in 0..7 = 2*(1+2+..+8)=2*36 = 72
+  check("dc_0_8", await dc_sum(0, 8), 72)
+  // dc_sum(3,3) empty = 0
+  check("dc_empty", await dc_sum(3, 3), 0)
+  // single-element dc_sum(4,5) = pipe_inc_double(4) = 10
+  check("dc_single", await dc_sum(4, 5), 10)
+
+  // --- 10.8 async fibonacci --------------------------------------
+  // 0,1,1,2,3,5,8,13,21,34,55
+  check("afib_0", await afib(0), 0)
+  check("afib_1", await afib(1), 1)
+  check("afib_5", await afib(5), 5)
+  check("afib_10", await afib(10), 55)
+  check("afib_12", await afib(12), 144)
+
+  // --- 10.9 resilient workflow -----------------------------------
+  // workflow(x) = 2x + 4
+  check("wf_0", await workflow(0), 4)
+  check("wf_3", await workflow(3), 10)           // 6+4
+  check("wf_8", await workflow(8), 20)           // 16+4
+  // batch_workflow(0,4): sum (2i+4) i in 0..3 = 4+6+8+10 = 28
+  check("bwf_0_4", await batch_workflow(0, 4), 28)
+  // batch_workflow(0,5): + (8+4)=12 => 28+12 = 40
+  check("bwf_0_5", await batch_workflow(0, 5), 40)
+
+  // --- 10.10 cross-checks / invariants ---------------------------
+  // fanout_sum equals double + square: re-derive independently.
+  let fs_a = await fanout_sum(6)        // 12 + 36 = 48
+  let d6 = await task_double(6)         // 12
+  let sq6 = await task_square(6)        // 36
+  check("fs_consistency", fs_a, d6 + sq6)
+
+  // pipe_three equals 3*pipe_inc_double (since triple of double-of-inc):
+  // pipe_three(x)=6x+6 ; 3*pipe_inc_double(x)=3*(2x+2)=6x+6
+  let pt = await pipe_three(4)          // 30
+  let pid4 = await pipe_inc_double(4)   // 10
+  check("p3_eq_3pid", pt, 3 * pid4)
+
+  // mapreduce additivity invariant against dc_sum over same range.
+  let mr = await mapreduce_inc_double(0, 3, 6)  // batch_inc_double(0,6)
+  let dc = await dc_sum(0, 6)
+  check("mr_eq_dc", mr, dc)
+
+  // batch_raced equals arithmetic series sum (n)(n+1)/2 over [1..n]
+  // batch_raced(0, 6) = sum (i+1) i in 0..5 = 1+2+3+4+5+6 = 21
+  check("br_0_6", await batch_raced(0, 6), 21)
+
+  // --- 10.11 fold patterns (Section 9b) --------------------------
+  // fold_sumsq(0,5): 0+1+4+9+16 = 30
+  check("fss_0_5", await fold_sumsq(0, 5), 30)
+  // fold_sumsq(1,4): 1+4+9 = 14
+  check("fss_1_4", await fold_sumsq(1, 4), 14)
+  // fold_sumsq empty = 0
+  check("fss_empty", await fold_sumsq(3, 3), 0)
+  // fold_product(0,4): (1)(2)(3)(4) = 24   (task_inc(i)=i+1)
+  check("fp4", await fold_product(0, 4), 24)
+  // fold_product(0,5): 24*5 = 120
+  check("fp5", await fold_product(0, 5), 120)
+  // fold_product empty = 1 (identity)
+  check("fp_empty", await fold_product(2, 2), 1)
+  // fold_maxbucket(0,10): max over buckets {100,200,300,400...} = 400
+  check("fmb_0_10", await fold_maxbucket(0, 10), 400)
+  // fold_maxbucket(0,2): buckets 100,200 -> 200
+  check("fmb_0_2", await fold_maxbucket(0, 2), 200)
+  // fold_maxbucket(0,1): bucket 100 -> 100
+  check("fmb_0_1", await fold_maxbucket(0, 1), 100)
+  // fold_count_even(0,10): evens 0,2,4,6,8 -> 5
+  check("fce_0_10", await fold_count_even(0, 10), 5)
+  // fold_count_even(0,5): 0,2,4 -> 3
+  check("fce_0_5", await fold_count_even(0, 5), 3)
+  // fold_count_even(1,5): 2,4 -> 2
+  check("fce_1_5", await fold_count_even(1, 5), 2)
+
+  // --- 10.12 service mesh (Section 9c) ---------------------------
+  // mesh(x) = x^2 + 5x + 3
+  check("mesh_0", await mesh(0), 3)              // 0+0+3
+  check("mesh_1", await mesh(1), 9)              // 1+5+3
+  check("mesh_3", await mesh(3), 27)             // 9+15+3
+  check("mesh_5", await mesh(5), 53)             // 25+25+3
+  // batch_mesh(0,4): sum (i^2+5i+3) i in 0..3
+  //   i0:3, i1:9, i2:4+10+3=17, i3:9+15+3=27 => 3+9+17+27 = 56
+  check("bmesh_0_4", await batch_mesh(0, 4), 56)
+  // batch_mesh(0,5): + (16+20+3)=39 => 56+39 = 95
+  check("bmesh_0_5", await batch_mesh(0, 5), 95)
+  // mesh decomposition cross-check: mesh(4) == svc_a+svc_b+svc_c
+  let ma = await svc_a(4)            // 2*4+2 = 10
+  let mb = await svc_b(4)            // 8+16 = 24
+  let mc = await svc_c(4)            // 5
+  check("mesh_decomp", await mesh(4), ma + mb + mc)  // 39 == 16+20+3
+
+  // --- 10.13 compose operators (Section 9d) ----------------------
+  // seq_compose(x) = -((2x+2)^2)
+  // x=0: -(2^2) = -4
+  check("seqc_0", await seq_compose(0), 0 - 4)
+  // x=1: -(4^2) = -16
+  check("seqc_1", await seq_compose(1), 0 - 16)
+  // x=3: -(8^2) = -64
+  check("seqc_3", await seq_compose(3), 0 - 64)
+  // par_compose(x) = 8x + 8
+  check("parc_0", await par_compose(0), 8)
+  check("parc_2", await par_compose(2), 24)      // 16+8
+  check("parc_5", await par_compose(5), 48)      // 40+8
+
+  // --- 10.14 state machine (Section 9e) --------------------------
+  // state_machine(x): s1=x+1; if s1 even -> 2*s1 else 3*s1; +7
+  // x=0: s1=1(odd)->3; +7 = 10
+  check("sm_0", await state_machine(0), 10)
+  // x=1: s1=2(even)->4; +7 = 11
+  check("sm_1", await state_machine(1), 11)
+  // x=2: s1=3(odd)->9; +7 = 16
+  check("sm_2", await state_machine(2), 16)
+  // x=3: s1=4(even)->8; +7 = 15
+  check("sm_3", await state_machine(3), 15)
+  // batch_state_machine(0,4): 10+11+16+15 = 52
+  check("bsm_0_4", await batch_state_machine(0, 4), 52)
+
+  // --- 10.15 retry ladder (Section 9f) ---------------------------
+  // retry_ladder(x) = 2*(x+1)
+  check("rl_0", await retry_ladder(0), 2)
+  check("rl_4", await retry_ladder(4), 10)       // 2*5
+  check("rl_9", await retry_ladder(9), 20)       // 2*10
+
+  // --- 10.16 d&c over fanout (Section 9g) ------------------------
+  // dc_fanout(lo,hi) == batch_fanout(lo,hi)
+  let dcf = await dc_fanout(0, 5)
+  let bff = await batch_fanout(0, 5)
+  check("dcf_eq_bf", dcf, bff)                    // 50 == 50
+  // dc_fanout(0,4) == 26
+  check("dcf_0_4", await dc_fanout(0, 4), 26)
+  // dc_fanout(1,5): batch_fanout(1,5) = 3+8+15+24 = 50
+  check("dcf_1_5", await dc_fanout(1, 5), 50)
+  // dc_fanout empty = 0
+  check("dcf_empty", await dc_fanout(7, 7), 0)
+
+  0
+}
+
+
+// ---------------------------------------------------------------------
+// SECTION 11. TOP-LEVEL await + final verdict (book: top-level await).
+// ---------------------------------------------------------------------
+
+let _ = await driver()
+
+print(f"checks_passed={g_pass}")
+print(f"checks_total={g_total}")
+
+// The number of check(...) calls in driver() — counted statically and
+// written here BEFORE first run as the expected total.
+let EXPECTED_TOTAL = 108
+
+if g_total != EXPECTED_TOTAL {
+  print(f"CHECK_FAILED: total_count expected={EXPECTED_TOTAL} got={g_total}")
+} else {
+  if g_pass == g_total {
+    print("ALL_CHECKS_PASSED")
+  } else {
+    print(f"CHECK_FAILED: {g_failed_name} (and possibly others)")
+  }
+}

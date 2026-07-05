@@ -1,0 +1,49 @@
+// small.shape — async slice (book: fundamentals/async.mdx)
+// Exercises the chapter's CORE that actually works:
+//   - async fn + await (book "Await")
+//   - async let concurrent bindings + await retrieval (book "Async Let")
+//   - top-level await (book: "Top-level await is supported in scripts")
+//   - direct `await fn()`
+// Determinism: pure arithmetic tasks; we assert final aggregates, not timing.
+
+// A "task" expressed as an async fn (book "Async Let" spawns expressions).
+async fn doubled(x: int) -> int {
+  x * 2
+}
+
+async fn squared(x: int) -> int {
+  x * x
+}
+
+// Two `async let` bindings run concurrently (book "Async Let":
+// "Multiple async let bindings run concurrently"). We await both and combine.
+async fn combine(n: int) -> int {
+  async let a = doubled(n)     // concurrent task A
+  async let b = squared(n)     // concurrent task B
+  let ra = await a
+  let rb = await b
+  ra + rb                      // 2n + n^2
+}
+
+// Direct `await fn()` (book "Await": `let data = await fetch_data()`).
+async fn run() -> int {
+  // n=3 -> 2*3 + 3*3 = 6 + 9 = 15
+  let c3 = await combine(3)
+  // n=5 -> 2*5 + 5*5 = 10 + 25 = 35
+  let c5 = await combine(5)
+  // direct await of a single async fn
+  let d = await doubled(10)    // 20
+  c3 + c5 + d                  // 15 + 35 + 20 = 70
+}
+
+// Top-level await (book: supported in scripts).
+let total = await run()
+print(total)
+
+// Self-check: expected values derived from book semantics above, written
+// before first run (2n + n^2 for combine; doubled = 2x).
+if total != 70 {
+  print(f"CHECK_FAILED: total expected=70 got={total}")
+} else {
+  print("ALL_CHECKS_PASSED")
+}

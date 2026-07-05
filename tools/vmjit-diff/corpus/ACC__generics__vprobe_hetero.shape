@@ -1,0 +1,17 @@
+trait Shape2 { fn area() -> int; fn nm() -> string; }
+type Sq { s: int }
+impl Shape2 for Sq { method area() -> int { self.s * self.s } method nm() -> string { "sq" } }
+type Rc { w: int, h: int }
+impl Shape2 for Rc { method area() -> int { self.w * self.h } method nm() -> string { "rc" } }
+fn main() {
+  let xs: Vec<dyn Shape2> = [ Sq { s: 3 }, Rc { w: 4, h: 6 } ]
+  let mut sum: int = 0
+  let mut names: string = ""
+  for x in xs {
+    let a: int = x.area()
+    sum = sum + a
+    names = names + x.nm()
+  }
+  print(f"sum={sum} names={names}")
+}
+main()

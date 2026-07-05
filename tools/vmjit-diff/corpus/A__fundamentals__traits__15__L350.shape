@@ -1,0 +1,13 @@
+trait Describable {
+  fn describe() -> string;
+}
+
+trait Comparable {
+  fn compare(other: int) -> int;
+}
+
+trait Printable : Describable + Comparable {
+  fn print_it() -> string;
+}
+
+print("ok")

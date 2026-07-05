@@ -1,0 +1,6 @@
+fn distance2(x: int, y: int) -> int {
+  x * x + y * y
+}
+
+let d2 = distance2(3, 4)
+print(d2)

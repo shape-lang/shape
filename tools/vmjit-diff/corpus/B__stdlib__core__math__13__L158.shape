@@ -1,0 +1,4 @@
+from std::core::math use { parallel_filter }
+
+let positives = parallel_filter([-1.0, 2.0, -3.0, 4.0], |x| x > 0.0)
+print(positives)   // [2.0, 4.0]

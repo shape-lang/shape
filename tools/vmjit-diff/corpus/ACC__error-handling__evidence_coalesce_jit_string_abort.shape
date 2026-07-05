@@ -1,0 +1,9 @@
+// Does ?? on Option<string> also leak under JIT?
+fn pick_s(a: Option<string>, dflt: string) -> string {
+    return a ?? dflt;
+}
+fn main() {
+    print(pick_s(Some("hi"), "x"));
+    print(pick_s(None, "x"));
+}
+main();

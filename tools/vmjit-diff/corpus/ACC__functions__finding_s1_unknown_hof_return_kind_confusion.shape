@@ -1,0 +1,6 @@
+fn apply(f, x) { f(x) }
+fn ret_num(x) { x * 2.0 }
+let r = apply(ret_num, 3.0)
+let bad: int = r
+print(bad)
+print(bad % 4)

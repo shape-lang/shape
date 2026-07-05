@@ -1,0 +1,69 @@
+// small.shape — generics slice
+// Book sources: fundamentals/functions.mdx (Generics, Trait Bounds, where clauses),
+//               fundamentals/traits.mdx (Defining/Implementing a Trait, Trait Bounds).
+//
+// Exercises generic functions (single + multi type-param), scalar-param generics
+// with single and multiple trait bounds, the where-clause form, monomorphization
+// across distinct concrete types, and user-trait-method dispatch from a generic body.
+
+// --- Generic identity (functions.mdx "Generics"; scalar-param T) ---
+fn identity<T>(x: T) -> T { x }
+
+// --- Multi type-param generics ---
+fn pick_first<A, B>(a: A, b: B) -> A { a }
+fn pick_second<A, B>(a: A, b: B) -> B { b }
+
+// --- Traits + bounds ---
+trait Display { fn display() -> string; }
+trait Tagged { fn tag() -> int; }
+
+type User { name: string }
+type Product { sku: string }
+
+impl Display for User { method display() -> string { self.name } }
+impl Display for Product { method display() -> string { self.sku } }
+impl Tagged for User { method tag() -> int { 7 } }
+
+// Single bound; body dispatches a user trait method.
+fn show<T: Display>(x: T) -> string { x.display() }
+
+// where-clause form.
+fn show_w<T>(x: T) -> string where T: Display { x.display() }
+
+// Multiple bounds with + ; both methods dispatch in the f-string body.
+fn show_tag<T: Display + Tagged>(x: T) -> string {
+  f"{x.display()}#{x.tag()}"
+}
+
+// --- check helpers ---
+fn ck_int(name: string, got: int, want: int) -> bool {
+  if got != want { print(f"CHECK_FAILED: {name} expected={want} got={got}") }
+  got == want
+}
+fn ck_str(name: string, got: string, want: string) -> bool {
+  if got != want { print(f"CHECK_FAILED: {name} expected={want} got={got}") }
+  got == want
+}
+fn ck_bool(name: string, got: bool, want: bool) -> bool {
+  if got != want { print(f"CHECK_FAILED: {name} expected={want} got={got}") }
+  got == want
+}
+
+// --- Checks: expected values derived from book semantics ---
+let c1 = ck_int("identity_int", identity(42), 42)
+let c2 = ck_str("identity_str", identity("hi"), "hi")
+let c3 = ck_bool("identity_bool", identity(true), true)
+
+let c4 = ck_int("pick_first", pick_first(1, "x"), 1)
+let c5 = ck_str("pick_second", pick_second(1, "x"), "x")
+
+let c6 = ck_str("show_user", show(User { name: "Alice" }), "Alice")
+let c7 = ck_str("show_product", show(Product { sku: "SKU-1" }), "SKU-1")
+
+let c8 = ck_str("show_w", show_w(Product { sku: "SKU-2" }), "SKU-2")
+
+let c9 = ck_str("show_tag", show_tag(User { name: "Bob" }), "Bob#7")
+
+if c1 && c2 && c3 && c4 && c5 && c6 && c7 && c8 && c9 {
+  print("ALL_CHECKS_PASSED")
+}
