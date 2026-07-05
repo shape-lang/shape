@@ -1790,6 +1790,107 @@ pub(crate) fn strip_error_prefix(e: &ShapeError) -> String {
     s.to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Comptime diagnostics: jargon firewall (comptime-excellence §4.4).
+//
+// User-facing comptime error/warning text must never carry internal audit
+// jargon (ADR section numbers, checkpoint names, refusal-list vocabulary,
+// SURFACE-stub markers). A comptime block or annotation handler can fail
+// deep inside the mini-VM and surface an internal executor string; those
+// strings are not user-actionable and must be replaced with a clean
+// sentence before they reach the terminal / LSP. This is the presentation
+// firewall on the diagnostic path (acceptance probe P10 greps rendered
+// output for exactly these fragments).
+// ---------------------------------------------------------------------------
+
+/// Internal-jargon fragments that must never appear in a user-facing
+/// comptime diagnostic. Matched case-insensitively for the word tokens;
+/// the `§` symbol is matched literally. Kept in sync with acceptance
+/// probe P10's grep set (comptime-excellence §7).
+const COMPTIME_JARGON_MARKERS: &[&str] = &[
+    "§",
+    "adr-",
+    "ckpt",
+    "v3-s5",
+    "refused",
+    "phase-2c",
+    "phase-2d",
+    "snapshot_future",
+    "notimplemented(surface",
+    "surface)",
+    "valueword",
+    "kindedslot",
+    "nativekind",
+    "wave-",
+];
+
+/// True if `msg` contains any internal-jargon fragment that the comptime
+/// diagnostics firewall must strip.
+pub(crate) fn comptime_message_has_jargon(msg: &str) -> bool {
+    if msg.contains('§') {
+        return true;
+    }
+    let lower = msg.to_ascii_lowercase();
+    COMPTIME_JARGON_MARKERS
+        .iter()
+        .any(|marker| *marker != "§" && lower.contains(marker))
+}
+
+/// Firewall an *internal* comptime-failure string (NOT user `error()` text).
+///
+/// Known internal failure shapes are mapped to clean, user-actionable
+/// sentences; anything still carrying audit jargon after that mapping is
+/// replaced wholesale (the internal detail is not user-actionable). A
+/// clean, jargon-free string passes through untouched.
+pub(crate) fn sanitize_comptime_internal(msg: &str) -> String {
+    // The 5-second comptime watchdog surfaces `VMError::Interrupted`
+    // ("Execution interrupted"). Present it as the budget it enforces.
+    if msg.contains("Execution interrupted") || msg.contains("execution interrupted") {
+        return "compile-time execution exceeded the 5-second limit".to_string();
+    }
+    // A SURFACE / NotImplemented stub reached at compile time means the
+    // requested operation is not available in comptime code.
+    if comptime_message_has_jargon(msg) {
+        return "this operation is not available in compile-time code".to_string();
+    }
+    msg.to_string()
+}
+
+/// Strip the VM's ` (line N)` enrichment suffix (`dispatch.rs`), which for a
+/// comptime failure refers to the meaningless internal mini-VM line, not the
+/// user's source. Acceptance P1 requires it absent from comptime diagnostics
+/// (the real span is anchored on the driving construct instead).
+fn strip_trailing_line_suffix(msg: &str) -> String {
+    let trimmed = msg.trim_end();
+    if let Some(open) = trimmed.rfind(" (line ") {
+        let rest = &trimmed[open + " (line ".len()..];
+        if let Some(inner) = rest.strip_suffix(')') {
+            if !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit()) {
+                return trimmed[..open].to_string();
+            }
+        }
+    }
+    msg.to_string()
+}
+
+/// Produce the clean, jargon-free user-facing message for a failed comptime
+/// execution.
+///
+/// The `error()` builtin prefixes its payload with `[comptime error] ` — that
+/// prefix marks intentional user content: the user's message passes through
+/// verbatim (the firewall never rewrites a message the user authored), with
+/// the internal marker stripped so the surfaced text is exactly what the user
+/// wrote. Every other failure is an internal executor string and is routed
+/// through the firewall.
+pub(crate) fn clean_comptime_message(e: &ShapeError) -> String {
+    const USER_MARKER: &str = "[comptime error] ";
+    let stripped = strip_trailing_line_suffix(&strip_error_prefix(e));
+    if let Some(idx) = stripped.find(USER_MARKER) {
+        return stripped[idx + USER_MARKER.len()..].to_string();
+    }
+    sanitize_comptime_internal(&stripped)
+}
+
 impl BytecodeCompiler {
     /// Resolve a ConcreteType type_tag from compiler state for the receiver.
     /// Returns 0xFF when the type cannot be determined.

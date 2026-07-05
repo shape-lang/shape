@@ -60,6 +60,7 @@ use shape_runtime::type_system::{
 pub(crate) mod comptime;
 pub(crate) mod comptime_builtins;
 pub(crate) mod comptime_concrete;
+pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
 mod control_flow;
 mod expressions;
@@ -1306,6 +1307,31 @@ pub struct BytecodeCompiler {
     /// but must produce a clear compile-time error when called instead of jumping
     /// to an invalid entry point.
     pub(crate) removed_functions: HashSet<String>,
+    /// Snapshot of the whole-program AST exactly as it was handed to the
+    /// pre-body `analyze_program` pass (compiler_impl_reference_model.rs). It
+    /// is the source-of-truth program for directive re-analysis: when a
+    /// comptime directive (`set return` / `set param`) mutates a function's
+    /// signature during body compilation, the mutated signature is patched
+    /// into a clone of this program and re-checked through the SAME
+    /// `analyze_program` path the explicit-annotation path uses, so a
+    /// directive-set signature that disagrees with the body becomes an
+    /// ordinary compile error instead of a segfault (design §4.5, S3).
+    pub(crate) directive_reanalysis_program: Option<shape_ast::ast::Program>,
+    /// The `known_bindings` slice handed to the pre-body `analyze_program`
+    /// pass, captured so directive re-analysis reproduces the same binding
+    /// environment (module bindings, imported consts, etc.).
+    pub(crate) directive_reanalysis_known_bindings: Vec<String>,
+    /// Accumulated per-function signature overrides applied by comptime
+    /// directives, keyed by function name. Each re-analysis patches ALL known
+    /// overrides into the snapshot so cross-function references observe the
+    /// post-directive signatures (declaration-order semantics, design §4.5.1).
+    pub(crate) directive_signature_overrides: HashMap<
+        String,
+        (
+            Vec<shape_ast::ast::FunctionParameter>,
+            Option<shape_ast::ast::TypeAnnotation>,
+        ),
+    >,
     /// Internal guard for compiler-synthesized `__comptime__` helper calls.
     /// User source must never access `__comptime__` directly.
     pub(crate) allow_internal_comptime_namespace: bool,

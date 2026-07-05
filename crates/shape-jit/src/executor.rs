@@ -147,9 +147,24 @@ impl ProgramExecutor for JITExecutor {
         let bytecode = self
             .bytecode_executor
             .compile_program_for_inspection(engine, program)
-            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("Bytecode compilation failed: {}", e),
-                location: None,
+            .map_err(|e| {
+                // Preserve the inner error's source location so spanned
+                // compile diagnostics (e.g. comptime `error()` anchored at
+                // its block / annotation site, comptime-excellence §4.4)
+                // still render via `format_with_source` instead of collapsing
+                // to a span-less `Error: …` line. Message is unchanged.
+                use shape_runtime::error::ShapeError;
+                let location = match &e {
+                    ShapeError::ParseError { location, .. }
+                    | ShapeError::LexError { location, .. }
+                    | ShapeError::SemanticError { location, .. }
+                    | ShapeError::RuntimeError { location, .. } => location.clone(),
+                    _ => None,
+                };
+                ShapeError::RuntimeError {
+                    message: format!("Bytecode compilation failed: {}", e),
+                    location,
+                }
             })?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
 

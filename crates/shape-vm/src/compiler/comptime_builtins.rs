@@ -15,7 +15,7 @@
 use shape_ast::ast::TypeAnnotation;
 use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
 use shape_runtime::module_exports::ModuleExports;
-use shape_runtime::type_schema::typed_object_from_pairs;
+use shape_runtime::type_schema::typed_object_for_named_schema;
 use shape_runtime::type_system::BuiltinTypes;
 use shape_runtime::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
@@ -145,10 +145,43 @@ pub(crate) enum ComptimeDirective {
     ReplaceModule {
         items: Vec<shape_ast::ast::Item>,
     },
+    /// §4.5.7: ADD generated items at the annotated item's module scope. Unlike
+    /// `ReplaceModule` (which is only valid on a module target and replaces its
+    /// body), `ExtendItems` is additive and valid on type/function/module
+    /// targets: the parsed items are registered + compiled alongside the
+    /// existing program.
+    ExtendItems {
+        items: Vec<shape_ast::ast::Item>,
+    },
+}
+
+/// A non-fatal warning emitted from inside the comptime mini-VM by
+/// `warning()` (comptime-excellence §4.4). Collected on a thread-local while
+/// the block / handler runs, drained by the driver, and re-emitted by the
+/// compiler with the driving construct's source span so `warning()` output is
+/// spanned and LSDS-routed instead of a bare `eprintln!`.
+#[derive(Debug, Clone)]
+pub(crate) struct ComptimeDiagnostic {
+    pub message: String,
 }
 
 thread_local! {
     static COMPTIME_DIRECTIVES: RefCell<Vec<ComptimeDirective>> = const { RefCell::new(Vec::new()) };
+    static COMPTIME_DIAGNOSTICS: RefCell<Vec<ComptimeDiagnostic>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Clear the thread-local comptime-diagnostics buffer before a comptime run.
+pub(crate) fn clear_comptime_diagnostics() {
+    COMPTIME_DIAGNOSTICS.with(|d| d.borrow_mut().clear());
+}
+
+/// Drain the comptime-diagnostics collected during the last comptime run.
+pub(crate) fn take_comptime_diagnostics() -> Vec<ComptimeDiagnostic> {
+    COMPTIME_DIAGNOSTICS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
+fn push_comptime_diagnostic(diag: ComptimeDiagnostic) {
+    COMPTIME_DIAGNOSTICS.with(|d| d.borrow_mut().push(diag));
 }
 
 pub(crate) fn clear_comptime_directives() {
@@ -292,7 +325,11 @@ pub(crate) fn create_comptime_builtins_module(
     );
 
     // warning(msg: string) -> Unit
-    // Emits a compile-time warning message to stderr.
+    // Collects a compile-time warning. The message flows out on the
+    // thread-local diagnostics buffer; the compiler re-emits it as a
+    // spanned, LSDS-routed warning anchored at the comptime construct
+    // (comptime-excellence §4.4). The old bare `eprintln!` (span-less,
+    // not routed) is deleted.
     register_typed_function(
         &mut module,
         "warning",
@@ -301,7 +338,9 @@ pub(crate) fn create_comptime_builtins_module(
         ConcreteType::Unit,
         |nb_args, _ctx| {
             if let Some(msg) = nb_args.first().and_then(|nb| nb.as_str()) {
-                eprintln!("[comptime warning] {}", msg);
+                push_comptime_diagnostic(ComptimeDiagnostic {
+                    message: msg.to_string(),
+                });
             }
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -336,18 +375,16 @@ pub(crate) fn create_comptime_builtins_module(
     // build_config() -> Object with build configuration
     // Returns a structured object: { debug, version, target_os, target_arch }
     //
-    // R2 (2026-06-18): do NOT pre-register an all-`FieldType::Any` predeclared
-    // schema here. `lookup_schema_for_fields` consults the predeclared cache
-    // FIRST (`mod.rs::lookup_schema_for_fields`), so an Any registration would
-    // shadow the concrete `__ComptimeBuildConfig` named schema
-    // (`builtin_schemas.rs` — `bool debug` + `string version/target_os/
-    // target_arch`). With the Any schema in front, the constructed
-    // `TypedObjectStorage.schema_id` pointed at all-Any fields, and field
-    // access on the bool `debug` surfaced `MakeFieldRef ... FIELD_TAG_ANY`
-    // (ADR-006 §2.7.13 / Q14 forbids fabricating a NativeKind from Any).
-    // Omitting it lets `typed_object_from_pairs` resolve the concrete named
-    // schema (order-insensitive field-set match), so every field carries a
-    // statically-sourceable tag.
+    // S2 (comptime-excellence §4.3): constructed via
+    // `typed_object_for_named_schema("__ComptimeBuildConfig", ...)`, which
+    // resolves the reserved, concrete named schema (`builtin_schemas.rs` —
+    // `bool debug` + `string version/target_os/target_arch`) BY NAME. Every
+    // field carries a statically-sourceable NativeKind (no `FieldType::Any`,
+    // so no `MakeFieldRef ... FIELD_TAG_ANY` — the R2 hazard). Named
+    // resolution supersedes the earlier "rely on order-insensitive field-set
+    // match" posture: `__ComptimeBuildConfig` is now `reserved` and is
+    // therefore SKIPPED by field-set inference, so it could no longer be
+    // reached that way regardless.
     register_typed_function(
         &mut module,
         "build_config",
@@ -356,7 +393,7 @@ pub(crate) fn create_comptime_builtins_module(
         ConcreteType::Object,
         |_args, _ctx| {
             // ADR-006 §2.7.6 / Q8 (Wave 5a Substep 3): build the typed
-            // object via `typed_object_from_pairs` (which already takes
+            // object via `typed_object_for_named_schema` (which takes
             // `KindedSlot`), then project the resulting carrier through
             // its underlying `ValueSlot::as_heap_value()` to recover the
             // `Arc<TypedObjectStorage>` and rewrap it for
@@ -368,12 +405,18 @@ pub(crate) fn create_comptime_builtins_module(
             // deleted; the strict-typed marshal boundary projects each
             // `TypedReturn` variant directly into a typed slot via the
             // function's registered `NativeKind`.
-            let kinded = typed_object_from_pairs(&[
-                ("debug", KindedSlot::from_bool(cfg!(debug_assertions))),
-                ("version", nb_str(env!("CARGO_PKG_VERSION"))),
-                ("target_os", nb_str(std::env::consts::OS)),
-                ("target_arch", nb_str(std::env::consts::ARCH)),
-            ]);
+            let kinded = typed_object_for_named_schema(
+                "__ComptimeBuildConfig",
+                &[
+                    ("debug", KindedSlot::from_bool(cfg!(debug_assertions))),
+                    ("version", nb_str(env!("CARGO_PKG_VERSION"))),
+                    ("target_os", nb_str(std::env::consts::OS)),
+                    ("target_arch", nb_str(std::env::consts::ARCH)),
+                    // Frozen introspection-contract version marker
+                    // (comptime-excellence §4.1.4).
+                    ("comptime_api", KindedSlot::from_int(1)),
+                ],
+            );
             // W17-comptime-vm-dispatch (ADR-006 §2.7.26, 2026-05-12):
             // canonical receiver-recovery pattern per CLAUDE.md
             // "5-arm receiver-recovery soundness rule" — the kinded
@@ -403,8 +446,8 @@ pub(crate) fn create_comptime_builtins_module(
             // the §2.7.7 / Q9 dispatch table (TypedObject arm calls
             // `release_elem` per the ckpt-2 lockstep).
             let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
-            // SAFETY: per `typed_object_from_pairs`'s construction-side
-            // contract, `ptr` points to a live TypedObjectStorage with
+            // SAFETY: per `typed_object_for_named_schema`'s construction-
+            // side contract, `ptr` points to a live TypedObjectStorage with
             // refcount ≥ 1.
             unsafe {
                 shape_value::v2::refcount::v2_retain(&(*ptr).header);
@@ -436,24 +479,22 @@ pub(crate) fn create_comptime_builtins_module(
     //                     Array HashMap Option Result TypedObject
     //                     TraitObject TypeVar Function Tuple Unit Unknown }
     //
-    // Pre-register the anonymous (Any-typed) schema for TypeInfo at
-    // module-creation time. The user-defined TypeKind enum schema is
-    // registered when the stdlib loads `std::core::types`; the closure
-    // looks it up at execution time via `current_registry()`.
+    // S2 (comptime-excellence §4.3): the TypeInfo record is built via the
+    // reserved, concrete named schema `__ComptimeTypeInfo` ({name, kind},
+    // registered at init in `builtin_schemas.rs`) — see
+    // `build_type_info_heap_value`. The previous
+    // `register_predeclared_any_schema(&["kind", "name"])` lazily minted an
+    // anonymous `{kind, name}` schema whose field ORDER was the reverse of
+    // the stdlib `TypeInfo {name, kind}` the compiler uses for the
+    // `OpaqueTypedObject("TypeInfo")` return type, so typed field access
+    // read `name`/`kind` at swapped offsets. Named construction in
+    // {name, kind} order aligns the physical layout with the consumer.
     //
-    // Recursive `Array<FieldInfo>` carrying is a W7-followup once
-    // Array<TypedObject> field-storage is wired post the V3-S5 ckpt-5/
-    // ckpt-6 SURFACE classes (the `op_new_array` / `op_new_object` /
-    // `arr[i]` for `Array<TypedObject>` cluster-2+ residuals; see
-    // CLAUDE.md "Known Constraints" v2-raw-heap-audit entry). The
-    // current scope ships the discriminator + name pair which is enough
-    // for `if ti.kind == TypeKind::TypedObject` dispatch in comptime
-    // user code; `type_info(T).fields` is a downstream slice.
-    let _type_info_schema = shape_runtime::type_schema::register_predeclared_any_schema(&[
-        "kind".to_string(),
-        "name".to_string(),
-    ]);
-
+    // Recursive `Array<FieldInfo>` (`type_info(T).fields`) is a W7 / S6
+    // follow-up once Array<TypedObject> field-storage is wired post the
+    // V3-S5 ckpt-5/ckpt-6 SURFACE classes; the current scope ships the
+    // {name, kind} pair which is enough for `if ti.kind == "TypedObject"`
+    // dispatch in comptime user code.
     let snapshot_for_type_info = type_snapshot;
     register_typed_function(
         &mut module,
@@ -613,7 +654,67 @@ pub(crate) fn create_comptime_builtins_module(
         },
     );
 
+    // Internal comptime directive: ADD generated items from source payload
+    // (§4.5.7 `extend (expr)`). __emit_extend_items(items_payload: string)
+    register_typed_fn_1::<_, Arc<String>>(
+        &mut module,
+        "__emit_extend_items",
+        "Internal: add generated module items from source payload",
+        "items_payload",
+        "string",
+        ConcreteType::Unit,
+        |payload, _ctx| {
+            let items = parse_module_items_payload(payload.as_str())?;
+            push_comptime_directive(ComptimeDirective::ExtendItems { items })?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
+        },
+    );
+
+    // §4.5.7.4: render a string as a valid Shape string literal (surrounding
+    // quotes + escaped quotes/backslashes/newlines/braces) for embedding a
+    // computed string into generated source. Comptime-callable helper backing
+    // `std::comptime::string_lit`.
+    register_typed_fn_1::<_, Arc<String>>(
+        &mut module,
+        "string_lit",
+        "Render a string as a Shape string literal for embedding in generated source",
+        "value",
+        "string",
+        ConcreteType::String,
+        |value, _ctx| {
+            let rendered = render_shape_string_literal(value.as_str());
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(rendered)))
+        },
+    );
+
     module
+}
+
+/// Render `s` as a valid Shape string literal: wrap in double quotes and escape
+/// the characters the Shape lexer treats specially inside a `"..."` literal.
+/// Shape's escape set (string_literals.rs) is `\n \t \r \\ \" \' \0 \{ \} \$ \#`;
+/// braces and `$`/`#` are f-string metacharacters, so escaping them keeps the
+/// rendered literal safe to embed inside generated f-strings too.
+fn render_shape_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '$' => out.push_str("\\$"),
+            '#' => out.push_str("\\#"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
 }
 
 // =========================================================================
@@ -740,10 +841,16 @@ fn build_type_info_heap_value(
     snapshot: &TypeReflectionSnapshot,
 ) -> Result<HeapValue, String> {
     let label = classify_bare_type_name(type_name, snapshot);
-    let kinded = typed_object_from_pairs(&[
-        ("kind", nb_str(label.as_str())),
-        ("name", nb_str(type_name)),
-    ]);
+    // {name, kind} order matches the stdlib `TypeInfo` declaration so the
+    // object's physical slot layout aligns with the compiler's typed field
+    // access on the `OpaqueTypedObject("TypeInfo")` return type (S2).
+    let kinded = typed_object_for_named_schema(
+        "__ComptimeTypeInfo",
+        &[
+            ("name", nb_str(type_name)),
+            ("kind", nb_str(label.as_str())),
+        ],
+    );
     // Wave 2 Round 4 D4 receiver-recovery pattern (same as build_config):
     // slot bits are `*const TypedObjectStorage`; bump refcount for the
     // outer HeapValue::TypedObject wrapper, drop the kinded slot so its
@@ -751,8 +858,8 @@ fn build_type_info_heap_value(
     // table TypedObject arm.
     let bits = kinded.slot().raw();
     let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
-    // SAFETY: `typed_object_from_pairs` returns a fresh raw pointer with
-    // refcount ≥ 1; the v2_retain pairs with the outer
+    // SAFETY: `typed_object_for_named_schema` returns a fresh raw pointer
+    // with refcount ≥ 1; the v2_retain pairs with the outer
     // `HeapValue::TypedObject` wrapper's eventual drop.
     unsafe {
         shape_value::v2::refcount::v2_retain(&(*ptr).header);
