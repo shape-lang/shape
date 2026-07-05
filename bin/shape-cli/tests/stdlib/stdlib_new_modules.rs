@@ -120,13 +120,21 @@ fn test_csv_is_valid() {
 #[test]
 fn test_msgpack_roundtrip_number() {
     init_runtime();
+    // WF-2E (2026-07-05): encode/decode are real serializers now (the
+    // prior "pending N4/N6" Err stub is deleted). Full hex round-trip
+    // recovers the original int value.
     assert!(eval_to_bool(
         r#"
         use std::core::msgpack
-        let encoded = msgpack::encode(42)
-        match encoded {
-            Err(_) => true,
-            Ok(_) => false,
+        match msgpack::encode(42) {
+            Ok(hex) => match msgpack::decode(hex) {
+                Ok(v) => match v {
+                    Json::Int(i) => i == 42,
+                    _ => false,
+                },
+                Err(_) => false,
+            },
+            Err(_) => false,
         }
     "#
     ));
@@ -135,13 +143,19 @@ fn test_msgpack_roundtrip_number() {
 #[test]
 fn test_msgpack_roundtrip_string() {
     init_runtime();
+    // WF-2E (2026-07-05): full byte-array round-trip recovers the string.
     assert!(eval_to_bool(
         r#"
         use std::core::msgpack
-        let encoded = msgpack::encode("hello")
-        match encoded {
-            Err(_) => true,
-            Ok(_) => false,
+        match msgpack::encode_bytes("hello") {
+            Ok(b) => match msgpack::decode_bytes(b) {
+                Ok(v) => match v {
+                    Json::Str(s) => s == "hello",
+                    _ => false,
+                },
+                Err(_) => false,
+            },
+            Err(_) => false,
         }
     "#
     ));
@@ -150,14 +164,17 @@ fn test_msgpack_roundtrip_string() {
 #[test]
 fn test_msgpack_encode_decode_basic() {
     init_runtime();
-    // MessagePack decode is exported but deferred pending N6 any-output marshal.
+    // WF-2E (2026-07-05): decode is a real deserializer now. MessagePack
+    // byte 0x00 is positive-fixint 0, which decodes to `Json::Int(0)`.
     assert!(eval_to_bool(
         r#"
         use std::core::msgpack
-        let decoded = msgpack::decode("00")
-        match decoded {
-            Err(_) => true,
-            Ok(_) => false,
+        match msgpack::decode("00") {
+            Ok(v) => match v {
+                Json::Int(i) => i == 0,
+                _ => false,
+            },
+            Err(_) => false,
         }
     "#
     ));
