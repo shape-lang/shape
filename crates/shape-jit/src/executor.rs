@@ -865,6 +865,27 @@ impl JITExecutor {
                         location: None,
                     }));
                 }
+                crate::context::JIT_SIGNAL_INT_OVERFLOW => {
+                    // WF-1A i64-checked (D3): JIT codegen emits a guarded
+                    // signed-overflow branch on `int` (i64) add/sub/mul
+                    // returning this signal instead of letting `iadd`/`isub`/
+                    // `imul` silently wrap. Maps to the same structured
+                    // integer-overflow diagnostic the bytecode VM raises via
+                    // `binop_int_checked(i64::checked_add/sub/mul)`
+                    // (`executor/arithmetic/mod.rs:150-152`), so `--mode jit`
+                    // reports the SAME overflow as `--mode vm` (the
+                    // audit-2026-07-04 §4.4 D3 split-brain). The signal carries
+                    // no operands, so the message omits the specific values the
+                    // VM interpolates; the class (`integer ... overflow ...
+                    // exceeds the int (i64) range`) and the remediation are the
+                    // same.
+                    return Ok(Err(shape_runtime::error::ShapeError::RuntimeError {
+                        message: "integer overflow: result exceeds the int (i64) \
+                                  range; widen explicitly with `as number` or `as bigint`"
+                            .to_string(),
+                        location: None,
+                    }));
+                }
                 crate::context::SIGNAL_TRAMPOLINE_ERROR => {
                     // r5c-2-bz-b-jit-err-surface: a VM-trampoline FFI call
                     // (`jit_call_method`) surfaced a clean `Err` (e.g.

@@ -4704,8 +4704,22 @@ impl BytecodeCompiler {
                     .map(|arg| self.span_to_source_location(arg.span())),
             });
         }
-        let indexed_native_array_callback =
-            array_hof_with_index_form && static_array_callback_arity == Some(2);
+        // WF-1A Item 4 (hashmap-filter-garbage, audit 2026-07-04 §4(d)): the
+        // `*Indexed` rewrite below must fire ONLY for a statically-proven Array
+        // receiver. Without the `receiver_is_array` gate, an arity-2 closure on
+        // a NON-array receiver (e.g. `HashMap.filter(|k, v| ...)`) rewrote the
+        // method name to the Array-only `filterIndexed`, which no HashMap/Set
+        // registry map registers — the VM cleanly errored "no method
+        // filterIndexed on receiver kind Ptr(HashMap)" while the JIT dispatch
+        // produced a nondeterministic garbage pointer-int (exit 0). Gating on
+        // `receiver_is_array` keeps a HashMap/Set arity-2 `filter`/`map` under
+        // its plain name so it dispatches to the collection's own 2-arg handler
+        // (`HASHMAP_METHODS["filter"]` -> `v2_filter`, etc.) identically in both
+        // modes. (`prefer_native_array_method` below already ANDs
+        // `receiver_is_array`; this gate additionally guards the name rewrite.)
+        let indexed_native_array_callback = receiver_is_array
+            && array_hof_with_index_form
+            && static_array_callback_arity == Some(2);
         let prefer_native_array_method = (prefer_native_array_phf_method(method)
             || indexed_native_array_callback)
             && receiver_is_array;

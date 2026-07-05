@@ -120,6 +120,22 @@ pub const SIGNAL_TRAMPOLINE_ERROR: i32 = -3;
 /// fall-through shape.
 pub const JIT_SIGNAL_INDEX_OUT_OF_BOUNDS: i32 = -4;
 
+/// Signal returned by a JIT-compiled function when a checked `int` (i64)
+/// add/sub/mul overflowed the signed 64-bit range. Per THE RULE
+/// (numeric-conversion D3, user 2026-06-01) `int` arithmetic is EXACT across
+/// the full i64 range: overflow is a structured RUNTIME error, NOT a silent
+/// two's-complement wrap. The bytecode VM raises this via
+/// `binop_int_checked(i64::checked_add/sub/mul)`
+/// (`crates/shape-vm/src/executor/arithmetic/mod.rs:150-152`); the JIT codegen
+/// emits a guarded signed-overflow branch (`compile_int64_checked_arith` in
+/// `crates/shape-jit/src/mir_compiler/rvalues.rs`) that early-`return_`s this
+/// signal instead of letting `iadd`/`isub`/`imul` silently wrap. The executor
+/// maps it to the same overflow diagnostic, so `--mode jit` reports the SAME
+/// error as `--mode vm` (closing the audit-2026-07-04 §4.4 D3 split-brain).
+/// This is a real checked-arith guarded branch — NOT a `Convert<X>To<Y>`
+/// coercion. Mirrors the `JIT_SIGNAL_DIVISION_BY_ZERO` fall-through shape.
+pub const JIT_SIGNAL_INT_OVERFLOW: i32 = -5;
+
 // ============================================================================
 // Compile-time layout verification for JITContext
 // ============================================================================

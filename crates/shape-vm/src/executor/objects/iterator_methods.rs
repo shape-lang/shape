@@ -667,23 +667,18 @@ pub(crate) fn handle_hashmap_iter(
     let recv = args
         .first()
         .ok_or_else(|| type_error("HashMap.iter(): missing receiver"))?;
-    if recv.kind != NativeKind::Ptr(HeapKind::HashMap) {
-        return Err(type_error(format!(
-            "HashMap.iter(): receiver must be a HashMap, got kind {:?}",
-            recv.kind
-        )));
-    }
-    // Recover the HashMapKindedRef via the canonical single-discriminator
-    // path (`as_heap_value()` → `HeapValue::HashMap`).
-    let kref = match recv.slot.as_heap_value() {
-        HeapValue::HashMap(kref) => kref.clone(),
-        other => {
-            return Err(type_error(format!(
-                "HashMap.iter(): receiver HeapValue is not a HashMap ({:?})",
-                other.kind()
-            )));
-        }
-    };
+    // WF-1A Item 5b (hashmap-iter carrier mismatch): recover the receiver via
+    // the kinded HashMap path — every HashMap producer
+    // (`KindedSlot::from_hashmap`, `v2_set`, `v2_merge`, ...) stores
+    // `Arc::into_raw(Arc<HashMapKindedRef>)` bits, NOT an `Arc<HeapValue>`, so
+    // the previous `recv.slot.as_heap_value()` recovery was a type-confused
+    // read (UB / spurious "not a HashMap" error) on every production receiver.
+    // `hashmap_methods::as_hashmap` performs the canonical
+    // `Arc::<HashMapKindedRef>::from_raw` + share-bump recovery the sibling
+    // HashMap handlers use — the consumer reads the carrier the producer wrote
+    // (ADR-005 §1 single-discriminator preserved; no bridge/decode-hop).
+    let arc = crate::executor::objects::hashmap_methods::as_hashmap(recv)?;
+    let kref = (*arc).clone();
     let state = IteratorState::new(IteratorSource::HashMap(kref));
     Ok(wrap_iterator(state))
 }

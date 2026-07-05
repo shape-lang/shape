@@ -60,11 +60,13 @@ pub(crate) mod suite {
     /// verifying the divergence against the current binary; NEVER remove one
     /// without the fix actually landing.
     ///
-    /// All 23 entries were hand-verified 2026-07-05 (shape 0.3.2 @ 1fb805b3):
-    /// each class representative reproduced through BOTH the in-process
-    /// `JITExecutor` path and the release binary (`target/release/shape run
-    /// --mode jit` vs `--mode vm` — VM correct in every case, all 117 green
-    /// under the sibling VM target). Five classes:
+    /// The 23 original entries were hand-verified 2026-07-05 (shape 0.3.2 @
+    /// 1fb805b3): each class representative reproduced through BOTH the
+    /// in-process `JITExecutor` path and the release binary
+    /// (`target/release/shape run --mode jit` vs `--mode vm` — VM correct in
+    /// every case, all 117 green under the sibling VM target). Class 5
+    /// (`jit-i64-overflow-silent-wrap`, 1 entry) was RETIRED by the WF-1A
+    /// i64-checked fix (2026-07-05), leaving 22 entries across four classes:
     ///
     /// 1. `jit-i8-u8-result-misread-as-bool` (17): any program whose final
     ///    value ORIGINATES from an i8/u8-typed binding (even after widening
@@ -78,9 +80,13 @@ pub(crate) mod suite {
     ///    reinterpreted as f64 (WF-0B baseline class hof-return-kind-raw-bits).
     /// 4. `jit-number-eq-int-literal-false` (1): `5.0 == 5` (literal adoption
     ///    in comparison) evaluates false under JIT, true under VM.
-    /// 5. `jit-i64-overflow-silent-wrap` (1): i64::MAX + 1 silently wraps to
-    ///    i64::MIN under JIT instead of the D3 structured overflow error —
-    ///    the audit-2026-07-04 §4.4 split-brain this target exists to watch.
+    ///
+    /// RETIRED — 5. `jit-i64-overflow-silent-wrap` (was 1 entry): i64::MAX + 1
+    ///    silently wrapped to i64::MIN under JIT instead of the D3 structured
+    ///    overflow error (the audit-2026-07-04 §4.4 split-brain this target
+    ///    exists to watch). WF-1A now emits a guarded signed-overflow branch
+    ///    in the JIT (`compile_int64_checked_arith`); both modes raise the
+    ///    same overflow error, so the case is asserted unconditionally.
     pub const KNOWN_JIT_DIVERGENT: &[KnownDivergence] = &[
         // -- class 1: jit-i8-u8-result-misread-as-bool ---------------------
         KnownDivergence {
@@ -219,13 +225,14 @@ pub(crate) mod suite {
             observed: "Bool(false) instead of Bool(true)",
         },
         // -- class 5: jit-i64-overflow-silent-wrap (audit §4.4 / D3) -------
-        KnownDivergence {
-            id: "category_e_silent_lossy_forbidden::e_int_overflow_is_runtime_error",
-            source: "let a: int = 9223372036854775807\nlet b: int = 1\na + b",
-            class: "jit-i64-overflow-silent-wrap",
-            observed: "Integer(-9223372036854775808) silent wrap instead of the \
-                       D3 structured integer-overflow runtime error",
-        },
+        // RETIRED by WF-1A i64-checked (2026-07-05): the JIT now emits a
+        // guarded signed-overflow branch on `int` (i64) add/sub/mul
+        // (`compile_int64_checked_arith` → `JIT_SIGNAL_INT_OVERFLOW`), so
+        // `let a: int = i64::MAX\nlet b: int = 1\na + b` raises the SAME
+        // structured integer-overflow runtime error under `--mode jit` as
+        // under `--mode vm`. The conformance case
+        // `category_e_silent_lossy_forbidden::e_int_overflow_is_runtime_error`
+        // is now asserted unconditionally in BOTH modes (no ledger entry).
     ];
 
     /// JIT-mode `ShapeTest` wrapper. Same builder surface as the real one
