@@ -6314,6 +6314,9 @@ impl BytecodeCompiler {
             }
             | Statement::ReplaceModuleExpr {
                 expression: expr, ..
+            }
+            | Statement::ExtendItemsExpr {
+                expression: expr, ..
             } => self.implicit_generic_expr_requires_concrete_emission(expr, param_names, visiting),
             Statement::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(|expr| {
                 self.implicit_generic_expr_requires_concrete_emission(expr, param_names, visiting)

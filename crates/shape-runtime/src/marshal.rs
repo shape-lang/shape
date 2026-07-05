@@ -30,7 +30,7 @@
 
 use crate::module_exports::ModuleContext;
 use crate::typed_module_exports::TypedReturn;
-use shape_value::NativeKind;
+use shape_value::{KindedSlot, NativeKind};
 use std::sync::Arc;
 
 /// Read a typed value from an 8-byte raw-bits slot.
@@ -46,6 +46,49 @@ pub trait FromSlot: Sized {
     /// this trait method): `bits` must have been produced by a slot
     /// that was statically proven to have kind `NATIVE_KIND`.
     fn from_slot(bits: u64) -> Self;
+
+    /// Read from a caller-side [`KindedSlot`], checking the slot's
+    /// **stamped** kind (from the VM's §2.7.7 parallel kind track — never
+    /// fabricated from bits) is in this parameter's kind class before
+    /// reading the carrier. This is the class-aware fixed-arity entry
+    /// point (ADR-006 §2.7.5 amendment §4.2.2a/2b): the scrutinee is the
+    /// stamped kind, the read is per-carrier-native, and no type
+    /// information is reconstructed from untyped bits.
+    ///
+    /// Default impl: scalars match exactly, heap `Ptr(_)` params accept
+    /// any `Ptr(_)` (the concrete `HeapValue` arm is the body's
+    /// discriminator per ADR-005 §1), on match the carrier is read via
+    /// [`Self::from_slot`]. `Arc<String>` (String/StringV2 carrier split)
+    /// and `Option<f64>` (nullable) override this to read each carrier
+    /// natively.
+    fn from_kinded(slot: &KindedSlot) -> Result<Self, MarshalError> {
+        let declared = Self::NATIVE_KIND;
+        let actual = slot.kind();
+        // Class-membership PREDICATE (not a per-HeapKind dispatch): a heap
+        // (`Ptr`) parameter accepts any heap carrier — the dispatch shell
+        // does NOT re-derive HeapKind granularity here (that would
+        // duplicate the type system at a runtime boundary); the concrete
+        // HeapKind discriminator is `slot.as_heap_value()` + `HeapValue`
+        // match inside the body's `from_slot` (ADR-005 §1). Scalars are
+        // exact. Spelled as a `matches!` predicate — the same non-dispatch
+        // Ptr-membership form as `NativeKind::is_refcounted`, NOT a
+        // `Ptr(_) =>` dispatch arm (check-heapkind-wildcards.sh CHECK 14:
+        // new HeapKind variants are caught at the `as_heap_value()` /
+        // `HeapValue` seam, not absorbed by a wildcard dispatch arm here).
+        let in_class = if matches!(declared, NativeKind::Ptr(_)) {
+            matches!(actual, NativeKind::Ptr(_))
+        } else {
+            actual == declared
+        };
+        if in_class {
+            Ok(Self::from_slot(slot.raw()))
+        } else {
+            Err(MarshalError::KindMismatch {
+                expected: declared,
+                got: actual,
+            })
+        }
+    }
 }
 
 /// Write a typed value into an 8-byte raw-bits slot.
@@ -71,6 +114,14 @@ pub enum MarshalError {
     /// Arg count mismatch between the function's registered arity and
     /// the slot slice handed in by the dispatcher.
     ArgCount { expected: usize, got: usize },
+    /// A caller-side slot's stamped `NativeKind` was not in the declared
+    /// parameter's kind class (e.g. an `int` argument reaching a `string`
+    /// parameter). Compared between two independently-stamped sources
+    /// (caller kind track vs registration schema) — not a bit decode.
+    KindMismatch {
+        expected: NativeKind,
+        got: NativeKind,
+    },
     /// The body returned an `Err(String)` — surfaced verbatim.
     Body(String),
 }
@@ -80,6 +131,13 @@ impl std::fmt::Display for MarshalError {
         match self {
             MarshalError::ArgCount { expected, got } => {
                 write!(f, "expected {} arg(s), got {}", expected, got)
+            }
+            MarshalError::KindMismatch { expected, got } => {
+                write!(
+                    f,
+                    "argument kind mismatch: expected {:?}, got {:?}",
+                    expected, got
+                )
             }
             MarshalError::Body(msg) => f.write_str(msg),
         }
@@ -122,6 +180,24 @@ impl FromSlot for Option<f64> {
         let v = f64::from_bits(bits);
         if v.is_nan() { None } else { Some(v) }
     }
+
+    /// Nullable `number?` class (ADR-006 §4.2.2a): a stamped
+    /// `NativeKind::Null` is the absence signal (kind IS the
+    /// discriminator, bits ignored — R5b-2 disposition) → `None`; the
+    /// `NullableFloat64` NaN-sentinel carrier reads via `from_slot`; a
+    /// plain `Float64` reads as `Some`.
+    #[inline]
+    fn from_kinded(slot: &KindedSlot) -> Result<Self, MarshalError> {
+        match slot.kind() {
+            NativeKind::Null => Ok(None),
+            NativeKind::NullableFloat64 => Ok(Self::from_slot(slot.raw())),
+            NativeKind::Float64 => Ok(Some(f64::from_bits(slot.raw()))),
+            got => Err(MarshalError::KindMismatch {
+                expected: NativeKind::NullableFloat64,
+                got,
+            }),
+        }
+    }
 }
 
 impl FromSlot for bool {
@@ -150,6 +226,27 @@ impl FromSlot for Arc<String> {
         unsafe {
             Arc::increment_strong_count(ptr);
             Arc::from_raw(ptr)
+        }
+    }
+
+    /// `string` carrier split (ADR-006 §4.2.2b): a `string` parameter can
+    /// receive EITHER the `Arc<String>` carrier (`NativeKind::String`) or
+    /// the v2-raw `*const StringObj` carrier (`NativeKind::StringV2` —
+    /// e.g. an `Array<string>` element read). Each carrier is read
+    /// natively — the `String` arm shares the `Arc<String>`, the
+    /// `StringV2` arm reads the `StringObj` UTF-8 content (via the
+    /// kind-directed `KindedSlot::as_str`) into a fresh `Arc<String>`.
+    /// No structural bridging between the two carriers (the per-carrier
+    /// discriminator decision is respected, not papered over).
+    #[inline]
+    fn from_kinded(slot: &KindedSlot) -> Result<Self, MarshalError> {
+        match slot.kind() {
+            NativeKind::String => Ok(Self::from_slot(slot.raw())),
+            NativeKind::StringV2 => Ok(Arc::new(slot.as_str().unwrap_or("").to_string())),
+            got => Err(MarshalError::KindMismatch {
+                expected: NativeKind::String,
+                got,
+            }),
         }
     }
 }
@@ -1176,12 +1273,16 @@ impl ToSlot for Arc<Vec<u8>> {
 
 // ─────────────────────── per-arity register helpers ───────────────────────
 
-/// Body type stored in the typed registry: takes raw `&[u64]` slots and
-/// returns a [`TypedReturn`]. Constructed only by the typed
-/// `register_typed_fn_N` helpers, which type-check the body's actual
-/// Rust signature against `FromSlot` for each arg.
+/// Body type stored in the typed registry: takes per-position typed
+/// [`KindedSlot`] carriers (kinds stamped by the VM's §2.7.7 parallel
+/// kind track) and returns a [`TypedReturn`]. Internal Rust trait object
+/// → carries `KindedSlot`, not raw `&[u64]` (ADR-006 §2.7.5). Constructed
+/// only by the typed `register_typed_fn_N` helpers, which type-check the
+/// body's actual Rust signature against `FromSlot` for each arg.
 type TypedInvoke = Arc<
-    dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String> + Send + Sync,
+    dyn for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync,
 >;
 
 /// Register a 0-arg native function whose body takes only the
@@ -1243,7 +1344,7 @@ pub fn register_typed_fn_1<F, P0>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
+        let p0 = P0::from_kinded(&slots[0])?;
         body(p0, ctx)
     });
     let params = vec![crate::module_exports::ModuleParam {
@@ -1288,8 +1389,8 @@ pub fn register_typed_fn_2<F, P0, P1>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
         body(p0, p1, ctx)
     });
     let params = param_names
@@ -1338,9 +1439,9 @@ pub fn register_typed_fn_3<F, P0, P1, P2>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
         body(p0, p1, p2, ctx)
     });
     let params = param_names
@@ -1404,7 +1505,7 @@ pub fn register_typed_fn_1_full<F, P0>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
+        let p0 = P0::from_kinded(&slots[0])?;
         body(p0, ctx)
     });
     install(
@@ -1443,8 +1544,8 @@ pub fn register_typed_fn_2_full<F, P0, P1>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
         body(p0, p1, ctx)
     });
     install(
@@ -1484,9 +1585,9 @@ pub fn register_typed_fn_3_full<F, P0, P1, P2>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
         body(p0, p1, p2, ctx)
     });
     install(
@@ -1545,10 +1646,10 @@ pub fn register_typed_fn_4<F, P0, P1, P2, P3>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
-        let p3 = P3::from_slot(slots[3]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
+        let p3 = P3::from_kinded(&slots[3])?;
         body(p0, p1, p2, p3, ctx)
     });
     let params = param_names
@@ -1605,11 +1706,11 @@ pub fn register_typed_fn_5<F, P0, P1, P2, P3, P4>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
-        let p3 = P3::from_slot(slots[3]);
-        let p4 = P4::from_slot(slots[4]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
+        let p3 = P3::from_kinded(&slots[3])?;
+        let p4 = P4::from_kinded(&slots[4])?;
         body(p0, p1, p2, p3, p4, ctx)
     });
     let params = param_names
@@ -1668,12 +1769,12 @@ pub fn register_typed_fn_6<F, P0, P1, P2, P3, P4, P5>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
-        let p3 = P3::from_slot(slots[3]);
-        let p4 = P4::from_slot(slots[4]);
-        let p5 = P5::from_slot(slots[5]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
+        let p3 = P3::from_kinded(&slots[3])?;
+        let p4 = P4::from_kinded(&slots[4])?;
+        let p5 = P5::from_kinded(&slots[5])?;
         body(p0, p1, p2, p3, p4, p5, ctx)
     });
     let params = param_names
@@ -1728,10 +1829,10 @@ pub fn register_typed_fn_4_full<F, P0, P1, P2, P3>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
-        let p3 = P3::from_slot(slots[3]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
+        let p3 = P3::from_kinded(&slots[3])?;
         body(p0, p1, p2, p3, ctx)
     });
     install(
@@ -1779,11 +1880,11 @@ pub fn register_typed_fn_5_full<F, P0, P1, P2, P3, P4>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
-        let p3 = P3::from_slot(slots[3]);
-        let p4 = P4::from_slot(slots[4]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
+        let p3 = P3::from_kinded(&slots[3])?;
+        let p4 = P4::from_kinded(&slots[4])?;
         body(p0, p1, p2, p3, p4, ctx)
     });
     install(
@@ -1833,12 +1934,12 @@ pub fn register_typed_fn_6_full<F, P0, P1, P2, P3, P4, P5>(
             }
             .into());
         }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
-        let p3 = P3::from_slot(slots[3]);
-        let p4 = P4::from_slot(slots[4]);
-        let p5 = P5::from_slot(slots[5]);
+        let p0 = P0::from_kinded(&slots[0])?;
+        let p1 = P1::from_kinded(&slots[1])?;
+        let p2 = P2::from_kinded(&slots[2])?;
+        let p3 = P3::from_kinded(&slots[3])?;
+        let p4 = P4::from_kinded(&slots[4])?;
+        let p5 = P5::from_kinded(&slots[5])?;
         body(p0, p1, p2, p3, p4, p5, ctx)
     });
     install(
@@ -1907,7 +2008,7 @@ fn install(
 
 type TypedAsyncInvoke = Arc<
     dyn Fn(
-            Vec<u64>,
+            Vec<KindedSlot>,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<TypedReturn, String>> + Send>,
         > + Send
@@ -1930,17 +2031,19 @@ pub fn register_typed_async_fn_1<F, Fut, P0>(
     P0: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
-        if slots.len() != 1 {
-            let err = MarshalError::ArgCount {
-                expected: 1,
-                got: slots.len(),
-            };
-            return Box::pin(async move { Err(err.into()) });
-        }
-        let p0 = P0::from_slot(slots[0]);
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
         let body = body.clone();
-        Box::pin(async move { body(p0).await })
+        Box::pin(async move {
+            if slots.len() != 1 {
+                return Err(MarshalError::ArgCount {
+                    expected: 1,
+                    got: slots.len(),
+                }
+                .into());
+            }
+            let p0 = P0::from_kinded(&slots[0])?;
+            body(p0).await
+        })
     });
     let params = vec![crate::module_exports::ModuleParam {
         name: param_name.into(),
@@ -1974,18 +2077,20 @@ pub fn register_typed_async_fn_2<F, Fut, P0, P1>(
     P1: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
-        if slots.len() != 2 {
-            let err = MarshalError::ArgCount {
-                expected: 2,
-                got: slots.len(),
-            };
-            return Box::pin(async move { Err(err.into()) });
-        }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
         let body = body.clone();
-        Box::pin(async move { body(p0, p1).await })
+        Box::pin(async move {
+            if slots.len() != 2 {
+                return Err(MarshalError::ArgCount {
+                    expected: 2,
+                    got: slots.len(),
+                }
+                .into());
+            }
+            let p0 = P0::from_kinded(&slots[0])?;
+            let p1 = P1::from_kinded(&slots[1])?;
+            body(p0, p1).await
+        })
     });
     let params = param_names
         .iter()
@@ -2023,19 +2128,21 @@ pub fn register_typed_async_fn_3<F, Fut, P0, P1, P2>(
     P2: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND, P2::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
-        if slots.len() != 3 {
-            let err = MarshalError::ArgCount {
-                expected: 3,
-                got: slots.len(),
-            };
-            return Box::pin(async move { Err(err.into()) });
-        }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
         let body = body.clone();
-        Box::pin(async move { body(p0, p1, p2).await })
+        Box::pin(async move {
+            if slots.len() != 3 {
+                return Err(MarshalError::ArgCount {
+                    expected: 3,
+                    got: slots.len(),
+                }
+                .into());
+            }
+            let p0 = P0::from_kinded(&slots[0])?;
+            let p1 = P1::from_kinded(&slots[1])?;
+            let p2 = P2::from_kinded(&slots[2])?;
+            body(p0, p1, p2).await
+        })
     });
     let params = param_names
         .iter()
@@ -2076,17 +2183,19 @@ pub fn register_typed_async_fn_1_full<F, Fut, P0>(
     P0: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
-        if slots.len() != 1 {
-            let err = MarshalError::ArgCount {
-                expected: 1,
-                got: slots.len(),
-            };
-            return Box::pin(async move { Err(err.into()) });
-        }
-        let p0 = P0::from_slot(slots[0]);
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
         let body = body.clone();
-        Box::pin(async move { body(p0).await })
+        Box::pin(async move {
+            if slots.len() != 1 {
+                return Err(MarshalError::ArgCount {
+                    expected: 1,
+                    got: slots.len(),
+                }
+                .into());
+            }
+            let p0 = P0::from_kinded(&slots[0])?;
+            body(p0).await
+        })
     });
     install_async(
         module,
@@ -2114,18 +2223,20 @@ pub fn register_typed_async_fn_2_full<F, Fut, P0, P1>(
     P1: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
-        if slots.len() != 2 {
-            let err = MarshalError::ArgCount {
-                expected: 2,
-                got: slots.len(),
-            };
-            return Box::pin(async move { Err(err.into()) });
-        }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
         let body = body.clone();
-        Box::pin(async move { body(p0, p1).await })
+        Box::pin(async move {
+            if slots.len() != 2 {
+                return Err(MarshalError::ArgCount {
+                    expected: 2,
+                    got: slots.len(),
+                }
+                .into());
+            }
+            let p0 = P0::from_kinded(&slots[0])?;
+            let p1 = P1::from_kinded(&slots[1])?;
+            body(p0, p1).await
+        })
     });
     install_async(
         module,
@@ -2154,19 +2265,21 @@ pub fn register_typed_async_fn_3_full<F, Fut, P0, P1, P2>(
     P2: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND, P2::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
-        if slots.len() != 3 {
-            let err = MarshalError::ArgCount {
-                expected: 3,
-                got: slots.len(),
-            };
-            return Box::pin(async move { Err(err.into()) });
-        }
-        let p0 = P0::from_slot(slots[0]);
-        let p1 = P1::from_slot(slots[1]);
-        let p2 = P2::from_slot(slots[2]);
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
         let body = body.clone();
-        Box::pin(async move { body(p0, p1, p2).await })
+        Box::pin(async move {
+            if slots.len() != 3 {
+                return Err(MarshalError::ArgCount {
+                    expected: 3,
+                    got: slots.len(),
+                }
+                .into());
+            }
+            let p0 = P0::from_kinded(&slots[0])?;
+            let p1 = P1::from_kinded(&slots[1])?;
+            let p2 = P2::from_kinded(&slots[2])?;
+            body(p0, p1, p2).await
+        })
     });
     install_async(
         module,
@@ -2226,16 +2339,15 @@ fn install_async(
 //
 // The variadic body signature is
 // `Fn(&[KindedSlot], &ModuleContext) -> Result<TypedReturn, String>`,
-// matching the §2.7.1.4 dispatch-slice contract. The `arg_kinds` field
-// of [`TypedModuleFunction`] is left as a per-param-position table
-// derived from the registered `ModuleParam` slice (each slot is
-// declared `NativeKind::Bool` placeholder for the variadic case;
-// dispatch reads bits and bundles them as `KindedSlot` carriers
-// regardless of the placeholder kind, since the body interprets the
-// slots itself per its variadic contract).
+// matching the §2.7.1.4 dispatch-slice contract. The per-position kinds
+// arrive already stamped on the caller's `KindedSlot` carriers (sourced
+// from the VM's §2.7.7 parallel kind track at the dispatch site) and are
+// passed through UNCHANGED — the body sees the true kinds. There is no
+// registration-time placeholder: `arg_kinds` is left empty for variadic
+// registrations (per-call kinds come solely from the caller's track,
+// never a fabricated `NativeKind::Bool` default — ADR-006 §2.7.8).
 
 use crate::typed_module_exports::TypedModuleFunction;
-use shape_value::KindedSlot;
 
 /// Body signature for a [`register_typed_function`] caller.
 ///
@@ -2275,29 +2387,18 @@ pub fn register_typed_function<F>(
 
     let name = name.into();
     let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
-    // Variadic registration: `arg_kinds` is a placeholder schema. The
-    // dispatcher constructs `KindedSlot`s by pairing each slot with the
-    // declared `NativeKind` from the typed registry — for variadic
-    // bodies the kind-per-position is the body's contract, not the
-    // dispatcher's. Phase 2c wires per-position `NativeKind` derivation
-    // from the schema annotations.
-    let arg_kinds: Vec<NativeKind> = params.iter().map(|_| NativeKind::Bool).collect();
+    // Variadic registration carries NO per-position kind schema: the
+    // caller's `KindedSlot` carriers already hold the true, compile-time-
+    // stamped kinds (VM §2.7.7 parallel kind track). `arg_kinds` stays
+    // empty — no `NativeKind::Bool` placeholder is fabricated (ADR-006
+    // §2.7.8: never a Bool-default).
+    let arg_kinds: Vec<NativeKind> = Vec::new();
     let return_type_str = return_type.shape_type_name();
 
-    let body = Arc::new(body);
-    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
-        // Phase 1.B variadic shim: read each raw u64 slot as a
-        // placeholder `KindedSlot::Bool`. The body is responsible for
-        // interpreting the slot bits per its own contract (which is the
-        // pre-bulldozer behaviour — variadic bodies always inspected
-        // their args). Phase 2c lands proper per-position kind
-        // threading from the registered schema.
-        let kinded: Vec<KindedSlot> = slots
-            .iter()
-            .map(|&bits| KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Bool))
-            .collect();
-        body(&kinded, ctx)
-    });
+    // The variadic body already takes `&[KindedSlot]`; the dispatcher
+    // hands it the caller's carriers straight through — true kinds flow
+    // end-to-end, no re-wrap, no placeholder.
+    let invoke: TypedInvoke = Arc::new(body);
 
     module.add_schema_only(
         name.clone(),
@@ -2343,16 +2444,14 @@ pub fn register_typed_async_function<F, Fut>(
 
     let name = name.into();
     let arg_types: Vec<String> = params.iter().map(|p| p.type_name.clone()).collect();
-    let arg_kinds: Vec<NativeKind> = params.iter().map(|_| NativeKind::Bool).collect();
+    // No placeholder kinds: the owned `Vec<KindedSlot>` handed to the body
+    // carries the caller's true, compile-time-stamped kinds (§2.7.7).
+    let arg_kinds: Vec<NativeKind> = Vec::new();
     let return_type_str = return_type.shape_type_name();
 
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<u64>| {
-        let kinded: Vec<KindedSlot> = slots
-            .into_iter()
-            .map(|bits| KindedSlot::new(shape_value::ValueSlot::from_raw(bits), NativeKind::Bool))
-            .collect();
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
         let body = body.clone();
-        Box::pin(async move { body(kinded).await })
+        Box::pin(async move { body(slots).await })
     });
 
     module.add_schema_only(

@@ -291,22 +291,34 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
         reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
     },
     WhitelistEntry {
-        rule: WhitelistRule::SchemaName("__ComptimeTargetField"),
+        rule: WhitelistRule::SchemaName("__ComptimeFieldDescriptor"),
         section: "§4.D.11",
         permanent: true,
-        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+        reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
     },
     WhitelistEntry {
-        rule: WhitelistRule::SchemaName("__ComptimeTargetParam"),
+        rule: WhitelistRule::SchemaName("__ComptimeParamDescriptor"),
         section: "§4.D.11",
         permanent: true,
-        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+        reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ComptimeAnnotationDescriptor"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
     },
     WhitelistEntry {
         rule: WhitelistRule::SchemaName("__ComptimeTarget"),
         section: "§4.D.11",
         permanent: true,
-        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+        reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__ComptimeTypeInfo"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
     },
     // ----- TRANSITIONAL row (§4.D.3 + §4.D.5 + §4.D.10-emission)
     //       NARROWED at W17.2-C close (post-W17.2-B PROPAGATE landings)

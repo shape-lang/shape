@@ -45,6 +45,20 @@ pub struct TypeSchema {
     /// Computed lazily and cached. Skipped during serialization since it is derived.
     #[serde(skip)]
     pub content_hash: Option<[u8; 32]>,
+    /// Reserved-schema flag (ADR / comptime-excellence §4.1.4 / §4.3).
+    ///
+    /// `true` for the small set of concrete, named schemas that back the
+    /// comptime introspection contract (`__ComptimeTarget`,
+    /// `__ComptimeFieldDescriptor`, `TypeInfo`, …). Reserved schemas are
+    /// registered deterministically at registry init and are resolved BY
+    /// NAME at construction, so their ids never carry load-bearing meaning
+    /// across a registry boundary. The flag exists so ad-hoc field-set /
+    /// field-order inference (`lookup_schema_for_fields`) can *skip* them:
+    /// an ordinary `{name, kind, …}` object must never silently bind to a
+    /// contract schema, and vice versa (the flag, not a `__` prefix,
+    /// because user-visible names like `TypeInfo` carry no prefix).
+    #[serde(default)]
+    pub reserved: bool,
 }
 
 impl TypeSchema {
@@ -112,6 +126,7 @@ impl TypeSchema {
             field_sources: HashMap::new(),
             enum_info: None,
             content_hash: None,
+            reserved: false,
         }
     }
 
@@ -216,6 +231,7 @@ impl TypeSchema {
             field_sources: HashMap::new(),
             enum_info: Some(enum_info),
             content_hash: None,
+            reserved: false,
         }
     }
 
@@ -354,6 +370,7 @@ impl TypeSchema {
             field_sources: HashMap::new(),
             enum_info: None,
             content_hash: None,
+            reserved: false,
         }
     }
 }

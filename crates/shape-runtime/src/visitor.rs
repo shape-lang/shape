@@ -514,6 +514,9 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Statement) {
         Statement::ReplaceModuleExpr { expression, .. } => {
             walk_expr(visitor, expression);
         }
+        Statement::ExtendItemsExpr { expression, .. } => {
+            walk_expr(visitor, expression);
+        }
         Statement::ReplaceBodyExpr { expression, .. } => {
             walk_expr(visitor, expression);
         }

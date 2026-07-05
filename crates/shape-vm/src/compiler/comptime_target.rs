@@ -190,31 +190,21 @@ impl ComptimeTarget {
     /// `NativeKind::Ptr(HeapKind::TypedObject)`. A mismatched element is a
     /// structural compile-time error, not a runtime kind-inference fallback.
     pub fn to_nanboxed(&self) -> Result<KindedSlot, ShapeError> {
-        use shape_runtime::type_schema::{
-            register_predeclared_any_schema, typed_object_from_pairs,
-        };
+        // S2 (comptime-excellence §4.3): every descriptor object is built
+        // through `typed_object_for_named_schema`, which resolves a
+        // reserved, concrete, pre-registered schema BY NAME. The previous
+        // `register_predeclared_any_schema` + `typed_object_from_pairs`
+        // path lazily minted an anonymous `__predecl_*` schema in the
+        // compiler's ambient registry, whose late-allocated id collided
+        // with a `__mod_*` module-object schema at the same numeric id in
+        // the handler VM's bytecode registry (cross-registry schema-id
+        // reuse). Named reserved schemas are registered at init in every
+        // registry, so the baked-in `schema_id` means the same thing on
+        // both sides of the boundary.
+        use shape_runtime::type_schema::typed_object_for_named_schema;
 
         let nb_str = |s: &str| KindedSlot::from_string_arc(Arc::new(s.to_string()));
         let nb_string = |s: String| KindedSlot::from_string_arc(Arc::new(s));
-        let ensure_schema = |names: &[&str]| {
-            let field_names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
-            let _ = register_predeclared_any_schema(&field_names);
-        };
-
-        // Pre-register the field schemas used below so
-        // `typed_object_from_pairs` can resolve them.
-        ensure_schema(&["name", "args"]);
-        ensure_schema(&["name", "type", "const"]);
-        ensure_schema(&["name", "type", "annotations", "optional"]);
-        ensure_schema(&[
-            "kind",
-            "name",
-            "fields",
-            "params",
-            "return_type",
-            "annotations",
-            "captures",
-        ]);
 
         let kind_str = match self.kind {
             AnnotationTargetKind::Function => "function",
@@ -280,10 +270,10 @@ impl ComptimeTarget {
             let mut ann_objs: Vec<KindedSlot> = Vec::with_capacity(fanns.len());
             for (aname, aargs) in fanns {
                 let args_arr = nb_string_array(aargs.clone())?;
-                ann_objs.push(typed_object_from_pairs(&[
-                    ("name", nb_string(aname.clone())),
-                    ("args", args_arr),
-                ]));
+                ann_objs.push(typed_object_for_named_schema(
+                    "__ComptimeAnnotationDescriptor",
+                    &[("name", nb_string(aname.clone())), ("args", args_arr)],
+                ));
             }
             let anns_arr = nb_object_array(ann_objs)?;
             let is_optional = is_option_type(ftype);
@@ -292,12 +282,15 @@ impl ComptimeTarget {
             } else {
                 ftype.clone()
             };
-            field_objs.push(typed_object_from_pairs(&[
-                ("name", nb_string(fname.clone())),
-                ("type", nb_string(effective_type)),
-                ("annotations", anns_arr),
-                ("optional", KindedSlot::from_bool(is_optional)),
-            ]));
+            field_objs.push(typed_object_for_named_schema(
+                "__ComptimeFieldDescriptor",
+                &[
+                    ("name", nb_string(fname.clone())),
+                    ("type", nb_string(effective_type)),
+                    ("annotations", anns_arr),
+                    ("optional", KindedSlot::from_bool(is_optional)),
+                ],
+            ));
         }
         let fields_arr = nb_object_array(field_objs)?;
 
@@ -306,11 +299,14 @@ impl ComptimeTarget {
             .params
             .iter()
             .map(|(pname, ptype, is_const)| {
-                typed_object_from_pairs(&[
-                    ("name", nb_string(pname.clone())),
-                    ("type", nb_string(ptype.clone())),
-                    ("const", KindedSlot::from_bool(*is_const)),
-                ])
+                typed_object_for_named_schema(
+                    "__ComptimeParamDescriptor",
+                    &[
+                        ("name", nb_string(pname.clone())),
+                        ("type", nb_string(ptype.clone())),
+                        ("const", KindedSlot::from_bool(*is_const)),
+                    ],
+                )
             })
             .collect();
         let params_arr = nb_object_array(param_objs)?;
@@ -328,15 +324,18 @@ impl ComptimeTarget {
         // captures: array of strings (captured names)
         let captures_arr = nb_string_array(self.captures.clone())?;
 
-        Ok(typed_object_from_pairs(&[
-            ("kind", nb_str(kind_str)),
-            ("name", nb_string(self.name.clone())),
-            ("fields", fields_arr),
-            ("params", params_arr),
-            ("return_type", ret),
-            ("annotations", ann_arr),
-            ("captures", captures_arr),
-        ]))
+        Ok(typed_object_for_named_schema(
+            "__ComptimeTarget",
+            &[
+                ("kind", nb_str(kind_str)),
+                ("name", nb_string(self.name.clone())),
+                ("fields", fields_arr),
+                ("params", params_arr),
+                ("return_type", ret),
+                ("annotations", ann_arr),
+                ("captures", captures_arr),
+            ],
+        ))
     }
 }
 

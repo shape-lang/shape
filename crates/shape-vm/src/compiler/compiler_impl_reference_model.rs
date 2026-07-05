@@ -421,7 +421,8 @@ impl BytecodeCompiler {
                     edges,
                 );
             }
-            Statement::ReplaceModuleExpr { expression, .. } => {
+            Statement::ReplaceModuleExpr { expression, .. }
+            | Statement::ExtendItemsExpr { expression, .. } => {
                 Self::analyze_expr_for_ref_mutation(
                     expression,
                     caller_name,
@@ -1750,6 +1751,46 @@ impl BytecodeCompiler {
         })
     }
 
+    /// S3 / Q47 (design §4.1.1 duplicate-application ruling): applying the same
+    /// annotation to one item more than once is a compile error in v1, naming
+    /// both application sites. This keeps `own_args(target, name)` unambiguous
+    /// by construction (never a silent outermost-wins guess). Repeated
+    /// application (e.g. `@example` twice) is a named v2 item, gated on an
+    /// invocation-index mechanism — not relaxed here.
+    pub(crate) fn check_duplicate_annotations(
+        &self,
+        annotations: &[shape_ast::ast::Annotation],
+        fallback_span: shape_ast::ast::Span,
+    ) -> Result<()> {
+        for (i, first) in annotations.iter().enumerate() {
+            for second in &annotations[i + 1..] {
+                if first.name != second.name {
+                    continue;
+                }
+                let first_span = if first.span == shape_ast::ast::Span::DUMMY {
+                    fallback_span
+                } else {
+                    first.span
+                };
+                let second_span = if second.span == shape_ast::ast::Span::DUMMY {
+                    fallback_span
+                } else {
+                    second.span
+                };
+                let first_loc = self.span_to_source_location(first_span);
+                let second_loc = self.span_to_source_location(second_span);
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "annotation '@{}' is applied more than once to the same item (first at line {}, again at line {}); apply it at most once",
+                        first.name, first_loc.line, second_loc.line
+                    ),
+                    location: Some(second_loc),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// STAGE Modules: build synthetic top-level AST items for every NAMED
     /// import of the root module, so the shared type checker resolves imported
     /// functions and types at every use position (let-initializer, nested
@@ -2055,6 +2096,15 @@ impl BytecodeCompiler {
         } else {
             TypeAnalysisMode::FailFast
         };
+        // S3 (design §4.5): snapshot the exact program handed to the analyzer.
+        // If a comptime `set return` / `set param` directive later mutates a
+        // function's signature during body compilation, we re-run this same
+        // analysis with the mutated signature patched in — turning the
+        // `set return string` on `fn answer() { 42 }` segfault into an
+        // ordinary body-vs-signature compile error (reusing the explicit
+        // annotation path, not a new checker).
+        self.directive_reanalysis_program = Some(analysis_program.clone());
+        self.directive_reanalysis_known_bindings = known_bindings.clone();
         if let Err(errors) = analyze_program_with_mode_and_comptime_context(
             &analysis_program,
             self.source_text.as_deref(),

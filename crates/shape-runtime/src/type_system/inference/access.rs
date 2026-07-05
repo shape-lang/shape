@@ -797,9 +797,19 @@ impl TypeInferenceEngine {
                 self.check_comptime_builtin_args(arg_types, &[string], call_span)?;
                 Type::Concrete(TypeAnnotation::Never)
             }
+            "string_lit" => {
+                self.check_comptime_builtin_args(arg_types, &[string.clone()], call_span)?;
+                string
+            }
             "build_config" => {
                 self.check_comptime_builtin_args(arg_types, &[], call_span)?;
                 Self::comptime_object_type(vec![
+                    // `comptime_api` is the frozen introspection-contract
+                    // version marker (comptime-excellence §4.1.4); must stay in
+                    // sync with the `__ComptimeBuildConfig` schema
+                    // (`builtin_schemas.rs`) and the `build_config` value
+                    // builder (`comptime_builtins.rs`).
+                    ("comptime_api", TypeAnnotation::Basic("int".to_string())),
                     ("debug", TypeAnnotation::Basic("bool".to_string())),
                     ("target_arch", TypeAnnotation::Basic("string".to_string())),
                     ("target_os", TypeAnnotation::Basic("string".to_string())),

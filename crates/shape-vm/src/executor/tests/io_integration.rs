@@ -108,8 +108,9 @@ fn call_export(module: &ModuleExports, name: &str, args: &[KindedSlot]) -> Typed
             "{name}: arg {idx} kind mismatch in test harness"
         );
     }
-    let raw: Vec<u64> = args.iter().map(KindedSlot::raw).collect();
-    (export.invoke)(&raw, &test_ctx()).unwrap_or_else(|err| panic!("{name} failed: {err}"))
+    // The typed body takes `&[KindedSlot]` carriers directly (kinds flow
+    // from the caller's §2.7.7 track); pass the test args through.
+    (export.invoke)(args, &test_ctx()).unwrap_or_else(|err| panic!("{name} failed: {err}"))
 }
 
 fn expect_string(value: TypedReturn) -> String {
@@ -408,8 +409,8 @@ fn test_io_handle_close_and_reuse_errors() {
 
     let export = module.typed_exports().get("read").expect("read export");
     let raw_args = vec![io_handle_slot(&handle), int_slot(-1)];
-    let raw: Vec<u64> = raw_args.iter().map(KindedSlot::raw).collect();
-    let err = (export.invoke)(&raw, &test_ctx()).expect_err("read from closed handle should error");
+    let err =
+        (export.invoke)(&raw_args, &test_ctx()).expect_err("read from closed handle should error");
     assert!(err.contains("handle is closed"), "unexpected error: {err}");
 
     let _ = std::fs::remove_file(&path);

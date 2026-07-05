@@ -1,0 +1,94 @@
+/// @module std::llm::tools
+/// Compile-time LLM tool-schema derivation and prompt validation.
+///
+/// The part of LLM integration that is genuinely compile-time-shaped is turning
+/// a typed function signature into the JSON tool schema a model is told about,
+/// and checking that prompt templates only reference parameters that exist.
+/// Both are done here at compile time — **no model is ever called during a
+/// build**. The runtime side (actually sending the schema to a model over
+/// HTTP) is ordinary userland code over `std::core::http` under `NetConnect`.
+///
+/// # Example
+///
+/// ```shape
+/// from std::llm::tools use { @llm_tool }
+///
+/// @llm_tool("Get current weather for a city")
+/// fn get_weather(city: string, units: string) -> string {
+///     f"\{\"city\": \"{city}\", \"temp_c\": 21\}"
+/// }
+///
+/// print(get_weather_tool_def())
+/// ```
+
+/// `@llm_tool(description)` — generate `{fn}_tool_def() -> string` returning the
+/// function's JSON tool schema, derived from its typed signature. The schema
+/// and the function can never drift, because the schema IS the signature. A
+/// missing return type, an unannotated parameter, or a parameter whose type has
+/// no JSON mapping is a compile error naming the exact offender.
+pub annotation llm_tool(description) {
+    targets: [function]
+    comptime post(target, ctx) {
+        if target.return_type == None {
+            error(f"@llm_tool requires an explicit return type on '{target.name}'")
+        }
+        let mut props = ""
+        let mut required = ""
+        let mut first = true
+        for p in target.params {
+            if p.type == "_" {
+                error(f"@llm_tool requires a type annotation on parameter '{p.name}' of '{target.name}'")
+            }
+            let mut jt = ""
+            if p.type == "int" {
+                jt = "integer"
+            } else if p.type == "number" {
+                jt = "number"
+            } else if p.type == "bool" {
+                jt = "boolean"
+            } else if p.type == "string" {
+                jt = "string"
+            }
+            if jt == "" {
+                error(f"@llm_tool: parameter '{p.name}' of '{target.name}' has type '{p.type}', which has no JSON Schema mapping")
+            }
+            let prop = f"\"{p.name}\": \{\"type\": \"{jt}\"\}"
+            let req = f"\"{p.name}\""
+            if first {
+                props = prop
+                required = req
+                first = false
+            } else {
+                props = f"{props}, {prop}"
+                required = f"{required}, {req}"
+            }
+        }
+        let schema = f"\{\"name\": \"{target.name}\", \"description\": \"{description}\", \"parameters\": \{\"type\": \"object\", \"properties\": \{{props}\}, \"required\": [{required}]\}\}"
+        extend (f"fn {target.name}_tool_def() -> string \{ {string_lit(schema)} \}")
+    }
+}
+
+/// `@prompt(template)` — validate a prompt template at compile time. Every
+/// `{placeholder}` in the template must name a parameter of the annotated
+/// function; a typo (`{audence}` for `{audience}`) is a compile error naming
+/// the placeholder and the function, long before any model is called.
+pub annotation prompt(template) {
+    targets: [function]
+    comptime post(target, ctx) {
+        let parts = template.split("{")
+        for part in parts {
+            if part.contains("}") {
+                let ph = part.split("}")[0]
+                let mut found = false
+                for p in target.params {
+                    if p.name == ph {
+                        found = true
+                    }
+                }
+                if !found {
+                    error(f"@prompt: placeholder \{{ph}\} has no matching parameter on '{target.name}'")
+                }
+            }
+        }
+    }
+}

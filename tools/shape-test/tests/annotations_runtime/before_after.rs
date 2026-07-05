@@ -224,3 +224,32 @@ print(mul(4, 5))
     .expect_output_contains("5")
     .expect_output_contains("20");
 }
+
+#[test]
+fn ctx_target_calls_original_impl_from_after_hook() {
+    // §4.1.5: `ctx.target` is a typed function value statically bound to the
+    // annotated function's ORIGINAL implementation. A runtime hook can call it
+    // (or pass it on) — it invokes the original body without re-triggering the
+    // hook. This is the surface WF-2C's `@remote` hard-depends on.
+    ShapeTest::new(
+        r#"
+annotation traced() {
+  after(args, result, ctx) {
+    let again = ctx.target(3)
+    print(f"again={again}")
+    result
+  }
+}
+
+@traced()
+fn square(x: int) -> int {
+  x * x
+}
+
+let r = square(5)
+print(r)
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("again=9\n25");
+}

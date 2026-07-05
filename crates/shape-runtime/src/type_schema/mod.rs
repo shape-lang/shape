@@ -138,11 +138,12 @@ fn lookup_predeclared_schema_id(fields: &[&str]) -> Option<SchemaId> {
     }
 
     // Ordered match against user-registered / stdlib schemas in the ambient
-    // registry.
+    // registry. Reserved contract schemas (§4.3) are skipped — they resolve
+    // by name only, never by field-order inference.
     reg.type_names()
         .filter_map(|name| reg.get(name))
         .find(|schema| {
-            if schema.fields.len() != fields.len() {
+            if schema.reserved || schema.fields.len() != fields.len() {
                 return false;
             }
             schema
@@ -194,10 +195,17 @@ fn lookup_schema_for_fields(fields: &[&str]) -> Option<TypeSchema> {
 
     let reg = current_registry();
     // Order-insensitive match over the current registry's named schemas.
+    //
+    // Reserved schemas (the comptime introspection contract — §4.3) are
+    // SKIPPED: they are only ever constructed BY NAME
+    // (`typed_object_for_named_schema`), never inferred from a field set,
+    // so an ad-hoc object whose field-name set happens to coincide with a
+    // contract schema (e.g. `{name, kind}` vs `__ComptimeTypeInfo`) can
+    // never silently bind to it, and vice versa.
     if let Some(schema) = reg
         .type_names()
         .filter_map(|name| reg.get(name))
-        .find(|schema| schema_matches_field_set(schema, fields))
+        .find(|schema| !schema.reserved && schema_matches_field_set(schema, fields))
     {
         return Some(schema.clone());
     }
@@ -233,6 +241,89 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
             field_names.join(", ")
         )
     });
+    build_typed_object_with_schema(&schema, fields)
+}
+
+/// Construct a `HeapValue::TypedObject` `KindedSlot` for a **named,
+/// pre-registered** schema, resolving the schema BY NAME in the current
+/// ambient registry (comptime-excellence §4.3).
+///
+/// This is the collision-free construction path for the comptime
+/// introspection contract (`__ComptimeTarget`, `__ComptimeFieldDescriptor`,
+/// `__ComptimeBuildConfig`, `__ComptimeTypeInfo`, …). Unlike
+/// [`typed_object_from_pairs`], the schema is never *inferred* from the
+/// field set (which can alias an unrelated named type at the same field
+/// signature, or an unrelated schema reusing the same numeric id in a
+/// different registry). Resolving by name in the ambient registry — which
+/// registered the contract schemas deterministically at init — yields a
+/// `schema_id` that means the same thing in whatever registry later
+/// dereferences the object.
+///
+/// `fields` may be supplied in any order; they are matched to the schema's
+/// declared field order by name. A missing schema, an arity mismatch, or a
+/// field name not present in the schema is a `panic!` with an
+/// internal-invariant message: every caller is in-tree and every contract
+/// schema is registered at init, so all three are in-tree bugs, never user
+/// states.
+pub fn typed_object_for_named_schema(
+    schema_name: &str,
+    fields: &[(&str, KindedSlot)],
+) -> KindedSlot {
+    let schema = current_registry()
+        .get(schema_name)
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "Reserved comptime schema '{schema_name}' is not registered in the current \
+             registry. It must be registered at registry init (builtin_schemas.rs) in every \
+             registry that hosts comptime construction/execution."
+            )
+        });
+    if schema.fields.len() != fields.len() {
+        panic!(
+            "Field count mismatch constructing '{}': schema declares {} field(s) {:?}, caller \
+             supplied {} — [{}]",
+            schema_name,
+            schema.fields.len(),
+            schema
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            fields.len(),
+            fields
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    for (name, _) in fields {
+        if !schema.has_field(name) {
+            panic!(
+                "Field '{name}' is not declared by reserved comptime schema '{schema_name}' \
+                 (declared: {:?})",
+                schema
+                    .fields
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    build_typed_object_with_schema(&schema, fields)
+}
+
+/// Shared TypedObject constructor: given an already-resolved schema and a
+/// set of `(name, KindedSlot)` field values, materialize the
+/// `TypedObjectStorage` with the schema's `id`, ordering slots by the
+/// schema's declared field order. Refcount discipline: each input pair's
+/// heap share is retained (via `KindedSlot::clone`) and moved into the
+/// object's slot list; the object's `_drop` retires those shares.
+fn build_typed_object_with_schema(
+    schema: &TypeSchema,
+    fields: &[(&str, KindedSlot)],
+) -> KindedSlot {
     let value_by_name: HashMap<&str, &KindedSlot> =
         fields.iter().map(|(name, value)| (*name, value)).collect();
 

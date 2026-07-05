@@ -500,6 +500,7 @@ statement = {
     | continue_stmt ~ ";"?
     | variable_decl ~ ";"?
     | assignment ~ ";"?
+    | extend_items_stmt
     | extend_statement
     | remove_target_stmt ~ ";"?
     | set_param_value_stmt ~ ";"?
@@ -523,6 +524,10 @@ replace_body_stmt = { "replace" ~ "body" ~ (replace_body_expr_payload | ("{" ~ s
 replace_body_expr_payload = { "(" ~ expression ~ ")" }
 replace_module_stmt = { "replace" ~ "module" ~ replace_module_expr_payload }
 replace_module_expr_payload = { "(" ~ expression ~ ")" }
+// `extend (expr)` — computed-generation directive (design §4.5.7). The `(`
+// lookahead disambiguates from `extend type_name { ... }` (a type_name never
+// starts with `(`).
+extend_items_stmt = { "extend" ~ "(" ~ expression ~ ")" }
 
 return_stmt = { return_keyword ~ expression? }
 // Note: Don't use ("(" ~ expression ~ ")") - that breaks compound expressions like (a) or (b)
@@ -1297,6 +1302,7 @@ block_statement = {
     return_stmt
     | variable_decl
     | assignment
+    | extend_items_stmt
     | extend_statement
     | remove_target_stmt
     | set_param_value_stmt
@@ -1311,6 +1317,7 @@ block_item = {
     return_stmt
     | variable_decl
     | assignment
+    | extend_items_stmt
     | extend_statement
     | remove_target_stmt
     | set_param_value_stmt

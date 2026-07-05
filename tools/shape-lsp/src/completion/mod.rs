@@ -1306,7 +1306,8 @@ fn method_body_contains_offset(method: &MethodDef, offset: usize) -> bool {
             | Statement::SetReturnExpr { span, .. }
             | Statement::ReplaceBodyExpr { span, .. }
             | Statement::ReplaceBody { span, .. }
-            | Statement::ReplaceModuleExpr { span, .. } => *span,
+            | Statement::ReplaceModuleExpr { span, .. }
+            | Statement::ExtendItemsExpr { span, .. } => *span,
         };
         span_contains_offset(span, offset)
     })

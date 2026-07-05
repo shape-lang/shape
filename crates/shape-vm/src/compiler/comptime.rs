@@ -25,7 +25,18 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
         "build_config",
         0,
         "build_config",
-        Some(&["debug", "target_arch", "target_os", "version"]),
+        // Return-fields hint so the comptime compiler can resolve field
+        // access on the result (`cfg.debug`, `cfg.comptime_api`, …). Must
+        // stay in sync with the `__ComptimeBuildConfig` schema
+        // (`builtin_schemas.rs`) — `comptime_api` is the frozen
+        // introspection-contract version marker (comptime-excellence §4.1.4).
+        Some(&[
+            "comptime_api",
+            "debug",
+            "target_arch",
+            "target_os",
+            "version",
+        ]),
     ),
     // W7 (2026-05-17) — `type_info(T)` comptime builtin per
     // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
@@ -36,6 +47,9 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
     // so the comptime compiler can resolve field access on the result
     // (`ti.name` / `ti.kind`).
     ("type_info", 1, "type_info", Some(&["kind", "name"])),
+    // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
+    // as a Shape source literal for embedding into `extend (expr)` output.
+    ("string_lit", 1, "string_lit", None),
 ];
 
 /// Comptime execution result.
@@ -50,6 +64,31 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
 pub(crate) struct ComptimeExecutionResult {
     pub value: KindedSlot,
     pub directives: Vec<super::comptime_builtins::ComptimeDirective>,
+    /// Non-fatal diagnostics (`warning()` / comptime `print()`) collected
+    /// during execution, drained from the thread-local buffer. The compiler
+    /// re-emits each with the driving construct's source span
+    /// (comptime-excellence §4.4).
+    pub warnings: Vec<super::comptime_builtins::ComptimeDiagnostic>,
+}
+
+/// §4.4 comptime-handler `ctx` param type. Field NAMES + ORDER match the
+/// `__ComptimeContext` reserved schema (builtin_schemas.rs) so typed field
+/// access on `ctx.module_path` / `ctx.file` resolves the right offsets.
+fn comptime_ctx_param_type() -> TypeAnnotation {
+    TypeAnnotation::Object(vec![
+        ObjectTypeField {
+            name: "module_path".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "file".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+    ])
 }
 
 fn comptime_target_param_type() -> TypeAnnotation {
@@ -733,6 +772,8 @@ pub(crate) fn execute_comptime_with_target(
         extensions,
         trait_impl_keys,
         known_type_symbols,
+        "",
+        "",
     )
 }
 
@@ -773,6 +814,8 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
+    ctx_module_path: &str,
+    ctx_file: &str,
 ) -> Result<ComptimeExecutionResult> {
     if handler_params.iter().filter(|p| p.is_variadic).count() > 1 {
         return Err(ShapeError::RuntimeError {
@@ -806,7 +849,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
             type_annotation: if idx == 0 {
                 Some(comptime_target_param_type())
             } else if idx == 1 {
-                Some(TypeAnnotation::Object(Vec::new()))
+                Some(comptime_ctx_param_type())
             } else {
                 None
             },
@@ -880,8 +923,23 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         }
     }
 
-    // Keep comptime ctx structured so annotations can grow into richer APIs.
-    let ctx_nb = shape_runtime::type_schema::typed_object_from_pairs(&[]);
+    // §4.4 comptime `ctx` compile-context: { module_path, file }. Built via
+    // the reserved named schema (S2) so it never collides with an unrelated
+    // ad-hoc field set. `build_config()` remains the single build-info surface
+    // (no `ctx.build`).
+    let ctx_nb = shape_runtime::type_schema::typed_object_for_named_schema(
+        "__ComptimeContext",
+        &[
+            (
+                "module_path",
+                KindedSlot::from_string_arc(std::sync::Arc::new(ctx_module_path.to_string())),
+            ),
+            (
+                "file",
+                KindedSlot::from_string_arc(std::sync::Arc::new(ctx_file.to_string())),
+            ),
+        ],
+    );
 
     // Wrap the handler body in a function that takes the target parameter.
     let func_name = "__comptime_handler_fn__".to_string();
@@ -1027,13 +1085,19 @@ fn execute_in_runtime_with_module_bindings(
         });
 
         super::comptime_builtins::clear_comptime_directives();
+        super::comptime_builtins::clear_comptime_diagnostics();
         let value = vm.execute(None).map_err(|e| ShapeError::RuntimeError {
             message: format!("Comptime handler execution failed: {}", e),
             location: None,
         })?;
         let directives = super::comptime_builtins::take_comptime_directives();
+        let warnings = super::comptime_builtins::take_comptime_diagnostics();
 
-        Ok(ComptimeExecutionResult { value, directives })
+        Ok(ComptimeExecutionResult {
+            value,
+            directives,
+            warnings,
+        })
     };
 
     if tokio::runtime::Handle::try_current().is_ok() {
@@ -1830,12 +1894,10 @@ mod tests {
         let err_msg = format!("{:?}", result.err().unwrap());
         // Verify the error reaches us through the CallValue → invoke_module_fn_id_stub
         // → body Err(String) path; the message format includes the
-        // `[comptime error] ...` prefix the body emits. The arg-kind
-        // marshalling shim is a pre-existing `register_typed_function`
-        // variadic-Bool issue (see `register_typed_function` in
-        // `shape-runtime/src/marshal.rs:2031`) — out of W17 territory; the
-        // arg shows as `<Bool>` rather than the user string until that
-        // upstream marshal layer fix lands. Dispatch path is intact.
+        // `[comptime error] ...` prefix the body emits. WF-1B S1 (marshal
+        // Bool-collapse deletion) landed: the string argument's true kind
+        // now flows from the §2.7.7 stack track, so the body reads the
+        // user's message verbatim (the old `<Bool>` placeholder is gone).
         assert!(
             err_msg.contains("[comptime error]") || err_msg.contains("W17 test error"),
             "error message should surface the comptime-error path: {}",

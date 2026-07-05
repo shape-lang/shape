@@ -4,7 +4,6 @@ use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{
     DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Statement, TypeAnnotation,
-    VarKind, VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
@@ -627,7 +626,18 @@ impl BytecodeCompiler {
         comptime_helpers.sort_by(|a, b| a.name.cmp(&b.name));
         comptime_helpers.dedup_by(|a, b| a.name == b.name);
 
-        super::comptime::execute_comptime_with_annotation_handler(
+        // §4.4: the comptime `ctx` compile-context (module_path + source file).
+        let ctx_module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+        let ctx_file = self
+            .program
+            .debug_info
+            .source_map
+            .get_file(self.current_file_id)
+            .unwrap_or("")
+            .to_string();
+
+        let context = format!("the @{} annotation handler", annotation.name);
+        let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
             &handler.params,
             target_value,
@@ -638,15 +648,13 @@ impl BytecodeCompiler {
             &extensions,
             trait_impls,
             known_type_symbols,
+            &ctx_module_path,
+            &ctx_file,
         )
-        .map_err(|e| ShapeError::RuntimeError {
-            message: format!(
-                "Comptime handler '{}' failed: {}",
-                annotation.name,
-                super::helpers::strip_error_prefix(&e)
-            ),
-            location: Some(self.span_to_source_location(handler_span)),
-        })
+        .map_err(|e| self.build_comptime_failure(&e, handler_span, &context))?;
+        // §4.4: re-emit any `warning()` output anchored at this handler site.
+        self.surface_comptime_warnings(&execution.warnings, handler_span);
+        Ok(execution)
     }
 
     fn collect_scoped_helpers_for_expr(&self, expr: &Expr) -> Vec<FunctionDef> {
@@ -1127,6 +1135,67 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// §4.5.7: apply a computed `extend (expr)` directive — register + compile
+    /// the generated items additively at the annotated item's module scope.
+    /// Free functions and `extend Type { ... }` blocks are the v1 surface (the
+    /// two shapes the derive/LLM showcases emit); other top-level item kinds
+    /// surface a clean compile error rather than a partial implementation.
+    ///
+    /// Function signatures are registered in a first pass so generated items may
+    /// reference one another, then bodies are compiled — the same two-phase
+    /// shape the top-level pipeline uses.
+    pub(super) fn apply_comptime_extend_items(
+        &mut self,
+        items: Vec<shape_ast::ast::Item>,
+        target_name: &str,
+    ) -> Result<()> {
+        use shape_ast::ast::Item;
+
+        let mut functions: Vec<FunctionDef> = Vec::new();
+        let mut extends: Vec<shape_ast::ast::ExtendStatement> = Vec::new();
+        for item in items {
+            match item {
+                Item::Function(func_def, _) => functions.push(func_def),
+                Item::Extend(extend, _) => extends.push(extend),
+                other => {
+                    return Err(ShapeError::RuntimeError {
+                        message: format!(
+                            "comptime `extend (...)` generated an item kind that is not \
+                             supported in v1 — only free functions and `extend Type {{ ... }}` \
+                             blocks may be generated (got {})",
+                            Self::generated_item_kind_name(&other)
+                        ),
+                        location: None,
+                    });
+                }
+            }
+        }
+
+        for func_def in &functions {
+            self.register_function(func_def)?;
+        }
+        for func_def in &functions {
+            self.compile_function_body(func_def)?;
+        }
+        for extend in extends {
+            self.apply_comptime_extend(extend, target_name)?;
+        }
+        Ok(())
+    }
+
+    fn generated_item_kind_name(item: &shape_ast::ast::Item) -> &'static str {
+        use shape_ast::ast::Item;
+        match item {
+            Item::Function(..) => "function",
+            Item::Extend(..) => "extend",
+            Item::StructType(..) => "type",
+            Item::Enum(..) => "enum",
+            Item::Trait(..) => "trait",
+            Item::Impl(..) => "impl",
+            _ => "item",
+        }
+    }
+
     fn annotate_comptime_extend_method_params(
         &self,
         methods: &mut [shape_ast::ast::types::MethodDef],
@@ -1371,6 +1440,10 @@ impl BytecodeCompiler {
                     self.apply_comptime_extend(extend, target_name)
                         .map_err(|e| e.to_string())?;
                 }
+                super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
+                    self.apply_comptime_extend_items(items, target_name)
+                        .map_err(|e| e.to_string())?;
+                }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     removed = true;
                     break;
@@ -1416,6 +1489,10 @@ impl BytecodeCompiler {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
                     self.apply_comptime_extend(extend, target_name)
+                        .map_err(|e| e.to_string())?;
+                }
+                super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
+                    self.apply_comptime_extend_items(items, target_name)
                         .map_err(|e| e.to_string())?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
@@ -1543,35 +1620,18 @@ impl BytecodeCompiler {
                     self.function_aliases
                         .insert("__original__".to_string(), shadow_name);
 
-                    // Inject `let args = [param1, param2, ...]` at the start of the
-                    // replacement body so the replacement can forward all arguments.
-                    let param_idents: Vec<Expr> = func_def
-                        .params
-                        .iter()
-                        .filter_map(|p| {
-                            p.simple_name()
-                                .map(|n| Expr::Identifier(n.to_string(), Span::DUMMY))
-                        })
-                        .collect();
-                    let mut new_body = Vec::new();
-                    if !param_idents.is_empty() {
-                        new_body.push(Statement::VariableDecl(
-                            VariableDecl {
-                                kind: VarKind::Let,
-                                is_mut: false,
-                                pattern: DestructurePattern::Identifier(
-                                    "args".to_string(),
-                                    Span::DUMMY,
-                                ),
-                                type_annotation: None,
-                                value: Some(Expr::Array(param_idents, Span::DUMMY)),
-                                ownership: Default::default(),
-                            },
-                            Span::DUMMY,
-                        ));
-                    }
-                    new_body.extend(body);
-                    func_def.body = new_body;
+                    // §4.5.5: `__original__` is a direct typed call to the
+                    // shadow function, which carries the original's EXACT
+                    // signature (params + return type cloned above). Forwarding
+                    // is written `__original__(a, b, ...)` with the real
+                    // parameter names and is type-checked like any other call.
+                    // The previous convention injected a hidden
+                    // `let args = [param1, ...]` binding and expected
+                    // `__original__(args)` — that passed one array where N
+                    // scalars are declared, silently reinterpreting an array
+                    // pointer as an int (audit garbage / arity error). No
+                    // hidden binding is injected into user scope anymore.
+                    func_def.body = body;
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
                     return Err(
@@ -1584,8 +1644,96 @@ impl BytecodeCompiler {
         Ok(removed)
     }
 
+    /// S3 (design §4.5): a comptime `set return` / `set param` directive
+    /// changed `effective_def`'s signature. Re-run the ordinary whole-program
+    /// type analysis with the mutated signature patched in, so the directive
+    /// re-enters the SAME body-vs-signature checker the explicit-annotation
+    /// path uses. This turns the `set return string` on `fn answer() { 42 }`
+    /// segfault into an ordinary compile error.
+    pub(super) fn recheck_directive_mutated_signature(
+        &mut self,
+        effective_def: &FunctionDef,
+    ) -> Result<()> {
+        // Record this function's post-directive signature so later re-analyses
+        // (for sibling directive-mutated functions) observe it too.
+        self.directive_signature_overrides.insert(
+            effective_def.name.clone(),
+            (
+                effective_def.params.clone(),
+                effective_def.return_type.clone(),
+            ),
+        );
+        // Only the strict compiler path executes code, so only it can segfault.
+        // In RecoverAll (LSP) mode best-effort analysis already ran and nothing
+        // executes; re-running here would double-report diagnostics.
+        if !matches!(
+            self.type_diagnostic_mode,
+            crate::compiler::TypeDiagnosticMode::Strict
+        ) {
+            return Ok(());
+        }
+        let Some(base_program) = self.directive_reanalysis_program.clone() else {
+            return Ok(());
+        };
+        // Patch every known directive override into a clone of the analyzed
+        // program. Only signature fields (return type + per-param type
+        // annotation / default value) are patched; bodies are left as analyzed.
+        let mut program = base_program;
+        let mut patched_any = false;
+        for item in &mut program.items {
+            if let shape_ast::ast::Item::Function(func, _) = item
+                && let Some((params, return_type)) =
+                    self.directive_signature_overrides.get(&func.name)
+            {
+                func.return_type = return_type.clone();
+                for (param, patched) in func.params.iter_mut().zip(params.iter()) {
+                    param.type_annotation = patched.type_annotation.clone();
+                    param.default_value = patched.default_value.clone();
+                }
+                patched_any = true;
+            }
+        }
+        if !patched_any {
+            return Ok(());
+        }
+        let known_bindings = self.directive_reanalysis_known_bindings.clone();
+        let result = shape_runtime::type_system::analyze_program_with_mode_and_comptime_context(
+            &program,
+            self.source_text.as_deref(),
+            None,
+            Some(&known_bindings),
+            shape_runtime::type_system::TypeAnalysisMode::FailFast,
+            self.comptime_mode,
+        );
+        if let Err(errors) = result {
+            return Err(self.directive_signature_type_error(&effective_def.name, errors));
+        }
+        Ok(())
+    }
+
+    /// Wrap the post-directive analysis failure with an attribution that names
+    /// the comptime directive as the source of the incompatible signature.
+    fn directive_signature_type_error(
+        &self,
+        func_name: &str,
+        errors: Vec<shape_runtime::type_system::TypeErrorWithLocation>,
+    ) -> ShapeError {
+        let (detail, location) = match Self::type_errors_to_shape(errors) {
+            ShapeError::SemanticError { message, location } => (message, location),
+            other => (format!("{}", other), None),
+        };
+        ShapeError::SemanticError {
+            message: format!(
+                "a comptime directive set a return/parameter type on '{}' that its body does not satisfy: {}",
+                func_name, detail
+            ),
+            location,
+        }
+    }
+
     /// Validate that all annotations on a function are allowed for function targets.
     pub(super) fn validate_annotation_targets(&self, func_def: &FunctionDef) -> Result<()> {
+        self.check_duplicate_annotations(&func_def.annotations, func_def.name_span)?;
         for ann in &func_def.annotations {
             self.validate_annotation_target_usage(
                 ann,
@@ -1771,8 +1919,36 @@ impl BytecodeCompiler {
         self.compile_annotation_wrapper(func_def, func_idx, impl_idx, &compiled_ann, &ann_arg_exprs)
     }
 
-    fn annotation_ctx_type_annotation() -> TypeAnnotation {
+    /// §4.1.5 runtime-hook `ctx` type. Field order MUST match the ctx object
+    /// schema built in `compile_annotation_wrapper` (`target`, `state`,
+    /// `event_log`) so typed field access resolves the right offsets. `target`
+    /// is typed as a function value carrying the annotated function's exact
+    /// signature, so `ctx.target(...)` is an ordinary typed call and passing
+    /// `ctx.target` to a builtin carries its type.
+    fn annotation_ctx_type_annotation(&self, func_def: &FunctionDef) -> TypeAnnotation {
+        let target_params: Vec<shape_ast::ast::types::FunctionParam> = func_def
+            .params
+            .iter()
+            .map(|p| shape_ast::ast::types::FunctionParam {
+                name: p.simple_name().map(|s| s.to_string()),
+                optional: false,
+                type_annotation: p
+                    .type_annotation
+                    .clone()
+                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
+            })
+            .collect();
+        let target_returns = func_def.return_type.clone().unwrap_or(TypeAnnotation::Void);
         TypeAnnotation::Object(vec![
+            shape_ast::ast::ObjectTypeField {
+                name: "target".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Function {
+                    params: target_params,
+                    returns: Box::new(target_returns),
+                },
+                annotations: vec![],
+            },
             shape_ast::ast::ObjectTypeField {
                 name: "state".to_string(),
                 optional: false,
@@ -1932,7 +2108,7 @@ impl BytecodeCompiler {
             self.annotation_arg_array_element_annotation(func_def)?,
         ));
         let result_annotation = self.annotation_result_type_annotation(func_def);
-        let ctx_annotation = Self::annotation_ctx_type_annotation();
+        let ctx_annotation = self.annotation_ctx_type_annotation(func_def);
 
         for handler_param in &handler.params {
             let type_annotation = match handler_param.name.as_str() {
@@ -2102,9 +2278,13 @@ impl BytecodeCompiler {
             Some(Operand::Local(args_local)),
         ));
 
-        // --- Build ctx object: { __impl: Function, state: {}, event_log: [] } ---
-        // Push fields in schema order: __impl, state, event_log
-        // __impl = reference to the implementation function
+        // --- Build ctx object: { target: Function, state: {}, event_log: [] } ---
+        // Push fields in schema order: target, state, event_log.
+        // §4.1.5: `ctx.target` is a typed function value statically bound to
+        // the annotated function's ORIGINAL implementation (the same referent
+        // as `__original__`). A runtime `before`/`after` hook reads it as an
+        // ordinary typed field and may call it or pass it on (WF-2C's `@remote`
+        // hard-depends on exactly this — no stringly `ctx["__impl"]` lookup).
         let impl_ref_const = self
             .program
             .add_constant(Constant::Function(impl_idx as u16));
@@ -2126,7 +2306,7 @@ impl BytecodeCompiler {
         self.emit_empty_annotation_event_log();
 
         let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
-            ("__impl", FieldType::Any),
+            ("target", FieldType::Any),
             ("state", FieldType::Any),
             ("event_log", FieldType::Array(Box::new(FieldType::Any))),
         ]);

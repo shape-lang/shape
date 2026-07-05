@@ -362,7 +362,12 @@ comptime {
 }
 print("should not reach here")
 "#;
-    ShapeTest::new(code).expect_run_err_contains("[comptime error] <Bool>");
+    // The user's message is preserved verbatim (WF-1B S1 marshal fix:
+    // the string argument's true kind flows from the parallel kind track —
+    // the old `<Bool>` placeholder came from the deleted Bool-collapse). The
+    // S4 diagnostics firewall strips the internal `[comptime error]` marker,
+    // so the surfaced text is exactly what the user wrote.
+    ShapeTest::new(code).expect_run_err_contains("this is a build error");
 }
 
 // ============================================================================

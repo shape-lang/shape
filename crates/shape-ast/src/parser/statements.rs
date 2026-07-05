@@ -238,6 +238,20 @@ pub fn parse_statement(pair: Pair<Rule>) -> Result<Statement> {
                 span: inner_span,
             })
         }
+        Rule::extend_items_stmt => {
+            // `extend (expr)` — computed-generation directive (§4.5.7). The
+            // single inner is the parenthesized payload expression.
+            let inner_span = pair_span(&inner);
+            let expr_pair = inner.into_inner().next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected expression in parenthesized `extend (...)` directive".to_string(),
+                location: Some(pair_loc),
+            })?;
+            let expression = expressions::parse_expression(expr_pair)?;
+            Ok(Statement::ExtendItemsExpr {
+                expression,
+                span: inner_span,
+            })
+        }
         _ => Err(ShapeError::ParseError {
             message: format!("Unexpected statement type: {:?}", inner.as_rule()),
             location: None,

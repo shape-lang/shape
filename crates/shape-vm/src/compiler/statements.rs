@@ -684,6 +684,18 @@ impl BytecodeCompiler {
         self.emit_comptime_internal_call("__emit_replace_module", vec![expression.clone()], span)
     }
 
+    /// §4.5.7: `extend (expr)` computed-generation directive. The payload
+    /// expression evaluates in the comptime VM to a `string` of top-level Shape
+    /// source; the parsed items are ADDED (not replaced) at the annotated
+    /// item's module scope.
+    fn emit_comptime_extend_items_expr_directive(
+        &mut self,
+        expression: &Expr,
+        span: Span,
+    ) -> Result<()> {
+        self.emit_comptime_internal_call("__emit_extend_items", vec![expression.clone()], span)
+    }
+
     pub(super) fn register_item_functions(&mut self, item: &Item) -> Result<()> {
         match item {
             Item::Function(func_def, _) => self.register_function(func_def),
@@ -1789,13 +1801,9 @@ impl BytecodeCompiler {
                     known_type_symbols,
                     type_snapshot,
                 )
-                .map_err(|e| ShapeError::RuntimeError {
-                    message: format!(
-                        "Comptime block evaluation failed: {}",
-                        super::helpers::strip_error_prefix(&e)
-                    ),
-                    location: Some(self.span_to_source_location(*span)),
-                })?;
+                .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
+                // §4.4: re-emit any `warning()` output anchored at this block.
+                self.surface_comptime_warnings(&execution.warnings, *span);
                 self.process_comptime_directives(execution.directives, "")
                     .map_err(|e| ShapeError::RuntimeError {
                         message: format!("Comptime block directive processing failed: {}", e),
@@ -3472,6 +3480,7 @@ impl BytecodeCompiler {
         use shape_runtime::type_schema::{FieldAnnotation, TypeSchemaBuilder};
 
         // Validate annotation target kinds before type registration.
+        self.check_duplicate_annotations(&struct_def.annotations, span)?;
         for ann in &struct_def.annotations {
             self.validate_annotation_target_usage(
                 ann,
@@ -4525,6 +4534,9 @@ impl BytecodeCompiler {
             }
             | Statement::ReplaceModuleExpr {
                 expression: expr, ..
+            }
+            | Statement::ExtendItemsExpr {
+                expression: expr, ..
             } => Self::qualify_module_expr(expr, module_path, type_params),
             Statement::VariableDecl(decl, _) => {
                 Self::qualify_module_variable_decl(decl, module_path, type_params);
@@ -5334,6 +5346,10 @@ impl BytecodeCompiler {
                     self.apply_comptime_extend(extend, module_name)
                         .map_err(|e| e.to_string())?;
                 }
+                super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
+                    self.apply_comptime_extend_items(items, module_name)
+                        .map_err(|e| e.to_string())?;
+                }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     removed = true;
                     break;
@@ -5502,13 +5518,9 @@ impl BytecodeCompiler {
                 known_type_symbols,
                 type_snapshot,
             )
-            .map_err(|e| ShapeError::RuntimeError {
-                message: format!(
-                    "Comptime block evaluation failed: {}",
-                    super::helpers::strip_error_prefix(&e)
-                ),
-                location: Some(self.span_to_source_location(span)),
-            })?;
+            .map_err(|e| self.build_comptime_failure(&e, span, "a compile-time block"))?;
+            // §4.4: re-emit any `warning()` output anchored at this block.
+            self.surface_comptime_warnings(&execution.warnings, span);
 
             if self
                 .process_comptime_directives_for_module(
@@ -5756,6 +5768,7 @@ impl BytecodeCompiler {
     }
 
     fn compile_module_decl(&mut self, module_def: &ModuleDecl, span: Span) -> Result<()> {
+        self.check_duplicate_annotations(&module_def.annotations, span)?;
         for ann in &module_def.annotations {
             self.validate_annotation_target_usage(ann, AnnotationTargetKind::Module, span)?;
         }
@@ -7614,6 +7627,10 @@ impl BytecodeCompiler {
             Statement::ReplaceModuleExpr { expression, span } => {
                 self.require_comptime_mode("replace module", *span)?;
                 self.emit_comptime_replace_module_expr_directive(expression, *span)?;
+            }
+            Statement::ExtendItemsExpr { expression, span } => {
+                self.require_comptime_mode("extend (...)", *span)?;
+                self.emit_comptime_extend_items_expr_directive(expression, *span)?;
             }
         }
         Ok(())

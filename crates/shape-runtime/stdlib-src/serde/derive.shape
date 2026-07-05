@@ -1,0 +1,97 @@
+/// @module std::serde::derive
+/// Derive-style JSON Schema generation at compile time.
+///
+/// `@json_schema` reads a type's declared fields via comptime introspection
+/// (`target.fields`) and generates a `{TypeName}_json_schema()` function that
+/// returns the type's JSON Schema as a string. No runtime reflection and no
+/// drift between the type and its schema — the schema is a pure function of the
+/// type declaration, computed once at compile time and emitted as ordinary
+/// Shape source via the `extend (...)` code-generation directive.
+///
+/// # Example
+///
+/// ```shape
+/// from std::serde::derive use { @json_schema }
+///
+/// @json_schema()
+/// type User {
+///     @description("Unique identifier") id: int,
+///     name: string,
+///     email: string?,
+/// }
+///
+/// print(User_json_schema())
+/// ```
+///
+/// A field whose type has no JSON Schema mapping (e.g. a nested struct, in v1)
+/// is a compile error naming the field — the deriver never emits a schema it
+/// cannot justify.
+
+/// `@json_schema` — generate `{TypeName}_json_schema() -> string` from a type's
+/// declared fields. Optional fields (`T?`) are omitted from `required`, and
+/// `@description(...)` field annotations become JSON Schema descriptions.
+pub annotation json_schema() {
+    targets: [type]
+    comptime post(target, ctx) {
+        let mut props = ""
+        let mut required = ""
+        let mut first_prop = true
+        let mut first_req = true
+        for field in target.fields {
+            // Map the canonical Shape field type to a JSON Schema type.
+            let mut jt = ""
+            if field.type == "int" {
+                jt = "integer"
+            } else if field.type == "number" {
+                jt = "number"
+            } else if field.type == "bool" {
+                jt = "boolean"
+            } else if field.type == "string" {
+                jt = "string"
+            }
+            if jt == "" {
+                error(f"@json_schema: field '{field.name}' has type '{field.type}', which has no JSON Schema mapping")
+            }
+
+            // A `@description("...")` field annotation becomes the property's
+            // JSON Schema description.
+            let mut desc = ""
+            for ann in field.annotations {
+                if ann.name == "description" {
+                    desc = ann.args[0]
+                }
+            }
+
+            let mut prop = ""
+            if desc == "" {
+                prop = f"\"{field.name}\": \{\"type\": \"{jt}\"\}"
+            } else {
+                prop = f"\"{field.name}\": \{\"type\": \"{jt}\", \"description\": \"{desc}\"\}"
+            }
+
+            if first_prop {
+                props = prop
+                first_prop = false
+            } else {
+                props = f"{props}, {prop}"
+            }
+
+            // Required unless the field was declared optional (`T?`).
+            if !field.optional {
+                let r = f"\"{field.name}\""
+                if first_req {
+                    required = r
+                    first_req = false
+                } else {
+                    required = f"{required}, {r}"
+                }
+            }
+        }
+
+        let schema = f"\{\"type\": \"object\", \"title\": \"{target.name}\", \"properties\": \{{props}\}, \"required\": [{required}]\}"
+        // Emit `fn {TypeName}_json_schema() -> string { "<schema>" }`. `string_lit`
+        // renders the computed schema as a safely-escaped Shape string literal;
+        // `\{` / `\}` are literal braces in the generated source.
+        extend (f"fn {target.name}_json_schema() -> string \{ {string_lit(schema)} \}")
+    }
+}

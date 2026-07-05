@@ -312,7 +312,8 @@ fn statement(stmt: &mut Statement, sigs: &Signatures, err: &mut Option<ShapeErro
         Statement::SetParamValue { expression, .. }
         | Statement::SetReturnExpr { expression, .. }
         | Statement::ReplaceBodyExpr { expression, .. }
-        | Statement::ReplaceModuleExpr { expression, .. } => expr(expression, sigs, err),
+        | Statement::ReplaceModuleExpr { expression, .. }
+        | Statement::ExtendItemsExpr { expression, .. } => expr(expression, sigs, err),
         Statement::ReplaceBody { body, .. } => stmts(body, sigs, err),
         // No embedded exprs to rewrite.
         Statement::RemoveTarget(_)

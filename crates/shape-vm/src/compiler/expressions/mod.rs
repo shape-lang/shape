@@ -1904,13 +1904,9 @@ impl BytecodeCompiler {
                     known_type_symbols,
                     type_snapshot,
                 )
-                .map_err(|e| shape_ast::error::ShapeError::RuntimeError {
-                    message: format!(
-                        "Comptime block evaluation failed: {}",
-                        super::helpers::strip_error_prefix(&e)
-                    ),
-                    location: Some(self.span_to_source_location(*span)),
-                })?;
+                .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
+                // §4.4: re-emit any `warning()` output anchored at this block.
+                self.surface_comptime_warnings(&execution.warnings, *span);
                 // Comptime blocks can emit directives via direct syntax.
                 // They are processed with no implicit target binding.
                 self.process_comptime_directives(execution.directives, "")

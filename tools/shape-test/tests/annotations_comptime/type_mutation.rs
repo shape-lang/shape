@@ -207,3 +207,79 @@ print(get_api_data())
     .expect_run_ok()
     .expect_output("mocked");
 }
+
+#[test]
+fn set_return_incompatible_with_body_is_compile_error() {
+    // §4.5 / S3: a `set return` that disagrees with the body re-enters the
+    // ordinary body-vs-signature type checker (the same path the explicit
+    // `-> string` annotation takes). Previously this reinterpreted an int as a
+    // string pointer and segfaulted; now it is an ordinary compile error.
+    ShapeTest::new(
+        r#"
+annotation force_string_return() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set return string
+  }
+}
+
+@force_string_return()
+fn answer() {
+  42
+}
+
+print(answer())
+"#,
+    )
+    .expect_run_err_contains("comptime directive");
+}
+
+#[test]
+fn set_return_compatible_with_body_still_compiles() {
+    // The re-check only fires as an error on a genuine mismatch — a compatible
+    // `set return int` on an int-bodied function still compiles and runs.
+    ShapeTest::new(
+        r#"
+annotation force_int_return() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set return int
+  }
+}
+
+@force_int_return()
+fn answer() {
+  42
+}
+
+print(answer())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("42");
+}
+
+#[test]
+fn duplicate_annotation_application_is_compile_error() {
+    // Q47 / §4.1.1: applying the same annotation twice to one target is a v1
+    // compile error naming both application sites.
+    ShapeTest::new(
+        r#"
+annotation tag() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set return int
+  }
+}
+
+@tag()
+@tag()
+fn foo() {
+  1
+}
+
+print(foo())
+"#,
+    )
+    .expect_run_err_contains("more than once");
+}
