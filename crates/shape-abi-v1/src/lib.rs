@@ -713,6 +713,26 @@ pub enum ErrorModel {
     Static = 1,
 }
 
+/// Runtime state-opacity model for a language runtime
+/// (`LanguageRuntimeVTable::state_model`).
+///
+/// Declares whether compiled foreign-function handles are pure functions of
+/// their `(source, signature)` (so any process reproduces them by re-calling
+/// `compile()`), or whether the runtime holds cross-call mutable interpreter
+/// state that is opaque and non-serializable. Consumed by snapshot/resume
+/// (WF-2B/2F): foreign runtime state is NEVER serialized — it is opaque by
+/// declaration (see `docs/design/ffi-rebuild.md` §4.7).
+///
+/// Compiled handles are pure functions of `(source, signature)` — re-`compile()`
+/// on any process reproduces them. A snapshot taken between foreign calls
+/// re-links lazily from `ForeignFunctionEntry.body_text`.
+pub const STATE_MODEL_STATELESS_COMPILE_CACHE: u32 = 0;
+
+/// The interpreter holds cross-call mutable state (module globals, imports with
+/// side effects). Python and TypeScript both declare this. Cross-call
+/// interpreter state does not survive resume — a book-documented caveat.
+pub const STATE_MODEL_STATEFUL_OPAQUE: u32 = 1;
+
 /// VTable for language runtime plugins (Python, Julia, SQL, etc.).
 ///
 /// Language runtimes enable `fn <language> name(...) { body }` blocks in Shape.
@@ -826,6 +846,45 @@ pub struct LanguageRuntimeVTable {
             out_len: *mut usize,
         ) -> i32,
     >,
+
+    // ---- ABI v4 additive tail (WF-2A stage 0, ffi-rebuild §4.7) ----
+    // These fields are STRICTLY ADDITIVE: appended after every v3 field so a
+    // v4 host reading a v4 vtable finds them at a stable offset. The loader
+    // gate (`plugins/loader.rs`) refuses to load version-mismatched
+    // extensions, so a v4 host never dereferences a v3 vtable's shorter
+    // layout. Do NOT reorder or remove any field above this line.
+    /// Return MessagePack-encoded runtime descriptor:
+    /// `{ extension_name, extension_version (semver), backend, platform_triple }`.
+    ///
+    /// Consumed by `shape ext list`, error messages, and node-capability
+    /// matching (a receiving node advertises which language runtimes at which
+    /// versions it can host). Absent (`None`) → matching falls back to the
+    /// language id only. Caller frees the buffer via `free_buffer`; returns 0
+    /// on success.
+    pub runtime_descriptor: Option<
+        unsafe extern "C" fn(
+            instance: *mut c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32,
+    >,
+
+    /// Runtime state-opacity model: `STATE_MODEL_STATELESS_COMPILE_CACHE` (0)
+    /// or `STATE_MODEL_STATEFUL_OPAQUE` (1). A plain `u32` field (not a fn
+    /// pointer). Consumed by snapshot/resume; foreign runtime state is never
+    /// serialized — it is opaque by declaration. Zero-initialized default is
+    /// `STATELESS_COMPILE_CACHE`, but the `language_runtime_plugin!` macro
+    /// stamps the conservative `STATEFUL_OPAQUE` for the interpreter-backed
+    /// runtimes it generates.
+    pub state_model: u32,
+
+    /// Reserved fn-pointer tail padding (null in v4). Lets additive vtable
+    /// functions land later (e.g. the ffi-rebuild §7 `request_cancel` hook)
+    /// without another ABI bump. Must be `None` when constructed by the macro.
+    pub reserved0: Option<unsafe extern "C" fn()>,
+    pub reserved1: Option<unsafe extern "C" fn()>,
+    pub reserved2: Option<unsafe extern "C" fn()>,
+    pub reserved3: Option<unsafe extern "C" fn()>,
 }
 
 /// LSP configuration for a language runtime, returned by `get_lsp_config`.
@@ -1501,7 +1560,14 @@ pub struct AlertHeader {
 /// - v1: Initial release with MessagePack-based load()
 /// - v2: Added load_binary() for high-performance binary columnar format
 /// - v3: Added module invoke_ex() typed payloads for table fast-path marshalling
-pub const ABI_VERSION: u32 = 3;
+/// - v4: WF-2A stage 0 — `LanguageRuntimeVTable` additive tail
+///   (`runtime_descriptor` + `state_model` + reserved padding), extension-side
+///   `catch_unwind` panic containment folded into `language_runtime_plugin!`,
+///   and the coordinated content-hash/blob-format finalization (foreign-entry
+///   `is_async`/`param_names`, blob-local `CallForeign` ordinals, declared
+///   native-library alias storage). See `docs/design/ffi-rebuild.md` §4.7 /
+///   `docs/design/polyglot-distributed-integration.md` §4.2.0.
+pub const ABI_VERSION: u32 = 4;
 
 /// Get the ABI version (plugins should export this)
 pub type GetAbiVersionFn = unsafe extern "C" fn() -> u32;
@@ -1706,20 +1772,165 @@ macro_rules! language_runtime_plugin {
             }
         }
 
+        // ffi-rebuild §4.5: extension-side panic containment. Every vtable
+        // entry the extension exports is wrapped in a generated `extern "C"`
+        // shell that runs the user function inside `catch_unwind` and converts
+        // a panic into the slot's error sentinel (null pointer / non-zero i32 /
+        // swallowed unit). Unwinding across the C ABI boundary is undefined
+        // behavior; these shells make the boundary panic-safe so a panicking
+        // Python/TS body can never unwind into the host VM.
+        unsafe extern "C" fn __shape_pc_init(
+            config: *const u8,
+            config_len: usize,
+        ) -> *mut ::std::ffi::c_void {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $init(config, config_len)
+            })) {
+                Ok(v) => v,
+                Err(_) => ::std::ptr::null_mut(),
+            }
+        }
+
+        unsafe extern "C" fn __shape_pc_register_types(
+            instance: *mut ::std::ffi::c_void,
+            types: *const u8,
+            types_len: usize,
+        ) -> i32 {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $register_types(instance, types, types_len)
+            })) {
+                Ok(v) => v,
+                Err(_) => 1,
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        unsafe extern "C" fn __shape_pc_compile(
+            instance: *mut ::std::ffi::c_void,
+            name: *const u8,
+            name_len: usize,
+            source: *const u8,
+            source_len: usize,
+            param_names: *const u8,
+            param_names_len: usize,
+            param_types: *const u8,
+            param_types_len: usize,
+            return_type: *const u8,
+            return_type_len: usize,
+            is_async: bool,
+            out_error: *mut *mut u8,
+            out_error_len: *mut usize,
+        ) -> *mut ::std::ffi::c_void {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $compile(
+                    instance,
+                    name,
+                    name_len,
+                    source,
+                    source_len,
+                    param_names,
+                    param_names_len,
+                    param_types,
+                    param_types_len,
+                    return_type,
+                    return_type_len,
+                    is_async,
+                    out_error,
+                    out_error_len,
+                )
+            })) {
+                Ok(v) => v,
+                Err(_) => ::std::ptr::null_mut(),
+            }
+        }
+
+        unsafe extern "C" fn __shape_pc_invoke(
+            instance: *mut ::std::ffi::c_void,
+            handle: *mut ::std::ffi::c_void,
+            args: *const u8,
+            args_len: usize,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $invoke(instance, handle, args, args_len, out_ptr, out_len)
+            })) {
+                Ok(v) => v,
+                Err(_) => 1,
+            }
+        }
+
+        unsafe extern "C" fn __shape_pc_dispose_function(
+            instance: *mut ::std::ffi::c_void,
+            handle: *mut ::std::ffi::c_void,
+        ) {
+            let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $dispose_function(instance, handle)
+            }));
+        }
+
+        unsafe extern "C" fn __shape_pc_language_id(
+            instance: *mut ::std::ffi::c_void,
+        ) -> *const ::std::ffi::c_char {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $language_id(instance)
+            })) {
+                Ok(v) => v,
+                Err(_) => ::std::ptr::null(),
+            }
+        }
+
+        unsafe extern "C" fn __shape_pc_get_lsp_config(
+            instance: *mut ::std::ffi::c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $get_lsp_config(instance, out_ptr, out_len)
+            })) {
+                Ok(v) => v,
+                Err(_) => 1,
+            }
+        }
+
+        unsafe extern "C" fn __shape_pc_free_buffer(ptr: *mut u8, len: usize) {
+            let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $free_buffer(ptr, len)
+            }));
+        }
+
+        unsafe extern "C" fn __shape_pc_drop(instance: *mut ::std::ffi::c_void) {
+            let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $drop_fn(instance)
+            }));
+        }
+
         #[unsafe(no_mangle)]
         pub extern "C" fn shape_language_runtime_vtable() -> *const $crate::LanguageRuntimeVTable {
             static VTABLE: $crate::LanguageRuntimeVTable = $crate::LanguageRuntimeVTable {
-                init: Some($init),
-                register_types: Some($register_types),
-                compile: Some($compile),
-                invoke: Some($invoke),
-                dispose_function: Some($dispose_function),
-                language_id: Some($language_id),
-                get_lsp_config: Some($get_lsp_config),
-                free_buffer: Some($free_buffer),
-                drop: Some($drop_fn),
+                init: Some(__shape_pc_init),
+                register_types: Some(__shape_pc_register_types),
+                compile: Some(__shape_pc_compile),
+                invoke: Some(__shape_pc_invoke),
+                dispose_function: Some(__shape_pc_dispose_function),
+                language_id: Some(__shape_pc_language_id),
+                get_lsp_config: Some(__shape_pc_get_lsp_config),
+                free_buffer: Some(__shape_pc_free_buffer),
+                drop: Some(__shape_pc_drop),
                 error_model: $crate::ErrorModel::Dynamic,
                 get_shape_source: Some(__shape_get_shape_source),
+                // ABI v4 additive tail (WF-2A stage 0). `state_model` is stamped
+                // STATEFUL_OPAQUE: the macro generates interpreter-backed
+                // runtimes (Python, TypeScript) whose cross-call state is opaque
+                // and non-serializable. `runtime_descriptor` is left `None` for
+                // now (matching falls back to language id); reserved padding is
+                // null for future additive vtable functions.
+                runtime_descriptor: None,
+                state_model: $crate::STATE_MODEL_STATEFUL_OPAQUE,
+                reserved0: None,
+                reserved1: None,
+                reserved2: None,
+                reserved3: None,
             };
             &VTABLE
         }
@@ -2008,7 +2219,12 @@ mod permission_tests {
         assert_eq!(format!("{}", Permission::Ffi), "ffi.call");
         assert_eq!(Permission::Ffi.category(), PermissionCategory::Foreign);
         assert_eq!(format!("{}", PermissionCategory::Foreign), "Foreign");
-        assert!(Permission::Ffi.description().to_lowercase().contains("foreign"));
+        assert!(
+            Permission::Ffi
+                .description()
+                .to_lowercase()
+                .contains("foreign")
+        );
     }
 
     #[test]
