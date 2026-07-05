@@ -461,6 +461,20 @@ pub struct VirtualMachine {
     /// When set, the dispatch loop calls `tick_instruction()` each cycle.
     pub resource_usage: Option<crate::resource_limits::ResourceUsage>,
 
+    /// Permissions granted to code executing in this VM (WF-1D security wiring).
+    ///
+    /// Threaded into every runtime `ModuleContext` built for stdlib dispatch
+    /// (see `invoke_module_fn_id_stub`). When `Some`, each gated stdlib I/O
+    /// call is checked against this set via `check_permission`; when `None`,
+    /// operations are allowed (preserved ONLY for genuinely-trusted local
+    /// `unlimited()` runs per the ratified posture). The serve / remote / wire
+    /// paths always set this to a concrete set so they fail closed.
+    pub(crate) granted_permissions: Option<shape_abi_v1::PermissionSet>,
+
+    /// Scope constraints (path / host narrowing) for gated stdlib dispatch.
+    /// Threaded into the runtime `ModuleContext` alongside `granted_permissions`.
+    pub(crate) scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
+
     /// Time-travel debugger for recording and navigating VM state history.
     /// `None` when time-travel debugging is not active.
     pub(crate) time_travel: Option<time_travel::TimeTravel>,

@@ -702,8 +702,13 @@ impl VirtualMachine {
             raw_invoker: None,
             function_hashes: None,
             vm_state: Some(&vm_state_snap),
-            granted_permissions: None,
-            scope_constraints: None,
+            // WF-1D security wiring: thread the VM's installed permission
+            // envelope into the gated-dispatch context. `None` (allow-all)
+            // only survives for genuinely-trusted local `unlimited()` runs;
+            // serve / remote / wire install a concrete set so `check_permission`
+            // fails closed on file::write_text / read_text / etc.
+            granted_permissions: self.granted_permissions.clone(),
+            scope_constraints: self.scope_constraints.clone(),
             set_pending_resume: None,
             set_pending_frame_resume: None,
         };

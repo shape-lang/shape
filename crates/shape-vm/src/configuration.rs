@@ -46,6 +46,17 @@ pub struct BytecodeExecutor {
     /// unbounded allocating loop) fails IN-PROCESS with a
     /// `ResourceLimitExceeded` error instead of OOM-killing the whole box.
     pub(crate) resource_limits: Option<crate::resource_limits::ResourceLimits>,
+
+    /// Permissions granted to code run by this executor (WF-1D security
+    /// wiring). Threaded into every VM's runtime `ModuleContext` so gated
+    /// stdlib I/O calls are checked. `None` (default) = allow-all, preserved
+    /// ONLY for genuinely-trusted local `unlimited()` execution. The serve /
+    /// remote / wire paths install a concrete set so they fail closed.
+    pub(crate) granted_permissions: Option<shape_abi_v1::PermissionSet>,
+
+    /// Scope constraints (path / host narrowing) threaded into the VM
+    /// `ModuleContext` alongside `granted_permissions`.
+    pub(crate) scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
 }
 
 impl Default for BytecodeExecutor {
@@ -75,6 +86,8 @@ impl BytecodeExecutor {
             permission_set: None,
             allow_internal_builtins: false,
             resource_limits: None,
+            granted_permissions: None,
+            scope_constraints: None,
         };
         executor.register_stdlib_modules();
 
@@ -228,6 +241,26 @@ impl BytecodeExecutor {
     /// observable result of a program that stays within them.
     pub fn set_resource_limits(&mut self, limits: Option<crate::resource_limits::ResourceLimits>) {
         self.resource_limits = limits;
+    }
+
+    /// Install the runtime permission envelope enforced by gated stdlib
+    /// dispatch (WF-1D security wiring). Threaded into every VM this executor
+    /// builds. `granted == None` = allow-all (trusted-local only). Pass a
+    /// concrete set (e.g. `PermissionSet::pure()` for a strict sandbox) so
+    /// file / net / process calls fail closed. `constraints` narrows paths /
+    /// hosts when present.
+    pub fn set_granted_permissions(
+        &mut self,
+        granted: Option<shape_abi_v1::PermissionSet>,
+        constraints: Option<shape_abi_v1::ScopeConstraints>,
+    ) {
+        self.granted_permissions = granted;
+        self.scope_constraints = constraints;
+    }
+
+    /// Read back the installed runtime permission envelope (WF-1D).
+    pub fn granted_permissions(&self) -> Option<&shape_abi_v1::PermissionSet> {
+        self.granted_permissions.as_ref()
     }
 }
 
