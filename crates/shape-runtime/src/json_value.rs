@@ -399,6 +399,146 @@ fn typed_object_ptr_to_json_value_with_registry_opt(
     )
 }
 
+/// Resolve the canonical `Json` ADT schema id (`std::core::json_value`).
+///
+/// Prefers the caller-supplied registry (the active program's registry,
+/// e.g. `ctx.schemas` in `json.stringify`); falls back to the ambient
+/// task/thread/default registry when the caller passes `None`. The by-name
+/// `"Json"` lookup is reliable even when the registry's by-id index has a
+/// collision, so it is the correct discriminator for Json-enum nodes.
+fn resolve_json_schema_id(
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Option<u64> {
+    if let Some(registry) = schemas {
+        if let Some(schema) = registry.get("Json") {
+            return Some(schema.id as u64);
+        }
+    }
+    let ambient = crate::type_schema::current_registry();
+    ambient.get("Json").map(|schema| schema.id as u64)
+}
+
+/// Resolve the `TypeSchema` for a `TypedObject` node, robust against registry
+/// by-id COLLISIONS.
+///
+/// WF-2E (2026-07-05): a `TypedObject` carries only a numeric `schema_id`, and
+/// the schema registries can map one id to MORE THAN ONE schema — observed:
+/// a predeclared `XmlNode`-shaped schema and the builtin `Json` enum both
+/// answer to id 41, and `get_by_id` / `lookup_schema_by_id_public` return the
+/// `Json` schema (2 fields) for an XmlNode node (3 fields), so the walk emits
+/// "node missing 'name'". The node's own STRUCTURE disambiguates: its actual
+/// slot count is the arity of its true schema. This resolver gathers every
+/// candidate schema registered under `schema_id` (execution registry by-id,
+/// ambient by-id, and the ambient predeclared table — the predeclared entry is
+/// otherwise unreachable because `lookup_schema_by_id` returns the colliding
+/// by-id hit first) and prefers the one whose field count equals `slot_count`.
+fn resolve_typed_object_schema(
+    schema_id: u64,
+    slot_count: usize,
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Option<crate::type_schema::TypeSchema> {
+    use crate::type_schema::lookup_schema_by_id_public;
+    let id = schema_id as u32;
+    let mut candidates: Vec<crate::type_schema::TypeSchema> = Vec::new();
+    if let Some(registry) = schemas {
+        if let Some(schema) = registry.get_by_id(id) {
+            candidates.push(schema.clone());
+        }
+    }
+    if let Some(schema) = lookup_schema_by_id_public(id) {
+        candidates.push(schema);
+    }
+    let ambient = crate::type_schema::current_registry();
+    if let Some(schema) = ambient.lookup_predeclared_by_id(id) {
+        candidates.push(schema);
+    }
+    // Prefer the candidate whose arity matches the node's actual slot count
+    // (the collision-robust choice); fall back to the first candidate.
+    candidates
+        .iter()
+        .find(|s| s.fields.len() == slot_count)
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
+}
+
+/// Attempt to invert a `Json` enum `TypedObject` node back to its logical
+/// `JsonValue`. Returns `None` when the node does NOT structurally match the
+/// canonical `Json` ADT layout (so the caller falls through to the generic
+/// struct walk — this is what rejects a non-Json object that only passed the
+/// `schema_id == json_id` gate via a registry by-id collision).
+///
+/// The Json ADT layout is `slot 0 = __variant (Int64)`, `slot 1 =
+/// __payload_0`. A genuine node satisfies ALL of:
+///   * exactly 2 slots and 2 `field_kinds`,
+///   * `field_kinds[0] == Int64` (the `__variant` discriminant),
+///   * `slots[0]` is a valid Json variant id (0..=6), AND
+///   * `field_kinds[1]` (the STAMPED payload kind — ADR-006 §2.7.7, the
+///     single discriminator the node was constructed with) is exactly the
+///     kind that variant's payload must carry.
+/// The variant↔payload-kind consistency is the strong discriminator against a
+/// colliding plain object.
+///
+/// On a match the payload is read from its stamped carrier (Str/Array/Object
+/// via the same borrow-only heap reader the struct walk uses, so refcounts
+/// are untouched). Array elements and Object values are themselves Json
+/// nodes, so the recursion re-enters `typed_object_to_json_value` and this
+/// fast path fires again — no schema walk, no `__variant` leak.
+fn try_json_enum_node(
+    slots: &[shape_value::ValueSlot],
+    field_kinds: &[NativeKind],
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Option<Result<JsonValue, String>> {
+    if slots.len() != 2 || field_kinds.len() != 2 || field_kinds[0] != NativeKind::Int64 {
+        return None;
+    }
+    let variant = slots[0].as_i64();
+    let payload_kind = field_kinds[1];
+    let bits = slots[1].raw();
+    // Variant id → the payload kind it MUST carry (mirrors
+    // `stdlib::json::build_json_enum_heap_value` / `project_json_value_to_slot`).
+    let value = match variant {
+        // Json::Null
+        0 if payload_kind == NativeKind::Null => JsonValue::Null,
+        // Json::Bool
+        1 if payload_kind == NativeKind::Bool => JsonValue::Bool(bits != 0),
+        // Json::Int
+        2 if payload_kind == NativeKind::Int64 => JsonValue::Int(bits as i64),
+        // Json::Number
+        3 if payload_kind == NativeKind::Float64 => JsonValue::Number(f64::from_bits(bits)),
+        // Json::Str
+        4 if matches!(payload_kind, NativeKind::String | NativeKind::StringV2) => {
+            return Some(typed_object_heap_field_to_json_value(
+                bits,
+                payload_kind,
+                "__payload_0",
+                schemas,
+            ));
+        }
+        // Json::Array
+        5 if payload_kind == NativeKind::Ptr(HeapKind::TypedArray) => {
+            return Some(typed_object_heap_field_to_json_value(
+                bits,
+                payload_kind,
+                "__payload_0",
+                schemas,
+            ));
+        }
+        // Json::Object
+        6 if payload_kind == NativeKind::Ptr(HeapKind::HashMap) => {
+            return Some(typed_object_heap_field_to_json_value(
+                bits,
+                payload_kind,
+                "__payload_0",
+                schemas,
+            ));
+        }
+        // Not a structurally-valid Json node (collision) — let the caller
+        // walk it as a plain struct.
+        _ => return None,
+    };
+    Some(Ok(value))
+}
+
 /// Walk a `HeapValue::TypedObject` and produce `JsonValue::Object`.
 ///
 /// Schema lookup via `lookup_schema_by_id_public`; per-FieldDef
@@ -415,17 +555,42 @@ fn typed_object_to_json_value(
     field_kinds: &[NativeKind],
     schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
 ) -> Result<JsonValue, String> {
-    use crate::type_schema::{FieldType, lookup_schema_by_id_public};
+    use crate::type_schema::FieldType;
 
-    let schema = schemas
-        .and_then(|registry| registry.get_by_id(schema_id as u32).cloned())
-        .or_else(|| lookup_schema_by_id_public(schema_id as u32))
-        .ok_or_else(|| {
-            format!(
-                "heap_to_json_value: unknown TypedObject schema id {}",
-                schema_id
-            )
-        })?;
+    // ── Json-enum node fast path (WF-2E, 2026-07-05) ────────────────────
+    // A `TypedObject` whose schema is the canonical `Json` ADT
+    // (`std::core::json_value`) is the output of `json.parse` (and the
+    // yaml/toml/msgpack parse siblings). Such a node must be INVERTED back
+    // to its logical `JsonValue` — NOT walked as a plain struct (which would
+    // leak the `{__variant, __payload_0}` enum representation) and NOT
+    // resolved via the schema's by-id index (which can collide: observed
+    // `get_by_id(31) -> "std::core::state::Frame"` while `get("Json").id ==
+    // 31`). The by-name `"Json".id == schema_id` check is the reliable
+    // discriminator, and the stamped `field_kinds` track fully describes the
+    // payload — the same single-discriminator contract the node was built
+    // with (`project_json_value_to_slot` / `build_json_enum_heap_value`).
+    if let Some(json_id) = resolve_json_schema_id(schemas) {
+        if json_id == schema_id {
+            // The by-name `"Json".id == schema_id` gate is the primary
+            // discriminator, but under a registry by-id collision (observed
+            // in JIT: an object literal's anonymous schema can be assigned the
+            // SAME id as the `Json` enum) a non-Json TypedObject can pass that
+            // gate. The structural guard below (exact 2-slot layout +
+            // Int64 variant discriminant + variant↔payload-kind consistency)
+            // rejects such collisions so a plain object is walked as a struct
+            // rather than mis-inverted as a Json enum node.
+            if let Some(result) = try_json_enum_node(slots, field_kinds, schemas) {
+                return result;
+            }
+        }
+    }
+
+    let schema = resolve_typed_object_schema(schema_id, slots.len(), schemas).ok_or_else(|| {
+        format!(
+            "heap_to_json_value: unknown TypedObject schema id {}",
+            schema_id
+        )
+    })?;
 
     let mut pairs: Vec<(String, JsonValue)> = Vec::with_capacity(schema.fields.len());
     for field in &schema.fields {
@@ -440,14 +605,6 @@ fn typed_object_to_json_value(
         }
         let slot = &slots[idx];
         let is_heap = (heap_mask & (1u64 << field.index)) != 0;
-        let field_kind = field_kinds.get(idx).copied().ok_or_else(|| {
-            format!(
-                "heap_to_json_value: TypedObject field '{}' index {} missing NativeKind (field_kinds.len()={})",
-                field.name,
-                idx,
-                field_kinds.len()
-            )
-        })?;
         let child = match (&field.field_type, is_heap) {
             (FieldType::I64, false)
             | (FieldType::I8, false)
@@ -476,6 +633,25 @@ fn typed_object_to_json_value(
                 ));
             }
             (_, true) => {
+                // Prefer the runtime-stamped kind (ADR-006 §2.7.7 parallel
+                // `field_kinds` track). Fall back to the schema `FieldType`'s
+                // static projection only when the table is short/empty (e.g.
+                // json-parse-built TypedObjects that pass an empty
+                // `field_kinds` vector — the historical "exceeds field_kinds
+                // length 0" failure). Never fabricate a kind from slot bits.
+                let field_kind = match field_kinds.get(idx).copied() {
+                    Some(k) => k,
+                    None => field.field_type.to_native_kind().map_err(|_| {
+                        format!(
+                            "heap_to_json_value: TypedObject field '{}' is heap-resident \
+                             but the field_kinds table is short (len={}) and FieldType {} \
+                             has no static NativeKind projection",
+                            field.name,
+                            field_kinds.len(),
+                            field.field_type
+                        )
+                    })?,
+                };
                 typed_object_heap_field_to_json_value(slot.raw(), field_kind, &field.name, schemas)?
             }
             // Inline scalar types where storage doesn't match field_type
@@ -564,6 +740,12 @@ fn typed_object_heap_field_to_json_value(
             })?;
             Ok(JsonValue::String(c.to_string()))
         }
+        // WF-2E (2026-07-05): a `Ptr(HeapKind::TypedArray)` field carries a
+        // v2-raw `*mut TypedArray<T>`. Route it through the shared
+        // element-type-stamped array reader (empty array on null carrier).
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            typed_array_to_json_value(bits as usize as *const u8, schemas)
+        }
         other => Err(format!(
             "heap_to_json_value: TypedObject field '{}' has heap NativeKind {:?} with no JSON serialization policy",
             field_name, other
@@ -571,9 +753,331 @@ fn typed_object_heap_field_to_json_value(
     }
 }
 
+// ───────────────────────── slot → JsonValue (canonical) ─────────────────────
+//
+// WF-2E shared object-graph marshal foundation (2026-07-05). This is the
+// canonical direction-1 entry: read the Shape value carried in a
+// `KindedSlot` into a `JsonValue` tree, dispatching on the STAMPED
+// `NativeKind` (ADR-006 §2.7.7 parallel-kind track — the single
+// discriminator). It NEVER blind-casts slot bits to a `HeapValue` /
+// `HashMapKindedRef` / `TypedObjectStorage` pointer based on a *declared*
+// (as opposed to *actual*) kind — that unsound reinterpretation is exactly
+// the SIGSEGV class this replaces (an object literal is a
+// `Ptr(HeapKind::TypedObject)` carrier; reading it as `HashMapKindedRef`
+// segfaults). Every heap arm below reads the concrete carrier whose kind
+// the slot is actually stamped with.
+
+/// Read the Shape value carried in `slot` into a `JsonValue`, dispatching
+/// on the slot's stamped `NativeKind`. `schemas` (when `Some`) is the
+/// active program's schema registry, used to resolve `TypedObject` field
+/// names; when `None`, the process/thread ambient registry
+/// (`lookup_schema_by_id_public`) is consulted.
+///
+/// Scalars are read inline; heap carriers are read through their concrete
+/// per-`NativeKind` pointer shape — no `as_heap_value()` blind-cast.
+pub fn slot_to_json_value(
+    slot: &shape_value::KindedSlot,
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Result<JsonValue, String> {
+    let bits = slot.raw();
+    match slot.kind() {
+        NativeKind::Null => Ok(JsonValue::Null),
+        NativeKind::Bool => Ok(JsonValue::Bool(bits != 0)),
+        NativeKind::Float64 => Ok(JsonValue::Number(f64::from_bits(bits))),
+        NativeKind::Float32 => Ok(JsonValue::Number(f32::from_bits(bits as u32) as f64)),
+        NativeKind::NullableFloat64 => {
+            let v = f64::from_bits(bits);
+            if v.is_nan() {
+                Ok(JsonValue::Null)
+            } else {
+                Ok(JsonValue::Number(v))
+            }
+        }
+        NativeKind::Char => {
+            let c = slot
+                .as_char()
+                .ok_or_else(|| "slot_to_json_value: invalid char bits".to_string())?;
+            Ok(JsonValue::String(c.to_string()))
+        }
+        NativeKind::String | NativeKind::StringV2 => {
+            if bits == 0 {
+                Ok(JsonValue::Null)
+            } else {
+                Ok(JsonValue::String(slot.as_str().unwrap_or("").to_string()))
+            }
+        }
+        NativeKind::DecimalV2 => Err(
+            "Decimal serialization policy not yet decided (precision preservation vs lossy \
+             f64 cast) — surface-and-stop"
+                .to_string(),
+        ),
+        // Integer family (signed/unsigned/sized/nullable-present): a JSON
+        // number. Null-valued nullable integers are stamped `NativeKind::Null`
+        // (R5b-2) and take the `Null` arm above.
+        k if k.is_integer_family() => Ok(JsonValue::Int(bits as i64)),
+        NativeKind::Ptr(hk) => slot_ptr_to_json_value(bits, hk, schemas),
+        other => Err(format!(
+            "slot_to_json_value: NativeKind {:?} has no JSON serialization policy",
+            other
+        )),
+    }
+}
+
+/// Heap-carrier arm of [`slot_to_json_value`]. Each `HeapKind` reads the
+/// concrete pointer shape stamped for it — no cross-kind reinterpretation.
+fn slot_ptr_to_json_value(
+    bits: u64,
+    hk: HeapKind,
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Result<JsonValue, String> {
+    if bits == 0 {
+        // A null carrier serializes to JSON null, except a null TypedArray
+        // carrier is the empty array (mirrors the non-null TypedArray arm).
+        // This is NOT a per-HeapKind serialization dispatch — every other
+        // kind's null projection is uniformly `null` — so it stays an `if`,
+        // not a `match hk` (which would demand an exhaustive per-variant arm
+        // for no semantic gain, and trips the HeapKind-wildcard guard).
+        return if hk == HeapKind::TypedArray {
+            Ok(JsonValue::Array(Vec::new()))
+        } else {
+            Ok(JsonValue::Null)
+        };
+    }
+    match hk {
+        HeapKind::TypedObject => {
+            // Wrap in a borrow-only `TypedObjectPtr` (no retain), read, then
+            // forget so the caller-owned slot share is untouched — mirror of
+            // `typed_object_heap_field_to_json_value`'s TypedObject arm.
+            let ptr = TypedObjectPtr::new(bits as *const TypedObjectStorage);
+            let out = typed_object_ptr_to_json_value_with_registry_opt(&ptr, schemas);
+            std::mem::forget(ptr);
+            out
+        }
+        HeapKind::HashMap => {
+            let kref: &HashMapKindedRef = unsafe { &*(bits as *const HashMapKindedRef) };
+            hashmap_kref_to_json_value_with_registry(kref, schemas)
+        }
+        HeapKind::TypedArray => typed_array_to_json_value(bits as usize as *const u8, schemas),
+        HeapKind::BigInt => {
+            let v = unsafe { &*(bits as *const i64) };
+            Ok(JsonValue::Int(*v))
+        }
+        HeapKind::String => {
+            let s = unsafe { &*(bits as *const String) };
+            Ok(JsonValue::String(s.clone()))
+        }
+        HeapKind::Char => {
+            let c = char::from_u32(bits as u32).ok_or_else(|| {
+                "slot_to_json_value: invalid char codepoint in Ptr(Char) carrier".to_string()
+            })?;
+            Ok(JsonValue::String(c.to_string()))
+        }
+        HeapKind::Decimal => Err(
+            "Decimal serialization policy not yet decided (N7 architectural-choice deferral)"
+                .to_string(),
+        ),
+        // Exhaustive no-JSON-policy tail (WF-2E, 2026-07-05): every remaining
+        // HeapKind is listed explicitly rather than swept into a `_` wildcard,
+        // so introducing a new HeapKind variant is a compile error here and
+        // forces a conscious JSON-serialization decision (HeapKind-wildcard
+        // guard, `scripts/check-heapkind-wildcards.sh`).
+        HeapKind::Closure
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => Err(format!(
+            "slot_to_json_value: heap kind {:?} has no JSON serialization policy",
+            hk
+        )),
+    }
+}
+
+/// Read a v2-raw `*mut TypedArray<T>` (base `*const u8`, element-type stamped
+/// at header offset 7) into a `JsonValue::Array`, dispatching on the
+/// producer-stamped element discriminant (never inferred from payload bits).
+/// Recurses for nested `TypedObject` / `TypedArray` elements.
+fn typed_array_to_json_value(
+    base: *const u8,
+    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
+) -> Result<JsonValue, String> {
+    use shape_value::v2::string_obj::StringObj;
+    use shape_value::v2::typed_array::{
+        ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
+        ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+        ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32,
+        TypedArray, TypedArrayElem, read_elem_type,
+    };
+
+    if base.is_null() {
+        return Ok(JsonValue::Array(Vec::new()));
+    }
+    let elem_type = unsafe { read_elem_type(base) };
+    // SAFETY: `base` is a live `*mut TypedArray<T>` per the caller's stamped
+    // `Ptr(HeapKind::TypedArray)` kind; the element-type byte selects the
+    // monomorphization to read. Each `as_slice` borrows the array's element
+    // buffer for the duration of the copy into `JsonValue` leaves.
+    let out: Vec<JsonValue> = unsafe {
+        match elem_type {
+            ELEM_TYPE_F64 => TypedArray::<f64>::as_slice(base as *const TypedArray<f64>)
+                .iter()
+                .map(|&v| JsonValue::Number(v))
+                .collect(),
+            ELEM_TYPE_F32 => TypedArray::<f32>::as_slice(base as *const TypedArray<f32>)
+                .iter()
+                .map(|&v| JsonValue::Number(v as f64))
+                .collect(),
+            ELEM_TYPE_I64 => TypedArray::<i64>::as_slice(base as *const TypedArray<i64>)
+                .iter()
+                .map(|&v| JsonValue::Int(v))
+                .collect(),
+            ELEM_TYPE_I32 => TypedArray::<i32>::as_slice(base as *const TypedArray<i32>)
+                .iter()
+                .map(|&v| JsonValue::Int(v as i64))
+                .collect(),
+            ELEM_TYPE_I16 => TypedArray::<i16>::as_slice(base as *const TypedArray<i16>)
+                .iter()
+                .map(|&v| JsonValue::Int(v as i64))
+                .collect(),
+            ELEM_TYPE_U16 => TypedArray::<u16>::as_slice(base as *const TypedArray<u16>)
+                .iter()
+                .map(|&v| JsonValue::Int(v as i64))
+                .collect(),
+            ELEM_TYPE_U32 => TypedArray::<u32>::as_slice(base as *const TypedArray<u32>)
+                .iter()
+                .map(|&v| JsonValue::Int(v as i64))
+                .collect(),
+            ELEM_TYPE_I8 => TypedArray::<i8>::as_slice(base as *const TypedArray<i8>)
+                .iter()
+                .map(|&v| JsonValue::Int(v as i64))
+                .collect(),
+            // BOOL and U8 share the 1-byte `TypedArray<u8>` storage; the stamp
+            // distinguishes their JSON projection.
+            ELEM_TYPE_U8 => TypedArray::<u8>::as_slice(base as *const TypedArray<u8>)
+                .iter()
+                .map(|&v| JsonValue::Int(v as i64))
+                .collect(),
+            ELEM_TYPE_BOOL => TypedArray::<u8>::as_slice(base as *const TypedArray<u8>)
+                .iter()
+                .map(|&v| JsonValue::Bool(v != 0))
+                .collect(),
+            ELEM_TYPE_CHAR => TypedArray::<char>::as_slice(base as *const TypedArray<char>)
+                .iter()
+                .map(|&c| JsonValue::String(c.to_string()))
+                .collect(),
+            ELEM_TYPE_STRING => {
+                TypedArray::<*const StringObj>::as_slice(base as *const TypedArray<*const StringObj>)
+                    .iter()
+                    .map(|&p| JsonValue::String(StringObj::as_str(p).to_owned()))
+                    .collect()
+            }
+            ELEM_TYPE_TYPED_OBJECT => {
+                let slice = TypedArray::<*const TypedObjectStorage>::as_slice(
+                    base as *const TypedArray<*const TypedObjectStorage>,
+                );
+                let mut rows = Vec::with_capacity(slice.len());
+                for &p in slice.iter() {
+                    let ptr = TypedObjectPtr::new(p);
+                    let child = typed_object_ptr_to_json_value_with_registry_opt(&ptr, schemas);
+                    std::mem::forget(ptr);
+                    rows.push(child?);
+                }
+                rows
+            }
+            ELEM_TYPE_TYPED_ARRAY => {
+                let slice = TypedArray::<*const TypedArrayElem>::as_slice(
+                    base as *const TypedArray<*const TypedArrayElem>,
+                );
+                let mut rows = Vec::with_capacity(slice.len());
+                for &row_ptr in slice.iter() {
+                    if row_ptr.is_null() {
+                        rows.push(JsonValue::Array(Vec::new()));
+                    } else {
+                        rows.push(typed_array_to_json_value(row_ptr as *const u8, schemas)?);
+                    }
+                }
+                rows
+            }
+            ELEM_TYPE_DECIMAL => {
+                return Err(
+                    "Array<decimal> serialization policy not yet decided (precision vs lossy \
+                     f64) — surface-and-stop"
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "typed_array_to_json_value: element-type discriminant {} has no JSON \
+                     serialization policy (unstamped array or unsupported element kind)",
+                    other
+                ));
+            }
+        }
+    };
+    Ok(JsonValue::Array(out))
+}
+
+/// Convert a `serde_json::Value` into the strict-typed `JsonValue` sum.
+///
+/// The shared "wire → intermediate" direction (the inverse of
+/// [`json_value_to_serde_json`]). Parsers that decode to `serde_json::Value`
+/// (json / msgpack-via-serde) funnel through here to reach the universal
+/// `JsonValue` intermediate; from there
+/// [`crate::stdlib::json::build_json_enum_heap_value`] projects to a Shape
+/// runtime `HeapValue` (the "intermediate → Shape value" direction for
+/// parse). Integral JSON numbers that fit `i64` map to `JsonValue::Int`;
+/// all other numbers map to `JsonValue::Number`, preserving the
+/// `int` / `number` distinction at the boundary.
+pub fn serde_json_to_json_value(value: serde_json::Value) -> JsonValue {
+    match value {
+        serde_json::Value::Null => JsonValue::Null,
+        serde_json::Value::Bool(b) => JsonValue::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if !n.to_string().contains('.') {
+                    return JsonValue::Int(i);
+                }
+            }
+            JsonValue::Number(n.as_f64().unwrap_or(0.0))
+        }
+        serde_json::Value::String(s) => JsonValue::String(s),
+        serde_json::Value::Array(arr) => {
+            JsonValue::Array(arr.into_iter().map(serde_json_to_json_value).collect())
+        }
+        serde_json::Value::Object(map) => JsonValue::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, serde_json_to_json_value(v)))
+                .collect(),
+        ),
+    }
+}
+
 /// Convert a `JsonValue` into a `serde_json::Value`.
 ///
-/// Inverse of `serde_json_to_json_value` (`stdlib/json.rs:172-196`).
+/// Inverse of [`serde_json_to_json_value`].
 /// Used by N7 consumers that produce JSON strings: `json.stringify`
 /// (C7), `http.post_json` (C8), `http.put_json` (C9). Pair with
 /// `heap_to_json_value` to round-trip a `HeapValue` tree to a JSON
@@ -743,11 +1247,78 @@ pub fn json_value_to_msgpack_bytes(jv: &JsonValue) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_value_to_serde_json, typed_object_ptr_to_json_value};
+    use super::{JsonValue, json_value_to_serde_json, slot_to_json_value, typed_object_ptr_to_json_value};
     use crate::type_schema::{SyncRegistryScope, TypeSchemaBuilder, TypeSchemaRegistry};
     use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
-    use shape_value::{NativeKind, ValueSlot};
+    use shape_value::{KindedSlot, NativeKind, ValueSlot};
     use std::sync::Arc;
+
+    /// WF-2E: the canonical `slot_to_json_value` walks a `TypedObject`
+    /// carried in a `KindedSlot` into a `JsonValue` tree — dispatching on
+    /// the stamped `NativeKind`, reading the heap `String` field via its
+    /// concrete carrier and the inline `Int64` field inline — WITHOUT the
+    /// blind `HashMapKindedRef` reinterpretation that segfaulted before.
+    #[test]
+    fn slot_to_json_value_walks_typed_object_scalar_and_heap_fields() {
+        let mut registry = TypeSchemaRegistry::new_with_stdlib();
+        let schema_id = TypeSchemaBuilder::new("__WF2ESlotObj")
+            .string_field("name")
+            .i64_field("age")
+            .register(&mut registry);
+        let _scope = SyncRegistryScope::enter(Arc::new(registry));
+
+        let name = Arc::new("Alice".to_string());
+        // field 0 (name) is heap (String), field 1 (age) is inline (Int64).
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            vec![
+                ValueSlot::from_string_arc(Arc::clone(&name)),
+                ValueSlot::from_int(30),
+            ]
+            .into_boxed_slice(),
+            0b01,
+            Arc::from(vec![NativeKind::String, NativeKind::Int64].into_boxed_slice()),
+        );
+        // KindedSlot owns the `_new` share; its Drop releases it at scope end.
+        let slot = KindedSlot::from_typed_object_raw(ptr);
+
+        let jv = slot_to_json_value(&slot, None).expect("slot_to_json_value on TypedObject");
+        match &jv {
+            JsonValue::Object(pairs) => {
+                assert_eq!(pairs.len(), 2);
+            }
+            other => panic!("expected JsonValue::Object, got {:?}", other),
+        }
+        let serde_value = json_value_to_serde_json(&jv);
+        assert_eq!(
+            serde_value["name"],
+            serde_json::Value::String("Alice".to_string())
+        );
+        assert_eq!(serde_value["age"], serde_json::json!(30));
+    }
+
+    /// WF-2E: a scalar-carrying `KindedSlot` (int / bool / string / null)
+    /// projects to the matching `JsonValue` leaf via the stamped kind.
+    #[test]
+    fn slot_to_json_value_reads_scalar_leaves() {
+        assert_eq!(
+            slot_to_json_value(&KindedSlot::from_int(7), None).unwrap(),
+            JsonValue::Int(7)
+        );
+        assert_eq!(
+            slot_to_json_value(&KindedSlot::from_bool(true), None).unwrap(),
+            JsonValue::Bool(true)
+        );
+        assert_eq!(
+            slot_to_json_value(&KindedSlot::none(), None).unwrap(),
+            JsonValue::Null
+        );
+        assert_eq!(
+            slot_to_json_value(&KindedSlot::from_string_arc(Arc::new("hi".to_string())), None)
+                .unwrap(),
+            JsonValue::String("hi".to_string())
+        );
+    }
 
     #[test]
     fn typed_object_string_field_serializes_from_direct_carrier() {

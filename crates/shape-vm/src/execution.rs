@@ -592,6 +592,21 @@ impl ProgramExecutor for BytecodeExecutor {
                 .and_then(|l| l.max_memory_bytes),
         );
 
+        // WF-2E (2026-07-05): install the program's own schema registry
+        // (the superset containing inline object-literal schemas, merged
+        // stdlib, and user types — the same registry the VM hands module
+        // bodies as `ctx.schemas`) as the ambient thread-local scope for
+        // the duration of this run. Without this, marshal-boundary readers
+        // that resolve a `TypedObject`'s field names through the ambient
+        // `lookup_schema_by_id_public` (e.g. `FromSlot<JsonValue>` in a
+        // native module arg that has no per-arg `ModuleContext`) fall back
+        // to `runtime.schema_registry_arc()`, which never received the
+        // inline schemas, and fail with "unknown TypedObject schema id N".
+        // The guard restores the prior ambient value on drop.
+        let _program_schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(
+            std::sync::Arc::new(vm.program.type_schema_registry.clone()),
+        );
+
         let completion: KindedSlot = match vm.execute(Some(ctx_borrow)) {
             Ok(completion) => completion,
             Err(e) => {
