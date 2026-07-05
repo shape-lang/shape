@@ -208,6 +208,27 @@ Findings from the Wave-0 runs that adjust later waves:
 - **Q53(b):** foreign-function-ref closure-capture typed carrier green-lit as WF-2F-adjacent (serialized arm carrying entry `content_hash`, rebound via §4.2.0 ordinal↔hash); v1 refusal stays until it lands.
 - **One-time hash break batched into WF-2A stage 0** (Q1): `frame_descriptor`+`capture_kinds` into `FunctionBlobHashInput`, A6 foreign_dependencies ordering + `CallForeign` ordinal rewrite + linker remap, A7 declared-alias, A5(ii) `__ffi_h{hex16}_return`, entry-hash += `is_async`/`param_names`. No persisted stores may exist before it lands.
 
+## 6quater. Wave-0 close checkpoint (2026-07-05, main ce49fc36) — book-gate scope correction
+
+Differential harness on merged main: **459 MATCH / 8 known-red / 0 unexpected** (the one Wave-0 baseline delta is `ACC__pattern-matching__large` TIMEOUT→MATCH from the parser fix — 27s→1.26s compile). The tight correctness gate is healthy.
+
+**But the book truth-gate is structurally misleading — this changes the WF-4 exit criterion.** `run-book-truth-gate.mjs` reports **240/240 green, which is only the `runnable=true` fences**. Of 738 total fences, **498 are `runnable=false`** and skipped; a vm-only probe of those shows **110 pass / 388 FAIL**. Real book truth ≈ **350/738 (~47%)**, not 100%. Only 6 of 498 exclusions carry an explicit fails-at-HEAD note — 382 fail silently outside the gate. The `runnable=false` curation is itself part of how the audit's "documents broken features as working" happened. (See memory `project_book_gate_denominator_trap`.)
+
+**Binding corrections:**
+- **WF-4 close criterion is measured against the full ~738-fence universe** (minus genuinely-intentional-error examples), NOT 240 runnable=true. A green 240/240 is not an acceptable exit.
+- **WF-4 audits the 498 exclusions:** flip the ~110 currently-passing (stale-pessimistic — datetime 15, functions 10, security-permissions 8, comptime-cookbook 7) to `runnable=true`; give every remaining exclusion an accurate fails-at-HEAD annotation tied to the fixing workflow.
+- **Failure classes → workflow mapping:** 146 dead-stdlib-namespace (io/state/http/crypto/json/csv/regex/linalg) → WF-2A/2B/2E; 193 other (unknown annotations, typed-array-carrier semantics, state::capture/caller) → WF-1B/2B/3A; 27 parse errors, 20 NotImplemented/SURFACE spread across waves.
+- **2 NEW SIGSEGVs** not in the audit → early triage: `A__advanced__ownership-deep-dive__15__L459` (likely Drop/ownership — flag to WF-1C) and `B__fundamentals__content__12__L341`. Added as differential-corpus candidates.
+
+## 6quinquies. Wave-1 routed residuals (from WF-1A close, 2026-07-05)
+
+WF-1A fixed its 4 core bugs + 2 of 3 drift families; the rest are **routed, not dropped**:
+
+- **NEW LANE — `jit-fallback-engine-isolation` (WF-1A-followup, schedule Wave-1.5 / early Wave-2).** Genuine JIT correctness bug WF-1A surfaced: the `[jit-fallback]` interpreter path recompiles on the **same Cranelift engine already mutated** by `compile_program_for_inspection` (executor.rs:149), so `a+b` resolves against a polluted schema/impl registry → the `jit-object-merge-field-add` class (4 corpus ids: `ACC__objects-arrays__small`, `ACC__operators__small`, `ACC__operators__large`, `ACC__collections__large`). Merge codegen is correct in isolation — the fix is engine isolation on fallback. **Now higher-priority** because WF-1A's signal-reexec fix *expands* the set of programs that take the fallback path (entanglement noted). `ACC__collections__large` is a NEW instance unmasked by the item-4 fix. Pinned known-red until fixed.
+- **WF-3A gains two lanes:** (1) `hof-return-kind-raw-bits` (`apply(f,x)` unprovable return with untyped param `f`) → needs HM let-generalization / HOF return-kind inference + the D2 number→int compile error, not a JIT stamp; (2) `HashMap.get` non-uniform return (Int64-on-hit / Null-on-miss) → ADR-006 §2.7.17 uniform `Option<V>` handler (registry_cross_check pin only, no corpus program).
+- **NEW LANE — deep-test stdlib-JIT-caching root (follow-up).** The 4 `mir_compiler::typedarray_ptr_regression_tests::jit_closure_capture_array_*` deterministic failures (`E_TYPED_OPCODE_WITHOUT_PROOF`) + 1 flaky `jit_err_path_set_add_non_string_key` — all confirmed pre-existing at branch HEAD, the stdlib-JIT-compilation-caching root already flagged in CLAUDE.md known-constraints. Own follow-up lane.
+- **`ACC__comptime__pb3` comptime/decimal panic** (V2 `NewTypedArrayString` has no `FrameDescriptor` → verifier bug, + rust_decimal `CapacityError` on f-string) — pre-existing BOTH-modes flaky on branch, DIVERGED on main. → WF-1B (comptime) or WF-3A. Pinned.
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
