@@ -65,7 +65,6 @@ impl VirtualMachine {
     /// Capture an uncaught exception payload for host-side rendering.
     ///
     /// Per ADR-006 §2.7 / Q7 the boundary carrier is `KindedSlot`.
-    #[allow(dead_code)]
     pub(crate) fn set_last_uncaught_exception(&mut self, value: KindedSlot) {
         self.last_uncaught_exception = Some(value);
     }

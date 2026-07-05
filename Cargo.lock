@@ -5450,17 +5450,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "shape-gc"
-version = "0.3.2"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "shape-jit"
 version = "0.3.2"
 dependencies = [
- "anyhow",
  "arrow-array",
  "arrow-schema",
  "chrono",
@@ -5469,13 +5461,10 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "libloading",
- "rmp-serde",
+ "phf 0.11.3",
  "rust_decimal",
- "serde",
- "serde_json",
  "sha2",
  "shape-ast",
- "shape-gc",
  "shape-runtime",
  "shape-value",
  "shape-vm",
@@ -5553,12 +5542,9 @@ dependencies = [
  "ordered-float 3.9.2",
  "parking_lot",
  "parquet",
- "pest",
- "pest_derive",
  "quick-xml",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "rayon",
  "regex",
  "reqwest",
  "rmp",
@@ -5624,7 +5610,6 @@ dependencies = [
  "serde",
  "serde_json",
  "shape-ast",
- "shape-gc",
  "smallvec",
  "thiserror 1.0.69",
  "tokio",
@@ -5669,27 +5654,18 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow-array",
- "arrow-ord",
  "arrow-schema",
  "arrow-select",
  "bincode",
  "chrono",
  "chrono-tz",
  "clap",
- "cranelift",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
  "criterion",
- "dashmap 5.5.3",
  "datafrog",
  "dirs",
  "hex",
- "lazy_static",
  "libffi",
  "libloading",
- "logos",
- "ordered-float 3.9.2",
  "parking_lot",
  "phf 0.11.3",
  "rand 0.8.5",
@@ -5704,18 +5680,14 @@ dependencies = [
  "shape-abi-v1",
  "shape-ast",
  "shape-diagnostics",
- "shape-gc",
  "shape-runtime",
  "shape-value",
  "shape-wire",
  "smallvec",
- "target-lexicon 0.12.16",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
- "unicode-normalization",
- "unicode-segmentation",
  "wide",
 ]
 

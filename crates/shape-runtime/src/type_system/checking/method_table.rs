@@ -107,7 +107,6 @@ pub struct GenericMethodSignature {
     /// Trait bounds on receiver type parameters.
     /// Each entry is (receiver_param_index, vec_of_trait_names).
     /// e.g., `Vec<T: Numeric>.sum()` → `[(0, ["Numeric"])]`
-    #[allow(dead_code)]
     pub receiver_param_bounds: Vec<(usize, Vec<String>)>,
 }
 

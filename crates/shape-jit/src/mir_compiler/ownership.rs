@@ -680,7 +680,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 // `RefcountDisposition` deductions in `refcount_disposition`; if the
 // reader uses no `NativeKind` directly, this stays a documentation
 // anchor for the kind-discriminator import.
-#[allow(dead_code)]
 const _: fn() = || {
     let _ = NativeKind::Int64;
 };

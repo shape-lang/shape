@@ -32,7 +32,6 @@ use shape_value::{KindedSlot, VMError};
 // In-progress phase-2c IndexedTable surface (cluster E-builtins-backlog): the
 // handlers + their `surface` helper are wired through the (currently un-consumed)
 // INDEXED_TABLE_METHODS PHF map pending the typed-Arc TableView replacement.
-#[allow(dead_code)]
 #[inline]
 fn surface(method: &str) -> VMError {
     VMError::NotImplemented(format!(
@@ -46,7 +45,6 @@ fn surface(method: &str) -> VMError {
 }
 
 /// `indexed.between(start, end)` — filter rows where index is in [start, end] (v2).
-#[allow(dead_code)]
 pub(crate) fn handle_between(
     _vm: &mut VirtualMachine,
     _args: &[KindedSlot],
@@ -56,7 +54,6 @@ pub(crate) fn handle_between(
 }
 
 /// `indexed.resample(interval, { col: "agg_fn", ... })` — bucket by interval, aggregate (v2).
-#[allow(dead_code)]
 pub(crate) fn handle_resample(
     _vm: &mut VirtualMachine,
     _args: &[KindedSlot],

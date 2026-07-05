@@ -9,8 +9,8 @@ use shape_runtime::package_bundle::{PackageBundle, verify_bundle_checksum};
 /// Registry index file format (mirrors dependency_resolver's private type).
 #[derive(Debug, Deserialize)]
 struct RegistryIndexFile {
-    #[serde(default)]
     #[allow(dead_code)]
+    #[serde(default)]
     package: Option<String>,
     #[serde(default)]
     versions: Vec<RegistryVersionRecord>,
@@ -23,8 +23,8 @@ struct RegistryVersionRecord {
     yanked: bool,
     #[serde(default)]
     checksum: Option<String>,
-    #[serde(default)]
     #[allow(dead_code)]
+    #[serde(default)]
     author_key: Option<String>,
     #[serde(default)]
     required_permissions: Vec<String>,

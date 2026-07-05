@@ -144,6 +144,7 @@ impl RangeSeries for TestRangeSeries {
 }
 
 /// Example demonstrating TestRangeSeries usage
+// Live entry when built as its own example; dead when included via `mod test_series;`.
 #[allow(dead_code)]
 fn main() {
     let series = TestRangeSeries::sine_wave("Test", 100, 100.0);

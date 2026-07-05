@@ -580,7 +580,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// bit-shape dispatch path inside `jit_call_value` (cases 1 / 2 —
     /// inline `TAG_FUNCTION` function refs and legacy `HK_CLOSURE`
     /// unified-heap callees).
-    #[allow(dead_code)]
     pub(crate) fn operand_slot_kind_or_carrier(
         &self,
         operand: &Operand,

@@ -3400,3 +3400,1202 @@ mod tests {
         );
     }
 }
+
+/// WF-0A gate hardening (2026-07-05): automated cross-check between the
+/// JIT return-kind classifier tables in this module —
+/// `well_known_method_return_kind` (receiver-invariant),
+/// `parametric_method_return_kind_from_receiver` (ConcreteType-keyed),
+/// `method_return_kind_from_in_pass_kinds` (NativeKind-keyed) and
+/// `iterator_adapter_return_kind` — and the VM method registry
+/// (`crates/shape-vm/src/executor/objects/method_registry.rs`).
+///
+/// The previous sync mechanism was a hand-maintained comment ("Verified
+/// against every dispatch table in `method_registry.rs`"). This module
+/// replaces trust-the-comment with execute-the-handler: for every method a
+/// JIT table claims a return kind for, the REAL registry handler is invoked
+/// with a representative receiver, and the returned `KindedSlot.kind` must
+/// equal the JIT claim. Claims are read from the actual classifier
+/// functions (never re-transcribed), so a change on either side that the
+/// other doesn't follow fails these tests with the drifted entries listed.
+///
+/// Pre-existing drift found when this check first ran is PINNED via
+/// `known_drift` (soundness bugs to be fixed in compiler/JIT territory, not
+/// silently rebaselined here). A pin that stops reproducing also fails —
+/// the pin list must only shrink.
+#[cfg(test)]
+mod registry_cross_check {
+    use super::*;
+    use shape_value::heap_value::{
+        AtomicData, ChannelData, DequeData, HashMapData, HashMapKindedRef, HashSetData, MutexData,
+        PriorityQueueData, RangeData,
+    };
+    use shape_value::v2::typed_array::{
+        ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I64, TypedArray, stamp_elem_type,
+    };
+    use shape_value::{IteratorSource, IteratorState, KindedSlot, VMError, ValueSlot};
+    use shape_vm::executor::method_registry as reg;
+    use shape_vm::{VMConfig, VirtualMachine};
+    use std::sync::Arc;
+
+    // ── Registry map roster ─────────────────────────────────────────────
+    //
+    // Every PHF dispatch table in method_registry.rs. The completeness
+    // sweep iterates this roster, so adding a map to the registry without
+    // adding it here is caught by `sweep_covers_every_registry_map` below
+    // (count assertion), and adding an entry whose NAME collides with a
+    // JIT invariant-table name is caught by
+    // `every_invariant_name_registry_entry_is_cross_checked`.
+    fn all_maps() -> Vec<(
+        &'static str,
+        &'static phf::Map<&'static str, reg::MethodHandler>,
+    )> {
+        vec![
+            ("ARRAY_METHODS", &reg::ARRAY_METHODS),
+            ("DATATABLE_METHODS", &reg::DATATABLE_METHODS),
+            ("HASHMAP_METHODS", &reg::HASHMAP_METHODS),
+            ("SET_METHODS", &reg::SET_METHODS),
+            ("DEQUE_METHODS", &reg::DEQUE_METHODS),
+            ("PRIORITY_QUEUE_METHODS", &reg::PRIORITY_QUEUE_METHODS),
+            ("DATETIME_METHODS", &reg::DATETIME_METHODS),
+            ("TIMESPAN_METHODS", &reg::TIMESPAN_METHODS),
+            ("INSTANT_METHODS", &reg::INSTANT_METHODS),
+            ("ITERATOR_METHODS", &reg::ITERATOR_METHODS),
+            ("MATRIX_METHODS", &reg::MATRIX_METHODS),
+            ("INDEXED_TABLE_METHODS", &reg::INDEXED_TABLE_METHODS),
+            ("FLOAT_ARRAY_METHODS", &reg::FLOAT_ARRAY_METHODS),
+            ("INT_ARRAY_METHODS", &reg::INT_ARRAY_METHODS),
+            ("BOOL_ARRAY_METHODS", &reg::BOOL_ARRAY_METHODS),
+            ("MUTEX_METHODS", &reg::MUTEX_METHODS),
+            ("ATOMIC_METHODS", &reg::ATOMIC_METHODS),
+            ("LAZY_METHODS", &reg::LAZY_METHODS),
+            ("CHANNEL_METHODS", &reg::CHANNEL_METHODS),
+            ("NUMBER_METHODS", &reg::NUMBER_METHODS),
+            ("STRING_METHODS", &reg::STRING_METHODS),
+            ("BOOL_METHODS", &reg::BOOL_METHODS),
+            ("CHAR_METHODS", &reg::CHAR_METHODS),
+            ("CONTENT_METHODS", &reg::CONTENT_METHODS),
+            ("RANGE_METHODS", &reg::RANGE_METHODS),
+        ]
+    }
+
+    fn map_by_name(name: &str) -> &'static phf::Map<&'static str, reg::MethodHandler> {
+        all_maps()
+            .into_iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("unknown registry map `{name}` in cross-check case"))
+            .1
+    }
+
+    /// Invoke a registry handler exactly the way the dispatch shell does:
+    /// `args[0]` = receiver, `args[1..]` = call arguments, `ctx = None`.
+    fn call(h: reg::MethodHandler, args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        h(&mut vm, args, None)
+    }
+
+    // ── Representative receivers ────────────────────────────────────────
+    //
+    // Built through the same production constructors the VM uses
+    // (`TypedArray::with_capacity` + `stamp_elem_type` v2-raw allocator
+    // pair; `KindedSlot::from_*` typed-Arc constructors). No kind
+    // fabrication: every slot's kind matches its real payload.
+
+    /// Non-empty `TypedArray<i64>` receiver `[10, 20, 30]`.
+    fn int_array() -> KindedSlot {
+        unsafe {
+            let p = TypedArray::<i64>::with_capacity(3) as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_I64);
+            let arr = p as *mut TypedArray<i64>;
+            TypedArray::<i64>::push(arr, 10);
+            TypedArray::<i64>::push(arr, 20);
+            TypedArray::<i64>::push(arr, 30);
+            KindedSlot::new(
+                ValueSlot::from_raw(p as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+            )
+        }
+    }
+
+    /// Non-empty `TypedArray<f64>` receiver `[1.5, 2.5]`.
+    fn float_array() -> KindedSlot {
+        unsafe {
+            let p = TypedArray::<f64>::with_capacity(2) as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_F64);
+            let arr = p as *mut TypedArray<f64>;
+            TypedArray::<f64>::push(arr, 1.5);
+            TypedArray::<f64>::push(arr, 2.5);
+            KindedSlot::new(
+                ValueSlot::from_raw(p as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+            )
+        }
+    }
+
+    /// Non-empty `TypedArray<u8>` bool receiver `[true, false]`.
+    fn bool_array() -> KindedSlot {
+        unsafe {
+            let p = TypedArray::<u8>::with_capacity(2) as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_BOOL);
+            let arr = p as *mut TypedArray<u8>;
+            TypedArray::<u8>::push(arr, 1);
+            TypedArray::<u8>::push(arr, 0);
+            KindedSlot::new(
+                ValueSlot::from_raw(p as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+            )
+        }
+    }
+
+    fn string_recv() -> KindedSlot {
+        KindedSlot::from_string("hello world")
+    }
+
+    fn range_recv() -> KindedSlot {
+        KindedSlot::from_range(Arc::new(RangeData::exclusive(0, 5)))
+    }
+
+    /// Empty `HashMap<string, int>` (I64-value carrier).
+    fn hashmap_empty() -> KindedSlot {
+        KindedSlot::from_hashmap(Arc::new(HashMapKindedRef::I64(
+            Arc::new(HashMapData::new()),
+        )))
+    }
+
+    /// `HashMap<string, int>` with `{"k": 1}` — built through the real
+    /// `v2_set` handler so the carrier shape matches production.
+    fn hashmap_k1() -> KindedSlot {
+        let set = *reg::HASHMAP_METHODS
+            .get("set")
+            .expect("HASHMAP_METHODS must register `set`");
+        call(
+            set,
+            &[
+                hashmap_empty(),
+                KindedSlot::from_string("k"),
+                KindedSlot::from_int(1),
+            ],
+        )
+        .expect("building the {\"k\": 1} fixture via v2_set must succeed")
+    }
+
+    /// String set `{"a"}`.
+    fn hashset_a() -> KindedSlot {
+        KindedSlot::from_hashset(Arc::new(HashSetData::from_keys(vec![Arc::new(
+            "a".to_string(),
+        )])))
+    }
+
+    fn deque_empty() -> KindedSlot {
+        KindedSlot::from_deque(Arc::new(DequeData::new()))
+    }
+
+    fn pq_empty() -> KindedSlot {
+        KindedSlot::from_priority_queue(Arc::new(PriorityQueueData::new()))
+    }
+
+    fn channel_open() -> KindedSlot {
+        KindedSlot::from_channel(Arc::new(ChannelData::new()))
+    }
+
+    /// Lazy range iterator over `0..5`.
+    fn iter_range() -> KindedSlot {
+        KindedSlot::from_iterator(Arc::new(IteratorState::new(IteratorSource::Range {
+            start: 0,
+            end: 5,
+            step: 1,
+        })))
+    }
+
+    fn mutex_int() -> KindedSlot {
+        KindedSlot::from_mutex(Arc::new(MutexData::new(KindedSlot::from_int(42))))
+    }
+
+    fn atomic_one() -> KindedSlot {
+        KindedSlot::from_atomic(Arc::new(AtomicData::new(1)))
+    }
+
+    // ── Case runner ─────────────────────────────────────────────────────
+
+    struct Case {
+        /// Human label, e.g. `Array<int>.mean()`.
+        label: &'static str,
+        /// Registry map the dispatch shell would consult for this
+        /// receiver (mirrors `objects/mod.rs` receiver-kind routing,
+        /// incl. `typed_array_method_registry`'s per-elem-kind map with
+        /// ARRAY_METHODS fallback).
+        map_name: &'static str,
+        method: &'static str,
+        /// `args[0]` = receiver, `args[1..]` = call arguments.
+        args: Vec<KindedSlot>,
+        /// JIT-side claimed return kind — ALWAYS produced by calling the
+        /// actual classifier fn, never transcribed by hand.
+        claim: Option<NativeKind>,
+        /// `Some(reason)` pins pre-existing drift found when this check
+        /// first ran (2026-07-05). Pinned entries must keep drifting —
+        /// a pin that starts agreeing fails as stale, so fixes must
+        /// remove the pin in the same change.
+        known_drift: Option<&'static str>,
+    }
+
+    fn run_cases(table_name: &str, cases: Vec<Case>) {
+        let mut failures: Vec<String> = Vec::new();
+        let mut pinned: Vec<String> = Vec::new();
+        for case in cases {
+            let Some(claim) = case.claim else {
+                failures.push(format!(
+                    "{}: JIT table `{table_name}` no longer classifies this entry \
+                     (arm deleted or receiver-shape changed) — update the cross-check",
+                    case.label
+                ));
+                continue;
+            };
+            let Some(handler) = map_by_name(case.map_name).get(case.method) else {
+                failures.push(format!(
+                    "{}: `{}` has no `{}` entry — JIT claims a return kind for a \
+                     method the registry does not register",
+                    case.label, case.map_name, case.method
+                ));
+                continue;
+            };
+            match call(*handler, &case.args) {
+                Ok(result) => {
+                    let agree = result.kind == claim;
+                    match (agree, case.known_drift) {
+                        (true, None) => {}
+                        (true, Some(reason)) => failures.push(format!(
+                            "{}: pinned drift no longer reproduces — JIT and VM now both \
+                             return {:?}; remove the stale pin ({reason})",
+                            case.label, claim
+                        )),
+                        (false, Some(reason)) => pinned.push(format!(
+                            "{}: JIT claims {:?}, VM `{}[\"{}\"]` returned {:?} — {reason}",
+                            case.label, claim, case.map_name, case.method, result.kind
+                        )),
+                        (false, None) => failures.push(format!(
+                            "{}: JIT `{table_name}` claims {:?}, VM `{}[\"{}\"]` returned {:?}",
+                            case.label, claim, case.map_name, case.method, result.kind
+                        )),
+                    }
+                }
+                // A pinned entry may also reproduce as an invocation
+                // failure (e.g. the HashMap.iter carrier mismatch, where
+                // the handler cannot decode the receiver at all).
+                Err(e) => match case.known_drift {
+                    Some(reason) => pinned.push(format!(
+                        "{}: VM `{}[\"{}\"]` failed instead of returning {:?}: {e:?} — {reason}",
+                        case.label, case.map_name, case.method, claim
+                    )),
+                    None => failures.push(format!(
+                        "{}: harness invocation of `{}[\"{}\"]` failed: {e:?}",
+                        case.label, case.map_name, case.method
+                    )),
+                },
+            }
+        }
+        if !pinned.is_empty() {
+            eprintln!(
+                "KNOWN JIT<->method_registry return-kind drift in `{table_name}` \
+                 (pinned soundness bugs — list must only shrink):\n{}",
+                pinned.join("\n")
+            );
+        }
+        assert!(
+            failures.is_empty(),
+            "JIT return-kind table `{table_name}` drifted from method_registry.rs:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// `args` operand vec putting the receiver in MIR slot 0 — the shape
+    /// both parametric classifiers key their receiver lookup on.
+    fn recv_operands() -> Vec<Operand> {
+        vec![Operand::Copy(Place::Local(SlotId(0)))]
+    }
+
+    // ── Test 1: receiver-invariant table ────────────────────────────────
+
+    /// `(map, method, args)` for every registry entry whose name appears
+    /// in `well_known_method_return_kind` and whose receiver is
+    /// constructible in a unit test.
+    fn invariant_cases() -> Vec<Case> {
+        let inv = |label, map_name, method: &'static str, args| Case {
+            label,
+            map_name,
+            method,
+            args,
+            claim: well_known_method_return_kind(method),
+            known_drift: None,
+        };
+        vec![
+            // Array (TypedArray<i64> receiver; ARRAY_METHODS is the
+            // fallback map for every element kind).
+            inv("Array.len()", "ARRAY_METHODS", "len", vec![int_array()]),
+            inv(
+                "Array.length()",
+                "ARRAY_METHODS",
+                "length",
+                vec![int_array()],
+            ),
+            inv(
+                "Array.isEmpty()",
+                "ARRAY_METHODS",
+                "isEmpty",
+                vec![int_array()],
+            ),
+            inv("Array.count()", "ARRAY_METHODS", "count", vec![int_array()]),
+            inv("Array.iter()", "ARRAY_METHODS", "iter", vec![int_array()]),
+            // HashMap
+            inv(
+                "HashMap.has(k)",
+                "HASHMAP_METHODS",
+                "has",
+                vec![hashmap_k1(), KindedSlot::from_string("k")],
+            ),
+            inv(
+                "HashMap.len()",
+                "HASHMAP_METHODS",
+                "len",
+                vec![hashmap_k1()],
+            ),
+            inv(
+                "HashMap.length()",
+                "HASHMAP_METHODS",
+                "length",
+                vec![hashmap_k1()],
+            ),
+            inv(
+                "HashMap.isEmpty()",
+                "HASHMAP_METHODS",
+                "isEmpty",
+                vec![hashmap_k1()],
+            ),
+            Case {
+                label: "HashMap.iter()",
+                map_name: "HASHMAP_METHODS",
+                method: "iter",
+                args: vec![hashmap_k1()],
+                claim: well_known_method_return_kind("iter"),
+                known_drift: Some(
+                    "PIN(2026-07-05): producer/consumer carrier mismatch — \
+                     `HASHMAP_METHODS[\"iter\"]` -> `handle_hashmap_iter` recovers \
+                     the receiver via `slot.as_heap_value()` (expects \
+                     `Arc<HeapValue>` bits), but every HashMap producer \
+                     (`ValueSlot::from_hashmap`, `v2_set`, `v2_merge`, ...) \
+                     stores `Arc<HashMapKindedRef>` bits, so the decode is a \
+                     type-confused read and `HashMap.iter()` errors (or reads \
+                     garbage) instead of returning `Ptr(Iterator)` — fix is \
+                     receiver recovery via the kinded HashMap path in \
+                     `iterator_methods.rs`, not a harness change",
+                ),
+            },
+            // Set
+            inv(
+                "Set.has(k)",
+                "SET_METHODS",
+                "has",
+                vec![hashset_a(), KindedSlot::from_string("a")],
+            ),
+            inv("Set.len()", "SET_METHODS", "len", vec![hashset_a()]),
+            inv("Set.length()", "SET_METHODS", "length", vec![hashset_a()]),
+            inv("Set.isEmpty()", "SET_METHODS", "isEmpty", vec![hashset_a()]),
+            // Deque
+            inv("Deque.size()", "DEQUE_METHODS", "size", vec![deque_empty()]),
+            inv("Deque.len()", "DEQUE_METHODS", "len", vec![deque_empty()]),
+            inv(
+                "Deque.length()",
+                "DEQUE_METHODS",
+                "length",
+                vec![deque_empty()],
+            ),
+            inv(
+                "Deque.isEmpty()",
+                "DEQUE_METHODS",
+                "isEmpty",
+                vec![deque_empty()],
+            ),
+            // PriorityQueue
+            inv(
+                "PriorityQueue.size()",
+                "PRIORITY_QUEUE_METHODS",
+                "size",
+                vec![pq_empty()],
+            ),
+            inv(
+                "PriorityQueue.len()",
+                "PRIORITY_QUEUE_METHODS",
+                "len",
+                vec![pq_empty()],
+            ),
+            inv(
+                "PriorityQueue.length()",
+                "PRIORITY_QUEUE_METHODS",
+                "length",
+                vec![pq_empty()],
+            ),
+            inv(
+                "PriorityQueue.isEmpty()",
+                "PRIORITY_QUEUE_METHODS",
+                "isEmpty",
+                vec![pq_empty()],
+            ),
+            // Iterator
+            inv(
+                "Iterator.count()",
+                "ITERATOR_METHODS",
+                "count",
+                vec![iter_range()],
+            ),
+            // Typed-array per-elem-kind maps
+            inv(
+                "Vec<number>.len()",
+                "FLOAT_ARRAY_METHODS",
+                "len",
+                vec![float_array()],
+            ),
+            inv(
+                "Vec<number>.length()",
+                "FLOAT_ARRAY_METHODS",
+                "length",
+                vec![float_array()],
+            ),
+            inv(
+                "Vec<int>.len()",
+                "INT_ARRAY_METHODS",
+                "len",
+                vec![int_array()],
+            ),
+            inv(
+                "Vec<int>.length()",
+                "INT_ARRAY_METHODS",
+                "length",
+                vec![int_array()],
+            ),
+            inv(
+                "Vec<bool>.len()",
+                "BOOL_ARRAY_METHODS",
+                "len",
+                vec![bool_array()],
+            ),
+            inv(
+                "Vec<bool>.length()",
+                "BOOL_ARRAY_METHODS",
+                "length",
+                vec![bool_array()],
+            ),
+            inv(
+                "Vec<bool>.isEmpty()",
+                "BOOL_ARRAY_METHODS",
+                "isEmpty",
+                vec![bool_array()],
+            ),
+            inv(
+                "Vec<bool>.count()",
+                "BOOL_ARRAY_METHODS",
+                "count",
+                vec![bool_array()],
+            ),
+            // String
+            inv("String.len()", "STRING_METHODS", "len", vec![string_recv()]),
+            inv(
+                "String.length()",
+                "STRING_METHODS",
+                "length",
+                vec![string_recv()],
+            ),
+            inv(
+                "String.contains(s)",
+                "STRING_METHODS",
+                "contains",
+                vec![string_recv(), KindedSlot::from_string("lo")],
+            ),
+            inv(
+                "String.iter()",
+                "STRING_METHODS",
+                "iter",
+                vec![string_recv()],
+            ),
+            // Range
+            inv(
+                "Range.contains(i)",
+                "RANGE_METHODS",
+                "contains",
+                vec![range_recv(), KindedSlot::from_int(3)],
+            ),
+            inv(
+                "Range.length()",
+                "RANGE_METHODS",
+                "length",
+                vec![range_recv()],
+            ),
+            inv("Range.size()", "RANGE_METHODS", "size", vec![range_recv()]),
+            inv("Range.len()", "RANGE_METHODS", "len", vec![range_recv()]),
+            inv(
+                "Range.isEmpty()",
+                "RANGE_METHODS",
+                "isEmpty",
+                vec![range_recv()],
+            ),
+            inv("Range.iter()", "RANGE_METHODS", "iter", vec![range_recv()]),
+        ]
+    }
+
+    /// Registry entries whose name IS in the invariant table but whose
+    /// receiver cannot be constructed in this unit-test harness. Each
+    /// needs a reason; the completeness sweep fails on any entry that is
+    /// neither verified nor listed here.
+    fn invariant_unverified() -> Vec<(&'static str, &'static str, &'static str)> {
+        vec![
+            (
+                "DATATABLE_METHODS",
+                "len",
+                "DataTable receiver requires an arrow RecordBatch fixture",
+            ),
+            (
+                "DATATABLE_METHODS",
+                "length",
+                "DataTable receiver requires an arrow RecordBatch fixture",
+            ),
+            (
+                "DATATABLE_METHODS",
+                "count",
+                "DataTable receiver requires an arrow RecordBatch fixture",
+            ),
+        ]
+    }
+
+    #[test]
+    fn invariant_table_matches_method_registry() {
+        run_cases("well_known_method_return_kind", invariant_cases());
+    }
+
+    /// Completeness sweep: every registry entry (all maps × all names)
+    /// whose name the JIT invariant table classifies must be either
+    /// invoked by `invariant_cases()` or explicitly allow-listed with a
+    /// reason. Guards against silent drift when a NEW registry entry
+    /// reuses an invariant-classified name (`len`, `count`, `has`, ...)
+    /// with a different return shape.
+    #[test]
+    fn every_invariant_name_registry_entry_is_cross_checked() {
+        use std::collections::HashSet;
+        let verified: HashSet<(&str, &str)> = invariant_cases()
+            .iter()
+            .map(|c| (c.map_name, c.method))
+            .collect();
+        let unverified: HashSet<(&str, &str)> = invariant_unverified()
+            .iter()
+            .map(|(m, n, _)| (*m, *n))
+            .collect();
+        let mut missing = Vec::new();
+        for (map_name, map) in all_maps() {
+            for name in map.keys() {
+                if well_known_method_return_kind(name).is_none() {
+                    continue;
+                }
+                let key = (map_name, *name);
+                if !verified.contains(&key) && !unverified.contains(&key) {
+                    missing.push(format!(
+                        "{map_name}[\"{name}\"] matches a JIT invariant-table name but has \
+                         no cross-check case — add it to invariant_cases() (or, with a \
+                         reason, to invariant_unverified())"
+                    ));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{}", missing.join("\n"));
+    }
+
+    /// The roster above must track method_registry.rs. If a map is added
+    /// or removed there, update `all_maps()` (the sweep is only as
+    /// complete as the roster).
+    #[test]
+    fn sweep_covers_every_registry_map() {
+        assert_eq!(
+            all_maps().len(),
+            25,
+            "registry map roster out of date — sync all_maps() with the \
+             `pub static *_METHODS` set in method_registry.rs"
+        );
+    }
+
+    // ── Test 2: ConcreteType-parametric table ───────────────────────────
+
+    #[test]
+    fn parametric_receiver_table_matches_method_registry() {
+        let claim = |method: &'static str, ct: ConcreteType| {
+            parametric_method_return_kind_from_receiver(method, &recv_operands(), &[ct])
+        };
+        let int_arr_ct = || ConcreteType::Array(Box::new(ConcreteType::I64));
+        let float_arr_ct = || ConcreteType::Array(Box::new(ConcreteType::F64));
+        let hashmap_ct =
+            || ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64));
+        let hashset_ct = || ConcreteType::HashSet(Box::new(ConcreteType::String));
+        let deque_ct = || ConcreteType::Deque(Box::new(ConcreteType::I64));
+        let channel_ct = || ConcreteType::Channel(Box::new(ConcreteType::I64));
+        let mutex_ct = || ConcreteType::Mutex(Box::new(ConcreteType::I64));
+
+        // Map choice per case mirrors the dispatch shell: TypedArray
+        // receivers consult `typed_array_method_registry` (INT_ARRAY /
+        // FLOAT_ARRAY per elem kind) first, then fall back to
+        // ARRAY_METHODS (`objects/mod.rs::typed_array_method_registry`).
+        let pc =
+            |label, map_name, method: &'static str, ct: ConcreteType, args, known_drift| Case {
+                label,
+                map_name,
+                method,
+                args,
+                claim: claim(method, ct),
+                known_drift,
+            };
+        let cases = vec![
+            // Array<int> element-parametric accessors/aggregations
+            pc(
+                "Array<int>.sum()",
+                "INT_ARRAY_METHODS",
+                "sum",
+                int_arr_ct(),
+                vec![int_array()],
+                None,
+            ),
+            pc(
+                "Array<int>.mean()",
+                "INT_ARRAY_METHODS",
+                "mean",
+                int_arr_ct(),
+                vec![int_array()],
+                Some(
+                    "PIN(2026-07-05): JIT claims elem kind Int64, but \
+                     `v2_int_avg` -> `avg_elements` returns Float64 for I64 \
+                     receivers (an int average is fractional) — fix belongs in \
+                     `parametric_method_return_kind_from_receiver`'s \
+                     sum/mean/min/max arm, not here",
+                ),
+            ),
+            pc(
+                "Array<int>.min()",
+                "INT_ARRAY_METHODS",
+                "min",
+                int_arr_ct(),
+                vec![int_array()],
+                None,
+            ),
+            pc(
+                "Array<int>.max()",
+                "INT_ARRAY_METHODS",
+                "max",
+                int_arr_ct(),
+                vec![int_array()],
+                None,
+            ),
+            pc(
+                "Array<int>.get(i)",
+                "ARRAY_METHODS",
+                "get",
+                int_arr_ct(),
+                vec![int_array(), KindedSlot::from_int(1)],
+                None,
+            ),
+            pc(
+                "Array<int>.first()",
+                "ARRAY_METHODS",
+                "first",
+                int_arr_ct(),
+                vec![int_array()],
+                None,
+            ),
+            pc(
+                "Array<int>.last()",
+                "ARRAY_METHODS",
+                "last",
+                int_arr_ct(),
+                vec![int_array()],
+                None,
+            ),
+            pc(
+                "Array<int>.pop()",
+                "ARRAY_METHODS",
+                "pop",
+                int_arr_ct(),
+                vec![int_array()],
+                None,
+            ),
+            // Array<number>
+            pc(
+                "Array<number>.sum()",
+                "FLOAT_ARRAY_METHODS",
+                "sum",
+                float_arr_ct(),
+                vec![float_array()],
+                None,
+            ),
+            pc(
+                "Array<number>.mean()",
+                "FLOAT_ARRAY_METHODS",
+                "mean",
+                float_arr_ct(),
+                vec![float_array()],
+                None,
+            ),
+            pc(
+                "Array<number>.min()",
+                "FLOAT_ARRAY_METHODS",
+                "min",
+                float_arr_ct(),
+                vec![float_array()],
+                None,
+            ),
+            pc(
+                "Array<number>.max()",
+                "FLOAT_ARRAY_METHODS",
+                "max",
+                float_arr_ct(),
+                vec![float_array()],
+                None,
+            ),
+            pc(
+                "Array<number>.get(i)",
+                "ARRAY_METHODS",
+                "get",
+                float_arr_ct(),
+                vec![float_array(), KindedSlot::from_int(0)],
+                None,
+            ),
+            pc(
+                "Array<number>.first()",
+                "ARRAY_METHODS",
+                "first",
+                float_arr_ct(),
+                vec![float_array()],
+                None,
+            ),
+            pc(
+                "Array<number>.last()",
+                "ARRAY_METHODS",
+                "last",
+                float_arr_ct(),
+                vec![float_array()],
+                None,
+            ),
+            pc(
+                "Array<number>.pop()",
+                "ARRAY_METHODS",
+                "pop",
+                float_arr_ct(),
+                vec![float_array()],
+                None,
+            ),
+            // HashMap<string, int>
+            pc(
+                "HashMap<string,int>.get(k) [hit]",
+                "HASHMAP_METHODS",
+                "get",
+                hashmap_ct(),
+                vec![hashmap_k1(), KindedSlot::from_string("k")],
+                Some(
+                    "PIN(2026-07-05): JIT claims Ptr(Option) (the table comment \
+                     says `v2_get` returns `KindedSlot::from_option`), but the \
+                     actual handler returns the BARE value kind on hit \
+                     (`get_kinded` -> `from_int` for I64 maps)",
+                ),
+            ),
+            pc(
+                "HashMap<string,int>.get(k) [miss]",
+                "HASHMAP_METHODS",
+                "get",
+                hashmap_ct(),
+                vec![hashmap_k1(), KindedSlot::from_string("absent")],
+                Some(
+                    "PIN(2026-07-05): JIT claims Ptr(Option), but the actual \
+                     handler returns `KindedSlot::none()` (kind Null) on miss",
+                ),
+            ),
+            pc(
+                "HashMap<string,int>.set(k, v)",
+                "HASHMAP_METHODS",
+                "set",
+                hashmap_ct(),
+                vec![
+                    hashmap_k1(),
+                    KindedSlot::from_string("k2"),
+                    KindedSlot::from_int(2),
+                ],
+                None,
+            ),
+            pc(
+                "HashMap<string,int>.delete(k)",
+                "HASHMAP_METHODS",
+                "delete",
+                hashmap_ct(),
+                vec![hashmap_k1(), KindedSlot::from_string("k")],
+                None,
+            ),
+            pc(
+                "HashMap<string,int>.merge(other)",
+                "HASHMAP_METHODS",
+                "merge",
+                hashmap_ct(),
+                vec![hashmap_k1(), hashmap_k1()],
+                None,
+            ),
+            // HashSet<string>
+            pc(
+                "Set<string>.add(k)",
+                "SET_METHODS",
+                "add",
+                hashset_ct(),
+                vec![hashset_a(), KindedSlot::from_string("b")],
+                None,
+            ),
+            pc(
+                "Set<string>.delete(k)",
+                "SET_METHODS",
+                "delete",
+                hashset_ct(),
+                vec![hashset_a(), KindedSlot::from_string("a")],
+                None,
+            ),
+            pc(
+                "Set<string>.union(other)",
+                "SET_METHODS",
+                "union",
+                hashset_ct(),
+                vec![hashset_a(), hashset_a()],
+                None,
+            ),
+            pc(
+                "Set<string>.intersection(other)",
+                "SET_METHODS",
+                "intersection",
+                hashset_ct(),
+                vec![hashset_a(), hashset_a()],
+                None,
+            ),
+            pc(
+                "Set<string>.difference(other)",
+                "SET_METHODS",
+                "difference",
+                hashset_ct(),
+                vec![hashset_a(), hashset_a()],
+                None,
+            ),
+            // Deque<int>
+            pc(
+                "Deque<int>.pushBack(v)",
+                "DEQUE_METHODS",
+                "pushBack",
+                deque_ct(),
+                vec![deque_empty(), KindedSlot::from_int(1)],
+                None,
+            ),
+            pc(
+                "Deque<int>.pushFront(v)",
+                "DEQUE_METHODS",
+                "pushFront",
+                deque_ct(),
+                vec![deque_empty(), KindedSlot::from_int(1)],
+                None,
+            ),
+            // PriorityQueue
+            pc(
+                "PriorityQueue.push(p)",
+                "PRIORITY_QUEUE_METHODS",
+                "push",
+                ConcreteType::PriorityQueue,
+                vec![pq_empty(), KindedSlot::from_int(5)],
+                None,
+            ),
+            // Channel<int>
+            pc(
+                "Channel<int>.send(v)",
+                "CHANNEL_METHODS",
+                "send",
+                channel_ct(),
+                vec![channel_open(), KindedSlot::from_int(7)],
+                None,
+            ),
+            pc(
+                "Channel<int>.close()",
+                "CHANNEL_METHODS",
+                "close",
+                channel_ct(),
+                vec![channel_open()],
+                None,
+            ),
+            // Mutex<int>
+            pc(
+                "Mutex<int>.get()",
+                "MUTEX_METHODS",
+                "get",
+                mutex_ct(),
+                vec![mutex_int()],
+                None,
+            ),
+            // Atomic (i64-only per §2.7.25)
+            pc(
+                "Atomic.load()",
+                "ATOMIC_METHODS",
+                "load",
+                ConcreteType::Atomic,
+                vec![atomic_one()],
+                None,
+            ),
+            pc(
+                "Atomic.fetch_add(d)",
+                "ATOMIC_METHODS",
+                "fetch_add",
+                ConcreteType::Atomic,
+                vec![atomic_one(), KindedSlot::from_int(1)],
+                None,
+            ),
+            pc(
+                "Atomic.fetch_sub(d)",
+                "ATOMIC_METHODS",
+                "fetch_sub",
+                ConcreteType::Atomic,
+                vec![atomic_one(), KindedSlot::from_int(1)],
+                None,
+            ),
+            pc(
+                "Atomic.compare_exchange(e, n)",
+                "ATOMIC_METHODS",
+                "compare_exchange",
+                ConcreteType::Atomic,
+                vec![
+                    atomic_one(),
+                    KindedSlot::from_int(1),
+                    KindedSlot::from_int(2),
+                ],
+                None,
+            ),
+            // NOT covered: `Lazy<T>.get()` — the JIT arm exists (asserted
+            // below) but `v2_lazy_get` on an uninitialized Lazy must run a
+            // real closure initializer, which this harness cannot
+            // construct. Tracked as unverified.
+        ];
+        run_cases("parametric_method_return_kind_from_receiver", cases);
+
+        // Lazy<T>.get(): assert the JIT arm still classifies (Int64 for
+        // Lazy<int>) and the registry still registers the handler, so a
+        // deletion on either side surfaces here even though the handler
+        // can't be invoked without a closure.
+        assert_eq!(
+            claim("get", ConcreteType::Lazy(Box::new(ConcreteType::I64))),
+            Some(NativeKind::Int64),
+            "JIT parametric table lost the Lazy<T>.get() arm"
+        );
+        assert!(
+            reg::LAZY_METHODS.get("get").is_some(),
+            "LAZY_METHODS no longer registers `get`"
+        );
+    }
+
+    // ── Test 3: in-pass-kinds parametric table ──────────────────────────
+
+    #[test]
+    fn in_pass_kinds_table_matches_method_registry() {
+        let claim = |method: &'static str, kind: NativeKind| {
+            method_return_kind_from_in_pass_kinds(method, &recv_operands(), &[Some(kind)])
+        };
+        let kc = |label, map_name, method: &'static str, kind: NativeKind, args| Case {
+            label,
+            map_name,
+            method,
+            args,
+            claim: claim(method, kind),
+            known_drift: None,
+        };
+        let hm = NativeKind::Ptr(HeapKind::HashMap);
+        let hs = NativeKind::Ptr(HeapKind::HashSet);
+        let dq = NativeKind::Ptr(HeapKind::Deque);
+        let pq = NativeKind::Ptr(HeapKind::PriorityQueue);
+        let ch = NativeKind::Ptr(HeapKind::Channel);
+        let it = NativeKind::Ptr(HeapKind::Iterator);
+        let cases = vec![
+            kc(
+                "HashMap.set(k, v) [in-pass]",
+                "HASHMAP_METHODS",
+                "set",
+                hm,
+                vec![
+                    hashmap_k1(),
+                    KindedSlot::from_string("k2"),
+                    KindedSlot::from_int(2),
+                ],
+            ),
+            kc(
+                "HashMap.delete(k) [in-pass]",
+                "HASHMAP_METHODS",
+                "delete",
+                hm,
+                vec![hashmap_k1(), KindedSlot::from_string("k")],
+            ),
+            kc(
+                "HashMap.merge(other) [in-pass]",
+                "HASHMAP_METHODS",
+                "merge",
+                hm,
+                vec![hashmap_k1(), hashmap_k1()],
+            ),
+            kc(
+                "Set.add(k) [in-pass]",
+                "SET_METHODS",
+                "add",
+                hs,
+                vec![hashset_a(), KindedSlot::from_string("b")],
+            ),
+            kc(
+                "Set.delete(k) [in-pass]",
+                "SET_METHODS",
+                "delete",
+                hs,
+                vec![hashset_a(), KindedSlot::from_string("a")],
+            ),
+            kc(
+                "Set.union(o) [in-pass]",
+                "SET_METHODS",
+                "union",
+                hs,
+                vec![hashset_a(), hashset_a()],
+            ),
+            kc(
+                "Set.intersection(o) [in-pass]",
+                "SET_METHODS",
+                "intersection",
+                hs,
+                vec![hashset_a(), hashset_a()],
+            ),
+            kc(
+                "Set.difference(o) [in-pass]",
+                "SET_METHODS",
+                "difference",
+                hs,
+                vec![hashset_a(), hashset_a()],
+            ),
+            kc(
+                "Deque.pushBack(v) [in-pass]",
+                "DEQUE_METHODS",
+                "pushBack",
+                dq,
+                vec![deque_empty(), KindedSlot::from_int(1)],
+            ),
+            kc(
+                "Deque.pushFront(v) [in-pass]",
+                "DEQUE_METHODS",
+                "pushFront",
+                dq,
+                vec![deque_empty(), KindedSlot::from_int(1)],
+            ),
+            kc(
+                "PriorityQueue.push(p) [in-pass]",
+                "PRIORITY_QUEUE_METHODS",
+                "push",
+                pq,
+                vec![pq_empty(), KindedSlot::from_int(5)],
+            ),
+            kc(
+                "Channel.send(v) [in-pass]",
+                "CHANNEL_METHODS",
+                "send",
+                ch,
+                vec![channel_open(), KindedSlot::from_int(7)],
+            ),
+            kc(
+                "Channel.close() [in-pass]",
+                "CHANNEL_METHODS",
+                "close",
+                ch,
+                vec![channel_open()],
+            ),
+            // Iterator lazy adapters with non-closure arguments — these
+            // empirically pin the shared `append_transform` ->
+            // `wrap_iterator` return path that `map`/`filter`/`flatMap`
+            // also use (those three need a real closure argument and are
+            // covered structurally below).
+            kc(
+                "Iterator.take(n) [in-pass]",
+                "ITERATOR_METHODS",
+                "take",
+                it,
+                vec![iter_range(), KindedSlot::from_int(2)],
+            ),
+            kc(
+                "Iterator.skip(n) [in-pass]",
+                "ITERATOR_METHODS",
+                "skip",
+                it,
+                vec![iter_range(), KindedSlot::from_int(1)],
+            ),
+            kc(
+                "Iterator.enumerate() [in-pass]",
+                "ITERATOR_METHODS",
+                "enumerate",
+                it,
+                vec![iter_range()],
+            ),
+            kc(
+                "Iterator.chain(other) [in-pass]",
+                "ITERATOR_METHODS",
+                "chain",
+                it,
+                vec![iter_range(), iter_range()],
+            ),
+        ];
+        run_cases("method_return_kind_from_in_pass_kinds", cases);
+
+        // Closure-arg adapters: cannot be invoked without a real closure
+        // block, but the claim + registration must both still exist, and
+        // their return statement is the same `append_transform` ->
+        // `wrap_iterator` path pinned by take/skip/enumerate/chain above.
+        for name in ["map", "filter", "flatMap"] {
+            assert_eq!(
+                claim(name, it),
+                Some(NativeKind::Ptr(HeapKind::Iterator)),
+                "JIT in-pass table lost the Iterator.{name} adapter arm"
+            );
+            assert!(
+                reg::ITERATOR_METHODS.get(name).is_some(),
+                "ITERATOR_METHODS no longer registers `{name}`"
+            );
+        }
+    }
+
+    // ── Test 4: the two JIT-side iterator-adapter classifiers agree ─────
+
+    #[test]
+    fn iterator_adapter_classifiers_agree() {
+        let args = recv_operands();
+        let kinds = vec![Some(NativeKind::Ptr(HeapKind::Iterator))];
+        for name in [
+            "map",
+            "filter",
+            "take",
+            "skip",
+            "flatMap",
+            "enumerate",
+            "chain",
+        ] {
+            assert_eq!(
+                iterator_adapter_return_kind(name, &args, &kinds),
+                method_return_kind_from_in_pass_kinds(name, &args, &kinds),
+                "`iterator_adapter_return_kind` and \
+                 `method_return_kind_from_in_pass_kinds` disagree on `{name}`"
+            );
+        }
+        // Non-Iterator receivers must classify to None in both.
+        let non_iter = vec![Some(NativeKind::Int64)];
+        for name in [
+            "map",
+            "filter",
+            "take",
+            "skip",
+            "flatMap",
+            "enumerate",
+            "chain",
+        ] {
+            assert_eq!(iterator_adapter_return_kind(name, &args, &non_iter), None);
+            assert_eq!(
+                method_return_kind_from_in_pass_kinds(name, &args, &non_iter),
+                None
+            );
+        }
+    }
+}

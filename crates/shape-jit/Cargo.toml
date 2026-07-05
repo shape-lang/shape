@@ -15,11 +15,7 @@ shape-vm = { workspace = true }
 shape-wire = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-rmp-serde = "1.3"
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 chrono = { workspace = true }
 sha2 = "0.10"
 libloading = "0.8"
@@ -35,7 +31,6 @@ cranelift-jit = "0.110"
 cranelift-module = "0.110"
 cranelift-native = "0.110"
 target-lexicon = "0.12"
-shape-gc = { workspace = true, optional = true }
 
 # Cluster-2 closure-wave-F tracing-crate migration (2026-05-16): structured
 # tracing for SHAPE_JIT_* diagnostic surfaces. Default-features = false plus
@@ -45,13 +40,20 @@ shape-gc = { workspace = true, optional = true }
 # only; the extension contract at `module_exports.rs:21` stays on raw bits.
 tracing = { version = "0.1", default-features = false }
 
+[dev-dependencies]
+# WF-0A gate hardening (2026-07-05): the `registry_cross_check` test module
+# in `src/mir_compiler/types.rs` iterates shape-vm's PHF method-registry maps
+# (`phf::Map<&str, MethodFnV2>`) to cross-check the JIT return-kind tables
+# against the real VM handlers. Same 0.11 line as shape-vm so the map type
+# unifies to a single crate version.
+phf = "0.11"
+
 [features]
 default = []
 # `jit-trace` enables the tracing macros at debug/trace levels. Without it,
 # `release_max_level_off` ensures shape-jit's diagnostic call sites compile
 # away to no-ops. The CLI's `--trace-jit` flag is also gated on this feature.
 jit-trace = ["tracing/std", "tracing/release_max_level_debug"]
-gc = ["shape-gc"]
 # Gate heavy JIT execution-path tests (integration_tests, a1d2_tests, a1e_tests,
 # v2_array_tests) behind this feature. Each heavy test invokes
 # JITExecutor::execute_program which JIT-compiles ~118 stdlib functions via

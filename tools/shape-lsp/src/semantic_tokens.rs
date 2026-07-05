@@ -1844,48 +1844,6 @@ impl<'a> Visitor for TokenCollector<'a> {
     }
 }
 
-/// Check if a name is a language-level built-in function
-///
-/// These are functions provided by the VM runtime, not from stdlib.
-/// Stdlib functions are discovered dynamically via annotation/import discovery.
-#[allow(dead_code)]
-fn is_builtin_function(name: &str) -> bool {
-    matches!(
-        name,
-        "print"
-            | "len"
-            | "count"
-            | "sum"
-            | "max"
-            | "min"
-            | "abs"
-            | "sqrt"
-            | "ln"
-            | "stddev"
-            | "highest"
-            | "lowest"
-            | "first"
-            | "last"
-            | "range"
-            | "push"
-            | "where"
-            | "shift"
-            | "resample"
-            | "slice"
-            | "fold"
-            | "cumsum"
-            | "floor"
-            | "ceil"
-            | "round"
-            | "pow"
-            | "log"
-            | "exp"
-            | "sin"
-            | "cos"
-            | "tan"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

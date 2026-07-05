@@ -112,7 +112,6 @@ jobs:
           # Leaf crates first, then dependents.
           crates=(
             shape-macros
-            shape-gc
             shape-abi-v1
             shape-ast
             shape-value

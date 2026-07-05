@@ -72,8 +72,7 @@ impl ValueSlot {
     /// Store any HeapValue on the heap. The caller MUST set the corresponding
     /// bit in `heap_mask` so Drop knows to free this.
     ///
-    /// Without `gc` feature: allocates via Box (freed by drop_heap).
-    /// With `gc` feature: allocates via GcHeap (freed by garbage collector).
+    /// Allocates via Box (freed by drop_heap).
     ///
     // ADR-005 / ADR-006: transitional API. New code uses per-FieldType
     // constructors (`from_string_arc(Arc<String>)`,
@@ -82,7 +81,6 @@ impl ValueSlot {
     // wrapping. The `from_heap_arc(Arc<HeapValue>)` shape is explicitly
     // forbidden (ADR-006 §13, Q6 ruling): per-FieldType constructors only.
     // See docs/adr/006-value-and-memory-model.md.
-    #[cfg(not(feature = "gc"))]
     #[deprecated(note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
                 (`from_string_arc`, `from_typed_object`, \
                 `from_decimal`, `from_bigint`, `from_hashmap`, ...). \
@@ -93,22 +91,6 @@ impl ValueSlot {
                 See ADR-006 §2.4 + W12 audit §3.5/§B.")]
     pub fn from_heap(value: HeapValue) -> Self {
         let ptr = Box::into_raw(Box::new(value)) as u64;
-        Self(ptr)
-    }
-
-    /// Store any HeapValue on the GC heap.
-    #[cfg(feature = "gc")]
-    #[deprecated(note = "Box<HeapValue> wrapping. Use a per-FieldType constructor \
-                (`from_string_arc`, `from_typed_object`, \
-                `from_decimal`, `from_bigint`, `from_hashmap`, ...). \
-                Array fields: V3-S5 ckpt-4 deleted `from_typed_array` along \
-                with the `TypedArrayData` enum; per-element-kind \
-                `from_typed_array_<T>(Arc<TypedArray<T>>)` constructors \
-                are the v2-raw replacement (downstream wave rebuild). \
-                See ADR-006 §2.4 + W12 audit §3.5/§B.")]
-    pub fn from_heap(value: HeapValue) -> Self {
-        let heap = shape_gc::thread_gc_heap();
-        let ptr = heap.alloc(value) as u64;
         Self(ptr)
     }
 
@@ -437,12 +419,10 @@ impl ValueSlot {
 
     /// Drop the heap value. MUST only be called on heap slots.
     ///
-    /// Without `gc` feature: frees via Box deallocation.
-    /// With `gc` feature: no-op (GC handles deallocation).
+    /// Frees via Box deallocation.
     ///
     /// # Safety
     /// Caller must ensure this slot actually contains a valid heap pointer.
-    #[cfg(not(feature = "gc"))]
     pub unsafe fn drop_heap(&mut self) {
         if self.0 != 0 {
             let ptr = self.0 as *mut HeapValue;
@@ -451,21 +431,12 @@ impl ValueSlot {
         }
     }
 
-    /// Drop the heap value (GC path: no-op).
-    #[cfg(feature = "gc")]
-    pub unsafe fn drop_heap(&mut self) {
-        // No-op: garbage collector handles deallocation
-        self.0 = 0;
-    }
-
     /// Clone a heap slot by cloning the pointed-to HeapValue into a new Box.
     ///
-    /// Without `gc` feature: deep clones into a new Box allocation.
-    /// With `gc` feature: bitwise copy (GC tracks all references).
+    /// Deep clones into a new Box allocation.
     ///
     /// # Safety
     /// Caller must ensure this slot actually contains a valid heap pointer.
-    #[cfg(not(feature = "gc"))]
     pub unsafe fn clone_heap(&self) -> Self {
         if self.0 == 0 {
             return Self(0);
@@ -478,13 +449,6 @@ impl ValueSlot {
         // while the call-site migration runs in Phase 1.B.
         #[allow(deprecated)]
         Self::from_heap(cloned)
-    }
-
-    /// Clone a heap slot (GC path: bitwise copy).
-    #[cfg(feature = "gc")]
-    pub unsafe fn clone_heap(&self) -> Self {
-        // Under GC, just copy the pointer — GC traces all live references
-        Self(self.0)
     }
 }
 

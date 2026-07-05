@@ -44,8 +44,7 @@ clippy:
 # --- Test Tiers ---
 
 # Tier 0: Compile-check the canonical clean-gate target set (~5-8s).
-# Uses the `check-clean` recipe — see its doc-comment for the exact target list
-# and the rationale for excluding `--benches`.
+# Uses the `check-clean` recipe — see its doc-comment for the exact target list.
 test-check: check-clean
 
 # Tier 1: Fast unit tests — no deep/soak, no integration
@@ -93,9 +92,9 @@ test-integration:
 test-crate crate:
 	ulimit -v {{test-mem-cap-kib}} && (cargo test -p {{crate}} --features deep-tests 2>/dev/null || cargo test -p {{crate}})
 
-# CI: full suite. Target set mirrors `check-clean`: `--all-targets` minus
-# `--benches` (the two shape-vm bench files reference deleted post-strict-typing
-# shapes; bench rebuild is Item 5's territory).
+# CI: full suite. Target set is `--all-targets` minus `--benches`: benches
+# COMPILE under the `check-clean` gate, but criterion bench binaries are not
+# run under `cargo test` (they measure, they don't assert).
 ci-test:
 	ulimit -v {{test-mem-cap-kib}} && cargo test --workspace --lib --bins --tests --examples --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
 	ulimit -v {{test-mem-cap-kib}} && cargo run -p xtask -- workspace-smoke
@@ -115,25 +114,20 @@ differential-gate:
 # build gate is green; sub-cluster close gates and verify-merge.sh CHECK 1+2
 # anchor on this command's coverage.
 #
-# Target set: `--lib --bins --tests --examples`
-#   = `--all-targets` minus `--benches`.
-#
-# Why benches are excluded:
-#   `crates/shape-vm/benches/vm_benchmarks.rs` and
-#   `crates/shape-vm/benches/typed_access_bench.rs` reference deleted
-#   post-strict-typing shapes (`OpCode::Lt`, `ValueWord`, `ValueWordExt`,
-#   `Constant::Value`). Rewriting them against the current opcode / slot ABI
-#   is Item 5's territory (the bench-rebuild sub-cluster running in parallel).
-#   Until Item 5 lands, `--benches` is out of the gate.
+# Target set: `--all-targets` (lib + bins + tests + examples + benches).
+# Benches rejoined the gate 2026-07-05 (WF-0A): the stale
+# `typed_access_bench.rs` empty-criterion-group stub was deleted and
+# `vm_benchmarks.rs` checks clean against the current opcode / slot ABI,
+# so the historical `--benches` exclusion no longer applies.
 #
 # Crates covered: every workspace member (see top-level Cargo.toml `members`),
 # i.e. shape-macros, shape-ast, shape-value, shape-wire, shape-runtime,
 # shape-vm, shape-jit, shape-diagnostics, shape-viz-{core,native}, shape-cli,
-# shape-lsp, shape-test, xtask, shape-abi-v1, shape-gc, shape-ext-python,
+# shape-lsp, shape-test, xtask, shape-abi-v1, shape-ext-python,
 # shape-ext-typescript. (`shape-app` and `shape-server` live in a SEPARATE
 # workspace at `../shape-app/` and are not workspace members here.)
 check-clean:
-	cargo check --workspace --lib --bins --tests --examples
+	cargo check --workspace --all-targets
 
 # --- Strict-typing plan gates (~/.claude/plans/stop-native-vs-tagged-tax.md) ---
 

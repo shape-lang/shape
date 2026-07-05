@@ -7,11 +7,8 @@
 //! directly by users - they are wrapped by Shape stdlib functions.
 
 use crate::context::ExecutionContext;
-use parking_lot::RwLock;
 use shape_ast::error::{Result, ShapeError};
 use shape_value::KindedSlot;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 pub mod array_transforms;
 pub mod convolution;
@@ -33,153 +30,12 @@ pub mod vector;
 /// arguments and the execution context, returns a `KindedSlot`.
 pub type IntrinsicFn = fn(&[KindedSlot], &mut ExecutionContext) -> Result<KindedSlot>;
 
-/// Global intrinsics registry
-///
-/// This registry holds all registered intrinsic functions and provides
-/// fast dispatch. It's thread-safe and can be shared across contexts.
-#[derive(Clone)]
-pub struct IntrinsicsRegistry {
-    functions: Arc<RwLock<HashMap<String, IntrinsicFn>>>,
-}
-
-impl std::fmt::Debug for IntrinsicsRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IntrinsicsRegistry")
-            .field("num_intrinsics", &self.functions.read().len())
-            .finish()
-    }
-}
-
-impl IntrinsicsRegistry {
-    /// Create new registry and register all intrinsics
-    pub fn new() -> Self {
-        let mut functions = HashMap::new();
-
-        // Register polymorphic-shape legacy intrinsic bodies still pending
-        // their architectural sub-decision sign-offs. Migrated intrinsics live
-        // in their respective `create_*_intrinsics_module` factories wired into
-        // `crates/shape-runtime/src/stdlib/mod.rs::all_stdlib_modules` per
-        // intrinsics-typed-CC cluster Q2-marshal-fold-light (M-A scope). See
-        // `docs/defections.md` 2026-05-07 intrinsics-typed-CC entry's sub-
-        // decision queue subsections for the per-fn deferral rationale.
-        Self::register_math_intrinsics(&mut functions);
-        Self::register_rolling_intrinsics(&mut functions);
-        Self::register_series_intrinsics(&mut functions);
-        Self::register_recurrence_intrinsics(&mut functions);
-
-        Self {
-            functions: Arc::new(RwLock::new(functions)),
-        }
-    }
-
-    /// Register a single intrinsic
-    pub fn register(&self, name: &str, func: IntrinsicFn) {
-        let full_name = if name.starts_with("__intrinsic_") {
-            name.to_string()
-        } else {
-            format!("__intrinsic_{}", name)
-        };
-
-        self.functions.write().insert(full_name, func);
-    }
-
-    /// Call an intrinsic function
-    pub fn call(
-        &self,
-        name: &str,
-        args: &[KindedSlot],
-        ctx: &mut ExecutionContext,
-    ) -> Result<KindedSlot> {
-        let functions = self.functions.read();
-
-        let func = functions
-            .get(name)
-            .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!(
-                    "Unknown intrinsic: {}. Available intrinsics: {:?}",
-                    name,
-                    functions.keys().take(5).collect::<Vec<_>>()
-                ),
-                location: None,
-            })?;
-
-        func(args, ctx)
-    }
-
-    /// Check if a function name is an intrinsic
-    pub fn is_intrinsic(&self, name: &str) -> bool {
-        self.functions.read().contains_key(name)
-    }
-
-    /// Get list of all registered intrinsics
-    pub fn list_intrinsics(&self) -> Vec<String> {
-        self.functions.read().keys().cloned().collect()
-    }
-
-    /// Register the 5 math intrinsics whose migration is deferred pending
-    /// follow-on architectural sub-decisions (sum/min/max polymorphic
-    /// return; char_code multi-input-type dispatch; bspline2_3d_batch
-    /// Register polymorphic-shape legacy intrinsic bodies. Phase 1.B
-    /// (ADR-006 §2.7.1.4): the bodies route through [`KindedSlot`] and
-    /// return error stubs pending the M1-split sub-decision (polymorphic
-    /// returns / inputs that the typed marshal layer cannot yet
-    /// represent). Until M1-split lands, calls produce a runtime error
-    /// rather than emit a silent wrong-typed value.
-    fn register_math_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
-        // `__intrinsic_sum` deleted — stdlib `sum()` now routes through
-        // PHF `.sum()` method dispatch (ADR-005 §1).
-        functions.insert("__intrinsic_min".to_string(), math::intrinsic_min);
-        functions.insert("__intrinsic_max".to_string(), math::intrinsic_max);
-        functions.insert(
-            "__intrinsic_char_code".to_string(),
-            math::intrinsic_char_code,
-        );
-        functions.insert(
-            "__intrinsic_bspline2_3d_batch".to_string(),
-            math::intrinsic_bspline2_3d_batch,
-        );
-    }
-
-    fn register_rolling_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_rolling_sum".to_string(),
-            rolling::intrinsic_rolling_sum,
-        );
-        functions.insert(
-            "__intrinsic_rolling_min".to_string(),
-            rolling::intrinsic_rolling_min,
-        );
-        functions.insert(
-            "__intrinsic_rolling_max".to_string(),
-            rolling::intrinsic_rolling_max,
-        );
-    }
-
-    fn register_series_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_diff".to_string(),
-            array_transforms::intrinsic_diff,
-        );
-        functions.insert(
-            "__intrinsic_cumsum".to_string(),
-            array_transforms::intrinsic_cumsum,
-        );
-    }
-
-    fn register_recurrence_intrinsics(functions: &mut HashMap<String, IntrinsicFn>) {
-        functions.insert(
-            "__intrinsic_linear_recurrence".to_string(),
-            recurrence::intrinsic_linear_recurrence,
-        );
-    }
-}
-
-impl Default for IntrinsicsRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// WF-0A (2026-07-05): `IntrinsicsRegistry` deleted — it was constructed and
+// self-registered but consumed by nothing (zero external consumers; see
+// docs/defections.md intrinsics-typed-CC entry, Q3 disposition: "confirmed
+// dead code; deletion lands mechanically"). Live intrinsics are wired via
+// the `create_*_intrinsics_module` factories in
+// `crates/shape-runtime/src/stdlib/mod.rs::all_stdlib_modules`.
 
 // ============================================================================
 // Common arg extraction helpers (DRY across all intrinsic modules)

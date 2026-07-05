@@ -31,10 +31,10 @@ use shape_ast::Program;
 use shape_runtime::context::ExecutionContext;
 use shape_runtime::engine::{ExecutionType, ProgramExecutor, ShapeEngine};
 use shape_runtime::error::Result;
+use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_runtime::type_schema::builtin_schemas::{
     OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE,
 };
-use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_runtime::wire_conversion;
 use shape_value::{HeapKind, KindedSlot, NativeKind};
 

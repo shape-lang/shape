@@ -336,74 +336,8 @@ fn bench_dispatch_loop(c: &mut Criterion) {
 // 3. bench_gc_alloc (feature-gated on `gc`)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "gc")]
-fn bench_gc_alloc(c: &mut Criterion) {
-    use shape_gc::GcHeap;
-
-    let mut group = c.benchmark_group("gc_alloc");
-
-    // --- bump_alloc_throughput: allocate N 64-byte objects ---
-    group.bench_function("bump_alloc_1k", |b| {
-        b.iter(|| {
-            let heap = GcHeap::new();
-            for i in 0..1_000u64 {
-                let _ = black_box(heap.alloc(black_box([i; 8])));
-            }
-        });
-    });
-
-    group.bench_function("bump_alloc_10k", |b| {
-        b.iter(|| {
-            let heap = GcHeap::new();
-            for i in 0..10_000u64 {
-                let _ = black_box(heap.alloc(black_box([i; 8])));
-            }
-        });
-    });
-
-    // --- gc_collect_empty: collection with no garbage ---
-    group.bench_function("gc_collect_empty", |b| {
-        b.iter(|| {
-            let mut heap = GcHeap::with_threshold(1024);
-            // Allocate a small amount then collect (nothing is garbage since
-            // we are not retaining roots — everything is unreachable)
-            for i in 0..100u64 {
-                let _ = heap.alloc([i; 8]);
-            }
-            heap.collect(&mut |_trace| {
-                // No roots — everything is garbage
-            });
-            black_box(heap.stats().collections);
-        });
-    });
-
-    // --- gc_collect_50pct: collection with 50% garbage ---
-    // We retain pointers to half the allocations as "roots".
-    group.bench_function("gc_collect_50pct", |b| {
-        b.iter(|| {
-            let mut heap = GcHeap::with_threshold(1024);
-            let mut retained = Vec::new();
-            for i in 0..200u64 {
-                let ptr = heap.alloc([i; 8]);
-                if i % 2 == 0 {
-                    retained.push(ptr as *mut u8);
-                }
-            }
-            heap.collect(&mut |trace| {
-                for ptr in &retained {
-                    trace(*ptr);
-                }
-            });
-            black_box(heap.stats().collections);
-        });
-    });
-
-    group.finish();
-}
-
-/// Stub for when `gc` feature is not enabled — still registers the group
-/// so the bench target compiles unconditionally.
-#[cfg(not(feature = "gc"))]
+/// Placeholder group — the tracing-GC allocator was deleted; Arc reference
+/// counting is the memory model.
 fn bench_gc_alloc(c: &mut Criterion) {
     let mut group = c.benchmark_group("gc_alloc");
     group.bench_function("gc_feature_disabled", |b| {
@@ -499,73 +433,6 @@ fn bench_jit_dispatch(c: &mut Criterion) {
 ///
 /// Acceptance: p99 pause is tracked; no assumed target until baseline is
 /// established. Once baseline exists, regressions >10% at p<0.05 fail CI.
-#[cfg(feature = "gc")]
-fn bench_gc_young_pause(c: &mut Criterion) {
-    use shape_gc::GcHeap;
-
-    let mut group = c.benchmark_group("gc_young_pause");
-
-    // Small young-gen collection (100 objects, ~6.4 KB)
-    group.bench_function("young_collect_100", |b| {
-        b.iter(|| {
-            let mut heap = GcHeap::with_threshold(1024);
-            for i in 0..100u64 {
-                let _ = heap.alloc([i; 8]);
-            }
-            // Collect with no roots — simulates a young-gen sweep
-            heap.collect(&mut |_trace| {});
-            black_box(heap.stats().collections);
-        });
-    });
-
-    // Medium young-gen collection (1000 objects, ~64 KB)
-    group.bench_function("young_collect_1k", |b| {
-        b.iter(|| {
-            let mut heap = GcHeap::with_threshold(1024);
-            for i in 0..1_000u64 {
-                let _ = heap.alloc([i; 8]);
-            }
-            heap.collect(&mut |_trace| {});
-            black_box(heap.stats().collections);
-        });
-    });
-
-    // Large young-gen collection (10K objects, ~640 KB)
-    group.bench_function("young_collect_10k", |b| {
-        b.iter(|| {
-            let mut heap = GcHeap::with_threshold(1024);
-            for i in 0..10_000u64 {
-                let _ = heap.alloc([i; 8]);
-            }
-            heap.collect(&mut |_trace| {});
-            black_box(heap.stats().collections);
-        });
-    });
-
-    // Young-gen with 50% survival (simulates realistic workload)
-    group.bench_function("young_collect_50pct_survival_1k", |b| {
-        b.iter(|| {
-            let mut heap = GcHeap::with_threshold(1024);
-            let mut live = Vec::new();
-            for i in 0..1_000u64 {
-                let ptr = heap.alloc([i; 8]);
-                if i % 2 == 0 {
-                    live.push(ptr as *mut u8);
-                }
-            }
-            heap.collect(&mut |trace| {
-                for ptr in &live {
-                    trace(*ptr);
-                }
-            });
-            black_box(heap.stats().collections);
-        });
-    });
-
-    group.finish();
-}
-
-#[cfg(not(feature = "gc"))]
 fn bench_gc_young_pause(c: &mut Criterion) {
     let mut group = c.benchmark_group("gc_young_pause");
     group.bench_function("gc_feature_disabled", |b| {

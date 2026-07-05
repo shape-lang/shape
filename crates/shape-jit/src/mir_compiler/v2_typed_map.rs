@@ -102,7 +102,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
 // Silence unused-import warnings — these are still re-exported by the
 // module but the surface-and-stop body has dropped its uses.
-#[allow(dead_code)]
 const _: fn() = || {
     let _ = NativeKind::Int64;
     let _ = types::I64;

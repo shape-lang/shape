@@ -664,7 +664,6 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
 }
 
 // Suppress dead-import warning when no test arms use `HeapValue` directly.
-#[allow(dead_code)]
 fn _heap_value_marker(_: &HeapValue) {}
 
 /// Static name for a `HashMapKindedRef` variant (the V discriminator) for

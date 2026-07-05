@@ -148,7 +148,6 @@ pub fn v2_float_sum(
 }
 
 /// `Vec<int>.sum()` — int aggregation.
-#[allow(dead_code)]
 pub fn v2_int_sum(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -171,7 +170,6 @@ pub fn v2_float_avg(
 }
 
 /// `Vec<int>.avg() / Vec<int>.mean()`.
-#[allow(dead_code)]
 pub fn v2_int_avg(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -194,7 +192,6 @@ pub fn v2_float_min(
 }
 
 /// `Vec<int>.min()`.
-#[allow(dead_code)]
 pub fn v2_int_min(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -213,7 +210,6 @@ pub fn v2_float_max(
 }
 
 /// `Vec<int>.max()`.
-#[allow(dead_code)]
 pub fn v2_int_max(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -490,7 +486,6 @@ pub(crate) fn handle_float_to_array(
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// `Vec<int>.abs()`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_abs(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -525,7 +520,6 @@ pub(crate) fn handle_int_abs(
 }
 
 /// `Vec<int>.map(|x| ...)`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_map(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -535,7 +529,6 @@ pub(crate) fn handle_int_map(
 }
 
 /// `Vec<int>.filter(|x| ...)`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_filter(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -545,7 +538,6 @@ pub(crate) fn handle_int_filter(
 }
 
 /// `Vec<int>.forEach(|x| ...)`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_for_each(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -555,7 +547,6 @@ pub(crate) fn handle_int_for_each(
 }
 
 /// `Vec<int>.reduce(|acc, x| ...) / .fold(init, |acc, x| ...)`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_reduce(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -565,7 +556,6 @@ pub(crate) fn handle_int_reduce(
 }
 
 /// `Vec<int>.find(|x| ...)`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_find(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -575,7 +565,6 @@ pub(crate) fn handle_int_find(
 }
 
 /// `Vec<int>.some(|x| ...)`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_some(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -585,7 +574,6 @@ pub(crate) fn handle_int_some(
 }
 
 /// `Vec<int>.every(|x| ...)`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_every(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -595,7 +583,6 @@ pub(crate) fn handle_int_every(
 }
 
 /// `Vec<int>.toArray()`.
-#[allow(dead_code)]
 pub(crate) fn handle_int_to_array(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],

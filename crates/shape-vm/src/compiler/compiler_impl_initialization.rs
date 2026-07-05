@@ -138,7 +138,7 @@ impl BytecodeCompiler {
             comptime_context_struct_defs: HashMap::new(),
             extension_registry: None,
             comptime_fields: HashMap::new(),
-            type_diagnostic_mode: TypeDiagnosticMode::Strict, // STRICT-FLIP (fix-then-flip branch): ReliableOnly→Strict, merges when corpus clears FPs
+            type_diagnostic_mode: TypeDiagnosticMode::Strict, // Strict is the default; the suppressing ReliableOnly variant was deleted (WF-0A)
             compile_diagnostic_mode: CompileDiagnosticMode::FailFast,
             comptime_mode: false,
             removed_functions: HashSet::new(),
@@ -909,12 +909,6 @@ impl BytecodeCompiler {
         ShapeError::MultiError(mapped)
     }
 
-    pub(super) fn should_emit_type_diagnostic(_error: &TypeError) -> bool {
-        // STRICT-FLIP (fix-then-flip branch): allowlist dropped — emit every
-        // type error (fail-closed). Neutralizes any residual ReliableOnly path.
-        true
-    }
-
     pub(super) fn collect_program_functions(
         program: &Program,
     ) -> HashMap<String, shape_ast::ast::FunctionDef> {
@@ -1089,16 +1083,6 @@ mod char_boundary_tests {
             compiler.compile_diagnostic_mode,
             CompileDiagnosticMode::FailFast
         );
-    }
-
-    #[test]
-    fn reliable_only_filter_is_fail_closed_for_hard_type_errors() {
-        assert!(BytecodeCompiler::should_emit_type_diagnostic(
-            &TypeError::TypeMismatch("int".to_string(), "string".to_string())
-        ));
-        assert!(BytecodeCompiler::should_emit_type_diagnostic(
-            &TypeError::UndefinedVariable("missing".to_string())
-        ));
     }
 
     #[test]

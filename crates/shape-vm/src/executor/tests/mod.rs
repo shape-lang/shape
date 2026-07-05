@@ -93,7 +93,6 @@ mod trait_object_thunks;
 /// reads bits directly, no `ValueWord` synthesis). Pair with the
 /// program's declared `top_level_frame.return_kind` (use
 /// [`execute_bytecode_typed`]) to interpret the bits.
-#[allow(dead_code)]
 fn execute_bytecode(
     instructions: Vec<Instruction>,
     constants: Vec<Constant>,
@@ -114,7 +113,6 @@ fn execute_bytecode(
 /// of stack; the caller decodes against the declared `return_kind`
 /// (e.g. `bits as i64`, `f64::from_bits(bits)`, `bits != 0` for bool).
 /// Replaces the deleted `ValueWord` synthesis path.
-#[allow(dead_code)]
 fn execute_bytecode_typed(
     instructions: Vec<Instruction>,
     constants: Vec<Constant>,
@@ -137,7 +135,6 @@ fn execute_bytecode_typed(
 
 /// Helper to execute hand-built bytecode through the post-strict-typing
 /// host boundary, preserving the actual top-of-stack [`KindedSlot`].
-#[allow(dead_code)]
 fn execute_bytecode_slot(
     instructions: Vec<Instruction>,
     constants: Vec<Constant>,
@@ -154,7 +151,6 @@ fn execute_bytecode_slot(
 }
 
 /// [`execute_bytecode_slot`] variant for programs that use top-level locals.
-#[allow(dead_code)]
 fn execute_bytecode_slot_with_locals(
     instructions: Vec<Instruction>,
     constants: Vec<Constant>,
@@ -174,7 +170,6 @@ fn execute_bytecode_slot_with_locals(
 
 /// [`execute_bytecode_slot`] variant for hand-built bytecode that references
 /// the program string pool, such as typed `CallMethod` instructions.
-#[allow(dead_code)]
 fn execute_bytecode_slot_with_strings(
     instructions: Vec<Instruction>,
     constants: Vec<Constant>,
@@ -982,7 +977,6 @@ fn test_multiple_type_annotations() {
 /// the borrow is sound. Mirror of the receiver-borrow shape in
 /// `executor/window_join.rs:465` (`exec_bind_schema` /
 /// `exec_load_col`).
-#[allow(dead_code)]
 fn typed_table_from_slot(
     slot: &shape_value::KindedSlot,
 ) -> Option<(u64, std::sync::Arc<shape_value::DataTable>)> {

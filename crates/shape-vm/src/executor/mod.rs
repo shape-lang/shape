@@ -58,6 +58,15 @@ pub use control_flow::foreign_marshal;
 pub use control_flow::native_abi;
 pub use task_scheduler::{TaskScheduler, TaskStatus};
 
+// WF-0A gate hardening (2026-07-05): re-export the PHF method registry so
+// shape-jit's return-kind cross-check test
+// (`crates/shape-jit/src/mir_compiler/types.rs::registry_cross_check`) can
+// iterate the dispatch tables and invoke the real handlers instead of
+// trusting a hand-synced "Verified against method_registry.rs" comment.
+// Additive visibility only — the dispatch shell and handler modules stay
+// `pub(crate)`; the maps' values are plain `MethodFnV2` fn pointers.
+pub use objects::method_registry;
+
 /// Reserved future ID used to signal a snapshot suspension
 pub const SNAPSHOT_FUTURE_ID: u64 = u64::MAX;
 
@@ -159,12 +168,6 @@ pub struct VMConfig {
     /// Enable VM metrics collection (counters, tier/GC event ring buffers, histograms).
     /// When false (default), `VirtualMachine.metrics` is `None` for zero overhead.
     pub metrics_enabled: bool,
-    /// When true, automatically initialise the tracing GC heap (`shape-gc`) on
-    /// VM creation instead of relying on Arc reference counting.
-    ///
-    /// Requires the `gc` crate feature to be compiled in; otherwise this flag
-    /// is silently ignored.
-    pub use_tracing_gc: bool,
 }
 
 impl Default for VMConfig {
@@ -178,7 +181,6 @@ impl Default for VMConfig {
             auto_gc: true,
             gc_trigger_threshold: DEFAULT_GC_TRIGGER_THRESHOLD,
             metrics_enabled: false,
-            use_tracing_gc: false,
         }
     }
 }
@@ -462,10 +464,6 @@ pub struct VirtualMachine {
     /// Time-travel debugger for recording and navigating VM state history.
     /// `None` when time-travel debugging is not active.
     pub(crate) time_travel: Option<time_travel::TimeTravel>,
-
-    /// GC heap (only present when `gc` feature is enabled).
-    #[cfg(feature = "gc")]
-    gc_heap: Option<shape_gc::GcHeap>,
 
     /// Whether selective JIT compilation has been applied to the loaded program.
     #[cfg(feature = "jit")]

@@ -40,8 +40,8 @@ use crate::bytecode::BytecodeProgram;
 /// §2.7.26), + a short reason describing why the exception is allowed.
 // `section` / `reason` are audit-trail metadata carried for documentation +
 // grep; the verification logic dispatches only on `rule` + `permanent`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub(crate) struct WhitelistEntry {
     /// Match rule (exact name, prefix, or dynamic enum-payload field).
     pub(crate) rule: WhitelistRule,
