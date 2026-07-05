@@ -16,7 +16,7 @@
 //! Spec §6 gaps proven RED here: G2 (int->number value), G5 (u16->u8),
 //! G6 (i16->u16). Plus the full CAST-cell complement.
 
-use shape_test::shape_test::ShapeTest;
+use crate::suite::ShapeTest;
 
 // =========================================================================
 // B.1 int <-> number, value-level (BOTH directions require a cast)

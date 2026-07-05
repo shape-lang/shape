@@ -48,6 +48,22 @@
 //! relaxed to match a regressed binary — it is the source of truth.
 //!
 //! Probe binary for the baseline: `target/release/shape run --mode vm`.
+//!
+//! ## Dual-mode execution (WF-0B, 2026-07-05)
+//!
+//! This target runs the suite under the bytecode INTERPRETER (`--mode vm`
+//! equivalent). The sibling target `numeric_conversions_jit` `#[path]`-includes
+//! the SAME five category files (test bodies are byte-identical) and runs them
+//! through `shape_jit::JITExecutor` (`--mode jit` equivalent), with an explicit
+//! known-divergence list for the audit-2026-07-04 §4.4 JIT correctness gaps.
+//! The `crate::suite::ShapeTest` indirection below is what lets each target
+//! choose its executor without touching the conformance test bodies.
+
+/// Executor selection shim: in this target `ShapeTest` is the plain
+/// (bytecode-VM) builder. The JIT sibling target substitutes a wrapper.
+pub(crate) mod suite {
+    pub use shape_test::shape_test::ShapeTest;
+}
 
 mod category_a_lossless_widening;
 mod category_b_lossy_implicit_rejected;

@@ -12,7 +12,7 @@
 //! Spec §6 gaps proven RED here: G1 (`val:number > 10` literal rejects),
 //! G7 (`let x:u8 = 300` silently wraps instead of compile-erroring).
 
-use shape_test::shape_test::ShapeTest;
+use crate::suite::ShapeTest;
 
 // =========================================================================
 // D.1 Int literal adopts `number` context (ACCEPT, value is f64)
