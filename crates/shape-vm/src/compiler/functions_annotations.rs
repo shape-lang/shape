@@ -1137,7 +1137,15 @@ impl BytecodeCompiler {
 
         for method in &extend.methods {
             let func_def = self.desugar_extend_method(method, &extend.type_name)?;
-            self.register_function(&func_def)?;
+            // §4.9.1: if the whole-program pre-pass already registered this
+            // generated method's SIGNATURE (so it is visible to the analyzer,
+            // method dispatch, and every user body), skip re-registering it —
+            // a second `register_function` would create a duplicate slot. The
+            // body is still compiled below, filling the pre-registered slot, so
+            // the method is compiled exactly once through the identical path.
+            if !self.materialized_comptime_fns.contains(&func_def.name) {
+                self.register_function(&func_def)?;
+            }
             self.compile_function_body(&func_def)?;
         }
         Ok(())
@@ -1176,9 +1184,12 @@ impl BytecodeCompiler {
     /// materialize is recorded in `materialized_comptime_fns` so pass-2's
     /// `apply_comptime_extend_items` does not register it a second time.
     ///
-    /// Only free functions are hoisted; type-extension methods (`extend Type {
-    /// fn ... }`) are left for pass-2, where the method registry is the natural
-    /// home and method dispatch already resolves them without an early pass.
+    /// Both generated free functions and generated type-extension methods
+    /// (`extend Type { method ... }`, §4.9.1) are hoisted: the extend's method
+    /// signatures are registered here and the `extend` block is returned so the
+    /// analyzer and method-dispatch resolution learn the method on the type
+    /// before any user body compiles. Pass-2's `apply_comptime_extend` compiles
+    /// each pre-registered method body.
     pub(super) fn materialize_computed_comptime_extends(
         &mut self,
         program: &shape_ast::ast::Program,
@@ -1317,23 +1328,55 @@ impl BytecodeCompiler {
                             continue;
                         };
                         for item in items {
-                            if let Item::Function(func_def, span) = item {
-                                if self.materialized_comptime_fns.insert(func_def.name.clone()) {
-                                    // Register the signature NOW so the analyzer,
-                                    // function-registration pass, and every user
-                                    // body (`fn main`) can resolve the call. The
-                                    // BODY is still compiled by pass-2's
-                                    // `apply_comptime_extend_items`
-                                    // (`compile_function_body`) when the annotated
-                                    // type compiles — the identical path as before
-                                    // this pre-pass, so the generated function's
-                                    // runtime/JIT characteristics are unchanged.
-                                    self.register_function(&func_def)?;
-                                    generated.push(Item::Function(func_def, span));
+                            match item {
+                                Item::Function(func_def, span) => {
+                                    if self.materialized_comptime_fns.insert(func_def.name.clone())
+                                    {
+                                        // Register the signature NOW so the
+                                        // analyzer, function-registration pass, and
+                                        // every user body (`fn main`) can resolve
+                                        // the call. The BODY is still compiled by
+                                        // pass-2's `apply_comptime_extend_items`
+                                        // (`compile_function_body`) when the
+                                        // annotated type compiles — the identical
+                                        // path as before this pre-pass, so the
+                                        // generated function's runtime/JIT
+                                        // characteristics are unchanged.
+                                        self.register_function(&func_def)?;
+                                        generated.push(Item::Function(func_def, span));
+                                    }
                                 }
+                                Item::Extend(extend, span) => {
+                                    // §4.9.1: a comptime-emitted type-extension
+                                    // method (`u.to_json()`) must be visible to
+                                    // the analyzer, method-dispatch resolution, and
+                                    // every user body BEFORE pass-2 — exactly like
+                                    // a generated free function. Register each
+                                    // method's SIGNATURE now (keyed by its desugared
+                                    // `Type.method` name), and return the `extend`
+                                    // block so the analyzer learns the method on the
+                                    // type. Pass-2's `apply_comptime_extend` fills
+                                    // each pre-registered slot with the compiled
+                                    // body — the identical path as before, so
+                                    // runtime/JIT characteristics are unchanged.
+                                    let mut any_new = false;
+                                    for method in &extend.methods {
+                                        let func_def =
+                                            self.desugar_extend_method(method, &extend.type_name)?;
+                                        if self
+                                            .materialized_comptime_fns
+                                            .insert(func_def.name.clone())
+                                        {
+                                            self.register_function(&func_def)?;
+                                            any_new = true;
+                                        }
+                                    }
+                                    if any_new {
+                                        generated.push(Item::Extend(extend, span));
+                                    }
+                                }
+                                _ => {}
                             }
-                            // Item::Extend (type-extension methods) is left for
-                            // pass-2 method registration.
                         }
                     }
                 }
