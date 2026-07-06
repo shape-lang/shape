@@ -940,36 +940,83 @@ impl VirtualMachine {
     /// a local run. `UInt64` is a scalar no-op kind (no strong-count share),
     /// so no retain/release is required. This is a metadata-layer init, not a
     /// value carrier — no tag/kind bridge, no Bool-default (ADR-006 §2.7.8).
-    pub(crate) fn initialize_foreign_stub_bindings(&mut self) {
+    pub(crate) fn initialize_foreign_stub_bindings(&mut self) -> Result<(), shape_value::VMError> {
+        // WF-3E fixAB (receiver side). Set of module-binding indices ACTUALLY
+        // referenced by loaded code — any `LoadModuleBinding`-family operand
+        // (`Operand::ModuleBinding`) across the flat instruction stream. This
+        // lets us distinguish a foreign stub the transferred program will call
+        // (`LoadModuleBinding + CallValue`) from a foreign function that merely
+        // exists in the origin program but is unreachable from this `@remote`
+        // entry (its blob is not transferred, its binding is never loaded).
+        let referenced: std::collections::HashSet<u16> = self
+            .program
+            .instructions
+            .iter()
+            .filter_map(|instr| match instr.operand {
+                Some(Operand::ModuleBinding(idx)) => Some(idx),
+                _ => None,
+            })
+            .collect();
+
         // Collect (binding_idx, func_id) first so the immutable program borrow
         // is released before the mutable `module_binding_write_kinded` writes.
         let mut inits: Vec<(usize, u64)> = Vec::new();
         for entry in self.program.foreign_functions.iter() {
-            // The stub function carries the SAME name as the foreign entry
-            // (functions_foreign.rs registers `def.name`). An annotation
-            // wrapper is a distinct `{name}___ann_wrapper` function, so an
-            // exact match resolves the stub, never the wrapper.
-            let Some(func_id) = self
-                .program
-                .functions
-                .iter()
-                .position(|f| f.name == entry.name)
-            else {
-                continue;
-            };
             let Some(binding_idx) = self
                 .program
                 .module_binding_names
                 .iter()
                 .position(|n| *n == entry.name)
             else {
+                // No module binding declared for this foreign entry — it cannot
+                // be reached through a binding load, so there is nothing to
+                // initialize.
                 continue;
             };
-            inits.push((binding_idx, func_id as u64));
+            // The stub function carries the SAME name as the foreign entry
+            // (functions_foreign.rs registers `def.name`). An annotation
+            // wrapper is a distinct `{name}___ann_wrapper` function, so an
+            // exact match resolves the stub, never the wrapper.
+            let func_id = self
+                .program
+                .functions
+                .iter()
+                .position(|f| f.name == entry.name);
+            match func_id {
+                // Resolvable stub → write the real `Constant::Function` slot
+                // shape `(func_id, NativeKind::UInt64)` — exactly what
+                // `op_push_const` produces, so `call_value_immediate_nb`'s
+                // `UInt64` callee arm dispatches identically to a local run.
+                // `UInt64` is a scalar no-op kind (no strong-count share).
+                Some(fid) => inits.push((binding_idx, fid as u64)),
+                None => {
+                    if referenced.contains(&(binding_idx as u16)) {
+                        // Referenced-but-unresolvable foreign stub: the
+                        // transferred code will `LoadModuleBinding + CallValue`
+                        // this binding, but the stub body never arrived (sender
+                        // closure incomplete). Surface-and-stop — DELETE the
+                        // `(0, NativeKind::Bool)` sentinel path (ADR-006
+                        // §2.7.8 Forbidden Patterns); never fabricate a kind to
+                        // paper over the missing transfer.
+                        return Err(shape_value::VMError::RuntimeError(format!(
+                            "foreign stub '{}' is referenced by the transferred \
+                             program but its function body was not transferred — \
+                             cannot initialize its module binding (distributed \
+                             §4.4: closure incomplete)",
+                            entry.name,
+                        )));
+                    }
+                    // Not referenced by loaded code — a foreign function present
+                    // in the origin program but unreachable from this `@remote`
+                    // entry. Its binding is never loaded, so leaving it at the
+                    // uninitialised default is sound (no consumer). Skip.
+                }
+            }
         }
         for (binding_idx, func_id) in inits {
             self.module_binding_write_kinded(binding_idx, func_id, NativeKind::UInt64);
         }
+        Ok(())
     }
 
     /// Take ownership of `module_bindings[index]`, replacing it with

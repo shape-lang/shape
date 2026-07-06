@@ -169,6 +169,14 @@ pub enum RemoteErrorKind {
     /// `ResourceLimitExceeded`; the sender-side read timeout is sender-LOCAL
     /// and never crosses the wire (distributed §4.9).
     Timeout,
+    /// Sender-LOCAL transport failure (connect refused / DNS / send / receive)
+    /// observed before a structured `CallResponse` was decoded. Never crosses
+    /// the wire — synthesized sender-side so the recoverable `remote::call`
+    /// surface can map it onto `RemoteError::Transport` (pre-send, retry-safe)
+    /// distinctly from a callee's own `RuntimeError` (which maps to
+    /// `RemoteError::Remote`). Appended last: named-msgpack variant order is
+    /// non-semantic, so this is wire-compatible for existing kinds.
+    Transport,
 }
 
 impl RemoteCallError {
@@ -589,7 +597,25 @@ pub fn build_minimal_blobs_by_hash(
         return None;
     }
 
-    // Compute transitive closure of dependencies
+    // Compute transitive closure of dependencies.
+    //
+    // WF-3E fixAB (sender side): the static `blob.dependencies` graph only
+    // records `Call`/`CallForeign` edges. A foreign-bearing `@remote` function
+    // reaches its `extern C` / `fn python` / `fn typescript` stub via
+    // `LoadModuleBinding(idx) + CallValue` — a value-call through a module
+    // binding, NOT a static `Call` edge. So the stub's own blob (which holds
+    // the `CallForeign` body) never enters the closure and the receiver
+    // reconstructs a program without the stub body ("got Bool" at dispatch).
+    //
+    // To pack the FULL reachable closure we additionally scan each blob's
+    // instruction stream for `Operand::ModuleBinding(idx)` operands, resolve
+    // `module_binding_names[idx]` → function name → the function's content
+    // hash (`function_blob_hashes[fn_id]`), and enqueue that hash. This pulls
+    // in foreign-stub blobs and any module-scope function-value target the
+    // transferred function references. Native stdlib module bindings
+    // (`env`/`file`/`http`) resolve to module OBJECTS with no matching
+    // top-level function → no hash → skipped here (handled receiver-side by
+    // registering the native capability modules).
     let mut needed: std::collections::HashSet<FunctionHash> = std::collections::HashSet::new();
     let mut queue = vec![entry_hash];
     while let Some(hash) = queue.pop() {
@@ -598,6 +624,33 @@ pub fn build_minimal_blobs_by_hash(
                 for dep in &blob.dependencies {
                     if !needed.contains(dep) {
                         queue.push(*dep);
+                    }
+                }
+                // Scan for module-binding value targets (foreign stubs +
+                // module-scope function values reached via CallValue).
+                for instr in &blob.instructions {
+                    let Some(crate::bytecode::Operand::ModuleBinding(idx)) = instr.operand else {
+                        continue;
+                    };
+                    let Some(binding_name) = program.module_binding_names.get(idx as usize) else {
+                        continue;
+                    };
+                    let Some(fn_id) = program
+                        .functions
+                        .iter()
+                        .position(|f| f.name == *binding_name)
+                    else {
+                        // No top-level function with this name — a native
+                        // stdlib module binding (env/file/http) or a non-
+                        // function value. Nothing to transfer from the sender.
+                        continue;
+                    };
+                    if let Some(Some(target_hash)) =
+                        program.function_blob_hashes.get(fn_id).copied()
+                    {
+                        if !needed.contains(&target_hash) {
+                            queue.push(target_hash);
+                        }
                     }
                 }
             }
@@ -1024,7 +1077,15 @@ fn run_remote_call(
     // bindings would otherwise read the `(0, Bool)` uninitialised sentinel and
     // `call_value_immediate_nb` would refuse the Bool-kinded callee. See
     // `VirtualMachine::initialize_foreign_stub_bindings`.
-    vm.initialize_foreign_stub_bindings();
+    vm.initialize_foreign_stub_bindings().map_err(|e| {
+        RemoteCallError::new(
+            RemoteErrorKind::RuntimeError,
+            format!(
+                "remote call '{}': foreign stub binding init failed: {:?}",
+                request.function_name, e,
+            ),
+        )
+    })?;
 
     // WF-2F axis C (combined compose A+B): install the snapshot persistence
     // context on the receiver VM so a `snapshot()` reached mid-transfer

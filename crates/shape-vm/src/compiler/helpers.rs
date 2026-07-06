@@ -3765,9 +3765,50 @@ impl BytecodeCompiler {
         // U4-4: V2 typed opcodes in the body force a descriptor (verifier rule).
         let needs_descriptor_for_v2 = has_v2_typed;
 
-        if needs_descriptor_for_slots || needs_descriptor_for_return || needs_descriptor_for_v2 {
+        // WF-3E fixA (D1 py/ts arity>=1): the leading `arity` slots are the
+        // function's parameters, which always carry an annotation-proven
+        // NativeKind. A body that only fails the FULL-locals proof because a
+        // LATER local is unproven (e.g. the `match pmul(a, 7) { Ok(v) => v, .. }`
+        // temporaries a `fn python` wrapper spills — the `Result`-unwrap match
+        // arms leave slots 1..N without a proven storage hint) still has a
+        // fully-proven param prefix.
+        //
+        // The distributed marshal ABI (remote.rs:1195) reads the first `arity`
+        // slots of the callee's `frame_descriptor` for per-arg NativeKind. When
+        // `proven_hints` short-circuits to `None` the descriptor shipped an
+        // EMPTY `slots` vec and the receiver rejected the call
+        // ("frame_descriptor has {0} slots but arity is {N}"). extern C
+        // wrappers (`labs(0 - x)`, no match temporaries) proved all locals and
+        // never hit this; the py/ts × arity>=1 quadrant did.
+        //
+        // Emitting the proven PARAM PREFIX satisfies the §2.7.5.1 invariant —
+        // every emitted entry is proven; a slots vec shorter than
+        // `locals_count` is the documented "proven prefix" (out-of-range local
+        // reads return `None` and fall back to polymorphic emission, exactly as
+        // the empty-vec case did). No `Unknown` placeholder, no Bool-default.
+        let arity = func.arity as usize;
+        let proven_params: Option<Vec<StorageHint>> = if arity > 0 && proven_hints.is_none() {
+            (0..arity.min(func.locals_count as usize))
+                .map(|slot| self.type_tracker.get_local_storage_hint(slot as u16))
+                .collect()
+        } else {
+            None
+        };
+        let needs_descriptor_for_params = proven_params
+            .as_ref()
+            .map(|p| p.len() == arity)
+            .unwrap_or(false);
+
+        if needs_descriptor_for_slots
+            || needs_descriptor_for_return
+            || needs_descriptor_for_v2
+            || needs_descriptor_for_params
+        {
             let slots = match &proven_hints {
                 Some(h) if needs_descriptor_for_slots => h.clone(),
+                None if needs_descriptor_for_params => {
+                    proven_params.clone().unwrap_or_default()
+                }
                 _ => Vec::new(),
             };
             let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);

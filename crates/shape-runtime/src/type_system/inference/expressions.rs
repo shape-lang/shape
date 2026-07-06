@@ -810,11 +810,27 @@ impl TypeInferenceEngine {
                     Ok(Type::Concrete(TypeAnnotation::Reference(
                         namespace.as_str().into(),
                     )))
-                } else if self.env.lookup(namespace).is_some()
+                } else if self
+                    .env
+                    .lookup(namespace)
+                    .is_some_and(|s| !matches!(s.ty, Type::Function { .. }))
                     || self.struct_type_defs.contains_key(namespace.as_str())
                     || self.env.lookup_type_alias(namespace).is_some()
                     || matches!(namespace.as_str(), "DateTime" | "Content")
                 {
+                    // WF-3E (D7): a module namespace whose last segment collides
+                    // with a same-named export (`use std::core::snapshot;
+                    // snapshot::snapshot()`) makes `env.lookup("snapshot")`
+                    // return the imported FUNCTION binding. Synthesizing a
+                    // `MethodCall` receiver here would type it as field access
+                    // on a function value ("Function cannot have fields"). A
+                    // `Type::Function` binding is never a static-method /
+                    // type-associated namespace, so exclude it and fall through
+                    // to the module-qualified-call path below (fresh result
+                    // var; the bytecode compiler resolves the real signature via
+                    // its module schema registry). Struct/enum/alias/DateTime/
+                    // Content static-method calls still match via their own
+                    // predicates above.
                     let synthetic = Expr::MethodCall {
                         receiver: Box::new(Expr::Identifier(namespace.clone(), *span)),
                         method: function.clone(),

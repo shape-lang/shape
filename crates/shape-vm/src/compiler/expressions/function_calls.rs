@@ -1720,6 +1720,39 @@ impl BytecodeCompiler {
             });
         }
 
+        // WF-3E (D7): a bare call `snapshot()` under `use std::core::snapshot`
+        // where the module's last segment collides with a same-named export.
+        // The bare name resolves to the module NAMESPACE binding (a
+        // predeclared module object that a pure Shape-source stdlib module
+        // like `snapshot` never populates on a local run), so the callable
+        // path below would emit `LoadModuleBinding + CallValue` and consume an
+        // uninitialised Bool sentinel at runtime
+        // (`call_value_immediate_nb: ... got Bool`). When `name` is a
+        // namespace-import alias (from `module_scope_sources`), is not shadowed
+        // by a local/closure-capture, and the imported module exports a
+        // function of the SAME name, rewrite to the qualified form
+        // `name::name(..)` — the exact path the documented
+        // `snapshot::snapshot()` takes (resolves to the real function via the
+        // module schema registry / `find_function`). No Bool-default
+        // consumption; a genuine resolution. The `{name}::{name}` existence
+        // gate keeps unrelated shadowing (`use std::core::math` + a user
+        // `fn math()`, where `math` has no `math` export) on the normal path.
+        if self.resolve_local(name).is_none()
+            && !self.mutable_closure_captures.contains_key(name)
+            && self.is_module_namespace_name(name)
+        {
+            let canonical = self
+                .resolve_canonical_module_path(name)
+                .unwrap_or_else(|| name.to_string());
+            let canonical_scoped = format!("{}::{}", canonical, name);
+            let exports_same_named = self.module_member_is_exported(&canonical, name)
+                == Some(true)
+                || self.find_function(&canonical_scoped).is_some();
+            if exports_same_named {
+                return self.compile_module_namespace_call(name, span, name, const_args, args);
+            }
+        }
+
         // Check locals FIRST — function parameters (and other local variables holding
         // callable values) must take priority over global function lookup.  Without this,
         // `fn apply(f, x) { f(x) }` would fail because `find_function("f")` returns None
@@ -5758,6 +5791,44 @@ impl BytecodeCompiler {
             self.program.has_w17_marshal_residual = true;
         }
 
+        // D5 (WF-3E over-wire enforcement): derive the CURRENT blob's
+        // `required_permissions` from the callee's actual native-stdlib-module
+        // call, not from the import statement. `record_blob_permissions` stamps
+        // onto `self.current_blob_builder`; while a function body is being
+        // compiled that IS the per-function blob, so a transferred per-function
+        // blob carries its real derived permissions (e.g. a fn calling
+        // `file::write_text` carries `FsWrite`). This covers BOTH namespace
+        // imports (`use std::core::http`) and named imports — the permission is
+        // derived from the call site, which the import-time recording at
+        // `statements.rs:1939` / `check_import_permissions` cannot do because at
+        // import time `current_blob_builder` is `__main__`, never the callee's
+        // blob. The §4.6 receiver load-refusal
+        // (`remote.rs` `load_linked_program_with_permissions` -> linker union)
+        // then operates on real hash-baked data, so a strict (granted=[]) node
+        // refuses a transferred fs.write fn at LOAD.
+        //
+        // Unconditional by canonical module path (NOT gated on
+        // `is_native_module_export`, whose registry keys the short alias `file`
+        // rather than the canonical `std::core::file` the builtin-fn path routes
+        // through): `record_blob_permissions` derives via
+        // `capability_tags::required_permissions`, which returns `pure()` (empty)
+        // for every non-capability module — user Shape modules, math, json — so a
+        // spurious record is a no-op (`record_blob_permissions` skips empty
+        // sets). Only the real capability modules (`std::core::file` -> FsWrite,
+        // `std::core::http` -> NetConnect, `std::core::env` -> Env, …) contribute.
+        //
+        // Restricted to user-space main compilation (`module_scope_stack`
+        // empty) — the SAME restriction the w17 flag above carries for the SAME
+        // reason (see its comment): re-stamping permissions on stdlib
+        // dep-module-internal blobs during bootstrap changes their content
+        // hashes and desyncs the precomputed content-addressed blob graph
+        // (missing-dependency-blob link panic). @remote-transferred functions
+        // are user-space, so the writer blob (which calls `file::write_text`)
+        // is still stamped; only stdlib-internal blobs are left untouched.
+        if self.module_scope_stack.is_empty() {
+            self.record_blob_permissions(&canonical_module, method);
+        }
+
         // For native module exports, use a hidden binding so that the native
         // module object is not clobbered when a Shape artifact module with the
         // same name is compiled (the module decl overwrites the regular binding).
@@ -5929,26 +6000,25 @@ impl BytecodeCompiler {
         // Named-function declaration first (R1); then a retained closure-literal
         // peek for a `let`-bound closure value (R2). Both yield the same
         // `(Vec<FunctionParameter>, Option<TypeAnnotation>)` signature shape.
-        let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) = if let Some(
-            func_def,
-        ) = self
-            .function_defs
-            .get(&resolved_name)
-            .or_else(|| self.function_defs.get(&fn_name))
-            .cloned()
-        {
-            (func_def.params, func_def.return_type)
-        } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
-            (peek.params, peek.return_type)
-        } else {
-            return Err(ShapeError::SemanticError {
-                message: format!(
-                    "remote::call: '{}' is not a statically-known function or closure binding",
-                    fn_name
-                ),
-                location: Some(self.span_to_source_location(fn_ref_expr.span())),
-            });
-        };
+        let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) =
+            if let Some(func_def) = self
+                .function_defs
+                .get(&resolved_name)
+                .or_else(|| self.function_defs.get(&fn_name))
+                .cloned()
+            {
+                (func_def.params, func_def.return_type)
+            } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
+                (peek.params, peek.return_type)
+            } else {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "remote::call: '{}' is not a statically-known function or closure binding",
+                        fn_name
+                    ),
+                    location: Some(self.span_to_source_location(fn_ref_expr.span())),
+                });
+            };
 
         // (2) Arity check.
         if call_args.len() != params.len() {
@@ -6024,27 +6094,43 @@ impl BytecodeCompiler {
             .collect();
         let pack_expr = Expr::Object(pack_entries, namespace_span);
 
-        // Dispatch to the internal `__call_raising` sibling (§4.1.2).
+        // Dispatch to the internal `__call_result` sibling (§4.9 / FIX C):
+        // the recoverable primitive whose native body returns a real
+        // `Result<R, RemoteError>` value (success → `Ok(R)`, transport /
+        // protocol / remote failure → `Err(RemoteError::…)`). The raising
+        // sibling `__call_raising` is left for the `@remote` before-hook (Q26).
         let rewritten = vec![addr_expr, fn_ref_expr, pack_expr];
         self.compile_module_namespace_call_on_binding(
             binding_name,
             namespace_name,
             namespace_span,
-            "__call_raising",
+            "__call_result",
             &[],
             &rewritten,
         )?;
 
-        // (4) Instantiate `R` from `fn_ref`'s declared return type so the call
-        // site is typed at the callee's return type (not the `_` wildcard of
-        // `__call_raising`).
-        if let Some(ret_ann) = return_type.as_ref() {
-            self.last_expr_type_info = self.type_info_from_annotation(ret_ann);
-            self.last_expr_schema = self
-                .last_expr_type_info
-                .as_ref()
-                .and_then(Self::value_schema_from_type_info);
-        }
+        // (4) Type the call site at `Result<R, RemoteError>` (NOT the bare `R`
+        // of the raising sibling), so the documented
+        // `match remote::call(…) { Ok(v) => …, Err(e) => … }` type-checks and
+        // the runtime `Result` value it produces matches. `R` is `fn_ref`'s
+        // declared return type; an unannotated/unit return becomes `Void`.
+        let r_ann = return_type
+            .clone()
+            .unwrap_or(shape_ast::ast::TypeAnnotation::Void);
+        let result_ann = shape_ast::ast::TypeAnnotation::Generic {
+            name: shape_ast::ast::TypePath::simple("Result"),
+            args: vec![
+                r_ann,
+                shape_ast::ast::TypeAnnotation::Reference(shape_ast::ast::TypePath::simple(
+                    "RemoteError",
+                )),
+            ],
+        };
+        self.last_expr_type_info = self.type_info_from_annotation(&result_ann);
+        self.last_expr_schema = self
+            .last_expr_type_info
+            .as_ref()
+            .and_then(Self::value_schema_from_type_info);
         Ok(())
     }
 

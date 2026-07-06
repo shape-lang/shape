@@ -472,6 +472,166 @@ fn reply_to_typed_return(
     }
 }
 
+/// §4.9 normative mapping: build the `RemoteError` enum value a failed
+/// `remote::call` surfaces, as an `Arc<HeapValue::TypedObject>` (an enum
+/// variant is a `TypedObject`: slot 0 `__variant` I64, then one slot per
+/// payload). The variant id is resolved BY NAME from the sender program's
+/// registered `RemoteError` schema — declaration order is not hardcoded. A
+/// missing schema is surfaced (surface-and-stop), never a fabricated value.
+fn build_remote_error_arc(
+    registry: &shape_runtime::type_schema::TypeSchemaRegistry,
+    err: &RemoteCallError,
+) -> Result<Arc<HeapValue>, String> {
+    let schema = registry.get("RemoteError").ok_or_else(|| {
+        "remote::call: the `RemoteError` enum schema is not registered in the \
+         sender's type registry (import `std::core::remote`) — cannot build the \
+         recoverable error value"
+            .to_string()
+    })?;
+    let schema_id = schema.id as u64;
+    let enum_info = schema.get_enum_info().ok_or_else(|| {
+        "remote::call: `RemoteError` is registered but not as an enum".to_string()
+    })?;
+
+    // (variant name, payload slots) per the §4.9 mapping. `RemoteCallError`
+    // carries only `message` (+ kind), so structured-field variants whose
+    // fields are not on the wire (VersionSkew's server/client ints) fall back
+    // to a message-preserving variant rather than fabricate values.
+    let msg = err.message.clone();
+    let (variant_name, payloads): (&str, Vec<KindedSlot>) = match err.kind {
+        RemoteErrorKind::Transport => ("Transport", vec![string_slot(msg)]),
+        RemoteErrorKind::Timeout => ("Timeout", vec![string_slot(msg)]),
+        RemoteErrorKind::FunctionNotFound => ("MissingFunction", vec![string_slot(msg)]),
+        RemoteErrorKind::ArgumentError => ("Protocol", vec![string_slot(msg)]),
+        RemoteErrorKind::RuntimeError => ("Remote", vec![string_slot(msg)]),
+        RemoteErrorKind::MissingModuleFunction => ("Protocol", vec![string_slot(msg)]),
+        RemoteErrorKind::PermissionDenied => {
+            ("PermissionDenied", vec![array_string_slot(vec![msg])])
+        }
+        RemoteErrorKind::HashMismatch => ("Protocol", vec![string_slot(msg)]),
+        // VersionSkew's server/client ints are not carried on the wire
+        // (RemoteCallError has only `message`); preserve the message via
+        // Protocol rather than fabricate integer fields.
+        RemoteErrorKind::VersionSkew => ("Protocol", vec![string_slot(msg)]),
+        RemoteErrorKind::UnsupportedCapture => (
+            "UnsupportedCapture",
+            vec![string_slot(String::new()), string_slot(msg)],
+        ),
+        RemoteErrorKind::AuthRequired => ("AuthRequired", vec![string_slot(msg)]),
+        RemoteErrorKind::ResourceLimitExceeded => {
+            ("ResourceLimitExceeded", vec![string_slot(msg)])
+        }
+    };
+
+    let variant_id = enum_info
+        .variant_by_name(variant_name)
+        .ok_or_else(|| {
+            format!(
+                "remote::call: `RemoteError` has no variant '{variant_name}' — \
+                 the sender's stdlib `remote` module is out of sync"
+            )
+        })?
+        .id as i64;
+
+    Ok(build_enum_variant_arc(schema_id, variant_id, payloads))
+}
+
+/// Owned single-string payload slot (one refcount share).
+fn string_slot(s: String) -> KindedSlot {
+    KindedSlot::from_string_arc(Arc::new(s))
+}
+
+/// Owned `Array<string>` payload slot — a `TypedArray<*const StringObj>`
+/// carrier (each element a fresh `StringObj`), mirroring the marshal-layer
+/// `ConcreteReturn::ArrayString` producer.
+fn array_string_slot(items: Vec<String>) -> KindedSlot {
+    use shape_value::v2::string_obj::StringObj;
+    use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, stamp_elem_type};
+    use shape_value::ValueSlot;
+    let arr = TypedArray::<*const StringObj>::with_capacity(items.len() as u32);
+    unsafe {
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+        for s in &items {
+            let p = StringObj::new(s.as_str()) as *const StringObj;
+            TypedArray::<*const StringObj>::push(arr, p);
+        }
+    }
+    KindedSlot::new(
+        ValueSlot::from_raw(arr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+/// Build an enum-variant `TypedObject` (`__variant` I64 at slot 0, then one
+/// slot per payload) as an `Arc<HeapValue::TypedObject>` — the carrier that
+/// `ConcreteReturn::OpaqueTypedObject` projects. Generalizes
+/// `result_option_carrier::build_variant_object` to an arbitrary payload
+/// arity. Each payload's owned heap share transfers into the object (forget
+/// after bits/kind capture); the object's `_drop` retires the heap-mask shares.
+fn build_enum_variant_arc(
+    schema_id: u64,
+    variant_id: i64,
+    payloads: Vec<KindedSlot>,
+) -> Arc<HeapValue> {
+    use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
+    use shape_value::ValueSlot;
+
+    let mut slots: Vec<ValueSlot> = Vec::with_capacity(1 + payloads.len());
+    let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(1 + payloads.len());
+    #[cfg(miri)]
+    let mut provenance: Vec<shape_value::heap_value::MiriSlotProvenance> =
+        Vec::with_capacity(1 + payloads.len());
+    let mut heap_mask: u64 = 0;
+
+    slots.push(ValueSlot::from_int(variant_id));
+    field_kinds.push(NativeKind::Int64);
+    #[cfg(miri)]
+    provenance.push(shape_value::heap_value::MiriSlotProvenance::None);
+
+    for (i, payload) in payloads.into_iter().enumerate() {
+        let field_index = i + 1;
+        let kind = payload.kind();
+        let bits = payload.slot().raw();
+        #[cfg(miri)]
+        let prov = payload.miri_provenance();
+        if payload_kind_owns_heap_share(kind) {
+            heap_mask |= 1u64 << field_index;
+        }
+        // Transfer the payload's single share into the object's slot list.
+        std::mem::forget(payload);
+        slots.push(ValueSlot::from_raw(bits));
+        field_kinds.push(kind);
+        #[cfg(miri)]
+        provenance.push(prov);
+    }
+
+    let field_kinds: Arc<[NativeKind]> = Arc::from(field_kinds.into_boxed_slice());
+    #[cfg(miri)]
+    let ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+        schema_id,
+        slots.into_boxed_slice(),
+        heap_mask,
+        field_kinds,
+        provenance.into_boxed_slice(),
+    );
+    #[cfg(not(miri))]
+    let ptr = TypedObjectStorage::_new(schema_id, slots.into_boxed_slice(), heap_mask, field_kinds);
+    Arc::new(HeapValue::TypedObject(TypedObjectPtr::new(ptr)))
+}
+
+/// Whether a payload slot of the given kind owns a heap refcount share (so its
+/// `heap_mask` bit must be set for the object's `_drop` to retire it).
+fn payload_kind_owns_heap_share(kind: NativeKind) -> bool {
+    match kind {
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 => true,
+        NativeKind::Ptr(hk) => !matches!(
+            hk,
+            HeapKind::Future | HeapKind::ModuleFn | HeapKind::Char | HeapKind::NativeScalar
+        ),
+        _ => false,
+    }
+}
+
 /// One request -> response round-trip over a fresh transport (transport-agnostic
 /// send closure for `call_with_resupply`).
 fn send_call(addr: &str, req: &RemoteCallRequest) -> RemoteCallResponse {
@@ -553,6 +713,116 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
                 e.message,
             )),
         }
+    }
+
+    fn call_remote_result(
+        &self,
+        addr: &str,
+        fn_ref: &KindedSlot,
+        args: &[KindedSlot],
+    ) -> Result<TypedReturn, String> {
+        let vm = self.vm_cell.borrow();
+        let program = &vm.program;
+
+        let store = ephemeral_store()?;
+        let arguments = serialize_arg_pack(args, &store)?;
+
+        // Resolve the callee to a RemoteCallRequest — identical to
+        // `call_remote`; a named-function value is a `NativeKind::UInt64`
+        // inline id, a closure value is a `Ptr(HeapKind::Closure)` block.
+        let request = match fn_ref.kind() {
+            NativeKind::UInt64 => {
+                let function_id = fn_ref.raw() as u16;
+                build_call_request_by_id(program, function_id, arguments).map_err(|e| {
+                    format!("remote::call: could not resolve the target function: {e}")
+                })?
+            }
+            NativeKind::Ptr(HeapKind::Closure) => {
+                let (function_id, upvalues, upvalue_kinds) =
+                    extract_closure_captures(fn_ref, &store)?;
+                build_closure_call_request(
+                    program,
+                    function_id,
+                    arguments,
+                    upvalues,
+                    upvalue_kinds,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "remote::call: the callee must be a function or closure \
+                     reference, but has kind {other:?}",
+                ));
+            }
+        };
+
+        // Wire round-trip with the bounded retry-once missing-blob resupply.
+        // The result-path send closure classifies a sender-local transport
+        // failure as `RemoteErrorKind::Transport` (never `RuntimeError`) so the
+        // §4.9 mapping below can distinguish it from a callee's own runtime
+        // error — the two are otherwise indistinguishable at `response.result`.
+        let response =
+            call_with_resupply(program, request, |req| send_call_classifying_transport(addr, req));
+
+        match response.result {
+            // Success: wrap the callee's value `R` in the `Ok` arm of a
+            // real `Result<R, RemoteError>` (project_typed_return's
+            // Ok/OkObjectPairs arms build the canonical `__Result` carrier).
+            Ok(value) => {
+                let reply = reply_to_typed_return(value, &program.type_schema_registry)?;
+                wrap_reply_in_ok(reply)
+            }
+            // Failure: map the structured `RemoteCallError` onto the matching
+            // `RemoteError` enum variant (§4.9) and return it as the `Err` arm.
+            Err(e) => {
+                let remote_error =
+                    build_remote_error_arc(&program.type_schema_registry, &e)?;
+                Ok(TypedReturn::Err(ConcreteReturn::OpaqueTypedObject(
+                    remote_error,
+                )))
+            }
+        }
+    }
+}
+
+/// Wrap a callee-value reply (`Concrete` scalar/array, or `ObjectPairs`
+/// scalar-field object — the two shapes `reply_to_typed_return` produces) in
+/// the `Ok` arm of a `Result<R, RemoteError>`. project_typed_return's
+/// `Ok`/`OkObjectPairs` arms build the canonical `__Result` TypedObject.
+fn wrap_reply_in_ok(reply: TypedReturn) -> Result<TypedReturn, String> {
+    match reply {
+        TypedReturn::Concrete(c) => Ok(TypedReturn::Ok(c)),
+        TypedReturn::ObjectPairs(pairs) => Ok(TypedReturn::OkObjectPairs(pairs)),
+        other => Err(format!(
+            "remote::call: the callee's success value has a shape ({:?}) whose \
+             `Result` wrapping is a follow-up (scalar / string / scalar-array / \
+             scalar-field-object success values are wired). Use remote.execute \
+             for polymorphic results.",
+            std::mem::discriminant(&other),
+        )),
+    }
+}
+
+/// Result-path send closure: one request→response round-trip that classifies a
+/// sender-local transport failure as `RemoteErrorKind::Transport` (rather than
+/// `send_call`'s `RuntimeError`), so `build_remote_error_arc` can map it onto
+/// `RemoteError::Transport` distinctly from a callee's own runtime error.
+fn send_call_classifying_transport(addr: &str, req: &RemoteCallRequest) -> RemoteCallResponse {
+    let msg = WireMessage::Call(req.clone());
+    match wire_roundtrip(addr, &msg) {
+        Ok(WireMessage::CallResponse(r)) => r,
+        Ok(other) => RemoteCallResponse {
+            result: Err(RemoteCallError::new(
+                RemoteErrorKind::Transport,
+                format!(
+                    "remote server returned an unexpected reply ({:?})",
+                    std::mem::discriminant(&other),
+                ),
+            )),
+        },
+        Err(e) => RemoteCallResponse {
+            result: Err(RemoteCallError::new(RemoteErrorKind::Transport, e)),
+        },
     }
 }
 
@@ -805,6 +1075,34 @@ pub fn create_remote_module() -> ModuleExports {
         remote_call_raising_body,
     );
 
+    // remote.__call_result(addr, fn_ref, args) -> Result<R, RemoteError>
+    //
+    // Recoverable sibling of `__call_raising` backing the public `remote::call`
+    // primitive (distributed §4.1.1 / §4.9, Q26 / FIX C). Same per-arity
+    // signature and dispatcher-delegation shape as `__call_raising`, but its
+    // body returns a real `Result<R, RemoteError>` value — success is `Ok(R)`
+    // typed at the callee's return type, and any transport / protocol / remote
+    // failure is `Err(RemoteError::…)` per the §4.9 mapping. The compiler's
+    // `remote::call` elaboration lowers to THIS builtin and types the call site
+    // at `Result<R, RemoteError>` (not the bare `R` of the raising sibling).
+    register_typed_fn_3_raw(
+        &mut module,
+        "__call_result",
+        "Call a function on a remote Shape server, returning Result<R, RemoteError> (`remote::call`)",
+        [
+            ("addr", "string"),
+            ("fn_ref", "_"),
+            ("args", "Array<_>"),
+        ],
+        [
+            NativeKind::String,
+            NativeKind::UInt64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        ],
+        ConcreteType::Named("_".to_string()),
+        remote_call_result_body,
+    );
+
     module
 }
 
@@ -839,6 +1137,38 @@ fn remote_call_raising_body(
     dispatcher.call_remote(&addr, &slots[1], &slots[2..])
 }
 
+/// Native body for `remote::__call_result` (§4.1.1 / §4.9, FIX C). Identical
+/// sender-side shape to [`remote_call_raising_body`] — checks `NetConnect`,
+/// resolves the address, delegates to the `ModuleContext`'s
+/// [`RemoteDispatcher`] — but delegates to `call_remote_result`, which returns
+/// a real `Result<R, RemoteError>` value instead of raising on failure.
+fn remote_call_result_body(
+    slots: &[KindedSlot],
+    ctx: &shape_runtime::module_exports::ModuleContext,
+) -> Result<TypedReturn, String> {
+    shape_runtime::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+
+    let addr_sv = slot_to_serializable(slots[0].raw(), slots[0].kind(), &ephemeral_store()?)
+        .map_err(|e| format!("remote::call: invalid address argument: {e}"))?;
+    let addr = match addr_sv {
+        SerializableVMValue::String(s) => s,
+        other => {
+            return Err(format!(
+                "remote::call: address must be a string, got {:?}",
+                std::mem::discriminant(&other),
+            ));
+        }
+    };
+
+    let dispatcher = ctx.remote_dispatch.ok_or_else(|| {
+        "remote::call: the runtime did not install a distributed-transfer \
+         dispatcher (internal error) — the call was not attempted"
+            .to_string()
+    })?;
+
+    dispatcher.call_remote_result(&addr, &slots[1], &slots[2..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +1180,10 @@ mod tests {
         assert!(module.has_export("execute"));
         assert!(module.has_export("ping"));
         assert!(module.has_export("__call_raising"));
+        assert!(
+            module.has_export("__call_result"),
+            "__call_result backs the recoverable remote::call primitive (FIX C)"
+        );
         assert!(!module.has_export("__call"), "__call retired from surface (Q35/OQ-11)");
     }
 

@@ -148,6 +148,23 @@ fn derive_serve_security(
     let mut scope = ScopeConstraints::none();
     scope.ffi_languages = ffi_languages.to_vec();
 
+    // D6c (WF-3E): opting a language in with `--ffi-languages python` IS the
+    // operator declaring the FFI vertical the gate governs, so it must GRANT
+    // the `Ffi` permission that the §4.8.3 load-refusal + the phase-1 dynamic
+    // dispatch check key on. Without this, a strict node started
+    // `--ffi-languages python` still refuses at LOAD ("requires permissions not
+    // granted: ffi.call") — the opt-in flag never granting the permission it
+    // gates on. `ffi_languages` then correctly SCOPES which languages that
+    // `Ffi` grant may execute (`control_flow/mod.rs` phase-1 opt-in check).
+    // Gated on loopback to preserve the non-loopback fail-closed posture above.
+    let granted = if !ffi_languages.is_empty() && is_loopback {
+        let mut g = granted;
+        g.insert(Permission::Ffi);
+        g
+    } else {
+        granted
+    };
+
     SecurityPosture {
         granted,
         scope,
@@ -239,9 +256,7 @@ pub async fn run_serve(
         // Half-configured TLS: the non-loopback gate already rejects this for
         // remote binds; on loopback we fail closed rather than silently serve
         // plaintext when the operator clearly intended TLS.
-        _ => bail!(
-            "TLS is half-configured: pass BOTH --tls-cert and --tls-key, or neither."
-        ),
+        _ => bail!("TLS is half-configured: pass BOTH --tls-cert and --tls-key, or neither."),
     };
 
     // Load language runtimes at startup for polyglot remote execution.
@@ -323,7 +338,11 @@ pub async fn run_serve(
     );
     // WF-2F axis C: surface the foreign-language opt-in posture so an operator
     // can see at a glance why a transferred `fn python` might be refused.
-    if config.security.granted.contains(&shape_abi_v1::Permission::Ffi) {
+    if config
+        .security
+        .granted
+        .contains(&shape_abi_v1::Permission::Ffi)
+    {
         if config.security.scope.ffi_languages.is_empty() {
             eprintln!(
                 "  ffi.call granted; ffi_languages: [] (strict — dynamic foreign \
@@ -397,14 +416,19 @@ fn build_tls_acceptor(
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| anyhow::anyhow!("parse TLS cert '{}': {}", cert_path.display(), e))?;
     if certs.is_empty() {
-        bail!("TLS cert '{}' contained no certificates", cert_path.display());
+        bail!(
+            "TLS cert '{}' contained no certificates",
+            cert_path.display()
+        );
     }
 
     let key_bytes = std::fs::read(key_path)
         .map_err(|e| anyhow::anyhow!("read TLS key '{}': {}", key_path.display(), e))?;
     let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_bytes[..])
         .map_err(|e| anyhow::anyhow!("parse TLS key '{}': {}", key_path.display(), e))?
-        .ok_or_else(|| anyhow::anyhow!("TLS key '{}' contained no private key", key_path.display()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("TLS key '{}' contained no private key", key_path.display())
+        })?;
 
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
@@ -1041,8 +1065,8 @@ struct InProcessResult {
 /// Execute Shape code in-process using the full engine pipeline.
 fn execute_code_in_process(
     code: &str,
-    _extensions: &[std::path::PathBuf],
-    _provider_opts: &ProviderOptions,
+    extensions: &[std::path::PathBuf],
+    provider_opts: &ProviderOptions,
     security: &SecurityPosture,
 ) -> Result<InProcessResult> {
     use shape_runtime::output_adapter::SharedCaptureAdapter;
@@ -1052,6 +1076,17 @@ fn execute_code_in_process(
 
     let mut engine =
         ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
+
+    // D6b (WF-3E): the Execute path must load the serve node's extensions so a
+    // `fn python` / `fn typescript` code string resolves its language runtime.
+    // Previously `_extensions` was ignored and a fresh engine's
+    // `register_language_runtime_artifacts()` yielded no runtimes, so foreign
+    // code failed "no extension provides language 'python'". Mirror the serve
+    // startup + local-run load path (script_cmd.rs) so the engine that
+    // `engine.execute` drives actually carries the runtimes.
+    let startup_specs =
+        extension_loading::collect_startup_specs(provider_opts, None, None, None, extensions);
+    let _ = extension_loading::load_specs(&mut engine, &startup_specs, |_, _| {}, |_, _| {});
 
     let mut executor = BytecodeExecutor::new();
     apply_security_posture(&mut executor, security);
@@ -1107,8 +1142,8 @@ fn execute_code_in_process(
 fn execute_file_in_process(
     path: &str,
     cwd: Option<&str>,
-    _extensions: &[std::path::PathBuf],
-    _provider_opts: &ProviderOptions,
+    extensions: &[std::path::PathBuf],
+    provider_opts: &ProviderOptions,
     security: &SecurityPosture,
 ) -> Result<InProcessResult> {
     use shape_runtime::output_adapter::SharedCaptureAdapter;
@@ -1130,6 +1165,17 @@ fn execute_file_in_process(
 
     let mut engine =
         ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
+
+    // D6b (WF-3E): load the serve node's extensions so a foreign fn resolves its
+    // language runtime on the Execute-file path (mirror execute_code_in_process).
+    let startup_specs = extension_loading::collect_startup_specs(
+        provider_opts,
+        None,
+        None,
+        Some(file_path),
+        extensions,
+    );
+    let _ = extension_loading::load_specs(&mut engine, &startup_specs, |_, _| {}, |_, _| {});
 
     let mut executor = BytecodeExecutor::new();
     apply_security_posture(&mut executor, security);
@@ -1372,8 +1418,7 @@ mod tests {
         tempfile::TempDir,
     ) {
         // 1. Throwaway self-signed cert + key (SAN=localhost).
-        let generated =
-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         let cert_der = generated.cert.der().clone();
 
         let dir = tempfile::tempdir().unwrap();
@@ -1758,12 +1803,7 @@ print(r)
         );
 
         let result = tokio::task::spawn_blocking(move || {
-            execute_code_in_process(
-                &code,
-                &[],
-                &ProviderOptions::default(),
-                &security,
-            )
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
         })
         .await
         .expect("client thread panicked");
@@ -1816,6 +1856,13 @@ print(r)
     /// the closure-over-wire path must reject it rather than ship a mutable cell.
     /// The whole request drives through the real `remote::call` elaboration and
     /// wire round-trip; only the outcome is a structured refusal.
+    ///
+    /// Post-D4 (WF-3E fixC, design §4.1.1 / Q26): `remote::call` now yields a
+    /// real `Result<R, RemoteError>` value — a mutable-capture refusal surfaces
+    /// as `Err(RemoteError::UnsupportedCapture { .. })` the program can handle,
+    /// NOT an uncatchable runtime abort. The closure is still refused (never
+    /// executed remotely, never a Bool-default); the delivery mechanism is the
+    /// recoverable Result surface. Assert on the printed Err value's message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_remote_mutable_capture_refused_over_tcp() {
         let addr = start_test_server().await;
@@ -1838,19 +1885,23 @@ print(r)
         .await
         .expect("client thread panicked");
 
-        // A mutable capture must NOT execute remotely — the call surfaces a
-        // clean refusal (the `_raising` sibling maps it to a runtime error).
-        // `InProcessResult` is not `Debug`, so match rather than `expect_err`.
-        let msg = match result {
-            Ok(out) => panic!(
-                "mutable-capture closure must be refused, not executed; got stdout {:?}",
-                out.stdout
+        // A mutable capture must NOT execute remotely. Post-D4 the refusal is a
+        // recoverable `Err(RemoteError::UnsupportedCapture)` VALUE (the program
+        // runs cleanly and prints it), not a program-level runtime error.
+        let stdout = match result {
+            Ok(out) => out.stdout.unwrap_or_default(),
+            Err(e) => panic!(
+                "post-D4 `remote::call` must yield a recoverable Result, not a \
+                 program abort; got error {e}"
             ),
-            Err(e) => format!("{e}"),
         };
         assert!(
-            msg.contains("capture") || msg.contains("immutable") || msg.contains("mutable"),
-            "refusal should name the capture problem in user-legible words, got: {msg}"
+            stdout.contains("Err") && stdout.contains("Capture"),
+            "refusal should print an Err(RemoteError::...Capture...) value, got stdout: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("capture") || stdout.contains("immutable") || stdout.contains("mutable"),
+            "refusal should name the capture problem in user-legible words, got stdout: {stdout:?}"
         );
     }
 
@@ -1870,7 +1921,10 @@ print(r)
 
         let tcp = TcpStream::connect(addr).await.unwrap();
         let server_name = ServerName::try_from("localhost").unwrap();
-        let mut tls = connector.connect(server_name, tcp).await.expect("TLS handshake");
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .expect("TLS handshake");
 
         // Prove the transport is actually TLS: the client saw the server's cert
         // and negotiated a concrete TLS protocol version.
@@ -1889,9 +1943,8 @@ print(r)
 
         // A real remote function call over the encrypted channel.
         let bytecode = {
-            let program =
-                shape_ast::parser::parse_program("function multiply(a, b) { a * b }")
-                    .expect("parse");
+            let program = shape_ast::parser::parse_program("function multiply(a, b) { a * b }")
+                .expect("parse");
             let compiler = shape_vm::compiler::BytecodeCompiler::new();
             compiler.compile(&program).expect("compile")
         };
@@ -2028,5 +2081,178 @@ print(r)
             }
             other => panic!("Expected ExecuteResponse, got {:?}", other),
         }
+    }
+
+    /// D1 (WF-3E) — `@remote` FOREIGN composition end-to-end. A regular `@remote`
+    /// fn whose BODY calls an `extern C` foreign stub transfers over the wire and
+    /// executes ON the serve node. Both the wrapper blob AND the foreign-stub blob
+    /// travel: the sender's minimal-blob closure now follows the
+    /// `LoadModuleBinding` + `CallValue` edge to the foreign stub (pre-fix it
+    /// shipped `blobs=1` with the stub missing, and the receiver died
+    /// "frame_descriptor has 0 slots but arity is 1"). The `extern C labs` runs
+    /// server-side via libffi — no language runtime needed — so
+    /// `remote_abs(-42) == 42` proves the foreign body executed on the receiver,
+    /// not a client-side fallback. This is the exact `blobs>=2` /
+    /// foreign-functions-non-empty regression path the audit found untested.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_foreign_extern_c_transfer_over_tcp() {
+        // `none` on loopback grants `Ffi`; `extern C` is not gated by the
+        // (empty) `ffi_languages` allow-list, so the foreign call is admitted.
+        let addr = start_test_server().await;
+        let security = derive_serve_security(SandboxLevel::None, true, &[]);
+
+        let code = format!(
+            r#"
+use std::core::remote
+
+extern "C" fn labs(x: int) -> int from "c"
+
+@remote("{addr}")
+fn remote_abs(x: int) -> int {{
+    labs(x)
+}}
+
+print(remote_abs(-42))
+"#
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
+        })
+        .await
+        .expect("client thread panicked");
+
+        let out = result.expect("@remote extern C composition transfer failed");
+        let stdout = out.stdout.unwrap_or_default();
+        assert!(
+            stdout.contains("42"),
+            "@remote fn calling extern C labs(-42) must return 42 server-side, \
+             got stdout {stdout:?} value {:?}",
+            out.value
+        );
+    }
+
+    /// D4 (WF-3E, design §4.1.1 / Q26) — `remote::call` yields a REAL
+    /// `Result<R, RemoteError>`. Pre-fix the compiler lowered `remote::call` at
+    /// the bare callee return type, so the documented
+    /// `match { Ok(v) => .., Err(e) => .. }` type-checked then crashed at runtime
+    /// ("No match arm matched"). Here BOTH arms are reachable from the same
+    /// program shape: a live node returns `Ok(42)`, and a dead port returns
+    /// `Err(RemoteError::Transport)` (pre-send connect-refused) — a recoverable
+    /// value, never an abort.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_call_result_ok_and_err_over_tcp() {
+        let addr = start_test_server().await;
+
+        // Ok arm — live node.
+        let security_ok = derive_serve_security(SandboxLevel::None, true, &[]);
+        let code_ok = format!(
+            r#"
+use std::core::remote
+fn mul(a: int, b: int) -> int {{ a * b }}
+let r = remote::call("{addr}", mul, 6, 7)
+match r {{
+    Ok(v) => print(f"OK={{v}}")
+    Err(e) => print(f"ERR={{e}}")
+}}
+"#
+        );
+        let ok = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code_ok, &[], &ProviderOptions::default(), &security_ok)
+        })
+        .await
+        .expect("client thread panicked")
+        .expect("remote::call Ok path failed");
+        assert!(
+            ok.stdout.unwrap_or_default().contains("OK=42"),
+            "live remote::call mul(6,7) must take the Ok arm with value 42"
+        );
+
+        // Err arm — nothing listening on 127.0.0.1:2 → a pre-send Transport
+        // failure surfaces as a recoverable `Err`, and the program runs to
+        // completion printing it (no "No match arm matched" abort).
+        let security_err = derive_serve_security(SandboxLevel::None, true, &[]);
+        let code_err = r#"
+use std::core::remote
+fn mul(a: int, b: int) -> int { a * b }
+let r = remote::call("127.0.0.1:2", mul, 6, 7)
+match r {
+    Ok(v) => print(f"OK={v}")
+    Err(e) => print("ERR_FIRED")
+}
+"#
+        .to_string();
+        let err = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code_err, &[], &ProviderOptions::default(), &security_err)
+        })
+        .await
+        .expect("client thread panicked")
+        .expect("remote::call Err path must run cleanly (recoverable), not abort");
+        assert!(
+            err.stdout.unwrap_or_default().contains("ERR_FIRED"),
+            "dead-port remote::call must take the Err arm as a recoverable Result, not crash"
+        );
+    }
+
+    /// D5 (WF-3E, §4.6) — receiver permission-over-wire refusal on REAL derived
+    /// permissions. A transferred per-function blob now carries its own body's
+    /// required permissions (pre-fix `record_blob_permissions` fired only for
+    /// NAMED top-level imports, so a namespace import + the callee body recorded
+    /// nothing and the §4.6 load-refusal had empty data). A strict node (grants
+    /// nothing) receives a fn that calls `file::write_text` and refuses it at LOAD
+    /// with `Err(RemoteError::PermissionDenied { missing: [..fs.write..] })`; the
+    /// write never runs (no file on disk).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_permission_refusal_over_wire() {
+        // Strict receiver grants nothing; the sender is fully trusted.
+        let addr = start_test_server_with_sandbox(SandboxLevel::Strict).await;
+        let security = derive_serve_security(SandboxLevel::None, true, &[]);
+
+        let target = std::env::temp_dir().join(format!(
+            "wf3e_d5_wire_refuse_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&target);
+
+        let code = format!(
+            r#"
+use std::core::remote
+use std::core::file
+fn writer(x: int) -> int {{ file::write_text("{}", "escaped over wire"); x }}
+let r = remote::call("{addr}", writer, 1)
+match r {{
+    Ok(v) => print(f"OK={{v}}")
+    Err(e) => print(f"REFUSED={{e}}")
+}}
+"#,
+            target.display()
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
+        })
+        .await
+        .expect("client thread panicked");
+
+        let stdout = result
+            .expect("D5 client program must run cleanly (recoverable refusal)")
+            .stdout
+            .unwrap_or_default();
+        assert!(
+            stdout.contains("REFUSED")
+                && (stdout.contains("fs.write") || stdout.to_lowercase().contains("permission")),
+            "strict node must refuse the transferred fs.write fn at load with a \
+             PermissionDenied Err naming fs.write, got stdout: {stdout:?}"
+        );
+        assert!(
+            !target.exists(),
+            "the refused write must NOT have hit disk on the strict receiver: {}",
+            target.display()
+        );
+        let _ = std::fs::remove_file(&target);
     }
 }

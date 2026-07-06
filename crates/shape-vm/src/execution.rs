@@ -327,7 +327,12 @@ impl BytecodeExecutor {
         // resolves a real callee, not the uninitialised sentinel. Idempotent
         // with any bindings the snapshot already restored (writes the same
         // typed value; ADR-006 §2.7.8 kinded write, no Bool-default).
-        vm.initialize_foreign_stub_bindings();
+        vm.initialize_foreign_stub_bindings().map_err(|e| {
+            ShapeError::RuntimeError {
+                message: format!("resume: foreign stub binding init failed: {e:?}"),
+                location: None,
+            }
+        })?;
 
         // Chained snapshots: a resumed VM is indistinguishable from a running
         // one and may snapshot again (§4.5.1 step 5).
