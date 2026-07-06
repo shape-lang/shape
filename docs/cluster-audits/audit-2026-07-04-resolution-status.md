@@ -76,7 +76,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 ### 12 NEW confirmed defects (each reproduced from scratch by an independent refuter) → owners
 | Sev | Defect | Owner | Status |
 |---|---|---|---|
-| CRIT | SIGINT-save mid-builtin → silently-corrupt snapshot | WF-3F | ⏳ release-blocking (ruled) |
+| CRIT | SIGINT-save mid-builtin → silently-corrupt snapshot | WF-3F | ✅ merged `5dc83444` (2 layers: conditional resume-marker + `from_snapshot` stack-base double-reserve) · **Fable** (12/12, revert-proof). Residual routed: SIGINT-in-JIT dropped (not corruption) |
 | CRIT | ~~`extensions/*.so` debug-profile load SIGSEGVs host~~ → **framing corrected: structural-ABI validation gap** (integer gate only, no repr(C) layout fingerprint) | WF-2A-fu | ✅ merged `ddb6a01e` (fingerprint gate; skew now fails cleanly, not SIGSEGV) · **Fable** |
 | CRIT | `[native-dependencies]` alias resolution dead (`resolve_library_target` hardcoded) | WF-2A-fu | ✅ merged `ddb6a01e` (resolution set threaded into VM+JIT) · **Fable** (differential vs pre-fix) |
 | HIGH | Module-scope closure-capture Drop finalizer leak (§2.7.30.4) | WF-3C | ⏳ (with real GC) |
