@@ -2,7 +2,6 @@ use super::{ExecutionMode, ExecutionModeArg, ProviderOptions};
 use crate::extension_loading;
 use anyhow::{Context, Result, bail};
 use shape_runtime::engine::{ExecutionResult, ShapeEngine};
-use shape_runtime::hashing::HashDigest;
 use shape_runtime::project::ExternalLockMode;
 #[cfg(test)]
 use shape_runtime::project::{NativeDependencyProvider, NativeDependencySpec};
@@ -289,8 +288,12 @@ pub async fn run_script(
 
     // Handle Resume or Execute (three-way branch)
     let exec_result: Result<()> = if let Some(hash_str) = resume {
-        let hash = HashDigest::from_hex(&hash_str);
-        eprintln!("Resuming from snapshot: {}", hash_str);
+        // Accept a full 64-char hash OR the truncated form that
+        // `shape snapshot list` prints (git-style unique prefix). A
+        // non-matching hash yields a clean "no snapshot found" error, never
+        // the raw "No such file or directory" from a built store path.
+        let hash = snapshot_store.resolve_hash(&hash_str)?;
+        eprintln!("Resuming from snapshot: {}", hash.hex());
 
         let (semantic, context, vm_hash, bytecode_hash) = engine.load_snapshot(&hash)?;
         engine.apply_snapshot(semantic, context)?;
@@ -446,11 +449,13 @@ pub async fn run_script(
                 // can distinguish completed (0) from interrupted (130).
                 if let Some(hash) = snapshot_hash {
                     eprintln!("Snapshot saved: {}", hash);
-                    if let Some(ref f) = file {
-                        eprintln!("Resume with: shape --resume {} {}", hash, f.display());
-                    } else {
-                        eprintln!("Resume with: shape --resume {}", hash);
-                    }
+                    // Design §4.5.3: plain resume (no source file) is the
+                    // form that continues the SAME code from the store — the
+                    // snapshot is the code authority. Appending the source
+                    // file would select recompile-and-resume, whose stricter
+                    // "edited source" semantics cleanly REFUSE an unchanged
+                    // file, so the printed hint must always be the plain form.
+                    eprintln!("Resume with: shape --resume {}", hash);
                 } else {
                     eprintln!("Interrupted - no snapshot saved");
                 }

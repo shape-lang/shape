@@ -74,23 +74,9 @@ pub async fn run_snapshot_delete(hash_str: String) -> Result<()> {
 }
 
 /// Resolve a hash prefix to a full hash by scanning available snapshots.
+///
+/// Delegates to [`SnapshotStore::resolve_hash`] so the `--resume` path and
+/// the `snapshot info`/`rm` subcommands share one resolution rule.
 fn resolve_hash(store: &SnapshotStore, prefix: &str) -> Result<HashDigest> {
-    // Try exact match first
-    let exact = HashDigest::from_hex(prefix);
-    if store.get_snapshot(&exact).is_ok() {
-        return Ok(exact);
-    }
-
-    // Try prefix match
-    let snapshots = store.list_snapshots()?;
-    let matches: Vec<_> = snapshots
-        .iter()
-        .filter(|(h, _)| h.hex().starts_with(prefix))
-        .collect();
-
-    match matches.len() {
-        0 => anyhow::bail!("No snapshot found matching '{}'", prefix),
-        1 => Ok(matches[0].0.clone()),
-        n => anyhow::bail!("Ambiguous hash prefix '{}' matches {} snapshots", prefix, n),
-    }
+    store.resolve_hash(prefix)
 }

@@ -163,6 +163,43 @@ impl SnapshotStore {
         Ok(results)
     }
 
+    /// Resolve a user-supplied hash (full or short prefix) to a stored
+    /// snapshot's full [`HashDigest`].
+    ///
+    /// `shape snapshot list` prints a truncated 16-char hash; feeding that
+    /// straight to `--resume` used to build a store path that does not exist
+    /// and surfaced as a cryptic `No such file or directory (os error 2)`.
+    /// This resolves an exact match first, then falls back to a unique
+    /// prefix scan (git-style), and otherwise returns a clean, actionable
+    /// error naming the prefix — never a raw I/O error.
+    pub fn resolve_hash(&self, prefix: &str) -> Result<HashDigest> {
+        let normalized = prefix.strip_prefix("sha256:").unwrap_or(prefix);
+        // Exact match first (full 64-char hash).
+        let exact = HashDigest::from_hex(normalized);
+        if self.snapshot_path(&exact).exists() {
+            return Ok(exact);
+        }
+        // Unique-prefix match against the stored envelopes.
+        let matches: Vec<HashDigest> = self
+            .list_snapshots()?
+            .into_iter()
+            .map(|(h, _)| h)
+            .filter(|h| h.hex().starts_with(normalized))
+            .collect();
+        match matches.len() {
+            0 => anyhow::bail!(
+                "no snapshot found matching '{}'. Run 'shape snapshot list' to see available snapshots.",
+                prefix
+            ),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            n => anyhow::bail!(
+                "'{}' is ambiguous - it matches {} snapshots. Use more characters of the hash.",
+                prefix,
+                n
+            ),
+        }
+    }
+
     /// Delete a snapshot file by hash.
     pub fn delete_snapshot(&self, hash: &HashDigest) -> Result<()> {
         let path = self.snapshot_path(hash);
