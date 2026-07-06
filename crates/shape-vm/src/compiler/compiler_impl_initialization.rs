@@ -459,128 +459,160 @@ impl BytecodeCompiler {
             }
 
             let max_iterations = 10;
-            for _iteration in 0..max_iterations {
-                let mut any_changed = false;
-                let mut recomputed: Vec<(FunctionHash, FunctionHash, FunctionBlob)> = Vec::new();
 
-                for blob in function_store.values() {
-                    let mut updated = blob.clone();
-                    let mut deps_changed = false;
+            // WF-3E D5: dependency-hash resolution and permission propagation
+            // both mutate content hashes and are mutually coupled — permission
+            // propagation re-hashes a depended-upon blob (e.g. an `@remote`
+            // wrapper that inherits `FsWrite` from its `___impl` body, which now
+            // carries a directly-derived per-blob permission), which dangles its
+            // CALLERS' dependency pointers (they still hold the pre-perm hash).
+            // The dependency-resolution loop below re-resolves those pointers
+            // from `blob_name_to_hash`, but the permission loop runs AFTER it, so
+            // a single sequential pass leaves stale pointers → linker "Missing
+            // function blob". Wrap BOTH in an outer joint fixpoint: after
+            // permission propagation changes any hash, re-run dependency
+            // resolution so caller pointers converge to the final hashes.
+            // Permissions grow monotonically, so the joint loop terminates.
+            let mut joint_changed = true;
+            let mut joint_guard = 0;
+            while joint_changed && joint_guard < max_iterations {
+                joint_changed = false;
+                joint_guard += 1;
 
-                    for (i, dep) in updated.dependencies.iter_mut().enumerate() {
-                        if let Some(name) = blob.callee_names.get(i) {
-                            // Keep self-recursive edges as ZERO sentinel.
-                            // Resolving self to a concrete hash makes the hash equation
-                            // non-convergent for recursive functions.
-                            if name == &blob.name {
-                                continue;
-                            }
-                            // Keep mutual-recursion edges as ZERO sentinel.
-                            // Like self-recursion, mutual recursion creates a hash
-                            // equation with no fixed point. The linker resolves these
-                            // using callee_names instead.
-                            if mutual_edges.contains(&(blob.name.clone(), name.clone())) {
-                                if *dep != FunctionHash::ZERO {
-                                    *dep = FunctionHash::ZERO;
-                                    deps_changed = true;
+                let mut dep_loop_changed = false;
+                for _iteration in 0..max_iterations {
+                    let mut any_changed = false;
+                    let mut recomputed: Vec<(FunctionHash, FunctionHash, FunctionBlob)> =
+                        Vec::new();
+
+                    for blob in function_store.values() {
+                        let mut updated = blob.clone();
+                        let mut deps_changed = false;
+
+                        for (i, dep) in updated.dependencies.iter_mut().enumerate() {
+                            if let Some(name) = blob.callee_names.get(i) {
+                                // Keep self-recursive edges as ZERO sentinel.
+                                // Resolving self to a concrete hash makes the hash equation
+                                // non-convergent for recursive functions.
+                                if name == &blob.name {
+                                    continue;
                                 }
-                                continue;
-                            }
-                            if let Some(&current) = self.blob_name_to_hash.get(name) {
-                                if *dep != current {
-                                    *dep = current;
-                                    deps_changed = true;
+                                // Keep mutual-recursion edges as ZERO sentinel.
+                                // Like self-recursion, mutual recursion creates a hash
+                                // equation with no fixed point. The linker resolves these
+                                // using callee_names instead.
+                                if mutual_edges.contains(&(blob.name.clone(), name.clone())) {
+                                    if *dep != FunctionHash::ZERO {
+                                        *dep = FunctionHash::ZERO;
+                                        deps_changed = true;
+                                    }
+                                    continue;
+                                }
+                                if let Some(&current) = self.blob_name_to_hash.get(name) {
+                                    if *dep != current {
+                                        *dep = current;
+                                        deps_changed = true;
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if deps_changed {
-                        let old_hash = updated.content_hash;
-                        updated.finalize();
-                        if updated.content_hash != old_hash {
-                            recomputed.push((old_hash, updated.content_hash, updated));
-                            any_changed = true;
-                        }
-                    }
-                }
-
-                for (old_hash, new_hash, blob) in recomputed {
-                    function_store.remove(&old_hash);
-                    function_store.insert(new_hash, blob.clone());
-                    self.blob_name_to_hash.insert(blob.name.clone(), new_hash);
-                    for slot in &mut self.function_hashes_by_id {
-                        if *slot == Some(old_hash) {
-                            *slot = Some(new_hash);
-                        }
-                    }
-
-                    // Update cache with the re-hashed blob.
-                    if let Some(ref mut cache) = self.blob_cache {
-                        cache.put_blob(&blob);
-                    }
-                }
-
-                if !any_changed {
-                    break;
-                }
-            }
-
-            // Transitive permission propagation:
-            // If function A calls function B, A inherits B's required_permissions.
-            // This must happen after dependency hash resolution, and forms its own
-            // fixpoint because permission changes alter content hashes.
-            for _perm_iter in 0..max_iterations {
-                let mut perm_changed = false;
-                let mut updates: Vec<(FunctionHash, shape_abi_v1::PermissionSet)> = Vec::new();
-
-                for (hash, blob) in function_store.iter() {
-                    let mut accumulated = blob.required_permissions.clone();
-                    for dep_hash in &blob.dependencies {
-                        if let Some(dep_blob) = function_store.get(dep_hash) {
-                            let unioned = accumulated.union(&dep_blob.required_permissions);
-                            if unioned != accumulated {
-                                accumulated = unioned;
+                        if deps_changed {
+                            let old_hash = updated.content_hash;
+                            updated.finalize();
+                            if updated.content_hash != old_hash {
+                                recomputed.push((old_hash, updated.content_hash, updated));
+                                any_changed = true;
                             }
                         }
                     }
-                    if accumulated != blob.required_permissions {
-                        updates.push((*hash, accumulated));
-                        perm_changed = true;
-                    }
-                }
 
-                let mut rehashed: Vec<(FunctionHash, FunctionBlob)> = Vec::new();
-                for (hash, perms) in updates {
-                    if let Some(blob) = function_store.get_mut(&hash) {
-                        blob.required_permissions = perms;
-                        let old_hash = blob.content_hash;
-                        blob.finalize();
-                        if blob.content_hash != old_hash {
-                            rehashed.push((old_hash, blob.clone()));
+                    for (old_hash, new_hash, blob) in recomputed {
+                        function_store.remove(&old_hash);
+                        function_store.insert(new_hash, blob.clone());
+                        self.blob_name_to_hash.insert(blob.name.clone(), new_hash);
+                        for slot in &mut self.function_hashes_by_id {
+                            if *slot == Some(old_hash) {
+                                *slot = Some(new_hash);
+                            }
+                        }
+
+                        // Update cache with the re-hashed blob.
+                        if let Some(ref mut cache) = self.blob_cache {
+                            cache.put_blob(&blob);
                         }
                     }
-                }
 
-                for (old_hash, blob) in rehashed {
-                    function_store.remove(&old_hash);
-                    self.blob_name_to_hash
-                        .insert(blob.name.clone(), blob.content_hash);
-                    for slot in &mut self.function_hashes_by_id {
-                        if *slot == Some(old_hash) {
-                            *slot = Some(blob.content_hash);
+                    if any_changed {
+                        dep_loop_changed = true;
+                    }
+                    if !any_changed {
+                        break;
+                    }
+                }
+                joint_changed |= dep_loop_changed;
+
+                // Transitive permission propagation:
+                // If function A calls function B, A inherits B's required_permissions.
+                // This must happen after dependency hash resolution, and forms its own
+                // fixpoint because permission changes alter content hashes.
+                let mut perm_loop_changed = false;
+                for _perm_iter in 0..max_iterations {
+                    let mut perm_changed = false;
+                    let mut updates: Vec<(FunctionHash, shape_abi_v1::PermissionSet)> = Vec::new();
+
+                    for (hash, blob) in function_store.iter() {
+                        let mut accumulated = blob.required_permissions.clone();
+                        for dep_hash in &blob.dependencies {
+                            if let Some(dep_blob) = function_store.get(dep_hash) {
+                                let unioned = accumulated.union(&dep_blob.required_permissions);
+                                if unioned != accumulated {
+                                    accumulated = unioned;
+                                }
+                            }
+                        }
+                        if accumulated != blob.required_permissions {
+                            updates.push((*hash, accumulated));
+                            perm_changed = true;
                         }
                     }
-                    if let Some(ref mut cache) = self.blob_cache {
-                        cache.put_blob(&blob);
-                    }
-                    function_store.insert(blob.content_hash, blob);
-                }
 
-                if !perm_changed {
-                    break;
+                    let mut rehashed: Vec<(FunctionHash, FunctionBlob)> = Vec::new();
+                    for (hash, perms) in updates {
+                        if let Some(blob) = function_store.get_mut(&hash) {
+                            blob.required_permissions = perms;
+                            let old_hash = blob.content_hash;
+                            blob.finalize();
+                            if blob.content_hash != old_hash {
+                                rehashed.push((old_hash, blob.clone()));
+                            }
+                        }
+                    }
+
+                    for (old_hash, blob) in rehashed {
+                        function_store.remove(&old_hash);
+                        self.blob_name_to_hash
+                            .insert(blob.name.clone(), blob.content_hash);
+                        for slot in &mut self.function_hashes_by_id {
+                            if *slot == Some(old_hash) {
+                                *slot = Some(blob.content_hash);
+                            }
+                        }
+                        if let Some(ref mut cache) = self.blob_cache {
+                            cache.put_blob(&blob);
+                        }
+                        function_store.insert(blob.content_hash, blob);
+                    }
+
+                    if perm_changed {
+                        perm_loop_changed = true;
+                    }
+                    if !perm_changed {
+                        break;
+                    }
                 }
-            }
+                joint_changed |= perm_loop_changed;
+            } // end joint dependency-resolution + permission-propagation fixpoint
 
             // Update main_hash if it changed
             if let Some(&updated_main) = self.blob_name_to_hash.get("__main__") {

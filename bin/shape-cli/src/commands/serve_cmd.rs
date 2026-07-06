@@ -148,6 +148,23 @@ fn derive_serve_security(
     let mut scope = ScopeConstraints::none();
     scope.ffi_languages = ffi_languages.to_vec();
 
+    // D6c (WF-3E): opting a language in with `--ffi-languages python` IS the
+    // operator declaring the FFI vertical the gate governs, so it must GRANT
+    // the `Ffi` permission that the §4.8.3 load-refusal + the phase-1 dynamic
+    // dispatch check key on. Without this, a strict node started
+    // `--ffi-languages python` still refuses at LOAD ("requires permissions not
+    // granted: ffi.call") — the opt-in flag never granting the permission it
+    // gates on. `ffi_languages` then correctly SCOPES which languages that
+    // `Ffi` grant may execute (`control_flow/mod.rs` phase-1 opt-in check).
+    // Gated on loopback to preserve the non-loopback fail-closed posture above.
+    let granted = if !ffi_languages.is_empty() && is_loopback {
+        let mut g = granted;
+        g.insert(Permission::Ffi);
+        g
+    } else {
+        granted
+    };
+
     SecurityPosture {
         granted,
         scope,
@@ -239,9 +256,7 @@ pub async fn run_serve(
         // Half-configured TLS: the non-loopback gate already rejects this for
         // remote binds; on loopback we fail closed rather than silently serve
         // plaintext when the operator clearly intended TLS.
-        _ => bail!(
-            "TLS is half-configured: pass BOTH --tls-cert and --tls-key, or neither."
-        ),
+        _ => bail!("TLS is half-configured: pass BOTH --tls-cert and --tls-key, or neither."),
     };
 
     // Load language runtimes at startup for polyglot remote execution.
@@ -323,7 +338,11 @@ pub async fn run_serve(
     );
     // WF-2F axis C: surface the foreign-language opt-in posture so an operator
     // can see at a glance why a transferred `fn python` might be refused.
-    if config.security.granted.contains(&shape_abi_v1::Permission::Ffi) {
+    if config
+        .security
+        .granted
+        .contains(&shape_abi_v1::Permission::Ffi)
+    {
         if config.security.scope.ffi_languages.is_empty() {
             eprintln!(
                 "  ffi.call granted; ffi_languages: [] (strict — dynamic foreign \
@@ -397,14 +416,19 @@ fn build_tls_acceptor(
         .collect::<std::result::Result<_, _>>()
         .map_err(|e| anyhow::anyhow!("parse TLS cert '{}': {}", cert_path.display(), e))?;
     if certs.is_empty() {
-        bail!("TLS cert '{}' contained no certificates", cert_path.display());
+        bail!(
+            "TLS cert '{}' contained no certificates",
+            cert_path.display()
+        );
     }
 
     let key_bytes = std::fs::read(key_path)
         .map_err(|e| anyhow::anyhow!("read TLS key '{}': {}", key_path.display(), e))?;
     let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_bytes[..])
         .map_err(|e| anyhow::anyhow!("parse TLS key '{}': {}", key_path.display(), e))?
-        .ok_or_else(|| anyhow::anyhow!("TLS key '{}' contained no private key", key_path.display()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("TLS key '{}' contained no private key", key_path.display())
+        })?;
 
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
@@ -1041,8 +1065,8 @@ struct InProcessResult {
 /// Execute Shape code in-process using the full engine pipeline.
 fn execute_code_in_process(
     code: &str,
-    _extensions: &[std::path::PathBuf],
-    _provider_opts: &ProviderOptions,
+    extensions: &[std::path::PathBuf],
+    provider_opts: &ProviderOptions,
     security: &SecurityPosture,
 ) -> Result<InProcessResult> {
     use shape_runtime::output_adapter::SharedCaptureAdapter;
@@ -1052,6 +1076,17 @@ fn execute_code_in_process(
 
     let mut engine =
         ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
+
+    // D6b (WF-3E): the Execute path must load the serve node's extensions so a
+    // `fn python` / `fn typescript` code string resolves its language runtime.
+    // Previously `_extensions` was ignored and a fresh engine's
+    // `register_language_runtime_artifacts()` yielded no runtimes, so foreign
+    // code failed "no extension provides language 'python'". Mirror the serve
+    // startup + local-run load path (script_cmd.rs) so the engine that
+    // `engine.execute` drives actually carries the runtimes.
+    let startup_specs =
+        extension_loading::collect_startup_specs(provider_opts, None, None, None, extensions);
+    let _ = extension_loading::load_specs(&mut engine, &startup_specs, |_, _| {}, |_, _| {});
 
     let mut executor = BytecodeExecutor::new();
     apply_security_posture(&mut executor, security);
@@ -1107,8 +1142,8 @@ fn execute_code_in_process(
 fn execute_file_in_process(
     path: &str,
     cwd: Option<&str>,
-    _extensions: &[std::path::PathBuf],
-    _provider_opts: &ProviderOptions,
+    extensions: &[std::path::PathBuf],
+    provider_opts: &ProviderOptions,
     security: &SecurityPosture,
 ) -> Result<InProcessResult> {
     use shape_runtime::output_adapter::SharedCaptureAdapter;
@@ -1130,6 +1165,17 @@ fn execute_file_in_process(
 
     let mut engine =
         ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
+
+    // D6b (WF-3E): load the serve node's extensions so a foreign fn resolves its
+    // language runtime on the Execute-file path (mirror execute_code_in_process).
+    let startup_specs = extension_loading::collect_startup_specs(
+        provider_opts,
+        None,
+        None,
+        Some(file_path),
+        extensions,
+    );
+    let _ = extension_loading::load_specs(&mut engine, &startup_specs, |_, _| {}, |_, _| {});
 
     let mut executor = BytecodeExecutor::new();
     apply_security_posture(&mut executor, security);
@@ -1372,8 +1418,7 @@ mod tests {
         tempfile::TempDir,
     ) {
         // 1. Throwaway self-signed cert + key (SAN=localhost).
-        let generated =
-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         let cert_der = generated.cert.der().clone();
 
         let dir = tempfile::tempdir().unwrap();
@@ -1758,12 +1803,7 @@ print(r)
         );
 
         let result = tokio::task::spawn_blocking(move || {
-            execute_code_in_process(
-                &code,
-                &[],
-                &ProviderOptions::default(),
-                &security,
-            )
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
         })
         .await
         .expect("client thread panicked");
@@ -1870,7 +1910,10 @@ print(r)
 
         let tcp = TcpStream::connect(addr).await.unwrap();
         let server_name = ServerName::try_from("localhost").unwrap();
-        let mut tls = connector.connect(server_name, tcp).await.expect("TLS handshake");
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .expect("TLS handshake");
 
         // Prove the transport is actually TLS: the client saw the server's cert
         // and negotiated a concrete TLS protocol version.
@@ -1889,9 +1932,8 @@ print(r)
 
         // A real remote function call over the encrypted channel.
         let bytecode = {
-            let program =
-                shape_ast::parser::parse_program("function multiply(a, b) { a * b }")
-                    .expect("parse");
+            let program = shape_ast::parser::parse_program("function multiply(a, b) { a * b }")
+                .expect("parse");
             let compiler = shape_vm::compiler::BytecodeCompiler::new();
             compiler.compile(&program).expect("compile")
         };
