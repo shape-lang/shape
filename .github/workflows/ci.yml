@@ -35,3 +35,42 @@ jobs:
 
       - name: VM vs JIT differential gate
         run: bash scripts/differential-gate.sh
+
+  # Foreign-call (FFI) end-to-end tier. The `rust` job above runs
+  # `cargo test --workspace --all-targets`, which exercises the always-on
+  # extern-C sentinels in `bin/shape-cli/tests/ffi_e2e.rs` but NOT the
+  # `fn python` / `fn typescript` execution probes (they are `#[ignore]`'d
+  # because they need the built runtime `.so`s + CPython/V8). This job builds
+  # those extensions and runs the FULL foreign matrix — so the foreign path can
+  # never silently die again (2026-07-04 audit root cause: foreign e2e tests
+  # were gated out of every tier). Mirrors `just test-ffi`.
+  ffi:
+    name: Foreign-call (FFI) e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install foreign-runtime build deps (PyO3 / deno_core)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-dev
+
+      - name: Build language-runtime extensions
+        run: |
+          mkdir -p extensions
+          cargo build -p shape-ext-python -p shape-ext-typescript
+          cp target/debug/libshape_ext_python.so extensions/
+          cp target/debug/libshape_ext_typescript.so extensions/
+
+      - name: FFI e2e — extern C + fn python + fn typescript (full matrix)
+        run: SHAPE_FFI_EXT_DIR="$PWD/extensions" cargo test -p shape-cli --test ffi_e2e -- --include-ignored
+
+      - name: FFI compile-side checks (Result mandate, declaration non-fatal)
+        run: cargo test -p shape-test --features e2e-python,e2e-typescript --test e2e_gated
