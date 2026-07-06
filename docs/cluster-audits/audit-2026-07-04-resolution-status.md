@@ -48,7 +48,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 29 | bigint unconstructible | ⏳ | WF-3A / D2 |
 | 30 | Drop broken at escape boundaries | ✅ no use-after-finalize | WF-1C · **Fable** |
 | 31 | Reference cycles leak unboundedly | ⏳ | WF-3C / D3 |
-| 32 | LSP false error on valid extern C | ⏳ | WF-3B |
+| 32 | LSP false error on valid extern C | ✅ merged `c2a34826` (LSP now mirrors the compiler oracle: `dynamic_language = !is_native_abi()`) · **Opus-indep** | WF-3B-LSP |
 
 ## Cross-cutting
 
