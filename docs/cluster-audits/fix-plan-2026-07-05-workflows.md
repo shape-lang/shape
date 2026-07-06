@@ -318,7 +318,7 @@ Full recon in `docs/cluster-audits/wf4-coverage-matrix.md`. **Measured: real boo
 - **Phase 1 — code fixes (fold into WF-3A + a serialization-fix lane):** the shipped-but-broken bugs above that block gate-green examples. Items needing V3-S5/W17 monomorphization → "mark not-implemented in prose", don't block.
 - **Phase 2 — 6 parallel book+test lanes (worktree-per-lane):** L1 distributed cluster (snapshot→remote→polyglot-distributed), L2 polyglot-ffi+extensions, L3 security-permissions, L4 async, L5 comptime (post-WF-3D), L6 serialization + core/strict-typing + drop-raii. Each lane: delete false cautions, flip runnable=false→true with complete examples, add the missing per-sub-feature test suites. **Acceptance: full-748-universe real pass to near-100%** (minus genuinely-intentional error fixtures), every wave-0..3 feature with ≥1 gate-green vm+jit example + a comprehensive test suite.
 
-## 6duodecies. WF-2G close (2026-07-06, branch `wave2/snapshot-completeness`, MERGE PENDING) — yellow
+## 6duodecies. WF-2G close (2026-07-06, branch `wave2/snapshot-completeness`, MERGED @ `569ad946`) — yellow
 
 Both snapshot-projection gaps implemented + gated green + forbidden-clean (commits `8fbe82f4` gap A, `b4bfad1c` gap B, `b5bccbe6` finalize). Gates: check-clean / check-no-dynamic / verify-merge 15/15 / diff-vmjit --fresh MATCH=466 unexpected=0; tests green modulo the 4 pinned `jit_closure_capture_*`. Refuted=false.
 - **GAP B (heap-element arrays)** — FULLY LIVE-PROVEN: `Array<string>/Decimal/TypedObject` → `Ok(Snapshot::Hash)` → fresh-process `shape --resume <hash>` → byte-identical, no SIGABRT at drop (snapshot hash `c8c187b0…`).
@@ -326,7 +326,7 @@ Both snapshot-projection gaps implemented + gated green + forbidden-clean (commi
 - **MERGE HELD** until the Fable verification (`w2txfx4ao`) completes (Fable reads main read-only). Merge is a clean fold-main-in — main's code is unchanged since `cc6d876c` (only doc commits since).
 
 **Residuals routed:**
-- **NEW distributed bug → cluster `remote-frame-descriptor` (WF-3A / Phase-1 code-fix):** `frame_descriptor has 0 slots but arity is 1` when a *transferred* `@remote` function carries locals (fires in remote frame-setup BEFORE snapshot; a minimal single-arg `@remote` fn transfers+returns fine). Clusters with the recon's `@remote` Array-param compile-error + `@remote` module-global-capture-returns-0 — one remote-frame-reconstruction defect family.
+- **NEW distributed bug → cluster `remote-frame-descriptor` (SINGLE OWNER = WF-3E, corrected 2026-07-06; was mis-routed to WF-3A/Phase-1):** `frame_descriptor has 0 slots but arity is 1` when a *transferred* `@remote` function carries locals (fires in remote frame-setup BEFORE snapshot; a minimal single-arg `@remote` fn transfers+returns fine). Clusters with the recon's `@remote` Array-param compile-error + `@remote` module-global-capture-returns-0 — one remote-frame-reconstruction defect family.
 - **`wf2g-combined-live-reverify`:** the full live 3-node combined harness (@remote transfer → foreign call → snapshot mid-exec → resume on node 2) blocked by the above; re-run to green once `remote-frame-descriptor` is fixed. Combined-cell persistability is substantiated at unit + committed-integration + projection-root-removal; the live 3-node re-run stays open.
 
 ## 6terdecies. Fable independent verification (2026-07-06) — composition REFUTED; WF-3E launched
@@ -346,7 +346,51 @@ User requested an independent Fable-model adversarial pass on the complex featur
 - Folded in: recon's `@remote` Array-param, module-global-capture-returns-0, `remote::execute` metadata bug; WF-2G's `frame_descriptor`.
 - WF-3E's **refuter runs on Fable** (the model that found the defects re-verifies the fix); finisher re-proves the 9-cell matrix FROM SCRATCH + adds the missing @remote-foreign integration test (the untested regression path) + corrects matrix/book.
 
+## 6quaterdecies. Meta-audit fold-in (2026-07-06) — independent audit of the fix program
+
+Independent 12-lane meta-audit (workflow `wf_189aa86e-6d5`, ~1.8M tokens) re-ran the audit's original failing probes against the release binary (vm+jit), each new finding reproduced from scratch by a separate refuter (12/12 CONFIRMED). **Verdict: on-track — 27/37 confirmed findings hands-on verified fixed at HEAD, gates green, self-correction loop proven (the Fable/WF-2F catch + WF-3E launch).** The audit's defect claims were 29/29 accurate; its meta-claims (parser root-cause, "jit feature dead", the 616 denominator, 73% book-truth) were not.
+
+### User rulings (2026-07-06)
+- **SIGINT-snapshot silent corruption → RELEASE-BLOCKING, fix now** (W17 territory). New lane **WF-3F**.
+- **D3 cycle leaks → REAL cycle-collecting GC** (not weak-refs). Revive the dead+bit-rotted `shape-gc` crate. Major workstream → **WF-3C rescoped**; needs a design/recon pass first.
+- **D4 tiered compilation → DELETE the inert machinery now** (`enable_tiered_compilation`/`set_backend`/`register_jit_function` + the NotImplemented promote dispatch). → **dead-code lane** (with §5 cleanup).
+- **WF-3A → SPLIT.** Schema-identity root fix (4 manifestations) becomes its own **WF-3A-schema**; the rest stays **WF-3A-edges**.
+- **D2 bigint → Implement** (unchanged rec, confirmed) → WF-3A-edges.
+
+### 12 new confirmed defects → owners
+| Sev | Defect | Owner |
+|---|---|---|
+| CRIT | SIGINT-save during in-flight stdlib builtin → silently-corrupt snapshot (save ok, resume dies callee-kind) | **WF-3F** (release-blocking) |
+| CRIT | `shape/extensions/*.so` (debug-profile) load SIGSEGVs host — debug/.so skew + zero ABI load-time validation; the exact `build-extensions`+`--extension-dir` flow the book documents | **WF-2A-fu extension-hardening** |
+| CRIT | `[native-dependencies]` alias resolution dead — `resolve_library_target` is a hardcoded c/m table, never reads the lock; every path/vendored alias (duckdb) uncallable | **WF-2A-fu native-deps-resolver** |
+| HIGH | Module-scope closure-capture Drop finalizer leak (§2.7.30.4; fn-scoped works, module-bound never drops) | **WF-3C** (drop+GC territory) |
+| HIGH | `--max-output-bytes` inert (`record_output` 0 call sites); `--max-memory-bytes` fires via `panic!` exit 101 — process-killing DoS on a serve node | **WF-3B resource-limits** (security) |
+| HIGH | `remote::call` Result contract fiction (= Fable D4) + closure args skip the compile-time check named fns get | **WF-3E** (owns) |
+| MED | `time::millis()->float` breaks inference in operand position (`millis()-start` won't compile) — float→number alias not applied | **WF-3A-edges** |
+| MED | Two closure-return compile bugs: tail closure in multi-stmt body misresolves own params (`Undefined variable 'b'`); returned parameterized closure mis-proves return as `number` | **WF-3A-edges** |
+| DOC | Book teaches retired `__original__(args)` in 5 examples (2 runnable=true dodge the gate by never applying the annotation — denominator trap); `json.mdx` documents a non-existent `as?` cast | **WF-4 book** |
+
+### Async re-route (the one refuted "green")
+WF-2D's 1003/203ms numbers hold ONLY when an `async let` RHS is a **direct stdlib call**. **User-defined async fns still execute eagerly/serially** (two 1s tasks = 2005ms; `join race` runs all branches; `join any` aborts on a failing branch). New lane **WF-2D-fu async-real-concurrency**: extend spawn-at-evaluation to user async-fn calls (or honestly re-scope the WF-2D close record). **This was claimed-green and is the highest-priority unverified-claim correction.**
+
+### WF-3E gates (binding, from the meta-audit's sequencing hazard)
+- **D5 (perms-over-wire) must land WITH or BEFORE D3 (Null stdlib bindings) — do NOT merge WF-3E unless Fable confirms D5 fires.** Fixing D3 alone opens a real serve-node sandbox gap (transferred blobs carry empty `required_permissions`, so the load-refusal never fires — masked today only because D3 kills payloads first).
+- **`remote-frame-descriptor` single owner = WF-3E** (was double-routed in §6duodecies/§6terdecies — §6duodecies corrected).
+
+### Process actions (meta-audit "could be done better")
+- **Standard close gate = independent-model from-scratch refuter re-proving the HEADLINE numbers (values, not exit codes; book-canonical form) before any close is recorded.** (Memory `feedback_independent_model_verification` + a new `feedback_verify_positive_claims`.)
+- Book-documented flows in CI (the extension SIGSEGV lives in the exact documented flow).
+- Bookkeeping: `defections.md` entry for WF-2G's Q53(b) carrier deviation (done this pass); pin binary-hash+HEAD per verification pass; book-truth number at every wave checkpoint.
+- Hygiene: repo-root probe litter removed; stale-worktree prune (~240 of 265) — queued.
+- Fix `just test` fail-fast: shape-vm/shape-runtime deep tests are silently skipped when shape-jit fails first → recipe should not fail-fast across crates.
+
+### Wave-3+ launch order (updated)
+Running: **WF-3E** (distributed composition). Launch now (disjoint, release-critical): **WF-3F** (SIGINT-snapshot, release-blocking) + **WF-2A-fu** (extension-hardening + native-deps). After WF-3E lands: **WF-3A-schema** + **WF-3A-edges** + **WF-2D-fu async**. Design-first then launch: **WF-3C real-GC**. Cleanup: **D4-delete + dead-code**. Then **WF-3B** (resource-limits + LSP + UX). Close: **WF-4** (book+test, 748-universe).
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
+
+> **RULED 2026-07-06 (see §6quaterdecies):** D2=Implement · D3=**Real cycle-collecting GC** (was weak-refs) · D4=**Delete inert machinery** (was defer) · SIGINT-snapshot=**Release-blocking** · WF-3A=**Split**. D1 async: WF-2D partial → **WF-2D-fu** re-route (user async-fns still serial). D5 jit-foreign: clean deopt (unchanged).
+
 
 | # | Decision | Options | Recommendation |
 |---|----------|---------|----------------|

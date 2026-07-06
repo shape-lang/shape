@@ -7196,3 +7196,15 @@ T1 surfaces it for Round 13 cluster-0 disposition.
 - `docs/cluster-audits/phase-3-cluster-0-status.md` §
   "W12-jit-trait-dispatch-return-kind close (2026-05-13)" —
   full surface analysis + bridging strategy
+
+## 2026-07-06 — WF-2G ModuleFn snapshot carrier: name-indirection over content-addressed blob (Q53(b))
+
+**Considered:** to make a `snapshot()` taken inside a remote-transferred function persistable, serialize a receiver-populated `Ptr(HeapKind::ModuleFn)` module binding. Two carriers were on the table: (a) content-addressed — snapshot the function's blob hash and transitive deps, restore by re-linking the blob; (b) name-indirection — `SerializableVMValue::ModuleFunction(String)` storing only the qualified export name, re-resolved against the resuming node's loaded module set.
+
+**Rationalization:** "the ModuleFn is always re-resolvable by qualified name on any node that has the module loaded, so carrying the blob is redundant weight." (Q53(b) design disposition.)
+
+**Pattern recognized:** *not* a Forbidden-Pattern (no ValueWord/tag-decode/Bool-default/parallel-discriminator — it stays on the typed `SerializableVMValue` carrier). The risk it flirts with is a *different* one: name-indirection silently succeeds on a node with a differently-versioned module of the same name (no content-hash pin), which is the "documentation ahead of reality" failure in carrier form — a resume that binds the wrong function body without erroring.
+
+**Alternative taken:** carrier (b) shipped (`wf2f-close-matrix.md` §Residual, `8fbe82f4`). Logged here per append-only discipline because it is a *bounded deviation, not a rejected one* — acceptable for same-image whole-VM resume (the only path exercised), but it must NOT be extended to cross-version distributed transfer without a content-hash pin. WF-3E (distributed composition) is the point where this assumption gets stress-tested; if `@remote`×foreign transfer ever resolves ModuleFn by name across differently-linked nodes, this entry is the flag to re-open (b)→(a).
+
+**Cost saved:** n/a (deviation taken, not avoided) — logged to prevent a future silent cross-version mis-bind.
