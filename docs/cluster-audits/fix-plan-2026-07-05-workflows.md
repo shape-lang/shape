@@ -281,6 +281,16 @@ Both remaining Wave-2 workflows completed and merged serially (fold-main-in-firs
 
 **Sole Wave-2 residual → WF-2G `snapshot-completeness` (launched from `cc6d876c`):** two same-class snapshot-**projection** gaps (enum arms already exist; the projection runtime→`SerializableVMValue` refuses): (A) **ModuleFn-by-content-hash** — receiver-transferred `ModuleFn` has no local name, so `ModuleFunction(String)` can't carry it → flips the 3 WF-2F combined cells to persistable+resumable using the Q53(b) content-hash-carrier pattern; (B) **heap-element arrays** (`Array<string|Decimal|TypedObject>`, WF-2B Defect 1). Refuter targets silent snapshot corruption + share-accounting SIGABRT + Bool-default. Script: `docs/cluster-audits/wf2g-snapshot-completeness.js`.
 
+## 6novies. Wave-3 opened (2026-07-06) — comptime completion (priority #2)
+
+**Recon before launch (read-only agent, merged main `05612c77`):** the comptime-excellence design doc (`docs/design/comptime-excellence.md`) was drafted against `1fb805b3` and reads as all-unbuilt, but 100+ commits later **WF-1B's S1–S6 correctness core already landed** — root causes A (Bool marshal deleted), B (schema identity), C (`set return` SIGSEGV → clean compile error), D (`__original__` typed forwarding), E-mostly (LSDS `error()`/`warning[C0002]` + jargon firewall passing) all FIXED and verified by running probes. `serde`/`llm` showcases exist and work at top-level. **Lesson: verify comptime against the shipped binary, not the stale design doc.** (Memory: `project_comptime_state_2026_07_06`.)
+
+**WF-3D `comptime-completion` (launched, branch `wave3/comptime-excellence` from `05612c77`):** closes the precise remaining gaps — (1) FLAGSHIP: `extend (expr)`-generated fns register after user fn bodies compile → invisible to `fn main()` (§4.5.1 pass-1.5 only half-applied; breaks the flagship showcase form); (2) `type_info(T).fields` + bare-ident `type_info(User)` + `ParamDescriptor.const`; (3) `--diagnostics json` LSDS CLI surface (P1's observation mechanism, LSP/MCP consumer); (4) `u.to_json()` method emission (§4.9.1, currently a free fn). Recon-gated (each fix self-checks done-vs-broken); P1–P14 adversarial acceptance; book flip of the fn-main showcase form. Disjoint from WF-2G (compile-time vs runtime) → runs parallel.
+
+**Routed comptime residuals (not in WF-3D):** JIT generated/`replace body` symbol resolution → `[jit-fallback]` deopt, output correct (P9 = WF-1A(c) lane); S6-packaging verification (`comptime_api`, keyed `build_config`+`[build.config]`, `ctx` values, `by_ref`); `expand-comptime` generated-fn reporting; comptime purity P11 (blocked on WF-1D).
+
+**Wave-3 remaining after WF-3D:** WF-3A type-system edges (incl. the schema-id-collision **root** fix unifying comptime §4.3 named-schemas + the object-spread regression + the routed WF-2E inference residuals), WF-3B UX-polish/split-brains (+ comptime S10 LSP lens, jargon string cleanup), WF-3C cycle-leak (D3 weak-refs+docs). Then Wave-4 WF-4 book-truth-gate close against the full ~738-fence universe.
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
