@@ -1124,33 +1124,14 @@ impl TypeTracker {
         &mut self,
         fields: &[(&str, FieldType)],
     ) -> SchemaId {
-        // Reuse only an existing INLINE schema (`__inline_obj_N`). An untyped
-        // object literal must NEVER adopt a structurally-matching NAMED struct
-        // schema: doing so let `{ x: 1, y: 2 }` inherit `Vec2`'s schema name,
-        // which then made `{x:1,y:2} + {y:20,z:30}` resolve `Vec2`'s `impl Add`
-        // (positional field add, `z` dropped) instead of the object-literal
-        // merge builtin. The object-literal-merge builtin takes precedence for
-        // untyped object literals; a user `impl Add` applies only to its NAMED
-        // type. MERGE-HIJACK fix (operators slice).
-        if let Some(existing) = self.schema_registry.type_names().find_map(|name| {
-            if !name.starts_with("__inline_obj_") {
-                return None;
-            }
-            self.schema_registry.get(name).and_then(|schema| {
-                if schema.fields.len() != fields.len() {
-                    return None;
-                }
-                let same = schema
-                    .fields
-                    .iter()
-                    .zip(fields.iter())
-                    .all(|(f, (n, t))| f.name == *n && f.field_type == *t);
-                if same { Some(schema.id) } else { None }
-            })
-        }) {
-            return existing;
-        }
-
+        // WF-3A: the by-name structural-dedup scan is gone — content-interning
+        // subsumes it. Anonymous inline objects (`__inline_obj_*`) intern by
+        // STRUCTURAL content id (the name is excluded from the hash), so two
+        // identical `{x,y}` literals share one handle automatically. The old
+        // MERGE-HIJACK hazard (an untyped `{x,y}` adopting a NAMED `Vec2`'s
+        // schema) is now structurally impossible: `Vec2` is NOMINAL (its name
+        // is folded into its content id), so it can never share a handle with
+        // a structural inline object.
         let id = self.inline_object_counter;
         self.inline_object_counter += 1;
         let type_name = format!("__inline_obj_{}", id);

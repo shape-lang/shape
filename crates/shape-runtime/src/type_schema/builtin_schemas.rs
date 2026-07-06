@@ -231,7 +231,6 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     // without string-parsing `version`. Additive-only; appended last so the
     // existing field offsets (debug=0 … target_arch=3) stay stable.
     let _comptime_build_config = TypeSchemaBuilder::new("__ComptimeBuildConfig")
-        .reserved()
         .bool_field("debug")
         .string_field("version")
         .string_field("target_os")
@@ -240,7 +239,6 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .register(registry);
 
     let _comptime_field_descriptor = TypeSchemaBuilder::new("__ComptimeFieldDescriptor")
-        .reserved()
         .string_field("name")
         .string_field("type")
         .array_field("annotations", FieldType::Any)
@@ -248,14 +246,12 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .register(registry);
 
     let _comptime_param_descriptor = TypeSchemaBuilder::new("__ComptimeParamDescriptor")
-        .reserved()
         .string_field("name")
         .string_field("type")
         .bool_field("const")
         .register(registry);
 
     let _comptime_annotation_descriptor = TypeSchemaBuilder::new("__ComptimeAnnotationDescriptor")
-        .reserved()
         .string_field("name")
         .array_field("args", FieldType::Any)
         .register(registry);
@@ -273,7 +269,6 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     // path surfaced an internal error whose message displaced the user's
     // `error()` text (the `@llm_tool` missing-return-type guard, §4.9.2).
     let _comptime_target = TypeSchemaBuilder::new("__ComptimeTarget")
-        .reserved()
         .string_field("kind")
         .string_field("name")
         .array_field("fields", FieldType::Any)
@@ -291,7 +286,6 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     // Field access on the reflection result resolves by NAME through this
     // schema, so appending `fields` does not disturb `name` / `kind` reads.
     let _comptime_type_info = TypeSchemaBuilder::new("__ComptimeTypeInfo")
-        .reserved()
         .string_field("name")
         .string_field("kind")
         // `fields` reuses the same `__ComptimeFieldDescriptor` row as
@@ -308,7 +302,6 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     // resolves the right offsets. (`ctx.build` is intentionally absent —
     // `build_config()` is the single build-info surface, §4.4.)
     let _comptime_context = TypeSchemaBuilder::new("__ComptimeContext")
-        .reserved()
         .string_field("module_path")
         .string_field("file")
         .register(registry);
@@ -359,13 +352,6 @@ mod tests {
         assert!(registry.has_type("__ComptimeAnnotationDescriptor"));
         assert!(registry.has_type("__ComptimeTarget"));
         assert!(registry.has_type("__ComptimeTypeInfo"));
-
-        // Contract schemas are reserved (skipped by ad-hoc field-set
-        // inference).
-        assert!(registry.get("__ComptimeTarget").unwrap().reserved);
-        assert!(registry.get("__ComptimeFieldDescriptor").unwrap().reserved);
-        assert!(registry.get("__ComptimeBuildConfig").unwrap().reserved);
-        assert!(registry.get("__ComptimeTypeInfo").unwrap().reserved);
 
         // Check field counts
         let any_error = registry.get_by_id(ids.any_error).unwrap();
