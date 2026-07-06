@@ -63,6 +63,17 @@ pub fn hash_bytes(data: &[u8]) -> HashDigest {
     HashDigest::from_hex(&hex::encode(result))
 }
 
+/// Hash a byte slice to a raw `[u8; 32]` SHA-256 digest.
+///
+/// Used for content-addressed identity that must be portable/fixed-width
+/// (e.g. `CodeManifest.program_root_hash`, blob content hashes) rather than
+/// the hex-string [`HashDigest`] used for store keys.
+pub fn hash_bytes_to_array(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
 /// Hash a file by reading its contents
 pub fn hash_file(path: &Path) -> io::Result<HashDigest> {
     let mut file = std::fs::File::open(path)?;

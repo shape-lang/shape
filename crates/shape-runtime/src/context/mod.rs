@@ -440,56 +440,240 @@ impl ExecutionContext {
     // Snapshotting
     // =========================================================================
 
-    /// Create a serializable snapshot of the dynamic execution state.
+    /// Create a serializable snapshot of the dynamic execution state
+    /// (WF-2B snapshot-resume, design §4.3.4 context-envelope half).
     ///
-    /// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.**
-    /// The kind-threaded `slot_to_serializable(slot, store)` replacement
-    /// for the deleted `nanboxed_to_serializable` is deferred to the
-    /// Phase 2c snapshot rebuild. W17 converts the previous `todo!()`
-    /// panic to a structured `anyhow!` error so the broken capability
-    /// surfaces as a runtime error rather than crashing the host
-    /// process.
-    pub fn snapshot(&self, _store: &SnapshotStore) -> Result<ContextSnapshot> {
-        let _ = (
-            &self.variable_scopes,
-            &self.type_alias_registry,
-            &self.enum_registry,
-            &self.struct_type_registry,
-            &self.data_cache,
-        );
-        let _: Option<SuspensionStateSnapshot> = None;
-        let _: Option<TypeAliasRuntimeEntrySnapshot> = None;
-        let _: Option<VariableSnapshot> = None;
-        Err(anyhow!(
-            "ExecutionContext::snapshot: W17-snapshot-resume surface — \
-             kind-threaded `slot_to_serializable(slot, store)` replacement \
-             for the deleted `nanboxed_to_serializable` has not landed. \
-             Tracked as W17-snapshot-resume per \
-             docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 §2.7.4 \
-             (snapshot serialization deferral) + §2.7.5.1 (post-proof \
-             wire-format shape for new HeapKinds: HashSet, Iterator, \
-             Result, Option, Deque, Channel, PriorityQueue, Range, \
-             Reference, FilterExpr, SharedCell)."
-        ))
+    /// Uses the kind-threaded `slot_to_serializable(bits, kind, store)` API
+    /// (the working §2.7.7 carrier — the stub's "deleted `nanboxed_to_serializable`"
+    /// claim was stale, the same false claim as the resume stubs). Each
+    /// variable-scope / type-alias-override value round-trips through it with
+    /// its `KindedSlot`'s real per-slot `NativeKind`. A pending async
+    /// suspension is a barrier (design §4.6.1) and refuses cleanly.
+    pub fn snapshot(&self, store: &SnapshotStore) -> Result<ContextSnapshot> {
+        use crate::snapshot::SerializableVMValue;
+
+        // Serialize a KindedSlot value via the kind-threaded API — the sole
+        // runtime kind source is the slot's own `NativeKind`, never a guess.
+        let ser = |slot: &KindedSlot| -> Result<SerializableVMValue> {
+            crate::snapshot::slot_to_serializable(slot.raw(), slot.kind(), store).map_err(|msg| {
+                anyhow!("ExecutionContext::snapshot: cannot serialize value: {msg}")
+            })
+        };
+        let ser_overrides =
+            |m: &Option<HashMap<String, KindedSlot>>| -> Result<Option<HashMap<String, SerializableVMValue>>> {
+                match m {
+                    None => Ok(None),
+                    Some(map) => {
+                        let mut out = HashMap::with_capacity(map.len());
+                        for (k, v) in map {
+                            out.insert(k.clone(), ser(v)?);
+                        }
+                        Ok(Some(out))
+                    }
+                }
+            };
+
+        // Variable scopes (REPL / block-scope bindings).
+        let mut variable_scopes = Vec::with_capacity(self.variable_scopes.len());
+        for scope in &self.variable_scopes {
+            let mut out = HashMap::with_capacity(scope.len());
+            for (name, var) in scope {
+                out.insert(
+                    name.clone(),
+                    VariableSnapshot {
+                        value: ser(&var.value)?,
+                        kind: var.kind,
+                        is_initialized: var.is_initialized,
+                        is_function_scoped: var.is_function_scoped,
+                        format_hint: var.format_hint.clone(),
+                        format_overrides: ser_overrides(&var.format_overrides)?,
+                    },
+                );
+            }
+            variable_scopes.push(out);
+        }
+
+        // Type-alias registry (runtime meta-override values).
+        let mut type_alias_registry = HashMap::with_capacity(self.type_alias_registry.len());
+        for (name, entry) in &self.type_alias_registry {
+            type_alias_registry.insert(
+                name.clone(),
+                TypeAliasRuntimeEntrySnapshot {
+                    base_type: entry.base_type.clone(),
+                    overrides: ser_overrides(&entry.overrides)?,
+                },
+            );
+        }
+
+        // Enum registry → name → EnumDef map.
+        let mut enum_registry = HashMap::new();
+        for name in self.enum_registry.names() {
+            if let Some(def) = self.enum_registry.get(name) {
+                enum_registry.insert(name.clone(), def.clone());
+            }
+        }
+
+        // A pending async suspension is a suspension barrier (design §4.6.1):
+        // non-quiescent async state is not soundly serializable in v1.
+        let suspension_state: Option<SuspensionStateSnapshot> = match &self.suspension_state {
+            None => None,
+            Some(_) => {
+                return Err(anyhow!(
+                    "cannot checkpoint while an async task is still running: \
+                     join or cancel it before checkpointing"
+                ));
+            }
+        };
+
+        let data_cache = match &self.data_cache {
+            Some(dc) => Some(dc.snapshot(store)?),
+            None => None,
+        };
+
+        Ok(ContextSnapshot {
+            data_load_mode: self.data_load_mode,
+            data_cache,
+            current_id: self.current_id.clone(),
+            current_row_index: self.current_row_index,
+            variable_scopes,
+            reference_datetime: self.reference_datetime,
+            current_timeframe: self.current_timeframe.clone(),
+            base_timeframe: self.base_timeframe.clone(),
+            date_range: self.date_range,
+            range_start: self.range_start,
+            range_end: self.range_end,
+            range_active: self.range_active,
+            type_alias_registry,
+            enum_registry,
+            struct_type_registry: self.struct_type_registry.clone(),
+            suspension_state,
+        })
     }
 
-    /// Restore execution state from a snapshot.
+    /// Restore execution state from a snapshot (design §4.5.1 step 3).
     ///
-    /// See [`Self::snapshot`] — W17-snapshot-resume surface.
+    /// Symmetric inverse of [`Self::snapshot`]: every persisted
+    /// `SerializableVMValue` is projected back to a kinded `(bits, kind)` via
+    /// `serializable_to_slot`, whose expected kind is derived from the SV
+    /// discriminator ([`expected_kind_from_serializable`] — the SV variant is
+    /// the authoritative kind carrier, ADR-006 §2.7.5.1). No Bool-default: an
+    /// unmappable value surfaces a clean projection error rather than
+    /// fabricating a kind (Constraint 3).
     pub fn restore_from_snapshot(
         &mut self,
-        _snapshot: ContextSnapshot,
-        _store: &SnapshotStore,
+        snapshot: ContextSnapshot,
+        store: &SnapshotStore,
     ) -> Result<()> {
-        Err(anyhow!(
-            "ExecutionContext::restore_from_snapshot: W17-snapshot-resume \
-             surface — symmetric to `snapshot()`. The kinded \
-             `serializable_to_slot(sv, expected_kind, store)` inverse \
-             reconstructs scope-binding parallel kind tracks from the \
-             persisted discriminator. Tracked as W17-snapshot-resume per \
-             docs/cluster-audits/phase-2d-playbook.md §3. ADR-006 §2.7.4 \
-             + §2.7.5.1."
-        ))
+        use crate::snapshot::{
+            SerializableVMValue, expected_kind_from_serializable, serializable_to_slot,
+        };
+        use shape_value::ValueSlot;
+
+        // Project one SV → owned KindedSlot. `serializable_to_slot`
+        // materializes a fresh (bits, kind) whose heap kinds own one strong
+        // share; `KindedSlot::new` takes ownership of that share.
+        let de = |sv: &SerializableVMValue| -> Result<KindedSlot> {
+            let expected = expected_kind_from_serializable(sv);
+            let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|msg| {
+                anyhow!("ExecutionContext::restore_from_snapshot: cannot deserialize value: {msg}")
+            })?;
+            Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+        };
+        let de_overrides =
+            |m: &Option<HashMap<String, SerializableVMValue>>| -> Result<Option<HashMap<String, KindedSlot>>> {
+                match m {
+                    None => Ok(None),
+                    Some(map) => {
+                        let mut out = HashMap::with_capacity(map.len());
+                        for (k, v) in map {
+                            out.insert(k.clone(), de(v)?);
+                        }
+                        Ok(Some(out))
+                    }
+                }
+            };
+
+        // Variable scopes (REPL / block-scope bindings).
+        let mut variable_scopes = Vec::with_capacity(snapshot.variable_scopes.len());
+        for scope in &snapshot.variable_scopes {
+            let mut out = HashMap::with_capacity(scope.len());
+            for (name, vs) in scope {
+                out.insert(
+                    name.clone(),
+                    Variable {
+                        value: de(&vs.value)?,
+                        kind: vs.kind,
+                        is_initialized: vs.is_initialized,
+                        is_function_scoped: vs.is_function_scoped,
+                        format_hint: vs.format_hint.clone(),
+                        format_overrides: de_overrides(&vs.format_overrides)?,
+                    },
+                );
+            }
+            variable_scopes.push(out);
+        }
+        // A snapshot always carries at least the root scope; guarantee one so
+        // subsequent binding lookups never index an empty scope stack.
+        if variable_scopes.is_empty() {
+            variable_scopes.push(HashMap::new());
+        }
+        self.variable_scopes = variable_scopes;
+
+        // Type-alias registry (runtime meta-override values).
+        let mut type_alias_registry = HashMap::with_capacity(snapshot.type_alias_registry.len());
+        for (name, entry) in &snapshot.type_alias_registry {
+            type_alias_registry.insert(
+                name.clone(),
+                TypeAliasRuntimeEntry {
+                    base_type: entry.base_type.clone(),
+                    overrides: de_overrides(&entry.overrides)?,
+                },
+            );
+        }
+        self.type_alias_registry = type_alias_registry;
+
+        // Enum registry.
+        let mut enum_registry = EnumRegistry::new();
+        for (_name, def) in snapshot.enum_registry {
+            enum_registry.register(def);
+        }
+        self.enum_registry = enum_registry;
+        self.struct_type_registry = snapshot.struct_type_registry;
+
+        // Scalar / metadata fields (verbatim inverse of snapshot()).
+        self.data_load_mode = snapshot.data_load_mode;
+        self.current_id = snapshot.current_id;
+        self.current_row_index = snapshot.current_row_index;
+        self.reference_datetime = snapshot.reference_datetime;
+        self.current_timeframe = snapshot.current_timeframe;
+        self.base_timeframe = snapshot.base_timeframe;
+        self.date_range = snapshot.date_range;
+        self.range_start = snapshot.range_start;
+        self.range_end = snapshot.range_end;
+        self.range_active = snapshot.range_active;
+
+        // A pending async suspension is a snapshot barrier (§4.6.1), so the
+        // capture side always records `None`; restore mirrors that.
+        self.suspension_state = None;
+
+        // Trading data-cache restore is out of the WF-2B pause/resume scope
+        // (its own row-storage round-trip). A `None` cache (the common
+        // non-trading path) restores cleanly; a persisted cache surfaces.
+        match snapshot.data_cache {
+            None => self.data_cache = None,
+            Some(dc) => {
+                if let Some(cache) = &self.data_cache {
+                    cache.restore_from_snapshot(dc, store)?;
+                } else {
+                    return Err(anyhow!(
+                        "ExecutionContext::restore_from_snapshot: snapshot carries a \
+                         data cache but this context has none to restore into"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Set indicator cache
@@ -732,26 +916,62 @@ mod tests {
     ) {
     }
 
-    /// W17-snapshot-resume gate: `ExecutionContext::snapshot` and
-    /// `ExecutionContext::restore_from_snapshot` both return a
-    /// structured `anyhow::Error` carrying the W17 surface marker,
-    /// never a `todo!()` panic that would abort the host process.
+    /// WF-2B snapshot-resume (design §4.3.4 + §4.5.1 step 3): both halves
+    /// of the context-envelope round-trip are live. `snapshot` produces a
+    /// real, kind-threaded `ContextSnapshot`; `restore_from_snapshot` is its
+    /// symmetric inverse. An empty context round-trips to an empty context
+    /// (one root scope, empty registries) — never a `todo!()` panic, never a
+    /// surface stub.
     #[test]
-    fn test_w17_execution_context_snapshot_returns_structured_error() {
+    fn test_execution_context_snapshot_empty_roundtrips() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
         let ctx = ExecutionContext::new_empty();
 
-        let result = ctx.snapshot(&store);
-        let err = result.expect_err("expected Err, got Ok");
-        let msg = format!("{err}");
+        let snap = ctx
+            .snapshot(&store)
+            .expect("an empty context snapshots cleanly");
         assert!(
-            msg.contains("W17-snapshot-resume surface"),
-            "missing W17 marker; got: {msg}"
+            snap.variable_scopes.iter().all(|s| s.is_empty()),
+            "empty context has no bound variables"
         );
+        assert!(snap.enum_registry.is_empty());
+        assert!(snap.type_alias_registry.is_empty());
+        assert!(snap.suspension_state.is_none());
+
+        // Resume-side rebuild (design §4.5.1 step 3): restores cleanly.
+        let mut ctx2 = ExecutionContext::new_empty();
+        ctx2.restore_from_snapshot(snap, &store)
+            .expect("empty context restores cleanly");
         assert!(
-            msg.contains("§2.7.4"),
-            "missing ADR-006 §2.7.4 cite; got: {msg}"
+            ctx2.variable_scopes.iter().all(|s| s.is_empty()),
+            "restored empty context has no bound variables"
         );
+        assert!(ctx2.enum_registry.names().next().is_none());
+        assert!(ctx2.type_alias_registry.is_empty());
+        assert!(ctx2.suspension_state.is_none());
+    }
+
+    /// A scalar variable bound in the root scope round-trips through
+    /// snapshot → restore with its value and `VarKind` preserved (design
+    /// §4.5.1 step 3 / ADR-006 §2.7.5.1 discriminator-drives-kind).
+    #[test]
+    fn test_execution_context_scalar_variable_roundtrips() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let mut ctx = ExecutionContext::new_empty();
+        ctx.set_variable("answer", KindedSlot::from_int(42))
+            .expect("bind answer");
+
+        let snap = ctx.snapshot(&store).expect("snapshot");
+        let mut ctx2 = ExecutionContext::new_empty();
+        ctx2.restore_from_snapshot(snap, &store).expect("restore");
+
+        let restored = ctx2
+            .get_variable("answer")
+            .expect("lookup ok")
+            .expect("answer is bound after restore");
+        assert_eq!(restored.kind(), shape_value::NativeKind::Int64);
+        assert_eq!(restored.raw() as i64, 42);
     }
 }

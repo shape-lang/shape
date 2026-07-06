@@ -155,6 +155,11 @@ impl VirtualMachine {
 
             // Check for Ctrl+C interrupt every 1024 instructions
             if self.instruction_count & 0x3FF == 0 && self.interrupt.load(Ordering::Relaxed) > 0 {
+                // Rewind past the just-fetched, not-yet-executed instruction
+                // so the persisted VmSnapshot.ip is a valid resume point —
+                // otherwise resume would silently skip one instruction
+                // (design §4.4 no-skip rule).
+                self.ip -= 1;
                 return Err(VMError::Interrupted);
             }
 
@@ -219,6 +224,16 @@ impl VirtualMachine {
                     resume_ip,
                 } = err
                 {
+                    // Design §4.1: in-loop consumer for `snapshot()`. Capture
+                    // → persist → push the `Result<Snapshot, SnapshotError>`
+                    // marker → CONTINUE. Real async future IDs keep the
+                    // existing suspend-return path.
+                    if future_id == super::SNAPSHOT_FUTURE_ID {
+                        let marker =
+                            self.consume_snapshot_suspension(resume_ip, ctx.as_deref_mut())?;
+                        self.push_kinded_slot(marker)?;
+                        continue;
+                    }
                     return Ok(ExecutionResult::Suspended {
                         future_id,
                         resume_ip,
@@ -308,6 +323,11 @@ impl VirtualMachine {
 
             // Check for Ctrl+C interrupt every 1024 instructions
             if self.instruction_count & 0x3FF == 0 && self.interrupt.load(Ordering::Relaxed) > 0 {
+                // Rewind past the just-fetched, not-yet-executed instruction
+                // so the persisted VmSnapshot.ip is a valid resume point —
+                // otherwise resume would silently skip one instruction
+                // (design §4.4 no-skip rule).
+                self.ip -= 1;
                 return Err(VMError::Interrupted);
             }
 
@@ -379,6 +399,15 @@ impl VirtualMachine {
                     resume_ip,
                 } = err
                 {
+                    // Design §4.1: in-loop `snapshot()` consumer (see the
+                    // matching site in `execute_with_suspend`). Capture →
+                    // persist → push marker → continue.
+                    if future_id == super::SNAPSHOT_FUTURE_ID {
+                        let marker =
+                            self.consume_snapshot_suspension(resume_ip, ctx.as_deref_mut())?;
+                        self.push_kinded_slot(marker)?;
+                        continue;
+                    }
                     return Ok(ExecutionResult::Suspended {
                         future_id,
                         resume_ip,
@@ -448,6 +477,11 @@ impl VirtualMachine {
 
             // Check for Ctrl+C interrupt every 1024 instructions
             if self.instruction_count & 0x3FF == 0 && self.interrupt.load(Ordering::Relaxed) > 0 {
+                // Rewind past the just-fetched, not-yet-executed instruction
+                // so the persisted VmSnapshot.ip is a valid resume point —
+                // otherwise resume would silently skip one instruction
+                // (design §4.4 no-skip rule).
+                self.ip -= 1;
                 return Err(VMError::Interrupted);
             }
 

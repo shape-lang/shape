@@ -472,15 +472,32 @@ impl super::VirtualMachine {
                     closure_heap_kind = Some(NativeKind::Ptr(shape_value::HeapKind::Closure));
                     std::mem::forget(block);
                 } else {
-                    // No layout — store the raw payload bits as the
-                    // legacy Vec<u64> upvalue carrier so the frame
-                    // remains structurally complete. A payload this
-                    // path cannot project surfaces-and-stops (no
-                    // Bool-default fabrication — ADR-006 §2.7.5.1 /
-                    // §2.7.7; matches the typed-closure branch above).
+                    // No layout — store the raw payload bits as the legacy
+                    // Vec<u64> upvalue carrier so the frame remains
+                    // structurally complete.
+                    //
+                    // Stage 0 (design §4.2.4, ADR-006 §2.7.8/Q10): the kind
+                    // for each upvalue comes from the capture-side-recorded
+                    // `upvalue_kinds` wire field — NEVER a fabricated
+                    // Bool-default. If the frame carries upvalues but the
+                    // snapshot has no recorded kind for a slot (a shape that
+                    // cannot occur for a v6 producer — the no-layout capture
+                    // path always records kinds), we surface-and-stop rather
+                    // than guess.
+                    let recorded_kinds = sframe.upvalue_kinds.as_ref();
                     let mut raw: Vec<u64> = Vec::with_capacity(svec.len());
                     for (i, sv) in svec.iter().enumerate() {
-                        let expected = NativeKind::Bool;
+                        let expected = match recorded_kinds.and_then(|ks| ks.get(i).copied()) {
+                            Some(k) => k,
+                            None => {
+                                return Err(VMError::NotImplemented(format!(
+                                    "SURFACE: from_snapshot frame[{frame_idx}] \
+                                     legacy-upvalue[{i}] has no closure layout and no \
+                                     recorded kind; kind cannot be derived — \
+                                     ADR-006 §2.7.8"
+                                )));
+                            }
+                        };
                         let (bits, _kind) =
                             serializable_to_slot(sv, expected, store).map_err(|msg| {
                                 VMError::NotImplemented(format!(
@@ -582,10 +599,13 @@ impl super::VirtualMachine {
         self.call_stack
             .iter()
             .map(|frame| {
-                let upvalues = if let Some(ref s) = store {
-                    snapshot_frame_upvalues_serializable(self, frame, s)
+                let (upvalues, upvalue_kinds) = if let Some(ref s) = store {
+                    match snapshot_frame_upvalues_serializable(self, frame, s) {
+                        Some((svs, kinds)) => (Some(svs), Some(kinds)),
+                        None => (None, None),
+                    }
                 } else {
-                    None
+                    (None, None)
                 };
                 shape_runtime::snapshot::SerializableCallFrame {
                     return_ip: frame.return_ip,
@@ -595,9 +615,291 @@ impl super::VirtualMachine {
                     upvalues,
                     blob_hash: frame.blob_hash.map(|h| h.0),
                     local_ip: None,
+                    // Stage 0 (design §4.2.4): record the per-upvalue kind at
+                    // capture so restore never Bool-defaults a no-layout frame.
+                    upvalue_kinds,
                 }
             })
             .collect()
+    }
+}
+
+/// Outcome of an attempted VM-state capture + persist (design §4.1 / §4.4).
+///
+/// One capture spine, two consumers (design §4.0): the in-loop `snapshot()`
+/// consumer maps this to a pushed `Result<Snapshot, SnapshotError>` marker and
+/// continues; the Ctrl+C interrupt consumer maps it to the "saved/no-save"
+/// terminal outcome. `Barrier`/`PersistFailed` carry the fully-rendered
+/// user-facing message (design §4.11 — no internal sentinel leak).
+pub(crate) enum SnapshotOutcome {
+    /// Captured + persisted; carries the envelope hash hex digest.
+    Saved(String),
+    /// A suspension barrier refused the capture; nothing written.
+    Barrier(String),
+    /// The store write failed; nothing written (atomic — §4.3.5).
+    PersistFailed(String),
+}
+
+/// Render a capture-side `VMError` (a §2.7.5.1 surface-and-stop sentinel) into
+/// a plain-language barrier message (design §4.11 rendering rule). The internal
+/// `SURFACE:`/ADR jargon never reaches the user — that is exactly the leak
+/// class the rule kills (cf. the `Suspended on future 18446…` leak).
+///
+/// Full per-HeapKind barrier attribution (`LiveChannel{binding}`,
+/// `HeldMutex{binding}`, …) is Stage 5 territory (it needs the SV serialize
+/// arms to carry the offending binding name); until then a capture refusal is
+/// rendered as a single clean, actionable barrier line.
+fn render_capture_barrier(e: &VMError) -> String {
+    // Design §4.11 rendering rule (Goal 6, "never a leaked internal sentinel
+    // string"): the raw capture error is a §2.7.5.1 surface-and-stop sentinel
+    // carrying ADR citations, `HeapKind::*` / `NativeKind` names, internal
+    // function names (`serialize_reference:` / `slot_to_serializable:`), and
+    // `SURFACE:` markers. NONE of that may reach the user. We therefore
+    // CLASSIFY the sentinel into a barrier family and emit a fixed
+    // plain-language message — the raw text is never embedded, so no jargon
+    // can leak regardless of the sentinel's wording.
+    //
+    // (Per-binding attribution — naming the exact value/binding — is Stage 5
+    // territory; it needs the SV serialize arms to carry the offending name.
+    // Until then a clean class-level line is the contract.)
+    let raw = e.to_string();
+    let lower = raw.to_ascii_lowercase();
+
+    // Order matters: match the most specific families first.
+    if lower.contains("non-promoted reference")
+        || lower.contains("kl-4")
+        || lower.contains("owning sharedcell")
+        || lower.contains("no owning shared")
+    {
+        return "cannot checkpoint here: a live reference into your data is still active at \
+                this point and cannot be saved. Finish using the reference, or move the \
+                snapshot() call to a point where no borrow is held, then try again."
+            .to_string();
+    }
+    if lower.contains("heapkind::closure") || lower.contains("closure arm") {
+        return "cannot checkpoint here: a live closure value is reachable and this build \
+                cannot yet save closures. Avoid holding a closure across the checkpoint, or \
+                run the computation without checkpointing it."
+            .to_string();
+    }
+    if lower.contains("channel") {
+        return "cannot checkpoint while a channel is alive: channels cannot be saved. \
+                Drop or close it before checkpointing."
+            .to_string();
+    }
+    if lower.contains("iterator") || lower.contains("deque") || lower.contains("filterexpr") {
+        return "cannot checkpoint while an iterator, deque, or query filter is alive: this \
+                value cannot be saved. Finish using it before checkpointing."
+            .to_string();
+    }
+    if lower.contains("mutex") {
+        return "cannot checkpoint while a mutex is locked. Release the lock before \
+                checkpointing."
+            .to_string();
+    }
+    if lower.contains("hashmap") {
+        return "cannot checkpoint here: this map's key/value types cannot be saved in this \
+                build. Only maps with string keys and values round-trip today."
+            .to_string();
+    }
+    // Everything else (DataTable / DateTime / Content / TraitObject / native
+    // views / …): a value of a type this build cannot yet persist is reachable.
+    "cannot checkpoint here: part of the current execution state cannot be saved in this \
+     build. Avoid holding that value across the checkpoint, or run the computation without \
+     checkpointing it."
+        .to_string()
+}
+
+impl super::VirtualMachine {
+    /// In-loop consumer for a `snapshot()` suspension (design §4.1).
+    ///
+    /// Captures the full VM state (§2.7.7 parallel `Vec<u64>` + `Vec<NativeKind>`
+    /// tracks), persists a complete content-addressed envelope + `CodeManifest`,
+    /// and returns the `Result<Snapshot, SnapshotError>` marker the dispatch
+    /// shell pushes onto the stack so the run CONTINUES after the call site.
+    ///
+    /// Return contract: `Ok(marker)` on every user-observable path — success
+    /// (`Ok(Snapshot::Hash(id))`), a barrier refusal, or a persist failure are
+    /// ALL pushed as ordinary Result values the program handles. Only genuine
+    /// VM-internal invariant violations (schema-registry gaps, share-accounting
+    /// corruption) return `Err(VMError)` to abort — they are shape bugs, not
+    /// user-handleable conditions.
+    pub(crate) fn consume_snapshot_suspension(
+        &mut self,
+        resume_ip: usize,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        // Design §4.1 step 3: set ip to the post-call instruction BEFORE
+        // capture, so the persisted `VmSnapshot.ip` resumes AFTER the
+        // snapshot() call with the marker as its result.
+        self.snapshot_set_ip(resume_ip);
+
+        // One capture/persist spine (design §4.0), two consumers. This is the
+        // in-loop consumer: every outcome becomes an `Ok(marker)` the program
+        // handles through the Result channel, and the run CONTINUES.
+        match self.perform_snapshot_capture(ctx) {
+            SnapshotOutcome::Saved(hex) => self.build_snapshot_hash_marker(hex),
+            SnapshotOutcome::Barrier(msg) => self.build_snapshot_error_marker("Barrier", msg),
+            SnapshotOutcome::PersistFailed(msg) => {
+                self.build_snapshot_error_marker("PersistFailed", msg)
+            }
+        }
+    }
+
+    /// Interrupt-save capture (design §4.4). The Ctrl+C host-boundary consumer
+    /// calls this after `VMError::Interrupted` unwinds to the boundary: unlike
+    /// the in-loop consumer it neither pushes a marker nor continues — the run
+    /// TERMINATES (exit 130). The returned [`SnapshotOutcome`] lets the caller
+    /// print `Snapshot saved: <hash>` or the no-save barrier message. `self.ip`
+    /// is already the un-executed-instruction resume point (§4.4 no-skip rule),
+    /// so no ip adjustment is needed here.
+    pub(crate) fn capture_interrupt_snapshot(
+        &mut self,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> SnapshotOutcome {
+        self.perform_snapshot_capture(ctx)
+    }
+
+    /// The shared capture + persist spine (design §4.1 steps 4–5 / §4.3.4).
+    /// Barrier / persist-failure outcomes are user-facing, rendered messages
+    /// (design §4.11 rendering rule — internal `SURFACE:`/ADR sentinels are
+    /// stripped, never leaked). Does NOT set `self.ip` — each consumer owns
+    /// the ip discipline (in-loop sets `resume_ip`; interrupt already holds
+    /// the un-executed-instruction ip).
+    pub(crate) fn perform_snapshot_capture(
+        &mut self,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> SnapshotOutcome {
+        // Barrier: no store installed (embedded host / deterministic opt-out)
+        // → NoStore. Handleable in Shape, never a trap (design §4.1, §4.11).
+        let Some(store) = self.snapshot_store.clone() else {
+            return SnapshotOutcome::Barrier(
+                "snapshot() is not available here: no snapshot store is configured. \
+                 'shape run' and 'shape repl' configure one automatically; embedded \
+                 hosts call set_snapshot_context(...) before executing."
+                    .to_string(),
+            );
+        };
+        let Some(seed) = self.snapshot_seed.clone() else {
+            return SnapshotOutcome::Barrier(
+                "snapshot() is not available here: this host runs without a \
+                 persistent execution context. Use the engine API with a persistent \
+                 context to enable checkpoints."
+                    .to_string(),
+            );
+        };
+        let manifest = self
+            .code_manifest
+            .clone()
+            .unwrap_or_else(|| self.build_code_manifest());
+
+        // Capture (design §4.2). An unsupported / opaque value surfaces as a
+        // barrier (user-handleable), never a garbage snapshot. The internal
+        // `SURFACE:`/ADR sentinel carried by the capture VMError is rendered
+        // to a plain-language barrier message here (§4.11 rendering rule).
+        let vm_snapshot = match self.snapshot(&store) {
+            Ok(s) => s,
+            Err(e) => {
+                return SnapshotOutcome::Barrier(render_capture_barrier(&e));
+            }
+        };
+
+        // Persist: monolithic-program twin + manifest + envelope (design
+        // §4.3.4 / §4.3.5). Atomic — a persist failure writes no envelope.
+        let bytecode_hash = store.put_struct(&self.program).ok();
+        match shape_runtime::snapshot::persist_execution_state(
+            &store,
+            &seed,
+            ctx.as_deref(),
+            &vm_snapshot,
+            &manifest,
+            bytecode_hash,
+            None,
+        ) {
+            Ok(h) => SnapshotOutcome::Saved(h.hex().to_string()),
+            Err(e) => SnapshotOutcome::PersistFailed(format!(
+                "checkpoint could not be written: {}. Nothing was saved; the \
+                 program continues. Check the snapshot store location and free space.",
+                e
+            )),
+        }
+    }
+
+    /// Build `Ok(Snapshot::Hash(hex))` (design §4.1.3) — the kinded enum
+    /// value the bytecode after the call site expects as `snapshot()`'s
+    /// return. No ValueWord, no `create_typed_enum_nb`: ordinary
+    /// `build_variant_object` + `build_ok` over the program's registered
+    /// enum schemas.
+    fn build_snapshot_hash_marker(
+        &self,
+        hex: String,
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        use super::result_option_carrier::{build_ok, build_variant_object};
+        let schema = self.lookup_schema_by_name("Snapshot").ok_or_else(|| {
+            VMError::RuntimeError(
+                "snapshot(): the Snapshot enum schema is not registered — \
+                 import std::core::snapshot"
+                    .to_string(),
+            )
+        })?;
+        let variant = schema.variant_id("Hash").ok_or_else(|| {
+            VMError::RuntimeError("snapshot(): Snapshot::Hash variant missing".to_string())
+        })? as i64;
+        let schema_id = schema.id as u64;
+        let payload = shape_value::KindedSlot::from_string_arc(std::sync::Arc::new(hex));
+        let snapshot_val = build_variant_object(schema_id, variant, payload);
+        Ok(build_ok(&self.builtin_schemas, snapshot_val))
+    }
+
+    /// Build `Ok(Snapshot::Resumed)` (design §4.1.3 / §4.5.1 step 4) — the
+    /// kinded enum value the resumed VM pushes onto the stack as the
+    /// `snapshot()` call site's return value before it re-enters the
+    /// dispatch loop. `Resumed` is a unit variant, so its payload slot is
+    /// `KindedSlot::none()`. Same ordinary `build_variant_object` + `build_ok`
+    /// path as the `Hash` marker — no ValueWord, no `create_typed_enum_nb`.
+    pub(crate) fn build_snapshot_resumed_marker(
+        &self,
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        use super::result_option_carrier::{build_ok, build_variant_object};
+        let schema = self.lookup_schema_by_name("Snapshot").ok_or_else(|| {
+            VMError::RuntimeError(
+                "resume: the Snapshot enum schema is not registered — \
+                 import std::core::snapshot"
+                    .to_string(),
+            )
+        })?;
+        let variant = schema.variant_id("Resumed").ok_or_else(|| {
+            VMError::RuntimeError("resume: Snapshot::Resumed variant missing".to_string())
+        })? as i64;
+        let schema_id = schema.id as u64;
+        let snapshot_val =
+            build_variant_object(schema_id, variant, shape_value::KindedSlot::none());
+        Ok(build_ok(&self.builtin_schemas, snapshot_val))
+    }
+
+    /// Build `Err(SnapshotError::<variant>(detail))` (design §4.1.4 / §4.11)
+    /// for a barrier refusal or a persist failure. `variant` is `"Barrier"`
+    /// or `"PersistFailed"`.
+    fn build_snapshot_error_marker(
+        &self,
+        variant: &str,
+        detail: String,
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        use super::result_option_carrier::{build_err, build_variant_object};
+        let schema = self.lookup_schema_by_name("SnapshotError").ok_or_else(|| {
+            VMError::RuntimeError(
+                "snapshot(): the SnapshotError enum schema is not registered — \
+                 import std::core::snapshot"
+                    .to_string(),
+            )
+        })?;
+        let variant_id = schema.variant_id(variant).ok_or_else(|| {
+            VMError::RuntimeError(format!("snapshot(): SnapshotError::{variant} variant missing"))
+        })? as i64;
+        let schema_id = schema.id as u64;
+        let payload = shape_value::KindedSlot::from_string_arc(std::sync::Arc::new(detail));
+        let err_val = build_variant_object(schema_id, variant_id, payload);
+        Ok(build_err(&self.builtin_schemas, err_val))
     }
 }
 
@@ -606,11 +908,15 @@ impl super::VirtualMachine {
 /// Returns `None` for non-closure frames or when the closure layout is
 /// not available in the program's side-table (the W17-snapshot-callstack-
 /// upvalues-no-layout follow-up).
+#[allow(clippy::type_complexity)]
 fn snapshot_frame_upvalues_serializable(
     vm: &super::VirtualMachine,
     frame: &super::CallFrame,
     store: &shape_runtime::snapshot::SnapshotStore,
-) -> Option<Vec<shape_runtime::snapshot::SerializableVMValue>> {
+) -> Option<(
+    Vec<shape_runtime::snapshot::SerializableVMValue>,
+    Vec<shape_value::NativeKind>,
+)> {
     use shape_runtime::snapshot::slot_to_serializable;
     use shape_value::v2::closure_raw::{
         OwnedClosureBlock, retain_typed_closure, typed_closure_function_id,
@@ -638,6 +944,10 @@ fn snapshot_frame_upvalues_serializable(
     let block = unsafe { OwnedClosureBlock::from_raw(ptr, layout) };
     let count = block.layout().capture_count();
     let mut out: Vec<shape_runtime::snapshot::SerializableVMValue> = Vec::with_capacity(count);
+    // Stage 0 (design §4.2.4): the closure block IS the kind source at
+    // capture (read_capture_kinded returns the real per-slot NativeKind);
+    // record it so restore never guesses. No Bool-default anywhere.
+    let mut kinds: Vec<shape_value::NativeKind> = Vec::with_capacity(count);
     for idx in 0..count {
         // SAFETY: idx < count; the block is borrowed live.
         let (cap_bits, cap_kind) = unsafe { block.read_capture_kinded(idx) };
@@ -652,8 +962,9 @@ fn snapshot_frame_upvalues_serializable(
             }
         };
         out.push(sv);
+        kinds.push(cap_kind);
     }
-    Some(out)
+    Some((out, kinds))
 }
 
 /// Pick the `expected_kind` for [`serializable_to_slot`] from a
@@ -735,6 +1046,51 @@ mod tests {
 
     fn make_hash(seed: u8) -> FunctionHash {
         FunctionHash([seed; 32])
+    }
+
+    /// Design §4.11 / Goal 6: a rendered capture-barrier message must NEVER
+    /// leak an internal sentinel token (ADR citations, `HeapKind`/`NativeKind`
+    /// names, internal function names, `SURFACE:`/`KL-4` markers). This is the
+    /// exact regression the refutation caught — the old renderer embedded the
+    /// raw sentinel whenever it lacked a `SURFACE:` prefix.
+    #[test]
+    fn render_capture_barrier_never_leaks_internal_jargon() {
+        // The two families the refutation observed leaking verbatim, plus a
+        // catch-all, each carrying the full internal wrapper text.
+        let leaky = [
+            "VirtualMachine::snapshot stack[0] kind=Ptr(Reference): serialize_reference: \
+             STAGE-R5 KL-4 guard — a non-promoted reference (Local / ModuleBinding / \
+             TypedField / IndexedElement) has no owning SharedCell; serializing-through \
+             would read its bits as *const SharedCell (a wild-free). Clean-refuse by \
+             design. ADR-006 §2.7.30.7.",
+            "VirtualMachine::snapshot module_binding[2] kind=Ptr(Closure): \
+             slot_to_serializable: W17-snapshot-roundtrip surface — HeapKind::Closure arm \
+             has no in-session SerializableVMValue projection. Tracked as \
+             W17-snapshot-Closure follow-up per docs/cluster-audits/phase-2d-playbook.md \
+             §3. ADR-006 §2.7.5.1.",
+            "VirtualMachine::snapshot stack[4] kind=Ptr(DataTable): SURFACE: some \
+             internal detail ADR-006 §2.7.5.1",
+        ];
+        // Tokens that must never survive into a user-facing message.
+        let forbidden = [
+            "ADR", "SURFACE:", "KL-4", "HeapKind", "NativeKind", "Ptr(", "SharedCell",
+            "serialize_reference", "slot_to_serializable", "VirtualMachine::snapshot",
+            "§2.7", "wild-free", "W17-snapshot", "phase-2d-playbook",
+        ];
+        for raw in leaky {
+            let rendered = render_capture_barrier(&VMError::NotImplemented(raw.to_string()));
+            for tok in forbidden {
+                assert!(
+                    !rendered.contains(tok),
+                    "leaked internal token {tok:?} in rendered barrier: {rendered:?}"
+                );
+            }
+            // And it should read as an actionable checkpoint refusal.
+            assert!(
+                rendered.starts_with("cannot checkpoint"),
+                "barrier message not user-facing: {rendered:?}"
+            );
+        }
     }
 
     #[test]
@@ -1273,6 +1629,9 @@ mod tests {
             upvalues: Some(vec![SV::IteratorOpaque]),
             blob_hash: None,
             local_ip: None,
+            // Stage 0 (design §4.2.4): no recorded kind → restore must
+            // surface-and-stop, never Bool-default.
+            upvalue_kinds: None,
         };
         let snap = VmSnapshot {
             ip: 0,
@@ -1299,8 +1658,8 @@ mod tests {
         };
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("legacy-upvalue") && msg.contains("W17-snapshot-roundtrip surface"),
-            "expected legacy-upvalue surface error, got: {msg}"
+            msg.contains("legacy-upvalue") && msg.contains("kind cannot be derived"),
+            "expected legacy-upvalue surface-and-stop (no Bool-default), got: {msg}"
         );
     }
 

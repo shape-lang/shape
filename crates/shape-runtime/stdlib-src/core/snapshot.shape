@@ -2,7 +2,6 @@
 /// Process Snapshotting and Resumability
 
 /// Result of a snapshot operation.
-/// `snapshot()` is a builtin that returns self enum directly.
 pub enum Snapshot {
     /// The process has just been snapshotted. Contains the Hash ID.
     Hash(string),
@@ -10,11 +9,32 @@ pub enum Snapshot {
     Resumed
 }
 
-builtin fn __intrinsic_snapshot() -> Snapshot;
+/// A refusal from `snapshot()`.
+///
+/// `snapshot()` returns a `Result` (design §4.1.4 / Q22) so a barrier the
+/// checkpoint hit — or a store I/O failure — is handleable in Shape's
+/// Result model instead of being an uncatchable runtime abort. Handle the
+/// `Err` and keep computing without a checkpoint.
+pub enum SnapshotError {
+    /// The current VM state cannot be soundly captured here (a foreign call
+    /// in flight, a live Channel/Iterator, no snapshot store configured,
+    /// ...). The string names the offending state and how to proceed.
+    Barrier(string),
+    /// The snapshot could not be written to the store. Nothing was saved;
+    /// the program continues.
+    PersistFailed(string)
+}
+
+builtin fn __intrinsic_snapshot() -> Result<Snapshot, SnapshotError>;
 
 /// Create a snapshot of the current execution state.
-/// This is a suspension point: the engine saves all state and returns `Snapshot::Hash(id)`.
-/// When resumed from a snapshot, execution continues here and returns `Snapshot::Resumed`.
-pub fn snapshot() -> Snapshot {
+///
+/// This is a suspension point: the engine saves all VM state content-
+/// addressed and the *same run continues* with `Ok(Snapshot::Hash(id))`.
+/// When resumed from a snapshot (`shape --resume <id>`), execution continues
+/// here and returns `Ok(Snapshot::Resumed)`. If the state cannot be captured
+/// (a barrier) or the store write fails, it returns `Err(SnapshotError::...)`
+/// — handle it and continue without a checkpoint.
+pub fn snapshot() -> Result<Snapshot, SnapshotError> {
     __intrinsic_snapshot()
 }
