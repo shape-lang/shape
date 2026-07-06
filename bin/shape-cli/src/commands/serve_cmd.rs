@@ -1393,7 +1393,7 @@ mod tests {
             auth_token: None,
             max_concurrent: 4,
             sandbox: SandboxLevel::None,
-            security: derive_serve_security(SandboxLevel::None, true),
+            security: derive_serve_security(SandboxLevel::None, true, &[]),
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),
@@ -1736,7 +1736,7 @@ mod tests {
         let addr = start_test_server().await;
         // Client grants: loopback + None → full permission set (incl. NetConnect)
         // and unlimited limits — the SENDER side of the call.
-        let security = derive_serve_security(SandboxLevel::None, true);
+        let security = derive_serve_security(SandboxLevel::None, true, &[]);
 
         // `base` and the argument are `number` (Float64): an UNANNOTATED closure
         // param `|x| x + base` is inferred `number` in the blob's
@@ -1783,7 +1783,7 @@ print(r)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_remote_noncapturing_closure_over_tcp() {
         let addr = start_test_server().await;
-        let security = derive_serve_security(SandboxLevel::None, true);
+        let security = derive_serve_security(SandboxLevel::None, true, &[]);
 
         let code = format!(
             r#"
@@ -1819,7 +1819,7 @@ print(r)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_remote_mutable_capture_refused_over_tcp() {
         let addr = start_test_server().await;
-        let security = derive_serve_security(SandboxLevel::None, true);
+        let security = derive_serve_security(SandboxLevel::None, true, &[]);
 
         let code = format!(
             r#"
