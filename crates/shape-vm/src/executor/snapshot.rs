@@ -650,19 +650,64 @@ pub(crate) enum SnapshotOutcome {
 /// arms to carry the offending binding name); until then a capture refusal is
 /// rendered as a single clean, actionable barrier line.
 fn render_capture_barrier(e: &VMError) -> String {
+    // Design §4.11 rendering rule (Goal 6, "never a leaked internal sentinel
+    // string"): the raw capture error is a §2.7.5.1 surface-and-stop sentinel
+    // carrying ADR citations, `HeapKind::*` / `NativeKind` names, internal
+    // function names (`serialize_reference:` / `slot_to_serializable:`), and
+    // `SURFACE:` markers. NONE of that may reach the user. We therefore
+    // CLASSIFY the sentinel into a barrier family and emit a fixed
+    // plain-language message — the raw text is never embedded, so no jargon
+    // can leak regardless of the sentinel's wording.
+    //
+    // (Per-binding attribution — naming the exact value/binding — is Stage 5
+    // territory; it needs the SV serialize arms to carry the offending name.
+    // Until then a clean class-level line is the contract.)
     let raw = e.to_string();
-    // Strip the internal surface prefix if present so no sentinel leaks.
-    let detail = raw
-        .rsplit("SURFACE:")
-        .next()
-        .unwrap_or(&raw)
-        .trim()
-        .trim_end_matches('.')
-        .to_string();
-    format!(
-        "cannot checkpoint here: this execution state cannot be saved ({detail}). \
-         Drop or finish using the offending value before checkpointing."
-    )
+    let lower = raw.to_ascii_lowercase();
+
+    // Order matters: match the most specific families first.
+    if lower.contains("non-promoted reference")
+        || lower.contains("kl-4")
+        || lower.contains("owning sharedcell")
+        || lower.contains("no owning shared")
+    {
+        return "cannot checkpoint here: a live reference into your data is still active at \
+                this point and cannot be saved. Finish using the reference, or move the \
+                snapshot() call to a point where no borrow is held, then try again."
+            .to_string();
+    }
+    if lower.contains("heapkind::closure") || lower.contains("closure arm") {
+        return "cannot checkpoint here: a live closure value is reachable and this build \
+                cannot yet save closures. Avoid holding a closure across the checkpoint, or \
+                run the computation without checkpointing it."
+            .to_string();
+    }
+    if lower.contains("channel") {
+        return "cannot checkpoint while a channel is alive: channels cannot be saved. \
+                Drop or close it before checkpointing."
+            .to_string();
+    }
+    if lower.contains("iterator") || lower.contains("deque") || lower.contains("filterexpr") {
+        return "cannot checkpoint while an iterator, deque, or query filter is alive: this \
+                value cannot be saved. Finish using it before checkpointing."
+            .to_string();
+    }
+    if lower.contains("mutex") {
+        return "cannot checkpoint while a mutex is locked. Release the lock before \
+                checkpointing."
+            .to_string();
+    }
+    if lower.contains("hashmap") {
+        return "cannot checkpoint here: this map's key/value types cannot be saved in this \
+                build. Only maps with string keys and values round-trip today."
+            .to_string();
+    }
+    // Everything else (DataTable / DateTime / Content / TraitObject / native
+    // views / …): a value of a type this build cannot yet persist is reachable.
+    "cannot checkpoint here: part of the current execution state cannot be saved in this \
+     build. Avoid holding that value across the checkpoint, or run the computation without \
+     checkpointing it."
+        .to_string()
 }
 
 impl super::VirtualMachine {
@@ -1001,6 +1046,51 @@ mod tests {
 
     fn make_hash(seed: u8) -> FunctionHash {
         FunctionHash([seed; 32])
+    }
+
+    /// Design §4.11 / Goal 6: a rendered capture-barrier message must NEVER
+    /// leak an internal sentinel token (ADR citations, `HeapKind`/`NativeKind`
+    /// names, internal function names, `SURFACE:`/`KL-4` markers). This is the
+    /// exact regression the refutation caught — the old renderer embedded the
+    /// raw sentinel whenever it lacked a `SURFACE:` prefix.
+    #[test]
+    fn render_capture_barrier_never_leaks_internal_jargon() {
+        // The two families the refutation observed leaking verbatim, plus a
+        // catch-all, each carrying the full internal wrapper text.
+        let leaky = [
+            "VirtualMachine::snapshot stack[0] kind=Ptr(Reference): serialize_reference: \
+             STAGE-R5 KL-4 guard — a non-promoted reference (Local / ModuleBinding / \
+             TypedField / IndexedElement) has no owning SharedCell; serializing-through \
+             would read its bits as *const SharedCell (a wild-free). Clean-refuse by \
+             design. ADR-006 §2.7.30.7.",
+            "VirtualMachine::snapshot module_binding[2] kind=Ptr(Closure): \
+             slot_to_serializable: W17-snapshot-roundtrip surface — HeapKind::Closure arm \
+             has no in-session SerializableVMValue projection. Tracked as \
+             W17-snapshot-Closure follow-up per docs/cluster-audits/phase-2d-playbook.md \
+             §3. ADR-006 §2.7.5.1.",
+            "VirtualMachine::snapshot stack[4] kind=Ptr(DataTable): SURFACE: some \
+             internal detail ADR-006 §2.7.5.1",
+        ];
+        // Tokens that must never survive into a user-facing message.
+        let forbidden = [
+            "ADR", "SURFACE:", "KL-4", "HeapKind", "NativeKind", "Ptr(", "SharedCell",
+            "serialize_reference", "slot_to_serializable", "VirtualMachine::snapshot",
+            "§2.7", "wild-free", "W17-snapshot", "phase-2d-playbook",
+        ];
+        for raw in leaky {
+            let rendered = render_capture_barrier(&VMError::NotImplemented(raw.to_string()));
+            for tok in forbidden {
+                assert!(
+                    !rendered.contains(tok),
+                    "leaked internal token {tok:?} in rendered barrier: {rendered:?}"
+                );
+            }
+            // And it should read as an actionable checkpoint refusal.
+            assert!(
+                rendered.starts_with("cannot checkpoint"),
+                "barrier message not user-facing: {rendered:?}"
+            );
+        }
     }
 
     #[test]
