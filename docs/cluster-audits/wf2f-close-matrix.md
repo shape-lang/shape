@@ -12,6 +12,21 @@
 > serve` loopback nodes at HEAD, not asserted from unit tests. Cells that do
 > NOT fully resume are recorded honestly rather than rounded up to green.
 
+> **⚠ CORRECTION (2026-07-06, independent Fable verification `fable-verify-results.md`):**
+> **This matrix was OVER-CLAIMED. 6 of the 9 cells below do NOT reproduce on merged main.**
+> Only the **snapshot→resume row (3 cells) is genuine**. Every `transfer` and `combined`
+> cell fails at the receiver — any `@remote fn python/typescript/extern C` dies with
+> `frame_descriptor 0 slots but arity 1` (arity≥1) or a `(0, NativeKind::Bool)` sentinel
+> (arity 0). Root cause: the minimal-blob transitive closure (`build_minimal_blobs_by_hash`,
+> remote.rs:583-618) does not carry the foreign stub, and the receiver's
+> `initialize_foreign_stub_bindings` (executor/mod.rs:943-973) leaves an uninitialized
+> Bool-default sentinel (a live ADR-006 §2.7.8 Forbidden-Pattern violation). Likely a merge
+> regression: WF-2F worked on the blobs=0 full-program path; the merged blobs=1 minimal-blob
+> path with `foreign_functions` non-empty was never tested. **The "captured output" values
+> below (CELL_*_TRANSFER / CELL_*_COMBINED) were not reproducible from scratch on merged main.**
+> Fix lane: **WF-3E distributed-composition-fix**. Do not cite this matrix as evidence the
+> composition works until WF-3E lands and re-proves it from scratch.
+
 Goal (user TOP priority): *"polyglot works with distributed computing together."*
 
 Design: `docs/design/polyglot-distributed-integration.md` (ratified 2026-07-05).

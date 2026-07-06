@@ -2,9 +2,9 @@
 /// Derive-style JSON serialization at compile time.
 ///
 /// `@to_json` reads a type's declared fields via comptime introspection and
-/// generates a `{TypeName}_to_json(v: {TypeName})` function that serializes a
-/// value to a JSON object string. The serializer is generated from the fields,
-/// so it can never drift from the type.
+/// generates a `to_json()` method on the type that serializes a value to a
+/// JSON object string. The serializer is generated from the fields, so it can
+/// never drift from the type.
 ///
 /// # Example
 ///
@@ -15,10 +15,10 @@
 /// type User { id: int, name: string }
 ///
 /// let u = User { id: 1, name: "Ada" }
-/// print(User_to_json(u))   // { "id": 1, "name": "Ada" }
+/// print(u.to_json())   // { "id": 1, "name": "Ada" }
 /// ```
 
-/// `@to_json` — generate `{TypeName}_to_json(v: {TypeName}) -> string` that
+/// `@to_json` — generate a `to_json() -> string` method on the type that
 /// serializes a value to a JSON object string. String fields are quoted;
 /// `int` / `number` / `bool` fields are emitted bare. A field whose type has no
 /// JSON representation is a compile error naming the field.
@@ -26,18 +26,18 @@ pub annotation to_json() {
     targets: [type]
     comptime post(target, ctx) {
         // Build the per-field pieces of the generated f-string body. Inside the
-        // generated source, `\"` is a literal quote and `{v.field}` is a runtime
-        // f-string interpolation, so from here a literal `\` is written `\\`, a
-        // literal `"` is `\"`, and a literal `{`/`}` (forming the runtime
+        // generated source, `\"` is a literal quote and `{self.field}` is a
+        // runtime f-string interpolation, so from here a literal `\` is written
+        // `\\`, a literal `"` is `\"`, and a literal `{`/`}` (forming the runtime
         // interpolation) is `\{`/`\}`.
         let mut body = ""
         let mut first = true
         for field in target.fields {
             let mut piece = ""
             if field.type == "string" {
-                piece = f"\\\"{field.name}\\\": \\\"\{v.{field.name}\}\\\""
+                piece = f"\\\"{field.name}\\\": \\\"\{self.{field.name}\}\\\""
             } else if field.type == "int" || field.type == "number" || field.type == "bool" {
-                piece = f"\\\"{field.name}\\\": \{v.{field.name}\}"
+                piece = f"\\\"{field.name}\\\": \{self.{field.name}\}"
             } else {
                 error(f"@to_json: field '{field.name}' has type '{field.type}', which has no JSON representation")
             }
@@ -50,6 +50,8 @@ pub annotation to_json() {
         }
         // Wrap the pieces in an object f-string: `f"\{ <body> \}"`.
         let generated_body = f"f\"\\\{ {body} \\\}\""
-        extend (f"fn {target.name}_to_json(v: {target.name}) -> string \{ {generated_body} \}")
+        // Emit a `to_json()` method on the type (implicit `self` receiver), so
+        // callers write `value.to_json()`.
+        extend (f"extend {target.name} \{ method to_json() -> string \{ {generated_body} \} \}")
     }
 }

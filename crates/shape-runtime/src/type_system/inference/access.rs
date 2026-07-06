@@ -767,6 +767,24 @@ impl TypeInferenceEngine {
         ))
     }
 
+    /// The `FieldDescriptor` row shape (comptime-excellence §4.1.1) as a
+    /// concrete object annotation, so `type_info(T).fields[i]` /
+    /// `target.fields[i]` subscript access resolves to a real object type with
+    /// `.name` / `.type` / `.optional` / `.annotations` fields (an
+    /// `unknown`-element array is iterable but not indexable, which regressed
+    /// the flagship `fields[0].name` form).
+    fn comptime_field_descriptor_annotation() -> TypeAnnotation {
+        TypeAnnotation::Object(vec![
+            Self::typed_object_field("name", TypeAnnotation::Basic("string".to_string())),
+            Self::typed_object_field("type", TypeAnnotation::Basic("string".to_string())),
+            Self::typed_object_field(
+                "annotations",
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("string".to_string()))),
+            ),
+            Self::typed_object_field("optional", TypeAnnotation::Basic("bool".to_string())),
+        ])
+    }
+
     fn infer_comptime_builtin_call(
         &mut self,
         name: &str,
@@ -821,6 +839,16 @@ impl TypeInferenceEngine {
                 Self::comptime_object_type(vec![
                     ("kind", TypeAnnotation::Basic("string".to_string())),
                     ("name", TypeAnnotation::Basic("string".to_string())),
+                    // `fields` is the declared-field descriptor array
+                    // (comptime-excellence §4.1.2). A concrete `FieldDescriptor`
+                    // element (not `unknown`) so `type_info(T).fields[i].name`
+                    // subscript access resolves identically to `target.fields`.
+                    (
+                        "fields",
+                        TypeAnnotation::Array(Box::new(
+                            Self::comptime_field_descriptor_annotation(),
+                        )),
+                    ),
                 ])
             }
             _ => {
@@ -859,8 +887,23 @@ impl TypeInferenceEngine {
         // the expected param is a concrete `Function` shape; everything else
         // falls through to plain `infer_expr` (unchanged behavior).
         let expected_closure_param_types = self.callee_concrete_param_fn_types(name, args);
+        // `type_info(User)` / `implements(Bar, Serialize)` name a type or trait
+        // directly as the argument — a bare identifier that is NOT a value
+        // binding. The comptime driver rewrites those identifiers to string
+        // literals before it evaluates the block (the compiler's
+        // rewrite_type_info_ident_args / rewrite_implements_ident_args pass), so
+        // the reflection builtin always receives the name as a string. Mirror
+        // that here so the outer type-check accepts the bare-identifier form
+        // instead of rejecting `User` as "not compatible with string".
+        let type_symbol_ident_args = self.in_comptime_context()
+            && matches!(name, "type_info" | "implements")
+            && crate::builtin_metadata::is_comptime_builtin_function(name);
         let mut arg_types: Vec<Type> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
+            if type_symbol_ident_args && matches!(arg, Expr::Identifier(..)) {
+                arg_types.push(BuiltinTypes::string());
+                continue;
+            }
             let arg_type = match (
                 arg,
                 expected_closure_param_types

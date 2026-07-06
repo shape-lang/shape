@@ -71,7 +71,7 @@ from std::serde::serialize use { @to_json }
 type User { id: int, name: string }
 
 let u = User { id: 1, name: "Ada" }
-print(User_to_json(u))
+print(u.to_json())
 "#;
 
 const TO_JSON_EXPECTED: &str = r#"{ "id": 1, "name": "Ada" }"#;

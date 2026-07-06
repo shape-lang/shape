@@ -105,10 +105,21 @@ impl BytecodeCompiler {
                 w.message.clone(),
             )
             .build();
-            eprintln!(
-                "{}",
-                shape_diagnostics::render::terminal::render(&diag).trim_end()
-            );
+            // LSDS is the source of truth; pick the renderer from the
+            // process-wide output format. Both channels go to stderr so a
+            // non-fatal warning during a successful compile never corrupts the
+            // program's own stdout.
+            match shape_diagnostics::output_format() {
+                shape_diagnostics::OutputFormat::Json => {
+                    eprintln!("{}", shape_diagnostics::render::json::render(&diag));
+                }
+                shape_diagnostics::OutputFormat::Human => {
+                    eprintln!(
+                        "{}",
+                        shape_diagnostics::render::terminal::render(&diag).trim_end()
+                    );
+                }
+            }
         }
     }
 }
