@@ -1144,6 +1144,116 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
     }
 }
 
+// ────── polymorphic object-graph arg → JsonValue (WF-2E, 2026-07-05) ──────
+//
+// The shared object-graph marshal entry. A body declaring
+// `arg: crate::json_value::JsonValue` receives the argument fully walked
+// into a typed serialization tree, dispatching on the STAMPED `NativeKind`
+// (ADR-006 §2.7.7 parallel-kind track) — never a blind pointer
+// reinterpretation keyed on the *declared* kind.
+//
+// This replaces the SIGSEGV-prone `Vec<(Arc<String>, Arc<HeapValue>)>`
+// pair-list shape for polymorphic arguments (http options / xml stringify
+// value / json stringify value). The prior shape's default `from_kinded`
+// accepted ANY `Ptr(_)` for a `Ptr(HeapKind::HashMap)`-declared param
+// (Ptr-class predicate) and then `from_slot` cast the bits to
+// `*const HashMapKindedRef`. When a Shape object literal (a
+// `Ptr(HeapKind::TypedObject)` carrier — object literals lower to
+// TypedObject, `compiler/expressions/collections.rs:762`) reached such a
+// param, the cast reinterpreted a `*const TypedObjectStorage` as a
+// `*const HashMapKindedRef` and segfaulted before the body ran. The
+// `JsonValue` reader keys off the actual stamped kind, so a TypedObject
+// options arg walks the object's schema and a HashMap options arg walks
+// the map — each via its concrete carrier.
+impl FromSlot for crate::json_value::JsonValue {
+    // Metadata only — `from_kinded` is overridden to accept any stamped
+    // kind (a JsonValue arg is polymorphic). The representative kind keeps
+    // `arg_kinds` display sensible for object-graph parameters. No dispatch
+    // consumes this as a hard gate (`invoke` passes the caller's kinds
+    // through unchanged; `from_kinded` is the sole check).
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedObject);
+
+    fn from_slot(_bits: u64) -> Self {
+        // Unreachable: `from_kinded` is overridden and never calls
+        // `from_slot`. A `JsonValue` cannot be reconstructed from raw bits
+        // without the stamped kind — that is the whole point.
+        panic!(
+            "FromSlot<JsonValue>::from_slot is unreachable — JsonValue marshals via \
+             from_kinded (the stamped NativeKind is the discriminator, not raw bits)"
+        )
+    }
+
+    /// Walk the caller-side `KindedSlot` into a `JsonValue` tree via the
+    /// canonical [`crate::json_value::slot_to_json_value`], dispatching on
+    /// the stamped kind. Schema resolution uses the ambient registry
+    /// (`None`) — `TypedObject` field names come from the process/thread
+    /// schema scope installed by the VM execution entry.
+    fn from_kinded(slot: &KindedSlot) -> Result<Self, MarshalError> {
+        crate::json_value::slot_to_json_value(slot, None).map_err(MarshalError::Body)
+    }
+}
+
+/// A polymorphic object-graph argument delivered UN-marshalled so the body
+/// can walk it into a `JsonValue` tree with the **execution** schema registry
+/// (`ctx.schemas`).
+///
+/// WF-2E (2026-07-05): `FromSlot<JsonValue>` marshals at the `from_kinded`
+/// boundary, which has no `ModuleContext`, so it resolves `TypedObject` field
+/// names through the ambient `current_registry()` (`None`). Under some
+/// execution engines (observed in JIT) that ambient handle is the
+/// process-default registry, which does NOT carry program-registered schemas
+/// (e.g. the `XmlNode` predeclared schema, or an object literal's anonymous
+/// schema) — so field names fail to resolve and the walk diverges VM↔JIT. A
+/// `PolymorphicArg` param defers the walk into the body, where the concrete
+/// execution registry is available and resolves those schemas consistently in
+/// both modes.
+///
+/// It carries the slot's raw bits + stamped kind (both `Copy`); the caller's
+/// slot stays live for the whole invoke, so the borrow-only
+/// `slot_to_json_value` read is sound. No refcount is taken or released.
+pub struct PolymorphicArg {
+    bits: u64,
+    kind: NativeKind,
+}
+
+impl PolymorphicArg {
+    /// Walk this argument into a `JsonValue`, resolving `TypedObject` field
+    /// names through the supplied execution registry.
+    pub fn to_json_value(
+        &self,
+        schemas: &crate::type_schema::TypeSchemaRegistry,
+    ) -> Result<crate::json_value::JsonValue, String> {
+        // Reconstruct a borrow-only KindedSlot view over the caller's live
+        // slot bits and read it; `forget` so the view's Drop never retires a
+        // share it does not own (the walk is borrow-only — no retain).
+        let view = KindedSlot::new(shape_value::ValueSlot::from_raw(self.bits), self.kind);
+        let out = crate::json_value::slot_to_json_value(&view, Some(schemas));
+        std::mem::forget(view);
+        out
+    }
+}
+
+impl FromSlot for PolymorphicArg {
+    // Representative kind only; `from_kinded` accepts any stamped kind (a
+    // polymorphic object-graph arg). No dispatch consumes this as a hard gate.
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedObject);
+
+    fn from_slot(_bits: u64) -> Self {
+        panic!(
+            "FromSlot<PolymorphicArg>::from_slot is unreachable — PolymorphicArg \
+             marshals via from_kinded (it carries the stamped kind, and the walk \
+             is deferred to the body where ctx.schemas is available)"
+        )
+    }
+
+    fn from_kinded(slot: &KindedSlot) -> Result<Self, MarshalError> {
+        Ok(PolymorphicArg {
+            bits: slot.raw(),
+            kind: slot.kind(),
+        })
+    }
+}
+
 // ────── typed-array Arc<Vec<T>> FromSlot/ToSlot (Migration shape (a)) ──────
 //
 // V3-S5 ckpt-5-prime²c (2026-05-15) — supervisor 2026-05-15 Migration shape
@@ -1460,6 +1570,65 @@ pub fn register_typed_fn_3<F, P0, P1, P2>(
         params,
         return_type,
         arg_kinds,
+        invoke,
+    );
+}
+
+/// Register a **per-arity** (fixed 3-arg) native whose body receives the raw
+/// `&[KindedSlot]` carriers plus the [`ModuleContext`], rather than
+/// `FromSlot`-marshaled Rust params. Used where the argument shapes are
+/// polymorphic across call sites but the arity is fixed and every slot's kind
+/// is real (from the VM §2.7.7 stack kind track) — e.g. `remote::call`'s
+/// `(addr, fn_ref, arg-pack)`, whose `fn_ref` (named-fn id / closure) and
+/// arg-pack (per-callee TypedObject / Array) inhabit no single `FromSlot`
+/// carrier (distributed §4.1.1).
+///
+/// This is the **per-arity** typed path (ADR-006 §2.7.4 "per-arity is preferred
+/// when the function arity is fixed"): `arg_kinds` are the declared, non-`Bool`
+/// kinds and the body dispatches on each slot's stamped `NativeKind` /
+/// `as_heap_value()` (ADR-005 §1). It is NOT the variadic `register_typed_function`
+/// Bool-default shape (CLAUDE.md §Forbidden Patterns) — no `KindedSlot::new(_,
+/// NativeKind::Bool)` fabrication, no kind-from-bits.
+pub fn register_typed_fn_3_raw<F>(
+    module: &mut crate::module_exports::ModuleExports,
+    name: impl Into<String>,
+    description: impl Into<String>,
+    param_names: [(&str, &str); 3],
+    arg_kinds: [NativeKind; 3],
+    return_type: crate::typed_module_exports::ConcreteType,
+    body: F,
+) where
+    F: for<'ctx> Fn(&[KindedSlot], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
+        + Send
+        + Sync
+        + 'static,
+{
+    let invoke: TypedInvoke = Arc::new(move |slots, ctx| {
+        if slots.len() != 3 {
+            return Err(MarshalError::ArgCount {
+                expected: 3,
+                got: slots.len(),
+            }
+            .into());
+        }
+        body(slots, ctx)
+    });
+    let params = param_names
+        .iter()
+        .map(|(name, ty)| crate::module_exports::ModuleParam {
+            name: (*name).to_string(),
+            type_name: (*ty).to_string(),
+            required: true,
+            ..Default::default()
+        })
+        .collect();
+    install(
+        module,
+        name,
+        description,
+        params,
+        return_type,
+        arg_kinds.to_vec(),
         invoke,
     );
 }

@@ -4,6 +4,7 @@
 mod additional;
 mod arithmetic;
 mod async_ops;
+pub(crate) mod async_runtime;
 mod builtins;
 mod call_convention;
 mod comparison;

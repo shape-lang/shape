@@ -152,28 +152,49 @@ pub async fn run_serve(
 ) -> Result<()> {
     let addr: SocketAddr = address.parse()?;
 
-    // Safety: refuse non-localhost without TLS
+    // Non-loopback bind gate (distributed §4.7 / Q29 / OQ-4). Loopback stays
+    // plain for dev; a non-loopback bind must present BOTH TLS material AND an
+    // auth token before it will serve — a non-loopback server executes
+    // arbitrary sender-supplied bytecode, so refusing (not warning) is the
+    // honest posture.
     if !addr.ip().is_loopback() {
         if tls_cert.is_none() || tls_key.is_none() {
             bail!(
-                "Refusing to start on non-localhost address {} without TLS.\n\
+                "Refusing to start on non-loopback address {} without TLS.\n\
                  Provide --tls-cert and --tls-key, or bind to 127.0.0.1.",
+                addr
+            );
+        }
+        // §4.7: non-loopback binds REQUIRE an auth token (upgraded from a
+        // warning to a refusal) — an unauthenticated non-loopback endpoint
+        // lets any client run code on this host.
+        if auth_token.is_none() {
+            bail!(
+                "Refusing to start on non-loopback address {} without --auth-token.\n\
+                 A non-loopback server requires authentication; pass --auth-token, \
+                 or bind to 127.0.0.1 for local development.",
                 addr
             );
         }
     }
 
-    // Warn if non-localhost without auth token
-    if !addr.ip().is_loopback() && auth_token.is_none() {
+    let sandbox_level: SandboxLevel = sandbox.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+
+    // Transport security honesty (distributed §4.7 / Q29 / OQ-4): TLS-on-TCP
+    // termination (tokio-rustls) is NOT yet wired into the serve accept loop.
+    // The `--tls-cert`/`--tls-key` gate above proves the operator INTENDED
+    // TLS, but the accept loop still speaks plaintext framing today. Rather
+    // than silently pretending the connection is encrypted (the previous
+    // `let _ = (tls_cert, tls_key); // future enhancement` lie), surface it
+    // loudly so no operator mistakes cert presence for active encryption.
+    if !addr.ip().is_loopback() && (tls_cert.is_some() || tls_key.is_some()) {
         eprintln!(
-            "Warning: serving on {} without --auth-token. Any client can execute code.",
+            "  WARNING: TLS termination is not yet active — traffic on {} is \
+             NOT encrypted at the transport layer (auth token still enforced).",
             addr
         );
     }
-
-    let sandbox_level: SandboxLevel = sandbox.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-
-    let _ = (tls_cert, tls_key); // TLS support is a future enhancement
+    let _ = (tls_cert, tls_key);
 
     // Load language runtimes at startup for polyglot remote execution.
     // Extensions are loaded once via the full discovery + load path;
@@ -352,10 +373,10 @@ async fn handle_connection(
                 if requires_auth(config) && !state.authenticated {
                     Some(WireMessage::CallResponse(
                         shape_vm::remote::RemoteCallResponse {
-                            result: Err(shape_vm::remote::RemoteCallError {
-                                message: "Authentication required.".to_string(),
-                                kind: shape_vm::remote::RemoteErrorKind::RuntimeError,
-                            }),
+                            result: Err(shape_vm::remote::RemoteCallError::new(
+                                shape_vm::remote::RemoteErrorKind::AuthRequired,
+                                "Authentication required.",
+                            )),
                         },
                     ))
                 } else {
@@ -846,10 +867,10 @@ fn handle_call(
             WireMessage::CallResponse(response)
         }
         Err(e) => WireMessage::CallResponse(shape_vm::remote::RemoteCallResponse {
-            result: Err(shape_vm::remote::RemoteCallError {
-                message: format!("Failed to create snapshot store: {}", e),
-                kind: shape_vm::remote::RemoteErrorKind::RuntimeError,
-            }),
+            result: Err(shape_vm::remote::RemoteCallError::new(
+                shape_vm::remote::RemoteErrorKind::RuntimeError,
+                format!("Failed to create snapshot store: {}", e),
+            )),
         }),
     }
 }

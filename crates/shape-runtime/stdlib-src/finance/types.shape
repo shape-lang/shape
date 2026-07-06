@@ -7,41 +7,41 @@
 // - IDE/LSP support (type hints and autocompletion)
 
 /// Canonical OHLCV candle shape used across market-data APIs.
-pub type Candle = {
+pub type Candle {
     /// Exchange or feed timestamp for the bar.
-    timestamp: timestamp;
+    timestamp: timestamp,
     /// Opening price.
-    open: number;
+    open: number,
     /// Highest traded price in the interval.
-    high: number;
+    high: number,
     /// Lowest traded price in the interval.
-    low: number;
+    low: number,
     /// Closing price.
-    close: number;
+    close: number,
     /// Executed volume during the interval.
-    volume: number;
-};
+    volume: number
+}
 
 /// Canonical trade record emitted by backtests and execution reports.
-pub type Trade = {
+pub type Trade {
     /// Stable identifier for the trade.
-    id: string;
+    id: string,
     /// Instrument or symbol identifier.
-    symbol: string;
+    symbol: string,
     /// Trade direction, typically `"buy"` or `"sell"`.
-    side: string;
+    side: string,
     /// Entry fill price.
-    entry_price: number;
+    entry_price: number,
     /// Exit fill price.
-    exit_price: number;
+    exit_price: number,
     /// Filled quantity.
-    quantity: number;
+    quantity: number,
     /// Entry timestamp.
-    entry_time: timestamp;
+    entry_time: timestamp,
     /// Exit timestamp.
-    exit_time: timestamp;
+    exit_time: timestamp,
     /// Profit and loss in quote currency.
-    pnl: number;
+    pnl: number,
     /// Profit and loss as a fraction of entry value.
-    pnl_pct: number;
-};
+    pnl_pct: number
+}
