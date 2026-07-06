@@ -73,6 +73,7 @@ impl VirtualMachine {
             resource_usage: None,
             granted_permissions: None,
             scope_constraints: None,
+            ffi_receiver_strict: false,
             time_travel: None,
             #[cfg(feature = "jit")]
             jit_compiled: false,

@@ -306,6 +306,14 @@ pub enum Commands {
         /// Maximum number of concurrent executions
         #[arg(long, default_value = "4")]
         max_concurrent: usize,
+        /// Foreign language runtimes this node will EXECUTE for transferred/
+        /// resumed foreign code (WF-2F axis C, ratified 2026-07-05). Strict
+        /// opt-in: defaults empty, so even `--sandbox off` refuses a
+        /// transferred `fn python` / `fn typescript` call until its language
+        /// is listed here. Repeat or comma-separate: `--ffi-languages python
+        /// --ffi-languages typescript`. `extern C` is not gated by this list.
+        #[arg(long = "ffi-languages", value_delimiter = ',')]
+        ffi_languages: Vec<String>,
         #[command(flatten)]
         opts: RuntimeCommandOptions,
     },

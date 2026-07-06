@@ -547,6 +547,26 @@ impl VirtualMachine {
                     self.apply_pending_resume()?;
                     continue;
                 }
+                // WF-2F axis C (combined compose A+B): a `snapshot()` reached
+                // while this driver is running (the `execute_function_by_id`
+                // path — remote per-function dispatch, and any nested entry
+                // point) must be consumed in-loop EXACTLY as the top-level
+                // `execute()` loop does (design §4.1, dispatch.rs:231-236):
+                // capture → persist → push the `Result<Snapshot, SnapshotError>`
+                // marker → CONTINUE. Without this the SNAPSHOT_FUTURE_ID
+                // suspension escaped as a raw `VMError::Suspended`, so a
+                // foreign-bearing function transferred `@remote` that snapshots
+                // mid-execution errored out instead of composing. Real async
+                // future IDs keep the suspend-propagation path below.
+                Err(VMError::Suspended {
+                    future_id,
+                    resume_ip,
+                }) if future_id == super::SNAPSHOT_FUTURE_ID => {
+                    let marker =
+                        self.consume_snapshot_suspension(resume_ip, ctx.as_deref_mut())?;
+                    self.push_kinded_slot(marker)?;
+                    continue;
+                }
                 Err(err) => return Err(err),
             }
 

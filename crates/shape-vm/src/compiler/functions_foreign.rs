@@ -1290,6 +1290,119 @@ mod ffi_permission_tests {
             "expected a link failure past the permission gate, got: {msg}"
         );
     }
+
+    // ----------------------------------------------------------------------
+    // WF-2F axis C — wire-serve receiver posture (§4.6 / OQ-6, ratified
+    // 2026-07-05): `ffi_languages` enforced as a strict OPT-IN allow-list for
+    // dynamic foreign languages on the network path, with the deliberate
+    // asymmetry against the local unscoped-empty-means-all posture proven
+    // above by `local_run_allows_foreign_call_unscoped`.
+    // ----------------------------------------------------------------------
+
+    fn python_vm() -> (VirtualMachine, ()) {
+        let bytecode =
+            compile(r#"fn python padd(a: int, b: int) -> Result<int> { return a + b }"#);
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.foreign_fn_handles = vec![None];
+        (vm, ())
+    }
+
+    fn scope_with_langs(langs: &[&str]) -> shape_abi_v1::ScopeConstraints {
+        let mut sc = shape_abi_v1::ScopeConstraints::none();
+        sc.ffi_languages = langs.iter().map(|s| s.to_string()).collect();
+        sc
+    }
+
+    #[test]
+    fn receiver_strict_refuses_dynamic_language_not_opted_in() {
+        // Strict receiver + EMPTY ffi_languages: a `fn python` call is refused
+        // at the phase-1 gate BEFORE the runtime lookup — the strict-empty
+        // posture means "refuse all dynamic foreign" unless opted in.
+        let (mut vm, _) = python_vm();
+        vm.set_permissions(
+            Some(shape_abi_v1::PermissionSet::from([
+                shape_abi_v1::Permission::Ffi,
+            ])),
+            Some(scope_with_langs(&[])),
+        );
+        vm.ffi_receiver_strict = true;
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("strict receiver with empty ffi_languages must refuse python");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("has not opted into the 'python'"),
+            "expected strict opt-in refusal naming python, got: {msg}"
+        );
+        // Proves the refusal PRECEDES the runtime lookup (never-die ordering).
+        assert!(
+            !msg.contains("no extension provides language"),
+            "gate must refuse before the runtime lookup, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn receiver_strict_admits_dynamic_language_when_opted_in() {
+        // Strict receiver + ffi_languages = ["python"]: the gate PASSES and
+        // control reaches the runtime lookup (which fails here because no
+        // python runtime is registered in the test VM — a DIFFERENT error,
+        // proving the language opt-in let it through).
+        let (mut vm, _) = python_vm();
+        vm.set_permissions(
+            Some(shape_abi_v1::PermissionSet::from([
+                shape_abi_v1::Permission::Ffi,
+            ])),
+            Some(scope_with_langs(&["python"])),
+        );
+        vm.ffi_receiver_strict = true;
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("no runtime registered → link-now failure past the gate");
+        let msg = format!("{err:?}");
+        assert!(
+            !msg.contains("has not opted into"),
+            "opted-in language must NOT be refused by the strict gate: {msg}"
+        );
+        assert!(
+            msg.contains("no extension provides language"),
+            "expected a runtime-lookup failure past the gate, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn receiver_strict_does_not_gate_extern_c_by_language() {
+        // `extern C` is governed by `Ffi` + `ffi_libraries`/`ffi_symbols`, NOT
+        // by `ffi_languages`. A strict receiver with empty ffi_languages must
+        // still let a native call through the language gate (it then fails at
+        // link because the library does not exist — a link error, not a
+        // language refusal).
+        let bytecode = compile(
+            r#"extern C fn strict_native(x: int) -> int from "/nonexistent/libshape_ffi_strict_probe.so";"#,
+        );
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.foreign_fn_handles = vec![None];
+        vm.set_permissions(
+            Some(shape_abi_v1::PermissionSet::from([
+                shape_abi_v1::Permission::Ffi,
+            ])),
+            Some(scope_with_langs(&[])),
+        );
+        vm.ffi_receiver_strict = true;
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("nonexistent native library must fail to link");
+        let msg = format!("{err:?}");
+        assert!(
+            !msg.contains("opted into") && !msg.contains("ffi_languages"),
+            "extern C must NOT be gated by the ffi_languages strict list: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to link"),
+            "expected a native link failure past the language gate, got: {msg}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -541,6 +541,19 @@ pub struct VirtualMachine {
     /// Threaded into the runtime `ModuleContext` alongside `granted_permissions`.
     pub(crate) scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
 
+    /// WF-2F axis C — wire-serve receiver posture (polyglot-distributed §4.6 /
+    /// OQ-6, ratified 2026-07-05). When a foreign-bearing function is executed
+    /// on behalf of a network sender, `ffi_languages` is enforced as a strict
+    /// OPT-IN allow-list: a dynamic foreign language (`fn python` /
+    /// `fn typescript`) is refused at call time unless the receiving operator
+    /// explicitly listed it, so an EMPTY list means "refuse all dynamic
+    /// foreign" (the deliberate asymmetry against local `shape run`'s
+    /// unscoped-empty-means-all posture). A plain control-flow flag, never a
+    /// Shape value; `false` for local execution, set `true` only on the
+    /// receiver path (`remote::run_remote_call`). `extern C` stays governed by
+    /// `Ffi` + `ffi_libraries`/`ffi_symbols`, not by language opt-in.
+    pub(crate) ffi_receiver_strict: bool,
+
     /// Time-travel debugger for recording and navigating VM state history.
     /// `None` when time-travel debugging is not active.
     pub(crate) time_travel: Option<time_travel::TimeTravel>,

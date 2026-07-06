@@ -1158,10 +1158,36 @@ impl VirtualMachine {
         // (`extern C`) entries are scoped by `ffi_libraries`/`ffi_symbols`
         // at link-now instead (§4.8.2).
         if !is_native {
-            if let Some(sc) = &self.scope_constraints {
-                if !sc.ffi_languages.is_empty()
-                    && !sc.ffi_languages.iter().any(|l| l == language)
-                {
+            let opted_in = self
+                .scope_constraints
+                .as_ref()
+                .is_some_and(|sc| sc.ffi_languages.iter().any(|l| l == language));
+            if self.ffi_receiver_strict {
+                // WF-2F axis C — wire-serve receiver posture (§4.6 / OQ-6,
+                // ratified 2026-07-05). `ffi_languages` is a strict OPT-IN
+                // allow-list on the network path: a dynamic foreign language
+                // is refused unless the receiving operator explicitly listed
+                // it, so an EMPTY list refuses ALL dynamic foreign (the
+                // deliberate asymmetry against local unscoped-empty-means-all).
+                // Zero sender trust: the receiver's own scope is the authority.
+                if !opted_in {
+                    let allowed: Vec<&str> = self
+                        .scope_constraints
+                        .as_ref()
+                        .map(|sc| sc.ffi_languages.iter().map(|s| s.as_str()).collect())
+                        .unwrap_or_default();
+                    return Err(VMError::RuntimeError(format!(
+                        "foreign call '{}': the server has not opted into the '{}' language \
+                         runtime (opted-in ffi_languages: {:?}); the operator must start \
+                         `shape serve` with --ffi-languages {} to allow it",
+                        name, language, allowed, language
+                    )));
+                }
+            } else if let Some(sc) = &self.scope_constraints {
+                // Local posture (ffi-rebuild §4.8.2): an empty list means "all
+                // dynamic foreign allowed" (parity with unscoped `FsRead`); a
+                // non-empty list narrows to the named languages.
+                if !sc.ffi_languages.is_empty() && !opted_in {
                     return Err(VMError::RuntimeError(format!(
                         "foreign call '{}': language '{}' is not in the allowed ffi_languages \
                          scope {:?}",
