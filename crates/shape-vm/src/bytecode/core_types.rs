@@ -208,6 +208,20 @@ impl ForeignFunctionEntry {
             hasher.update(pt.as_bytes());
             hasher.update(b"\0");
         }
+        // ffi-rebuild §4.7 / integration A (C2): `param_names` and `is_async`
+        // are semantics-affecting foreign-function identity — param names are
+        // visible to Python/TS bodies as binding names, and `is_async` changes
+        // the invoke integration. They were omitted from the hash pre-WF-2A;
+        // adding them is one of the four stage-0 break items. Domain-separated
+        // (`\0names\0` / `\0async\0`) so they can never be confused with the
+        // preceding `param_types` run or the `native_abi` tail below.
+        hasher.update(b"\0names\0");
+        for pn in &self.param_names {
+            hasher.update(pn.as_bytes());
+            hasher.update(b"\0");
+        }
+        hasher.update(b"\0async\0");
+        hasher.update([self.is_async as u8]);
         if let Some(ref rt) = self.return_type {
             hasher.update(rt.as_bytes());
         }

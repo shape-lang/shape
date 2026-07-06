@@ -96,8 +96,13 @@ impl BytecodeCompiler {
             let signature = self.build_native_c_signature(def)?;
             Some(crate::bytecode::NativeAbiSpec {
                 abi: native.abi.clone(),
-                library: self
-                    .resolve_native_library_alias(&native.library, native.package_key.as_deref())?,
+                // A7 (integration §4.1 / §4.4.3): store the DECLARED alias, not
+                // the compile-host-resolved soname. Resolution to a concrete
+                // path/soname is deferred wholly to the executing host
+                // (link-now locally, load-verify on remote/resume) so identical
+                // declarations hash identically across compile hosts —
+                // `compute_content_hash` (`core_types.rs`) covers this string.
+                library: native.library.clone(),
                 symbol: native.symbol.clone(),
                 signature,
             })
@@ -105,15 +110,47 @@ impl BytecodeCompiler {
             None
         };
 
-        // Register an anonymous schema if the return type contains an inline object.
+        let foreign_idx = self.program.foreign_functions.len() as u16;
+        let mut entry = crate::bytecode::ForeignFunctionEntry {
+            name: def.name.clone(),
+            language: def.language.clone(),
+            body_text: def.body_text.clone(),
+            param_names: param_names.clone(),
+            param_types,
+            return_type,
+            arg_count: total_c_arg_count,
+            is_async: def.is_async,
+            dynamic_errors: dynamic_language,
+            // A5(ii): filled in below from the hash-derived schema name.
+            return_type_schema_id: None,
+            content_hash: None,
+            native_abi,
+        };
+        // The content hash excludes `return_type_schema_id` (a registry-local
+        // numeric id that never crosses node boundaries), so it is final here
+        // and can seed the hash-derived schema name below.
+        entry.compute_content_hash();
+
+        // A5(ii) (integration §4.2.6): register the anonymous foreign-return
+        // schema under a HASH-DERIVED name `__ffi_h{hex16}_return`, where
+        // `hex16` is the first 16 hex chars of the entry's content hash — not
+        // the function name. Keying by content hash makes the receiver's
+        // `return_type_schema_id` re-stamp immune to name dedup / name
+        // tampering and correctly shares one return schema between two aliases
+        // of one body (identical `return_type` ⇒ identical hash). Neutral to
+        // every existing hash: the schema name reaches no hashed payload.
         let return_type_schema_id = if def.is_native_abi() {
             None
         } else {
+            let hex16: String = entry
+                .content_hash
+                .map(|h| h[..8].iter().map(|b| format!("{b:02x}")).collect())
+                .unwrap_or_default();
+            let schema_name = format!("__ffi_h{hex16}_return");
             def.return_type
                 .as_ref()
                 .and_then(|ann| Self::find_object_in_annotation(ann))
                 .map(|obj_fields| {
-                    let schema_name = format!("__ffi_{}_return", def.name);
                     // Check if already registered (e.g. from a previous compilation pass)
                     let registry = self.type_tracker.schema_registry_mut();
                     if let Some(existing) = registry.get(&schema_name) {
@@ -155,23 +192,7 @@ impl BytecodeCompiler {
                         })
                 })
         };
-
-        let foreign_idx = self.program.foreign_functions.len() as u16;
-        let mut entry = crate::bytecode::ForeignFunctionEntry {
-            name: def.name.clone(),
-            language: def.language.clone(),
-            body_text: def.body_text.clone(),
-            param_names: param_names.clone(),
-            param_types,
-            return_type,
-            arg_count: total_c_arg_count,
-            is_async: def.is_async,
-            dynamic_errors: dynamic_language,
-            return_type_schema_id,
-            content_hash: None,
-            native_abi,
-        };
-        entry.compute_content_hash();
+        entry.return_type_schema_id = return_type_schema_id;
         self.program.foreign_functions.push(entry);
 
         // Emit a jump over the function body so the VM doesn't fall through
@@ -852,6 +873,14 @@ impl BytecodeCompiler {
         Ok(format!("fn({}) -> {}", param_types.join(", "), ret_type))
     }
 
+    // A7 (integration §4.1 / §4.4.3): the compile side no longer resolves the
+    // native-library alias into the entry (it stores the declared alias so
+    // hashes are host-stable). This resolution chain is retained as the
+    // template the executing host reuses at link-now / load-verify — the
+    // design names `functions_foreign.rs:855-896` as the mirror for the
+    // receiver-side resolution chain. Wired into the link-now path in WF-2A
+    // stage 1+; kept here to avoid re-deriving it.
+    #[allow(dead_code)]
     fn resolve_native_library_alias(
         &self,
         requested: &str,

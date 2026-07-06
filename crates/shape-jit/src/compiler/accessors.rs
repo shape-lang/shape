@@ -1044,6 +1044,7 @@ mod tests {
             source_map: vec![],
             foreign_dependencies: vec![],
             frame_descriptor: None,
+            capture_kinds: vec![],
         };
 
         let report = preflight_blob_jit_compatibility(&blob);
