@@ -1,107 +1,93 @@
 --------------------------------------------------------------------------------
-VM-vs-JIT differential harness — BASELINE 2026-07-05 (WF-1A REFRESH)
+VM-vs-JIT differential harness — BASELINE 2026-07-05
+  (WF-1A-followup REFRESH — jit-fallback-engine-isolation)
 --------------------------------------------------------------------------------
-Binary   : worktree release build, shape 0.3.2 (branch wave1/jit-correctness)
+Binary   : worktree release build, shape 0.3.2 (branch wave1/jit-fallback-isolation)
 Corpus   : 467 programs (240 book runnable fences, 224 acceptance, 3 synthetic)
 Timeout  : 10s per mode per program
 Runner   : tools/vmjit-diff/run-diff.mjs (regenerated with --fresh; no resume)
 Exit     : 0 — zero unexpected non-MATCH
 
-SUMMARY COUNTS (post WF-1A)
-  MATCH    = 462
-  DIVERGED =   2   (ACC__functions__finding_s1_unknown_hof_return_kind_confusion,
-                    ACC__operators__large)
+SUMMARY COUNTS (post WF-1A-followup jit-fallback-engine-isolation)
+  MATCH    = 466   (465/466 — flaps by 1 with the pb3 sample below)
+  DIVERGED =   1   (ACC__functions__finding_s1_unknown_hof_return_kind_confusion)
   VM_FAIL  =   0
-  JIT_FAIL =   3   (ACC__collections__large, ACC__objects-arrays__small,
-                    ACC__operators__small)
+  JIT_FAIL =   0
   TIMEOUT  =   0
-  known-red hits = 5, known-red now matching = 0, unexpected non-MATCH = 0
+  known-red hits = 1, known-red now matching = 1, unexpected non-MATCH = 0
 
-DELTA vs the WF-0B baseline (was MATCH=458 / 9 known-red; preserved below)
-  MATCH 458 -> 462 (+4).  WF-1A closed FOUR audit-2026-07-04 §4 divergence classes;
-  their SYN__/ACC__ repro programs stay in the corpus as regression MATCH cases:
-    (a) jit-double-execution   -> MATCH  (item 1: compiler/program.rs compile-stage
-        whole-program deopt; the runtime `-1` stub that double-ran side effects is
-        deleted). SYN__jit-double-execution now MATCH.
-    (b) i64-overflow-wrap      -> MATCH  (item 2: compile_int64_checked_arith +
-        JIT_SIGNAL_INT_OVERFLOW; `int` add/sub/mul raise the same D3 overflow error
-        under --mode jit as --mode vm). SYN__i64-overflow-wrap now MATCH.
-    (c) annotation-hooks-dropped -> MATCH (item 3: functions.rs suppresses the
-        unwrapped-body mir_data for annotation-wrapper fns so the JIT trampolines to
-        the wrapped VM bytecode that carries the before/after hooks).
-        ACC__annotations__probe4 now MATCH.
-    (d) hashmap-filter-garbage -> MATCH  (item 4: function_calls.rs receiver_is_array
-        gate on the *Indexed rewrite + types.rs HashMap filter/map/groupBy JIT
-        return-kind). SYN__hashmap-filter-garbage now MATCH.
-  TIMEOUT 1 -> 0.  ACC__pattern-matching__large now compiles within the 10s budget
-    on this host (wave0 parser-backtracking fix already on-branch); its known-red
-    entry was retired earlier (commit ea5a791c). Classifies MATCH.
-  VM_FAIL 2 -> 0.  The two VM_FAIL synthetics (i64-overflow-wrap, hashmap-filter-
-    garbage) are the item-2 / item-4 fixes above; both now MATCH.
+  NOTE on the flap: ACC__comptime__pb3.shape is a PRE-EXISTING nondeterministic
+  flake (comptime typed-string-array emitted without a FrameDescriptor → both
+  modes fail V2 verification identically, then execute the mis-verified bytecode
+  into UB whose crash-mode flaps exit 101 / exit 1 across runs). It samples MATCH
+  (both exit 101) OR DIVERGED (vm 101 / jit 1) run-to-run, so MATCH is 465 or 466
+  and known-red-now-matching is 0 or 1. Either sample is EXIT 0 (pb3 is pinned in
+  known-red.json as comptime-typedstring-verify-nondeterministic). This fresh run
+  sampled the MATCH side (MATCH=466, now-matching=1). Do NOT auto-remove the pb3
+  pin on a single now-matching sample — it is nondeterministic. Root: a comptime
+  typed-string-array FrameDescriptor gap (comptime-marshal follow-up), NOT engine
+  isolation; PROVEN pre-existing on the UNPATCHED base binary fbfd050e.
 
-REMAINING 5 known-red (all reclassified — root deeper than WF-1A JIT-table alignment)
+DELTA vs the WF-1A baseline (was MATCH=462, DIVERGED=2, JIT_FAIL=3; preserved below)
+  MATCH 462 -> 466 (+4).  WF-1A-followup (jit-fallback-engine-isolation) closed the
+  `jit-object-merge-field-add` class — all 4 of its ids now DETERMINISTICALLY MATCH:
+    ACC__objects-arrays__small : JIT_FAIL -> MATCH
+    ACC__operators__small      : JIT_FAIL -> MATCH
+    ACC__collections__large    : JIT_FAIL -> MATCH
+    ACC__operators__large      : DIVERGED -> MATCH
+  Root cause (fix-plan §6quinquies): the [jit-fallback] interpreter path re-COMPILED
+  `program` via `execute_program` on the SAME engine already mutated by the JIT
+  inspection compile (`compile_program_for_inspection`, executor.rs:149). The second
+  compile advanced `engine.runtime.schema_registry.next_id`, shifting ambient-domain
+  merged/named-type SchemaIds UP while compiler-LOCAL inline-object ids reset to their
+  per-compile base — colliding in the shared SchemaId namespace and resolving a wide
+  merged object against a narrow inline schema (`MakeFieldRef field_idx N out of
+  bounds`). The merge codegen is correct in isolation; the bug was the double-compile.
+  Fix: `execute_compiled` extracted from `execute_program` (crates/shape-vm/src/
+  execution.rs) and the JIT fallback (crates/shape-jit/src/executor.rs) now runs the
+  ALREADY-BUILT inspection `bytecode` instead of a second compile — no counter
+  re-advance, byte-identical to `--mode vm`. NOT a tag-decode/dynamic shim.
+  These 4 ids' ACC__ repro programs stay in the corpus as regression MATCH cases;
+  their known-red.json entries were REMOVED (a MATCH on a listed id is a stale pin).
+
+REMAINING known-red (both reclassified — root deeper than engine isolation)
   - hof-return-kind-raw-bits (1: ACC__functions__finding_s1_...) -> WF-3A
     type-system-edges + let-generalization. `apply(f,x)` has an unprovable return
     (untyped param f); the sound fix is HOF return-kind inference / HM
     let-generalization + a D2 number->int compile error, NOT a JIT stamp.
-  - jit-object-merge-field-add (4: ACC__objects-arrays__small, ACC__operators__small,
-    ACC__operators__large, ACC__collections__large) -> WF-1A-followup
-    jit-fallback-engine-isolation. The [jit-fallback] interpreter recompiles on the
-    same engine already mutated by compile_program_for_inspection (executor.rs:149),
-    resolving `a + b` against a polluted schema/impl registry. The merge codegen is
-    correct in isolation. ACC__collections__large was UNMASKED by the item-4 fix (it
-    used to fail identically in both modes at its arity-2 HashMap.filter; VM is now
-    correct and the JIT hits the pre-existing merge bug).
+    Classified DIVERGED, both exit 0, deterministic.
+  - comptime-typedstring-verify-nondeterministic (1: ACC__comptime__pb3) -> a
+    comptime-marshal follow-up. See the flap NOTE above. Pinned so the flake does
+    not spuriously red/green the gate; a MATCH sample is EXPECTED.
 
 The 3 registry_cross_check-only JIT return-kind drifts (Array<int>.mean, HashMap.iter,
 HashMap.get) have no corpus program; they are pinned/retired in
 crates/shape-jit/src/mir_compiler/types.rs (mean + iter retired by WF-1A; get
 reclassified to WF-3A / ADR-006 §2.7.17 uniform-Option-return).
 
-All 5 non-MATCH ids remain pinned in tools/vmjit-diff/known-red.json. Full fresh
-per-program report follows; the historical WF-0B baseline (MATCH=458) is preserved
-at the very bottom for provenance.
+Both remaining non-MATCH ids stay pinned in tools/vmjit-diff/known-red.json. Full
+fresh per-program report follows; the historical WF-0B baseline (MATCH=458) is
+preserved in git history and summarized at the very bottom for provenance.
 
 --------------------------------------------------------------------------------
-FULL REPORT (reports/report.md — WF-1A --fresh run 2026-07-05)
+FULL REPORT (reports/report.md — WF-1A-followup --fresh run 2026-07-05)
 --------------------------------------------------------------------------------
 # VM-vs-JIT differential report
 
-- generated: 2026-07-05T15:58:09.638Z
-- binary: `/home/dev/dev/shape-lang/worktrees/wf1a-jit-correctness/target/release/shape` (shape 0.3.2)
+- generated: 2026-07-05T21:11:57.122Z
+- binary: `/home/dev/dev/shape-lang/worktrees/wf-jitfallback/target/release/shape` (shape 0.3.2)
 - corpus: tools/vmjit-diff/corpus (generated 2026-07-05T04:45:03.196Z)
 - programs run: 467, timeout 10s/mode
-- counts: MATCH=462, DIVERGED=2, VM_FAIL=0, JIT_FAIL=3, TIMEOUT=0
-- known-red hits: 5; known-red now matching: 0; **unexpected non-MATCH: 0**
+- counts: MATCH=466, DIVERGED=1, VM_FAIL=0, JIT_FAIL=0, TIMEOUT=0
+- known-red hits: 1; known-red now matching: 1; **unexpected non-MATCH: 0**
 
 ## Non-MATCH programs
-
-### JIT_FAIL (known-red: jit-object-merge-field-add) — `ACC__collections__large.shape`
-- tier: acceptance; source: docs/cluster-audits/v0.3.3-book-acceptance/programs/collections/large.shape
-- known-red reason: UNMASKED by the WF-1A item-4 fix (2026-07-05): at baseline this program errored identically in BOTH modes at line 499 `levels.filter(|k, v| v > 12)` (the arity-2 `HashMap.filter` -> Array-only `filterIndexed` rewrite), so it classified MATCH-by-both-failing. The item-4 `receiver_is_array` gate makes the HashMap filter work (VM=2, JIT deopts Route A -> interpreter=2), so the program now progresses to SECTION 10's object merge and hits the SAME jit-object-merge-field-add bug the other entries carry: vm prints ALL_CHECKS_PASSED (exit 0); jit prints 'CHECK_FAILED: s10.abc.x expected=1 got=3' after a W39 F1 LoadModuleBinding SURFACE fallback, then errors 'MakeFieldRef field_idx 1 out of bounds (slot count 1)' (exit 1) — the identical dirty-engine-fallback-recompile merge symptom. VM is now CORRECT; the JIT divergence is the reclassified merge class, not the filter. Classified JIT_FAIL.
-- vm: exit=0 signal=null timedOut=false (1925ms)
-- jit: exit=1 signal=null timedOut=false (1970ms)
-- vm stdout:
-```
-ALL_CHECKS_PASSED
-
-```
-- jit stdout:
-```
-CHECK_FAILED: s10.abc.x expected=1 got=3
-
-```
-- jit stderr:
-```
-[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: W39 F1 module-binding function-body SURFACE (ADR-006 §2.7.14): function 'check_int' contains LoadModuleBinding at bytecode instruction 2019. Module bindings are not MIR places, so the JIT function-body lowering has no compile-time side table for this storage. Running native top-level code and then interpreting such a function through the trampoline VM would read an unsynchronized module-binding array (observe
-… [truncated, 867 bytes total]
-```
 
 ### DIVERGED (known-red: hof-return-kind-raw-bits) — `ACC__functions__finding_s1_unknown_hof_return_kind_confusion.shape`
 - tier: acceptance; source: docs/cluster-audits/v0.3.3-book-acceptance/programs/functions/finding_s1_unknown_hof_return_kind_confusion.shape
 - known-red reason: vm prints '6.0'; jit prints '4618441417868443648' (a raw f64 bit pattern). RECLASSIFIED WF-1A -> WF-3A type-system-edges: `apply(f, x)` has an unprovable return type (untyped `f`), so `let bad: int = r` is admitted where r is number-valued; the sound fix is HOF return-kind inference / let-generalization + a D2 number->int compile error, not a JIT return-kind-table stamp. Classified DIVERGED, both exit 0, deterministic. Verified per-id in the 2026-07-05 baseline run.
-- vm: exit=0 signal=null timedOut=false (179ms)
-- jit: exit=0 signal=null timedOut=false (197ms)
+- vm: exit=0 signal=null timedOut=false (152ms)
+- jit: exit=0 signal=null timedOut=false (172ms)
 - vm stdout:
 ```
 6.0
@@ -115,77 +101,24 @@ CHECK_FAILED: s10.abc.x expected=1 got=3
 
 ```
 
-### JIT_FAIL (known-red: jit-object-merge-field-add) — `ACC__objects-arrays__small.shape`
-- tier: acceptance; source: docs/cluster-audits/v0.3.3-book-acceptance/programs/objects-arrays/small.shape
-- known-red reason: vm prints ALL_CHECKS_PASSED (exit 0); jit prints 'CHECK_FAILED: merge.x expected=1 got=3' (exit 1) with a W39 F1 LoadModuleBinding SURFACE fallback on stderr. RECLASSIFIED WF-1A -> WF-1A-followup jit-fallback-engine-isolation: the [jit-fallback] interpreter recompiles on the dirty inspection-compile engine and resolves the merge against a polluted registry. Classified JIT_FAIL, deterministic. Verified per-id in the 2026-07-05 baseline run.
-- vm: exit=0 signal=null timedOut=false (198ms)
-- jit: exit=1 signal=null timedOut=false (228ms)
-- vm stdout:
-```
-ALL_CHECKS_PASSED
-
-```
-- jit stdout:
-```
-CHECK_FAILED: merge.x expected=1 got=3
-
-```
-- jit stderr:
-```
-[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: W39 F1 module-binding function-body SURFACE (ADR-006 §2.7.14): function 'checkInt' contains LoadModuleBinding at bytecode instruction 2023. Module bindings are not MIR places, so the JIT function-body lowering has no compile-time side table for this storage. Running native top-level code and then interpreting such a function through the trampoline VM would read an unsynchronized module-binding array (observed
-… [truncated, 865 bytes total]
-```
-
-### DIVERGED (known-red: jit-object-merge-field-add) — `ACC__operators__large.shape`
-- tier: acceptance; source: docs/cluster-audits/v0.3.3-book-acceptance/programs/operators/large.shape
-- known-red reason: Both modes fail, differently: vm errors 'no method add on receiver kind Ptr(TypedObject) (line 736)' with empty stdout (exit 1); jit prints 'CHECK_FAILED: T.merge3_b expected=20 got=30' + 'T.merge3_c expected=30 got=4' (exit 1) after a c4-4B TryUnwrap SURFACE fallback. RECLASSIFIED WF-1A -> WF-1A-followup jit-fallback-engine-isolation (dirty-engine fallback recompile). Classified DIVERGED. Verified per-id in the 2026-07-05 baseline run.
-- vm: exit=1 signal=null timedOut=false (2726ms)
-- jit: exit=1 signal=null timedOut=false (2724ms)
-- vm stderr:
-```
-Error: Runtime error: no method 'add' on receiver kind Ptr(TypedObject) (line 736)
-
-```
-- jit stdout:
-```
-CHECK_FAILED: T.merge3_b expected=20 got=30
-CHECK_FAILED: T.merge3_c expected=30 got=4
-
-```
-- jit stderr:
-```
-[jit-fallback] function main failed JIT compile: Runtime error: c4-4B TryUnwrap (`?` operator) SURFACE (ADR-006 §2.7.14): the program contains an `OpCode::TryUnwrap` (the `?` operator) whose unwrap-or-early-return semantics MIR collapses to a transparent copy at `mir/lowering/expr.rs:2594`. The JIT-emitted code calls the inner expression via the trampoline (`dispatch_call_via_trampoline_vm`), stores the trampoline's heap-Result/Option `u64` into a slot whose parallel-kind tracker records the SUC
-… [truncated, 1405 bytes total]
-```
-
-### JIT_FAIL (known-red: jit-object-merge-field-add) — `ACC__operators__small.shape`
-- tier: acceptance; source: docs/cluster-audits/v0.3.3-book-acceptance/programs/operators/small.shape
-- known-red reason: vm prints ALL_CHECKS_PASSED (exit 0); jit prints 'CHECK_FAILED: merge_collide_keep' + 'CHECK_FAILED: merge_collide_override' (exit 1) with a c4-4B TryUnwrap SURFACE fallback on stderr — `{x:1,y:2} + {y:20,z:30}` loses merge-override semantics in jit mode. RECLASSIFIED WF-1A -> WF-1A-followup jit-fallback-engine-isolation (dirty-engine fallback recompile). Classified JIT_FAIL, deterministic (re-run twice by hand 2026-07-05).
-- vm: exit=0 signal=null timedOut=false (230ms)
-- jit: exit=1 signal=null timedOut=false (277ms)
-- vm stdout:
-```
-ALL_CHECKS_PASSED
-
-```
-- jit stdout:
-```
-CHECK_FAILED: merge_collide_keep
-CHECK_FAILED: merge_collide_override
-
-```
-- jit stderr:
-```
-[jit-fallback] function main failed JIT compile: Runtime error: c4-4B TryUnwrap (`?` operator) SURFACE (ADR-006 §2.7.14): the program contains an `OpCode::TryUnwrap` (the `?` operator) whose unwrap-or-early-return semantics MIR collapses to a transparent copy at `mir/lowering/expr.rs:2594`. The JIT-emitted code calls the inner expression via the trampoline (`dispatch_call_via_trampoline_vm`), stores the trampoline's heap-Result/Option `u64` into a slot whose parallel-kind tracker records the SUC
-… [truncated, 1405 bytes total]
-```
+## Known-red entries now MATCHING (candidates for allowlist removal)
+- ACC__comptime__pb3.shape
+  (EXPECTED — nondeterministic flake, do NOT remove the pin on a single MATCH
+   sample; see the flap NOTE in SUMMARY COUNTS above.)
 
 --------------------------------------------------------------------------------
 HISTORICAL PROVENANCE
 --------------------------------------------------------------------------------
+WF-1A REFRESH (superseded by this WF-1A-followup refresh) recorded MATCH=462,
+DIVERGED=2, VM_FAIL=0, JIT_FAIL=3, TIMEOUT=0, known-red hits=5, unexpected=0. It
+closed four audit-2026-07-04 §4 divergence classes (jit-double-execution,
+i64-overflow-wrap, annotation-hooks-dropped, hashmap-filter-garbage) and the
+compile-blowup TIMEOUT, and reclassified the object-merge (4 ids) + hof-return-kind
+(1 id) known-reds. Its full per-program report lives in this file's git history
+(pre WF-1A-followup refresh). The WF-1A-followup work above then closed the
+object-merge class (dirty-engine fallback recompile), moving its 4 ids to MATCH.
+
 The prior WF-0B baseline snapshot (binary shape 0.3.2 @ 1fb805b3, branch
 wave0/vmjit-diff-harness) recorded MATCH=458, DIVERGED=4, VM_FAIL=2, JIT_FAIL=2,
 TIMEOUT=1, known-red hits=9, unexpected non-MATCH=0. Its full per-program report
-lives in this file's git history (pre WF-1A refresh). WF-1A closed classes (a)-(d)
-above and the compile-blowup TIMEOUT, moving 4 programs + the timeout to MATCH and
-reclassifying the remaining 5 known-red ids. No new unexpected non-MATCH.
+also lives in this file's git history.

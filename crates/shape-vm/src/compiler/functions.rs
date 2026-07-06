@@ -3823,8 +3823,15 @@ mod tests {
             .as_ref()
             .expect("dep_b native ABI");
 
-        assert_eq!(dep_a.library, "/tmp/libdep_a_shared.so");
-        assert_eq!(dep_b.library, "/tmp/libdep_b_shared.so");
+        // A7 (integration §4.1 / §4.4.3): the compiled entry now stores the
+        // DECLARED alias, not the compile-host-resolved soname — path
+        // resolution is deferred wholly to the executing host so identical
+        // declarations hash identically across compile hosts. Both functions
+        // declare `from "shared"`, so both entries carry the alias `"shared"`;
+        // package-scoped resolution to distinct sonames happens at load time
+        // via `NativeResolutionSet`, not in the compiled `native_abi.library`.
+        assert_eq!(dep_a.library, "shared");
+        assert_eq!(dep_b.library, "shared");
     }
 
     #[test]
