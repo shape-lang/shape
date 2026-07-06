@@ -6877,6 +6877,38 @@ producer-side proof discipline). The protocol has three clauses:
    refcount-at-offset-0) with a per-field `field_kinds` array
    carrying the proven `NativeKind` per slot.
 
+   **Amendment (WF-2A stage 3, Q13/OQ10 override, 2026-07-05 —
+   `docs/design/ffi-rebuild.md` §3.2/§4.5(1b)).** The *surfacing
+   channel* of a wire-vs-declared mismatch is refined for the
+   sub-case of a **dynamic-language foreign function's return
+   value** (`fn python` / `fn typescript`, which always declares
+   `Result<T>` per §3.6 of the design). Such a mismatch is delivered
+   as a **class-1 `Err`** on the user's declared `Result<T>`, whose
+   string payload begins with the stable, book-documented
+   discriminator prefix **`TypeConformanceError: `** — NOT as a
+   `VMError::RuntimeError`. Rationale: a foreign body returning the
+   wrong type is foreign misbehaviour in the same trust class as a
+   raised exception, so a flaky third-party function is handleable
+   via `match` / `?` instead of aborting the program; the prefix
+   keeps it distinguishable from a genuine foreign exception (which
+   carries no prefix). **Everything else in this clause stands
+   unweakened:** the wire bytes are still never free to
+   re-discriminate; the declared type + `schema_id` remain the sole
+   oracle; the nonconforming value is still *refused* (never
+   constructed, never Bool-defaulted, never `KindedSlot::none()`-
+   substituted). Only the delivery channel of the dynamic-return
+   sub-case changes. **All other mismatch surfaces keep the
+   `VMError` channel exactly as written above:** argument-path
+   marshal failures, `extern C` decoding (no `Result` channel
+   exists there), and true marshal-arm gaps (an unsupported declared
+   type) which stay a compile-time marshalability error /
+   surface-and-stop `VMError::NotImplemented` — never folded into
+   the user's `Err`. Implemented by
+   `foreign_marshal::wrap_dynamic_result`: an `unmarshal_result`
+   `RuntimeError` (conformance mismatch) becomes the prefixed
+   class-1 `Err`; a `NotImplemented` (marshal-arm gap) propagates as
+   the class-2 `VMError`.
+
 3. **Fail-safe ABI version-mismatch clause (supervisor (iv)
    ruling).** Extensions MUST export `shape_abi_version()`
    (FFI symbol, returns `u32`). The host plugin loader at

@@ -50,6 +50,13 @@ impl BytecodeCompiler {
             });
         }
 
+        // ffi-rebuild §4.10 S2 / OQ4: warn on the deprecated CamelCase
+        // C-view/slice spellings; the lowercase `cview`/`cmut`/`cslice`/
+        // `cmut_slice` forms are canonical (they still compile for one release).
+        if def.is_native_abi() {
+            self.warn_deprecated_ctype_aliases(def);
+        }
+
         // The function slot was already registered by register_item_functions.
         // Find its index.
         let func_idx = self
@@ -275,6 +282,26 @@ impl BytecodeCompiler {
                 .flat_map(|(_, p)| p.get_identifiers())
                 .collect();
             func.param_names = visible_names;
+        }
+
+        // ffi-rebuild §4.8.3 — compile-time `Ffi` derivation. Every foreign
+        // call requires `Permission::Ffi`. Stamp it into the extern-stub blob's
+        // `required_permissions` (the blob that carries the `CallForeign`
+        // instruction) so that:
+        //   (a) the linker's transitive union propagates `Ffi` to every blob
+        //       that can reach a foreign call (`linker.rs` folds each blob's
+        //       `required_permissions`), and
+        //   (b) it is baked into the blob's content hash — two otherwise-
+        //       identical programs, one calling foreign code, hash differently,
+        //       so load-time capability checking and the Deterministic-mode
+        //       load-time refusal (§4.8.3, both keyed on
+        //       `total_required_permissions ∋ Ffi`) work with zero runtime cost.
+        // This is the derivation the WF-1D `Permission::Ffi` reservation
+        // deferred to WF-2A (`shape-abi-v1/src/lib.rs` variant note).
+        if let Some(ref mut blob) = self.current_blob_builder {
+            blob.record_permissions(&shape_abi_v1::PermissionSet::from([
+                shape_abi_v1::Permission::Ffi,
+            ]));
         }
 
         // Finalize and register the extern stub blob.
@@ -587,10 +614,17 @@ impl BytecodeCompiler {
         }
 
         // 6. Build return value
-        let is_void_return = def.return_type.as_ref().map_or(
-            false,
-            |ann| matches!(ann, shape_ast::ast::TypeAnnotation::Basic(n) if n == "void"),
-        );
+        //
+        // `void` may parse to either `TypeAnnotation::Void` or the textual
+        // `Basic("void")` depending on grammar context (both are accepted by
+        // `native_ctype_from_annotation`); detect both. Getting this right
+        // matters: a single `out` param + void return returns the out value
+        // DIRECTLY, avoiding a 2-tuple `NewArray` (the DuckDB
+        // `duckdb_open(path, out db)` shape and the book's out-param example).
+        let is_void_return = def.return_type.as_ref().map_or(false, |ann| {
+            matches!(ann, shape_ast::ast::TypeAnnotation::Void)
+                || matches!(ann, shape_ast::ast::TypeAnnotation::Basic(n) if n == "void")
+        });
 
         if out_count == 1 && is_void_return {
             // Single out param + void return → return the out value directly
@@ -658,6 +692,90 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Emit a one-release deprecation warning for each parameter/return that
+    /// uses a CamelCase C-view/slice spelling (`CView`/`CMut`/`CSlice`/
+    /// `CMutSlice`). The canonical lowercase spellings (`cview`/`cmut`/
+    /// `cslice`/`cmut_slice`) are the book's; both compile today (ffi-rebuild
+    /// §4.10 S2 / OQ4), but the CamelCase aliases are scheduled for removal.
+    fn warn_deprecated_ctype_aliases(&self, def: &shape_ast::ast::ForeignFunctionDef) {
+        let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+        let mut annotations: Vec<&shape_ast::ast::TypeAnnotation> = def
+            .params
+            .iter()
+            .filter_map(|p| p.type_annotation.as_ref())
+            .collect();
+        if let Some(ret) = def.return_type.as_ref() {
+            annotations.push(ret);
+        }
+        for ann in annotations {
+            if let Some((deprecated, canonical)) = Self::deprecated_ctype_alias_in(ann)
+                && seen.insert(deprecated)
+            {
+                self.emit_foreign_warning(
+                    format!(
+                        "`{deprecated}<...>` is a deprecated spelling; use the canonical \
+                         `{canonical}<...>` instead (extern C function '{}')",
+                        def.name
+                    ),
+                    def.name_span,
+                );
+            }
+        }
+    }
+
+    /// Recursively locate the first deprecated CamelCase C-view/slice spelling
+    /// in an annotation tree, returning `(deprecated, canonical)` spellings.
+    fn deprecated_ctype_alias_in(
+        ann: &shape_ast::ast::TypeAnnotation,
+    ) -> Option<(&'static str, &'static str)> {
+        use shape_ast::ast::TypeAnnotation;
+        match ann {
+            TypeAnnotation::Generic { name, args } => {
+                let hit = match name.as_str() {
+                    "CView" => Some(("CView", "cview")),
+                    "CMut" => Some(("CMut", "cmut")),
+                    "CSlice" => Some(("CSlice", "cslice")),
+                    "CMutSlice" => Some(("CMutSlice", "cmut_slice")),
+                    _ => None,
+                };
+                if hit.is_some() {
+                    return hit;
+                }
+                args.iter().find_map(Self::deprecated_ctype_alias_in)
+            }
+            TypeAnnotation::Array(inner) => Self::deprecated_ctype_alias_in(inner),
+            TypeAnnotation::Function { params, returns } => params
+                .iter()
+                .find_map(|p| Self::deprecated_ctype_alias_in(&p.type_annotation))
+                .or_else(|| Self::deprecated_ctype_alias_in(returns)),
+            _ => None,
+        }
+    }
+
+    /// Emit a spanned, LSDS-routed compile-time warning on the foreign-function
+    /// diagnostic channel. Mirrors `surface_comptime_warnings`' terminal render.
+    fn emit_foreign_warning(&self, message: String, span: shape_ast::ast::Span) {
+        let sl = self.span_to_source_location(span);
+        let loc = shape_diagnostics::Location::new(
+            sl.file.clone(),
+            sl.line as u32,
+            sl.column as u32,
+            span.start as u32,
+            span.end as u32,
+        );
+        let diag = shape_diagnostics::DiagnosticBuilder::new(
+            "F0001",
+            shape_diagnostics::Severity::Warning,
+            loc,
+            message,
+        )
+        .build();
+        eprintln!(
+            "{}",
+            shape_diagnostics::render::terminal::render(&diag).trim_end()
+        );
+    }
+
     pub(super) fn native_ctype_from_annotation(
         ann: &shape_ast::ast::TypeAnnotation,
         is_return: bool,
@@ -711,12 +829,20 @@ impl BytecodeCompiler {
                 _ => None,
             },
             TypeAnnotation::Void if is_return => Some("void".to_string()),
+            // Slice carriers. Canonical (book, ffi-rebuild §4.10 S2 / OQ4):
+            // lowercase `cslice<T>` / `cmut_slice<T>`. `Vec<T>` sugars to
+            // `cslice<T>`. The CamelCase `CSlice`/`CMutSlice` are accepted as
+            // one-release deprecated aliases (warned in `compile_foreign_function`).
             TypeAnnotation::Generic { name, args }
-                if (name == "Vec" || name == "CSlice" || name == "CMutSlice")
+                if (name == "Vec"
+                    || name == "cslice"
+                    || name == "cmut_slice"
+                    || name == "CSlice"
+                    || name == "CMutSlice")
                     && args.len() == 1 =>
             {
                 let elem = Self::native_slice_elem_ctype_from_annotation(&args[0])?;
-                if name == "CMutSlice" {
+                if name == "cmut_slice" || name == "CMutSlice" {
                     Some(format!("cmut_slice<{elem}>"))
                 } else {
                     Some(format!("cslice<{elem}>"))
@@ -730,15 +856,20 @@ impl BytecodeCompiler {
                     None
                 }
             }
+            // Pointer-backed struct views. Canonical (book, ffi-rebuild §4.10
+            // S2 / OQ4): lowercase `cview<T>` (read) / `cmut<T>` (mutable). The
+            // CamelCase `CView`/`CMut` are accepted as one-release deprecated
+            // aliases (warned in `compile_foreign_function`).
             TypeAnnotation::Generic { name, args }
-                if (name == "CView" || name == "CMut") && args.len() == 1 =>
+                if (name == "cview" || name == "cmut" || name == "CView" || name == "CMut")
+                    && args.len() == 1 =>
             {
                 let inner = match &args[0] {
                     TypeAnnotation::Basic(type_name) => type_name.clone(),
                     TypeAnnotation::Reference(type_name) => type_name.to_string(),
                     _ => return None,
                 };
-                if name == "CView" {
+                if name == "cview" || name == "CView" {
                     Some(format!("cview<{inner}>"))
                 } else {
                     Some(format!("cmut<{inner}>"))
@@ -921,5 +1052,335 @@ impl BytecodeCompiler {
             return Ok(resolved);
         }
         Ok(requested.to_string())
+    }
+}
+
+#[cfg(test)]
+mod ffi_permission_tests {
+    //! ffi-rebuild stage 4a — `Permission::Ffi` enforcement (§4.8).
+    //!
+    //! Default-tier (NOT `deep-tests`-gated) so foreign permission gating is
+    //! part of the never-die sentinel: compile-time `Ffi` derivation, the
+    //! two-phase call gate (coarse `Ffi` before link, library/symbol scope
+    //! before dlopen), the OQ13 local-unscoped posture, and the Q6
+    //! Deterministic load-time refusal.
+    use crate::compiler::BytecodeCompiler;
+    use crate::executor::{PermissionError, VMConfig, VirtualMachine};
+
+    fn compile(code: &str) -> crate::bytecode::BytecodeProgram {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        compiler.compile(&program).expect("compile failed")
+    }
+
+    #[test]
+    fn extern_c_declaration_derives_ffi_permission() {
+        // §4.8.3: compiling an `extern C fn` stamps `Ffi` into the extern-stub
+        // blob (the blob carrying `CallForeign`); the linker's transitive union
+        // surfaces it in `total_required_permissions` (baked into the hash).
+        let bytecode = compile(r#"extern C fn labs(x: int) -> int from "c";"#);
+        let ca = bytecode
+            .content_addressed
+            .as_ref()
+            .expect("content-addressed program");
+        let stub = ca
+            .function_store
+            .values()
+            .find(|b| b.name == "labs")
+            .expect("labs stub blob");
+        assert!(
+            stub.required_permissions
+                .contains(&shape_abi_v1::Permission::Ffi),
+            "extern C stub blob must require Ffi"
+        );
+        let linked = crate::linker::link(ca).expect("link");
+        assert!(
+            linked
+                .total_required_permissions
+                .contains(&shape_abi_v1::Permission::Ffi),
+            "linker transitive union must contain Ffi"
+        );
+    }
+
+    #[test]
+    fn python_declaration_derives_ffi_permission() {
+        let bytecode = compile(
+            r#"
+            fn python add(a: int, b: int) -> Result<int> {
+                return a + b
+            }
+        "#,
+        );
+        let ca = bytecode
+            .content_addressed
+            .as_ref()
+            .expect("content-addressed program");
+        let stub = ca
+            .function_store
+            .values()
+            .find(|b| b.name == "add")
+            .expect("add stub blob");
+        assert!(
+            stub.required_permissions
+                .contains(&shape_abi_v1::Permission::Ffi),
+            "fn python stub blob must require Ffi"
+        );
+    }
+
+    #[test]
+    fn non_foreign_program_does_not_require_ffi() {
+        let bytecode = compile(r#"fn add(a: int, b: int) -> int { return a + b }"#);
+        let ca = bytecode.content_addressed.as_ref().expect("ca");
+        let linked = crate::linker::link(ca).expect("link");
+        assert!(
+            !linked
+                .total_required_permissions
+                .contains(&shape_abi_v1::Permission::Ffi),
+            "a program with no foreign code must not require Ffi"
+        );
+    }
+
+    #[test]
+    fn deterministic_context_refuses_foreign_program_at_load() {
+        // §4.8.3 (Q6): a Deterministic execution context refuses a foreign-
+        // bearing program at LOAD time — even when Ffi itself is granted.
+        let bytecode =
+            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let ca = bytecode
+            .content_addressed
+            .clone()
+            .expect("content-addressed program");
+        let granted = shape_abi_v1::PermissionSet::from([
+            shape_abi_v1::Permission::Ffi,
+            shape_abi_v1::Permission::Deterministic,
+        ]);
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let err = vm
+            .load_program_with_permissions(ca, &granted)
+            .expect_err("deterministic + foreign must refuse at load");
+        assert!(
+            matches!(err, PermissionError::DeterministicForeignRefused),
+            "expected DeterministicForeignRefused, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn foreign_program_loads_when_ffi_granted_without_determinism() {
+        let bytecode =
+            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let ca = bytecode.content_addressed.clone().expect("ca");
+        let granted = shape_abi_v1::PermissionSet::from([shape_abi_v1::Permission::Ffi]);
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program_with_permissions(ca, &granted)
+            .expect("Ffi-granted non-deterministic load should succeed");
+    }
+
+    #[test]
+    fn foreign_program_refused_at_load_without_ffi_grant() {
+        let bytecode =
+            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let ca = bytecode.content_addressed.clone().expect("ca");
+        // readonly does not include Ffi (shape-abi-v1 preset invariant).
+        let granted = shape_abi_v1::PermissionSet::readonly();
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let err = vm
+            .load_program_with_permissions(ca, &granted)
+            .expect_err("no-Ffi sandbox must refuse foreign program at load");
+        match err {
+            PermissionError::InsufficientPermissions { missing, .. } => {
+                assert!(
+                    missing.contains(&shape_abi_v1::Permission::Ffi),
+                    "missing set must name Ffi"
+                );
+            }
+            other => panic!("expected InsufficientPermissions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_foreign_call_refused_before_dlopen_without_ffi() {
+        // §4.8.2 phase 1: the coarse `Ffi` presence check runs BEFORE link-now
+        // (path resolution + dlopen). Point a native entry at a NONEXISTENT
+        // library: if control reached `link_native_function`/dlopen, the error
+        // would be a link failure ("Failed to link ... No such file"). Getting
+        // the permission-refusal error INSTEAD proves the check precedes dlopen
+        // — the .so's ELF constructors never run.
+        let bytecode = compile(
+            r#"extern C fn missing_sym(x: int) -> int from "/nonexistent/libshape_ffi_probe_does_not_exist.so";"#,
+        );
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        // Handles start unlinked (lazy). Install a granted set WITHOUT Ffi.
+        vm.foreign_fn_handles = vec![None];
+        vm.set_permissions(
+            Some(shape_abi_v1::PermissionSet::from([
+                shape_abi_v1::Permission::FsRead,
+            ])),
+            None,
+        );
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("foreign call without Ffi must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("requires permission Ffi"),
+            "expected Ffi permission refusal, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Failed to link") && !msg.to_lowercase().contains("no such file"),
+            "dlopen must NOT have been attempted (constructor must not run): {msg}"
+        );
+    }
+
+    #[test]
+    fn native_foreign_call_refused_before_dlopen_under_determinism() {
+        // Deterministic backstop (§4.8.3): even with a nonexistent library, a
+        // Deterministic granted context refuses the call before any link/dlopen.
+        let bytecode = compile(
+            r#"extern C fn det_missing(x: int) -> int from "/nonexistent/libshape_ffi_det_probe.so";"#,
+        );
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.foreign_fn_handles = vec![None];
+        vm.set_permissions(
+            Some(shape_abi_v1::PermissionSet::from([
+                shape_abi_v1::Permission::Ffi,
+                shape_abi_v1::Permission::Deterministic,
+            ])),
+            None,
+        );
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("deterministic foreign call must be refused");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("deterministic execution cannot run foreign code"),
+            "expected deterministic refusal, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Failed to link") && !msg.to_lowercase().contains("no such file"),
+            "dlopen must NOT have been attempted: {msg}"
+        );
+    }
+
+    #[test]
+    fn local_run_allows_foreign_call_unscoped() {
+        // OQ13 posture: a trusted-local run (granted == None) grants Ffi
+        // unscoped, so the permission check passes and control reaches link-now.
+        // With a nonexistent library the outcome is a LINK failure — proving the
+        // permission gate did NOT block it (it got past the check to dlopen).
+        let bytecode = compile(
+            r#"extern C fn local_missing(x: int) -> int from "/nonexistent/libshape_ffi_local_probe.so";"#,
+        );
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.foreign_fn_handles = vec![None];
+        // granted == None (trusted local): Ffi is unscoped.
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("nonexistent library must fail to link");
+        let msg = format!("{err:?}");
+        assert!(
+            !msg.contains("requires permission Ffi") && !msg.contains("deterministic execution"),
+            "local run must NOT be blocked by the permission gate: {msg}"
+        );
+        assert!(
+            msg.contains("Failed to link"),
+            "expected a link failure past the permission gate, got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ctype_spelling_tests {
+    //! ffi-rebuild §4.10 S2 / OQ4 — canonical lowercase C-view/slice spellings
+    //! (`cview`/`cmut`/`cslice`/`cmut_slice`) with the CamelCase forms accepted
+    //! as one-release deprecated aliases.
+    use crate::compiler::BytecodeCompiler;
+
+    fn native_signature(code: &str, fn_name: &str) -> String {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        bytecode
+            .foreign_functions
+            .iter()
+            .find(|e| e.name == fn_name)
+            .and_then(|e| e.native_abi.as_ref())
+            .map(|spec| spec.signature.clone())
+            .unwrap_or_else(|| panic!("no native signature for '{fn_name}'"))
+    }
+
+    #[test]
+    fn lowercase_cview_cmut_compile_and_produce_canonical_signature() {
+        let sig = native_signature(
+            r#"
+            type C QuoteC { bid: f64, ask: f64 }
+            extern C fn quote_mid(q: cview<QuoteC>) -> f64 from "libquote";
+            extern C fn quote_fill(q: cmut<QuoteC>, v: f64) -> void from "libquote";
+            "#,
+            "quote_mid",
+        );
+        assert!(sig.contains("cview<QuoteC>"), "signature: {sig}");
+    }
+
+    #[test]
+    fn lowercase_cslice_cmut_slice_compile() {
+        let sig = native_signature(
+            r#"extern C fn bump(xs: cmut_slice<i32>) -> void from "lib";"#,
+            "bump",
+        );
+        assert!(sig.contains("cmut_slice<i32>"), "signature: {sig}");
+        let sig = native_signature(
+            r#"extern C fn sum(xs: cslice<i32>) -> i32 from "lib";"#,
+            "sum",
+        );
+        assert!(sig.contains("cslice<i32>"), "signature: {sig}");
+    }
+
+    #[test]
+    fn camelcase_forms_are_aliases_of_the_lowercase_spellings() {
+        // CamelCase and lowercase must lower to the identical native C signature
+        // — they are one type, one deprecated spelling of the other.
+        assert_eq!(
+            native_signature(
+                r#"type C Q { x: f64 } extern C fn f(q: CView<Q>) -> f64 from "l";"#,
+                "f",
+            ),
+            native_signature(
+                r#"type C Q { x: f64 } extern C fn f(q: cview<Q>) -> f64 from "l";"#,
+                "f",
+            ),
+        );
+        assert_eq!(
+            native_signature(
+                r#"extern C fn f(xs: CMutSlice<i32>) -> void from "l";"#,
+                "f",
+            ),
+            native_signature(
+                r#"extern C fn f(xs: cmut_slice<i32>) -> void from "l";"#,
+                "f",
+            ),
+        );
+    }
+
+    #[test]
+    fn deprecated_alias_detection_flags_camelcase_only() {
+        use shape_ast::ast::{TypeAnnotation, TypePath};
+        let camel = TypeAnnotation::Generic {
+            name: TypePath::simple("CView"),
+            args: vec![TypeAnnotation::Reference(TypePath::simple("Q"))],
+        };
+        let lower = TypeAnnotation::Generic {
+            name: TypePath::simple("cview"),
+            args: vec![TypeAnnotation::Reference(TypePath::simple("Q"))],
+        };
+        assert_eq!(
+            BytecodeCompiler::deprecated_ctype_alias_in(&camel),
+            Some(("CView", "cview"))
+        );
+        assert_eq!(BytecodeCompiler::deprecated_ctype_alias_in(&lower), None);
     }
 }

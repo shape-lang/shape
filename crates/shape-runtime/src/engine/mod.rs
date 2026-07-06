@@ -117,6 +117,12 @@ pub struct ShapeEngine {
     /// these schemas (ids preserved) keeps a user type's id stable for
     /// the whole REPL session, so persisted instances stay resolvable.
     pub(crate) repl_user_schemas: std::collections::HashMap<String, crate::type_schema::TypeSchema>,
+    /// Opt-in eager foreign linking (WF-2A stage 1, ffi-rebuild §4.2). When
+    /// `true`, the program executor links/compiles EVERY foreign function up
+    /// front (reporting all failures) before executing a single instruction —
+    /// the `shape run --eager-link` / CI validation posture. Default `false`
+    /// keeps linking lazy (link-now at first call).
+    pub(crate) eager_link_foreign: bool,
 }
 
 impl ShapeEngine {
@@ -138,7 +144,20 @@ impl ShapeEngine {
             repl_persistence: false,
             repl_definitions: Vec::new(),
             repl_user_schemas: std::collections::HashMap::new(),
+            eager_link_foreign: false,
         })
+    }
+
+    /// Enable/disable opt-in eager foreign linking (WF-2A stage 1,
+    /// ffi-rebuild §4.2). When enabled, the program executor links every
+    /// foreign function up front before executing. Default is lazy (`false`).
+    pub fn set_eager_link_foreign(&mut self, enabled: bool) {
+        self.eager_link_foreign = enabled;
+    }
+
+    /// Whether opt-in eager foreign linking is enabled.
+    pub fn eager_link_foreign(&self) -> bool {
+        self.eager_link_foreign
     }
 
     /// Create engine with data
@@ -158,6 +177,7 @@ impl ShapeEngine {
             repl_persistence: false,
             repl_definitions: Vec::new(),
             repl_user_schemas: std::collections::HashMap::new(),
+            eager_link_foreign: false,
         })
     }
 
@@ -190,6 +210,7 @@ impl ShapeEngine {
             repl_persistence: false,
             repl_definitions: Vec::new(),
             repl_user_schemas: std::collections::HashMap::new(),
+            eager_link_foreign: false,
         })
     }
 

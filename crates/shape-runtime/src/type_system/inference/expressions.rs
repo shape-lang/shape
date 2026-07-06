@@ -3847,6 +3847,15 @@ impl TypeInferenceEngine {
             )
         })?;
 
+        // `ptr` ↔ `int` explicit bit-preserving reinterpretation (ffi-rebuild
+        // §4.6.5 / §4.10 S4). Both are 64-bit scalars; the cast relabels the
+        // slot without changing its bits. It is NOT lossless in the numeric
+        // sense (a pointer above i64::MAX reinterprets to a negative int), so
+        // it is only reachable via an explicit `as` cast — never implicit.
+        if Self::is_ptr_int_reinterpret(&source_name, &target_selector) {
+            return Ok(());
+        }
+
         if self.has_into_impl(&source_name, &target_selector) {
             return Ok(());
         }
@@ -3871,6 +3880,14 @@ impl TypeInferenceEngine {
             self.render_type_for_diag(source),
             self.render_type_for_diag(target),
         ))
+    }
+
+    /// Whether `(source, target)` is a `ptr` ↔ `int` bit-preserving
+    /// reinterpretation pair (ffi-rebuild §4.6.5 / §4.10 S4). `int` is spelled
+    /// `int`/`i64` after `try_into` canonicalization; `ptr` stays `ptr`.
+    fn is_ptr_int_reinterpret(source: &str, target: &str) -> bool {
+        let is_int = |n: &str| matches!(n, "int" | "i64");
+        (source == "ptr" && is_int(target)) || (is_int(source) && target == "ptr")
     }
 
     pub(crate) fn render_type_for_diag(&self, ty: &Type) -> String {
@@ -3983,6 +4000,39 @@ mod tests {
 
     fn test_span() -> Span {
         Span { start: 0, end: 0 }
+    }
+
+    #[test]
+    fn ptr_int_reinterpret_pairs_only() {
+        // ffi-rebuild §4.6.5 / §4.10 S4: `ptr as int` / `int as ptr` are valid
+        // explicit reinterpretations; other pairs are not.
+        assert!(TypeInferenceEngine::is_ptr_int_reinterpret("ptr", "int"));
+        assert!(TypeInferenceEngine::is_ptr_int_reinterpret("int", "ptr"));
+        assert!(TypeInferenceEngine::is_ptr_int_reinterpret("ptr", "i64"));
+        assert!(TypeInferenceEngine::is_ptr_int_reinterpret("i64", "ptr"));
+        // Not a reinterpret pair.
+        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("ptr", "ptr"));
+        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("int", "int"));
+        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("ptr", "number"));
+        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("string", "ptr"));
+        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("usize", "ptr"));
+    }
+
+    /// `ptr as int` and `int as ptr` validate as infallible conversions.
+    #[test]
+    fn ptr_int_infallible_conversion_accepted_both_directions() {
+        let engine = TypeInferenceEngine::new();
+        let ptr = Type::Concrete(TypeAnnotation::Reference("ptr".into()));
+        let int = Type::Concrete(TypeAnnotation::Reference("int".into()));
+        engine
+            .validate_infallible_conversion(&ptr, &int)
+            .expect("ptr as int must be a valid reinterpretation");
+        engine
+            .validate_infallible_conversion(&int, &ptr)
+            .expect("int as ptr must be a valid reinterpretation");
+        // A non-ptr, non-numeric source still fails.
+        let string = BuiltinTypes::string();
+        assert!(engine.validate_infallible_conversion(&string, &ptr).is_err());
     }
 
     #[test]

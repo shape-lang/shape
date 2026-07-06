@@ -930,18 +930,36 @@ enum ForeignInvokeMode {
 
 unsafe fn jit_call_foreign_impl(
     _ctx: *mut JITContext,
-    _foreign_idx: u32,
+    foreign_idx: u32,
     _arg_count: usize,
     _mode: ForeignInvokeMode,
 ) -> u64 {
-    todo!(
-        "phase-2c §2.7.10/Q11: JIT-side kinded foreign-call ABI rebuild — \
-         jit_call_foreign_impl. The foreign_bridge invoke / invoke_native / \
-         invoke_dynamic surfaces still take &[ValueWord]; once that crate's \
-         own kinded-ABI migration lands, args flow as &[KindedSlot] per \
-         ADR-006 §2.7.10/Q11 and the Err() arm constructs the Result::Err \
-         carrier through the kinded HeapKind::Err producer per §2.7.6/Q8. \
-         See docs/cluster-audits/wave-10-jit-playbook.md §5."
+    // ffi-rebuild §4.9 J1 (WF-2A stage 4, Q12): UNREACHABLE by construction.
+    //
+    // Foreign calls execute on the ONE shared interpreter core
+    // `VirtualMachine::invoke_foreign_kinded` (control_flow/mod.rs). The JIT
+    // preflight gate `vm_only_opcode_reason(OpCode::CallForeign)` (see
+    // compiler/accessors.rs) refuses to compile any function or top-level
+    // whose bytecode contains `CallForeign`, so Cranelift codegen never emits
+    // a call to this trampoline — the enclosing function runs in the bytecode
+    // interpreter via the `[jit-fallback]` path. Because tier-2 never runs a
+    // foreign-bearing function, `--mode jit` and `--mode vm` cannot diverge
+    // on foreign-call semantics; the "deopt" is a compile-time refusal with
+    // zero runtime deopt state to get wrong.
+    //
+    // Reaching this body means the preflight gate regressed (a compiler bug):
+    // fail LOUDLY rather than silently return a divergent value. This is NOT
+    // the J2 out-of-line lowering (a deferred pure-perf follow-up, design
+    // OQ9); J2 would lower `CallForeign` to an out-of-line Cranelift call into
+    // this SAME `invoke_foreign_kinded`, preserving the invariant. extern "C"
+    // cannot unwind, so this aborts the process — never confusable with a
+    // real foreign result.
+    unreachable!(
+        "ffi-rebuild §4.9 J1 invariant violated: the JIT reached \
+         jit_call_foreign_impl for foreign fn #{foreign_idx}, but \
+         `vm_only_opcode_reason(OpCode::CallForeign)` (shape-jit \
+         compiler/accessors.rs) should have routed the enclosing function to \
+         the bytecode interpreter. The preflight gate regressed."
     )
 }
 
@@ -971,17 +989,20 @@ pub extern "C" fn jit_call_foreign_dynamic(
 
 unsafe fn jit_call_foreign_native_args_fixed<const N: usize>(
     _ctx: *mut JITContext,
-    _foreign_idx: u32,
+    foreign_idx: u32,
     _args: [u64; N],
 ) -> u64 {
-    todo!(
-        "phase-2c §2.7.10/Q11: JIT-side kinded foreign-call ABI rebuild — \
-         jit_call_foreign_native_args_fixed<N>. Same gating as \
-         jit_call_foreign_impl: foreign_bridge invoke_native still takes \
-         &[ValueWord]; once that crate's own kinded-ABI migration lands, \
-         the fixed-arity boxed_args array becomes [KindedSlot; N] per \
-         ADR-006 §2.7.10/Q11. See \
-         docs/cluster-audits/wave-10-jit-playbook.md §5."
+    // ffi-rebuild §4.9 J1 (WF-2A stage 4, Q12): UNREACHABLE by construction —
+    // same gate as `jit_call_foreign_impl`. `vm_only_opcode_reason(
+    // OpCode::CallForeign)` refuses to JIT foreign-bearing functions, so no
+    // codegen emits a call to this fixed-arity native trampoline. Reaching it
+    // means the preflight gate regressed; abort loudly rather than diverge.
+    unreachable!(
+        "ffi-rebuild §4.9 J1 invariant violated: the JIT reached \
+         jit_call_foreign_native_args_fixed::<{N}> for foreign fn \
+         #{foreign_idx}, but `vm_only_opcode_reason(OpCode::CallForeign)` \
+         should have routed the enclosing function to the bytecode \
+         interpreter. The preflight gate regressed."
     )
 }
 
@@ -1102,98 +1123,17 @@ mod tests {
         let _ = take_jit_runtime_error();
     }
 
-    #[test]
-    #[ignore = "SURFACE: jit_call_foreign_native_0 is extern \"C\" todo!() pending kinded foreign-call ABI rebuild (ADR-006 §2.7.10/Q11, docs/cluster-audits/wave-10-jit-playbook.md §5); extern C can't unwind, so #[should_panic] aborts the test process. Re-enable via `cargo test -- --ignored` once the underlying SURFACE closes."]
-    fn native_fixed_arity_helpers_surface_pending_kinded_abi() {
-        // SURFACE: jit_call_foreign_native_args_fixed routes to todo!()
-        // pending the kinded foreign-call ABI rebuild (§2.7.10/Q11).
-        // Can't use #[should_panic] on extern "C" functions: Rust 1.93+
-        // aborts the process (SIGABRT) on a non-unwinding panic instead of
-        // reporting a clean test failure. Same constraint as
-        // ffi/v2/mod.rs:1060 `test_array_get_oob_returns_none_via_typed_array`.
-        let _ = jit_call_foreign_native_0(std::ptr::null_mut(), 0);
-    }
-
-    // Suppress the unused-helpers lint for the moved `native_fixed_arity_helpers_return_null_for_null_context`.
-    #[allow(dead_code)]
-    fn native_fixed_arity_helpers_return_null_for_null_context() {
-        assert_eq!(jit_call_foreign_native_0(std::ptr::null_mut(), 0), TAG_NULL);
-        assert_eq!(
-            jit_call_foreign_native_1(std::ptr::null_mut(), 0, TAG_NULL),
-            TAG_NULL
-        );
-        assert_eq!(
-            jit_call_foreign_native_2(std::ptr::null_mut(), 0, TAG_NULL, TAG_NULL),
-            TAG_NULL
-        );
-        assert_eq!(
-            jit_call_foreign_native_3(std::ptr::null_mut(), 0, TAG_NULL, TAG_NULL, TAG_NULL),
-            TAG_NULL
-        );
-        assert_eq!(
-            jit_call_foreign_native_4(
-                std::ptr::null_mut(),
-                0,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL
-            ),
-            TAG_NULL
-        );
-        assert_eq!(
-            jit_call_foreign_native_5(
-                std::ptr::null_mut(),
-                0,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL
-            ),
-            TAG_NULL
-        );
-        assert_eq!(
-            jit_call_foreign_native_6(
-                std::ptr::null_mut(),
-                0,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL
-            ),
-            TAG_NULL
-        );
-        assert_eq!(
-            jit_call_foreign_native_7(
-                std::ptr::null_mut(),
-                0,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL
-            ),
-            TAG_NULL
-        );
-        assert_eq!(
-            jit_call_foreign_native_8(
-                std::ptr::null_mut(),
-                0,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL,
-                TAG_NULL
-            ),
-            TAG_NULL
-        );
-    }
+    // ffi-rebuild §4.9 J1 (WF-2A stage 4, Q12): the foreign-call JIT
+    // trampolines (`jit_call_foreign` / `jit_call_foreign_native{,_dynamic}` /
+    // `jit_call_foreign_native_N` → `jit_call_foreign_impl` /
+    // `jit_call_foreign_native_args_fixed`) are now UNREACHABLE by
+    // construction — `vm_only_opcode_reason(OpCode::CallForeign)` refuses to
+    // JIT any function whose bytecode contains `CallForeign`, so no codegen
+    // emits a call to them. The prior `#[ignore]`'d SURFACE test that invoked
+    // `jit_call_foreign_native_0` (aborting the test process on the extern-"C"
+    // `todo!()`) and its stale `return_null_for_null_context` companion are
+    // removed: the J1 invariant is now asserted at the preflight level in
+    // `compiler::accessors` (`call_foreign_is_vm_only_j1` /
+    // `preflight_gates_call_foreign_j1`), which is the load-bearing gate and
+    // is testable without aborting.
 }

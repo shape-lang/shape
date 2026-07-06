@@ -273,7 +273,12 @@ const ALL_OPCODES: &[OpCode] = &[
     OpCode::Halt,
     OpCode::IntToNumber,
     OpCode::NumberToInt,
-    OpCode::CallForeign,
+    // NOTE: `OpCode::CallForeign` is deliberately excluded from ALL_OPCODES
+    // (like the `ConvertTo*` / `*SharedModuleBinding` VM-only opcodes): it is
+    // gated as VM-only by `vm_only_opcode_reason` (ffi-rebuild §4.9 J1), so
+    // the exhaustive `all_opcodes_pass_preflight` invariant (every ALL_OPCODES
+    // entry must pass preflight) stays true. Foreign calls run on the shared
+    // interpreter core; the JIT refuses to compile them.
     OpCode::AddTyped,
     OpCode::SubTyped,
     OpCode::MulTyped,
@@ -663,6 +668,30 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
         | OpCode::TryConvertToChar => Some(
             "WS-12: ConvertTo*/TryConvertTo* (`as` cast) not lowered by the \
              JIT translator; VM-only until per-kind typed convert bodies land",
+        ),
+        // ffi-rebuild §4.9 J1 (WF-2A stage 4, Q12): foreign calls execute on
+        // the ONE shared interpreter core
+        // `VirtualMachine::invoke_foreign_kinded`. The JIT refuses to compile
+        // any function (or top-level) whose bytecode contains `CallForeign`,
+        // so a foreign-bearing function runs in the bytecode interpreter
+        // forever (a deliberate compile-time deopt, logged once via the
+        // `[jit-fallback]` channel). Because tier-2 never runs foreign-bearing
+        // functions, `--mode jit` and `--mode vm` CANNOT diverge on
+        // foreign-call semantics — divergence is impossible by construction
+        // with zero runtime deopt state to get wrong. J2 (an out-of-line
+        // Cranelift call into the SAME `invoke_foreign_kinded`) is a deferred
+        // pure-performance follow-up (design OQ9: no correctness difference).
+        // This mirrors the `ConvertTo*` VM-only precedent immediately above:
+        // the bytecode preflight routes the whole program / function to the
+        // interpreter via the documented `[jit-fallback]` path — surface-and-
+        // stop, NOT a dynamic-fallback shim.
+        OpCode::CallForeign => Some(
+            "ffi-rebuild §4.9 J1: `CallForeign` runs on the shared interpreter \
+             core `VirtualMachine::invoke_foreign_kinded`; the JIT refuses to \
+             compile foreign-bearing functions so `--mode jit` and `--mode vm` \
+             cannot diverge (J2 out-of-line lowering is a deferred pure-perf \
+             follow-up). Whole-program/function deopt to the bytecode \
+             interpreter via the `[jit-fallback]` path.",
         ),
         _ => None,
     }
@@ -1074,6 +1103,90 @@ mod tests {
                 builtin
             );
         }
+    }
+
+    // ── ffi-rebuild §4.9 J1 (WF-2A stage 4, Q12) ────────────────────────
+    // Foreign calls execute on the ONE shared interpreter core
+    // `VirtualMachine::invoke_foreign_kinded`. The JIT refuses to compile any
+    // function/top-level whose bytecode contains `CallForeign`, so `--mode
+    // jit` runs it in the bytecode interpreter via `[jit-fallback]` — making
+    // vm≡jit foreign-call semantics true by construction (zero runtime deopt
+    // state). These tests pin the load-bearing preflight gate.
+
+    #[test]
+    fn call_foreign_is_vm_only_j1() {
+        assert!(
+            vm_only_opcode_reason(OpCode::CallForeign).is_some(),
+            "ffi-rebuild §4.9 J1: CallForeign must be VM-only so the JIT \
+             refuses to compile foreign-bearing functions"
+        );
+    }
+
+    #[test]
+    fn preflight_gates_call_foreign_j1() {
+        // A function body that pushes an arg-count, an arg, and calls a
+        // foreign fn must be classified NON-jittable, routing it to the
+        // interpreter's shared foreign-call core.
+        let instructions = vec![
+            Instruction::simple(OpCode::PushConst),
+            Instruction::simple(OpCode::PushConst),
+            Instruction::new(OpCode::CallForeign, Some(Operand::ForeignFunction(0))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let report = preflight_instructions(&instructions);
+        assert!(
+            !report.can_jit(),
+            "ffi-rebuild §4.9 J1: a CallForeign-bearing instruction stream \
+             must fail preflight (run in the interpreter)"
+        );
+        assert!(
+            report.vm_only_opcodes.contains(&OpCode::CallForeign),
+            "the preflight report must name CallForeign as the VM-only blocker"
+        );
+    }
+
+    #[test]
+    fn preflight_blob_gates_call_foreign_j1() {
+        // Same gate via the per-blob entry point used by the mixed function
+        // table (a foreign call nested inside a user function body).
+        use shape_vm::bytecode::FunctionBlob;
+
+        let blob = FunctionBlob {
+            content_hash: shape_vm::bytecode::FunctionHash::ZERO,
+            name: "calls_foreign".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            instructions: vec![
+                Instruction::simple(OpCode::PushConst),
+                Instruction::new(OpCode::CallForeign, Some(Operand::ForeignFunction(0))),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            constants: vec![],
+            strings: vec![],
+            required_permissions: Default::default(),
+            dependencies: vec![],
+            callee_names: vec![],
+            type_schemas: vec![],
+            source_map: vec![],
+            foreign_dependencies: vec![],
+            frame_descriptor: None,
+            capture_kinds: vec![],
+            capture_names: vec![],
+        };
+
+        let report = preflight_blob_jit_compatibility(&blob);
+        assert!(
+            !report.can_jit(),
+            "ffi-rebuild §4.9 J1: a foreign-bearing function blob must be \
+             classified non-jittable so the mixed table keeps it interpreted"
+        );
     }
 
     // Track A.1D.2 — OwnedMutable opcodes are now JIT-compiled via the

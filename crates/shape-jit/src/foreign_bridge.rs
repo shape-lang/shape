@@ -173,11 +173,26 @@ impl JitForeignBridgeState {
         let result_msgpack = runtime
             .invoke(compiled, &args_msgpack)
             .map_err(|e| format!("Foreign function '{}' error: {}", entry.name, e))?;
+        // Builtin schema ids are needed for the `Option<T>` return arm's
+        // `build_some`/`build_none` carriers (ffi-rebuild §4.4). Static-error
+        // dynamic-language runtimes reach here; `Dynamic`-error runtimes are
+        // refused above (WF-2A stage 4 rewrites this whole bridge to delegate
+        // to `VirtualMachine::invoke_foreign_kinded`).
+        let builtin = shape_runtime::type_schema::builtin_schemas::resolve_builtin_schema_ids(
+            &self.schemas,
+        )
+        .ok_or_else(|| {
+            format!(
+                "Foreign function '{}': builtin Result/Option schemas not registered",
+                entry.name
+            )
+        })?;
         foreign_marshal::unmarshal_result(
             &result_msgpack,
             return_type,
             entry.return_type_schema_id,
             &self.schemas,
+            &builtin,
         )
         .map_err(|e| format!("Foreign function '{}': {}", entry.name, e))
     }
@@ -195,12 +210,14 @@ impl JitForeignBridgeState {
             ));
         };
         // ADR-006 §2.7.10/Q11 dispatch carrier shape: `&[KindedSlot]` for
-        // args, `KindedSlot` for result. The `vm_stack_data` /
-        // `vm_stack_kinds` writeback pair is not threaded through the
-        // foreign-bridge entry yet (Phase-2c FFI rebuild) — pass `None`
-        // and let `invoke_linked_function`'s §2.7.4 stub surface the
-        // rebuild gap.
-        native_abi::invoke_linked_function(linked, args, raw_invoker, None, None)
+        // args, `KindedSlot` for result. WF-2A stage 2 dropped the writeback
+        // pair (§3.5/§4.6.4) and the callback re-entry invoker (callbacks are
+        // a later sub-wave), so the native invoke is a pure `(linked, args)`
+        // call. NOTE: WF-2A stage 4 (§4.9) rewrites this whole bridge as a
+        // thin delegate to the shared `VirtualMachine::invoke_foreign_kinded`;
+        // this direct call keeps the bridge compiling until then.
+        let _ = raw_invoker;
+        native_abi::invoke_linked_function(linked, args)
             .map_err(|e| format!("Native function '{}' error: {}", entry.name, e))
     }
 

@@ -88,6 +88,33 @@ test-deep:
 test-integration:
 	ulimit -v {{test-mem-cap-kib}} && cargo test -p shape-test
 
+# Foreign-call (FFI) e2e tier (ffi-rebuild §7, WF-2A stage 5).
+#
+# `bin/shape-cli/tests/ffi_e2e.rs` drives the real `shape` binary end-to-end
+# across all three foreign verticals. The `extern C` probes need no extension
+# and ALSO run in the default gate (`cargo test --workspace --all-targets`);
+# the `fn python` / `fn typescript` probes are `#[ignore]`'d there because they
+# need the built runtime `.so`s + CPython/V8. This tier builds the extensions
+# first, then runs the FULL matrix via `--include-ignored`. Wired into
+# `.github/workflows/ci.yml` as the `ffi` job so it is a CI tier that actually
+# runs (the 2026-07-04 audit's root cause was foreign e2e tests gated out of
+# every tier). `SHAPE_FFI_EXT_DIR` points the harness at the built `.so`s;
+# absent extensions make the harness PANIC (never silently skip).
+#
+# NOTE: unlike the other test recipes this tier does NOT wrap the run in
+# `ulimit -v {{test-mem-cap-kib}}`. Loading the TypeScript extension initializes
+# V8, whose pointer-compression sandbox reserves a ~1 TB contiguous *virtual*
+# address range up front (committed lazily). A `ulimit -v` cap makes that
+# reservation fail with "Fatal process out of memory: Oilpan: CagedHeap
+# reservation" the instant the `.so` is loaded — even for the python probes,
+# since the harness loads every extension in SHAPE_FFI_EXT_DIR. Foreign-runtime
+# memory is outside the VM-heap accounting anyway (ffi-rebuild §4.8.3), so the
+# VM memory cap does not apply here. The CI `ffi` job runs the same commands
+# without a cap for the same reason.
+test-ffi: build-extensions
+	SHAPE_FFI_EXT_DIR="{{justfile_directory()}}/extensions" cargo test -p shape-cli --test ffi_e2e -- --include-ignored
+	cargo test -p shape-test --features e2e-python,e2e-typescript --test e2e_gated
+
 # Run all tests for a single crate
 test-crate crate:
 	ulimit -v {{test-mem-cap-kib}} && (cargo test -p {{crate}} --features deep-tests 2>/dev/null || cargo test -p {{crate}})

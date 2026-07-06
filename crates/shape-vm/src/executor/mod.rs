@@ -85,6 +85,13 @@ pub enum PermissionError {
     },
     /// Linking failed before permission checking could occur.
     LinkError(String),
+    /// A `Deterministic` execution context loaded a program whose transitive
+    /// `required_permissions` include `Ffi` (ffi-rebuild §4.8.3, Q6). Foreign
+    /// bodies are unobservable side-effect sources — determinism cannot be
+    /// attested through the extension vtable — so a Deterministic context
+    /// refuses foreign-bearing programs at LOAD time, before any bytecode runs.
+    /// This fires even when `Ffi` is itself granted.
+    DeterministicForeignRefused,
 }
 
 impl std::fmt::Display for PermissionError {
@@ -99,6 +106,12 @@ impl std::fmt::Display for PermissionError {
                 )
             }
             PermissionError::LinkError(msg) => write!(f, "link error: {msg}"),
+            PermissionError::DeterministicForeignRefused => write!(
+                f,
+                "deterministic execution refuses foreign code: this program requires the Ffi \
+                 permission (extern C / embedded Python/TypeScript), and foreign bodies cannot \
+                 be attested deterministic through the extension boundary"
+            ),
         }
     }
 }
@@ -440,9 +453,32 @@ pub struct VirtualMachine {
     /// Stores spawned callables and tracks their completion status.
     pub(crate) task_scheduler: task_scheduler::TaskScheduler,
 
-    /// Compiled foreign function handles (linked at pre-execution time).
-    /// Index corresponds to program.foreign_functions index.
+    /// Compiled foreign function handles, lazily linked at FIRST CALL
+    /// (WF-2A stage 1 lazy linking, ffi-rebuild §4.2). Index corresponds to
+    /// `program.foreign_functions`. All entries start `None` at program load;
+    /// `op_call_foreign` / `invoke_foreign_kinded` performs link-now on the
+    /// first call to each foreign function. Declaring a foreign function is
+    /// never fatal — link/compile failures surface as structured errors at
+    /// first call (or up front under `--eager-link`).
     pub(crate) foreign_fn_handles: Vec<Option<ForeignFunctionHandle>>,
+
+    /// VM-level language-runtime registry (ffi-rebuild §4.2). Maps a language
+    /// id (e.g. `"python"`) to its loaded extension runtime. Populated by the
+    /// engine when it constructs the `Execution` (same threading shape
+    /// `remote.rs` already uses). The dynamic foreign-call link-now path
+    /// (`fn python` / `fn typescript`) looks the runtime up here.
+    pub(crate) language_runtimes: HashMap<
+        String,
+        std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
+    >,
+
+    /// Per-VM `dlopen` cache for `extern C` native libraries, keyed by the
+    /// declared library alias/path. Moved out of the deleted eager-link loop
+    /// (ffi-rebuild §4.2) so repeated links to one library share a single
+    /// `dlopen`. Each `Arc<Library>` keep-alive is also held by every
+    /// `NativeLinkedFunction` that resolved a symbol from it.
+    pub(crate) native_library_cache:
+        HashMap<String, std::sync::Arc<libloading::Library>>,
 
     /// Content hashes for each function, indexed by function_id.
     /// Populated from `BytecodeProgram.content_addressed` or `LinkedProgram`.

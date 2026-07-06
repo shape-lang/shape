@@ -280,9 +280,19 @@ impl PythonRuntime {
                     .call1(&py_tuple)
                     .map_err(|e| error_mapping::format_python_error(py, &e, func))?;
 
-                // 4. Convert result -> msgpack (type-aware path)
-                let result_value =
-                    marshaling::pyobject_to_typed_msgpack(py, &result, &func.return_type)?;
+                // 4. Convert result -> msgpack (STRUCTURAL / untyped path).
+                //
+                // ffi-rebuild §4.5 (1b) / clause-2 host-as-oracle: the HOST is
+                // the single return-type conformance oracle. The extension
+                // returns the value structurally; shape-vm's `unmarshal_result`
+                // validates it against the declared type. This keeps a genuine
+                // Python EXCEPTION (rc != 0 → class-1 `Err`, §4.5 (1a)) cleanly
+                // distinguishable from a NONCONFORMING return (host-detected →
+                // class-1 `Err` with the `TypeConformanceError:` discriminator,
+                // §4.5 (1b)). Pre-validating here would collapse both into the
+                // rc != 0 channel and defeat the discriminator. `func.return_type`
+                // is intentionally not consulted for the return value.
+                let result_value = marshaling::pyobject_to_msgpack(py, &result)?;
                 rmp_serde::to_vec(&result_value)
                     .map_err(|e| format!("Failed to serialize result: {}", e))
             })

@@ -1,5 +1,24 @@
 use super::super::*;
 
+/// ffi-rebuild §4.8.3 (Q6): a `Deterministic` execution context refuses a
+/// foreign-bearing program at LOAD time. `required ∋ Ffi` is compile-time-
+/// derived (`compile_foreign_function`, §4.8.3) and load-time-visible, so
+/// refusal happens before a single instruction runs — zero side effects. The
+/// gate fires even when `Ffi` is itself granted: foreign bodies are
+/// unobservable side-effect sources and determinism cannot be attested through
+/// the extension vtable.
+fn deterministic_foreign_gate(
+    required: &shape_abi_v1::PermissionSet,
+    granted: &shape_abi_v1::PermissionSet,
+) -> Result<(), PermissionError> {
+    if granted.contains(&shape_abi_v1::Permission::Deterministic)
+        && required.contains(&shape_abi_v1::Permission::Ffi)
+    {
+        return Err(PermissionError::DeterministicForeignRefused);
+    }
+    Ok(())
+}
+
 impl VirtualMachine {
     /// Load a program into the VM
     pub fn load_program(&mut self, program: BytecodeProgram) {
@@ -361,6 +380,7 @@ impl VirtualMachine {
     ) -> Result<(), PermissionError> {
         let linked =
             crate::linker::link(&program).map_err(|e| PermissionError::LinkError(e.to_string()))?;
+        deterministic_foreign_gate(&linked.total_required_permissions, granted)?;
         if !linked.total_required_permissions.is_subset(granted) {
             let missing = linked.total_required_permissions.difference(granted);
             return Err(PermissionError::InsufficientPermissions {
@@ -383,6 +403,7 @@ impl VirtualMachine {
         linked: crate::bytecode::LinkedProgram,
         granted: &shape_abi_v1::PermissionSet,
     ) -> Result<(), PermissionError> {
+        deterministic_foreign_gate(&linked.total_required_permissions, granted)?;
         if !linked.total_required_permissions.is_subset(granted) {
             let missing = linked.total_required_permissions.difference(granted);
             return Err(PermissionError::InsufficientPermissions {

@@ -280,6 +280,10 @@ pub enum Commands {
         /// Path to a .shape file or project directory (with shape.toml).
         /// If omitted, checks the current directory as a project.
         path: Option<PathBuf>,
+        /// Additionally verify that every foreign function links/resolves
+        /// (`extern C` libraries dlopen + symbol-resolve). Executes nothing.
+        #[arg(long)]
+        link: bool,
     },
 
     /// Start the Shape execution server (in-process VM, replaces wire-serve)
@@ -355,6 +359,12 @@ pub struct RunCommandOptions {
     /// Resume execution from a snapshot hash
     #[arg(long, value_name = "HASH")]
     pub resume: Option<String>,
+
+    /// Eagerly link/compile every foreign function (`extern C` / `fn python`
+    /// / `fn typescript`) up front, before executing — reporting all
+    /// link/compile failures. Default is lazy (link at first call).
+    #[arg(long)]
+    pub eager_link: bool,
 
     #[command(flatten)]
     pub runtime: RuntimeCommandOptions,

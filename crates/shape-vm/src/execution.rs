@@ -25,7 +25,7 @@ use std::sync::Arc;
 use crate::bytecode::BytecodeProgram;
 use crate::compiler::BytecodeCompiler;
 use crate::configuration::BytecodeExecutor;
-use crate::executor::{ForeignFunctionHandle, VMConfig, VirtualMachine};
+use crate::executor::{VMConfig, VirtualMachine};
 
 use shape_ast::Program;
 use shape_runtime::context::ExecutionContext;
@@ -712,39 +712,40 @@ impl BytecodeExecutor {
         // vm_impl/modules.rs) — calling it is a no-op until the kinded
         // module-binding cell-storage rebuild lands per ADR-006 §2.7.8 / Q10.
         vm.populate_module_objects();
-        vm.foreign_fn_handles.clear();
-        if !vm.program.foreign_functions.is_empty() {
-            let entries = vm.program.foreign_functions.clone();
-            let mut handles: Vec<Option<ForeignFunctionHandle>> = Vec::with_capacity(entries.len());
-            let mut native_library_cache: std::collections::HashMap<
-                String,
-                std::sync::Arc<libloading::Library>,
-            > = std::collections::HashMap::new();
-            for (idx, entry) in entries.iter().enumerate() {
-                if let Some(native_spec) = &entry.native_abi {
-                    let linked = crate::executor::native_abi::link_native_function(
-                        native_spec,
-                        &vm.program.native_struct_layouts,
-                        &mut native_library_cache,
-                    )
-                    .map_err(|e| {
-                        shape_runtime::error::ShapeError::RuntimeError {
-                            message: format!(
-                                "Failed to link native function '{}': {}",
-                                entry.name, e
-                            ),
-                            location: None,
-                        }
-                    })?;
-                    vm.program.foreign_functions[idx].dynamic_errors = false;
-                    handles.push(Some(ForeignFunctionHandle::Native(std::sync::Arc::new(
-                        linked,
-                    ))));
-                    continue;
-                }
-                handles.push(None);
+
+        // WF-2A stage 1 — LAZY LINKING (ffi-rebuild §4.2). The eager
+        // link-at-load loop is DELETED: declaring a foreign function
+        // (`extern C fn` / `fn python` / `fn typescript`) is NEVER fatal.
+        // Every handle starts `None`; `op_call_foreign` / the shared
+        // `invoke_foreign_kinded` core performs link-now on first call and
+        // surfaces link/compile failures there as structured errors. This
+        // also drops the deleted loop's `dynamic_errors = false` runtime flip
+        // — the compile side already stamps `dynamic_errors: dynamic_language`
+        // on the entry, so no consumer loses the flag.
+        vm.foreign_fn_handles =
+            std::iter::repeat_with(|| None)
+                .take(vm.program.foreign_functions.len())
+                .collect();
+        // Install the VM-level language-runtime registry (ffi-rebuild §4.2) so
+        // the dynamic foreign-call link-now path can resolve its runtime —
+        // same threading shape `remote.rs` uses.
+        vm.set_language_runtimes(engine.language_runtimes());
+
+        // Opt-in eager foreign linking (WF-2A stage 1, `shape run --eager-link`
+        // / CI validation): link/compile EVERY foreign function up front,
+        // reporting ALL failures, BEFORE executing a single instruction. The
+        // default stays lazy.
+        if engine.eager_link_foreign() {
+            if let Err(errors) = vm.eager_link_all() {
+                return Err(shape_runtime::error::ShapeError::RuntimeError {
+                    message: format!(
+                        "eager foreign linking failed ({} error(s)):\n  - {}",
+                        errors.len(),
+                        errors.join("\n  - ")
+                    ),
+                    location: None,
+                });
             }
-            vm.foreign_fn_handles = handles;
         }
 
         // Install the snapshot persistence context (design §4.1 / §4.3.4) so

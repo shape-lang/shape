@@ -1006,6 +1006,35 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
+        // ── ptr ↔ int bit-preserving reinterpretation (ffi-rebuild §4.6.5 / S4) ──
+        // `ptr` and `int` are both 64-bit scalars; the cast relabels the slot
+        // without changing its bits — value-changing for high-bit pointers
+        // (they reinterpret to negative ints), hence explicit-only. Not an
+        // `Into` impl, not a numeric-lattice conversion: a dedicated bit-move
+        // via `CastWidth(I64)` that stamps `NativeKind::Int64`. `as ptr` then
+        // carries the raw 64 bits as the opaque pointer scalar; `ptr as int`
+        // restamps to `Int64` so int arithmetic on a pointer value works.
+        if let Some(target) = Self::try_into_name_from_annotation(type_annotation) {
+            let target_is_ptr = target == "ptr";
+            let target_is_int = target == "int" || target == "i64";
+            if (target_is_ptr || target_is_int)
+                && let Some(src) = self.cast_source_name(expr)
+            {
+                let src_is_ptr = src == "ptr";
+                let src_is_int = src == "int" || src == "i64";
+                if (src_is_ptr && target_is_int) || (src_is_int && target_is_ptr) {
+                    self.compile_expr(expr)?;
+                    self.emit(Instruction::new(
+                        OpCode::CastWidth,
+                        Some(Operand::Width(NumericWidth::I64)),
+                    ));
+                    self.last_expr_type_info =
+                        Some(crate::type_tracking::VariableTypeInfo::named(target));
+                    return Ok(());
+                }
+            }
+        }
+
         // ── Width integer cast: `expr as i8`, `expr as u16`, etc. ──
         // Emits CastWidth which does bit-truncation (Rust-style). Not Into-based.
         if let TypeAnnotation::Basic(name) = type_annotation {

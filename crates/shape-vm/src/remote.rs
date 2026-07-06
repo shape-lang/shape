@@ -972,6 +972,18 @@ fn run_remote_call(
                         RemoteErrorKind::RuntimeError,
                         format!("link failed for '{}': {s}", request.function_name),
                     ),
+                    crate::executor::PermissionError::DeterministicForeignRefused => {
+                        RemoteCallError::new(
+                            RemoteErrorKind::PermissionDenied,
+                            format!(
+                                "remote call '{}' refused — this program requires the Ffi \
+                                 permission (extern C / embedded Python/TypeScript), and a \
+                                 deterministic execution context cannot attest foreign bodies \
+                                 through the extension boundary",
+                                request.function_name,
+                            ),
+                        )
+                    }
                 })?;
         }
         // Full-payload fallback: no content-addressed metadata to verify or
