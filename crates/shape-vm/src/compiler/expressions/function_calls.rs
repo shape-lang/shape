@@ -5660,6 +5660,24 @@ impl BytecodeCompiler {
             }
         }
 
+        // Q33 / distributed §4.1.1: `remote::call(addr, fn_ref, arg0, arg1, …)`
+        // is compiler-recognized — the same special-casing class as
+        // `as`-casts → `__into_*`. Resolve `fn_ref` to a concrete function
+        // type, positionally type-check the call args against its declared
+        // param types (compile error on arity / type mismatch — never a
+        // runtime coercion), lower the args to a TypedObject `_0.._n` pack
+        // carrier (per-field kinds proven from the compiled args), and dispatch
+        // to the internal `__call_raising` sibling with `R` instantiated from
+        // `fn_ref`'s declared return type.
+        if canonical_module == "std::core::remote" && method == "call" {
+            return self.compile_remote_call_elaboration(
+                binding_name,
+                namespace_name,
+                namespace_span,
+                args,
+            );
+        }
+
         // Shape-source module exports (non-native) compile as regular functions.
         // Route namespace calls to direct function dispatch so const-template
         // specialization/comptime handlers run in the same compiler context.
@@ -5840,6 +5858,219 @@ impl BytecodeCompiler {
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
         Ok(())
+    }
+
+    /// Q33 / distributed §4.1.1: elaborate a direct
+    /// `remote::call(addr, fn_ref, args…)` site — the imperative analog of the
+    /// `@remote` annotation path, in the same special-casing class as
+    /// `as`-casts → `__into_*`.
+    ///
+    /// 1. Resolve `fn_ref` to a statically-known callable — a named function
+    ///    declaration (R1) OR a `let`-bound closure literal (R2). Both surface
+    ///    the same `(params, return_type)` signature: a named function via its
+    ///    `FunctionDef`, a closure value via its retained `ClosureBodyPeek`
+    ///    (`local_callable_closure_bodies` / `module_binding_callable_closure_bodies`,
+    ///    the same peek the value-call return-inference path reads). §4.1.1: for
+    ///    a closure value "the type is static, the callee identity is not" — the
+    ///    signature type-checks at compile time; the runtime `Ptr(HeapKind::Closure)`
+    ///    value (with its captures) is resolved by the sender's closure arm
+    ///    (`remote_builtins.rs::call_remote`).
+    /// 2. Positionally type-check each call arg against the declared param
+    ///    type — a proven mismatch (or an un-provable arg against a concrete
+    ///    declared param) is a COMPILE error, never a runtime coercion.
+    /// 3. Lower the positional call args into a TypedObject `_0.._n` pack
+    ///    carrier whose per-field kinds are the compiled arg kinds (the
+    ///    supervisor-D1 tuple carrier — no new `HeapKind::Tuple`).
+    /// 4. Dispatch to the internal `__call_raising` sibling (§4.1.2), then
+    ///    instantiate the call-site type `R` from `fn_ref`'s declared return
+    ///    type (scalars / strings project through the typed return carrier
+    ///    today; heap-shaped returns are R3).
+    fn compile_remote_call_elaboration(
+        &mut self,
+        binding_name: &str,
+        namespace_name: &str,
+        namespace_span: Span,
+        args: &[Expr],
+    ) -> Result<()> {
+        use shape_ast::ast::{FunctionParameter, TypeAnnotation};
+
+        if args.len() < 2 {
+            return Err(ShapeError::SemanticError {
+                message: "remote::call(addr, fn, args…) requires at least a server address \
+                          and a function reference"
+                    .to_string(),
+                location: Some(self.span_to_source_location(namespace_span)),
+            });
+        }
+        let addr_expr = args[0].clone();
+        let fn_ref_expr = args[1].clone();
+        let call_args = &args[2..];
+
+        // (1) Resolve `fn_ref` to a statically-known callable and recover its
+        // declared signature `(params, return_type)`. A bare identifier can name
+        // either a top-level function (R1) or a `let`-bound closure value (R2).
+        let fn_name = match &fn_ref_expr {
+            Expr::Identifier(name, _) => name.clone(),
+            _ => {
+                return Err(ShapeError::SemanticError {
+                    message: "remote::call: the function reference must name a \
+                              statically-known function or closure binding"
+                        .to_string(),
+                    location: Some(self.span_to_source_location(fn_ref_expr.span())),
+                });
+            }
+        };
+        let resolved_name = self
+            .function_aliases
+            .get(&fn_name)
+            .cloned()
+            .unwrap_or_else(|| fn_name.clone());
+
+        // Named-function declaration first (R1); then a retained closure-literal
+        // peek for a `let`-bound closure value (R2). Both yield the same
+        // `(Vec<FunctionParameter>, Option<TypeAnnotation>)` signature shape.
+        let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) = if let Some(
+            func_def,
+        ) = self
+            .function_defs
+            .get(&resolved_name)
+            .or_else(|| self.function_defs.get(&fn_name))
+            .cloned()
+        {
+            (func_def.params, func_def.return_type)
+        } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
+            (peek.params, peek.return_type)
+        } else {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "remote::call: '{}' is not a statically-known function or closure binding",
+                    fn_name
+                ),
+                location: Some(self.span_to_source_location(fn_ref_expr.span())),
+            });
+        };
+
+        // (2) Arity check.
+        if call_args.len() != params.len() {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "remote::call: '{}' expects {} argument(s), but {} were supplied",
+                    fn_name,
+                    params.len(),
+                    call_args.len()
+                ),
+                location: Some(self.span_to_source_location(namespace_span)),
+            });
+        }
+
+        // (2 cont.) Positional type-check each arg against the declared param
+        // type. A proven mismatch is a COMPILE error (no runtime coercion); an
+        // arg whose type cannot be proven against a concretely-declared param
+        // is also rejected — strict typing has no `any` escape hatch.
+        for (i, arg) in call_args.iter().enumerate() {
+            let param = &params[i];
+            let Some(param_ann) = param.type_annotation.as_ref() else {
+                // Unannotated / wildcard param: nothing concrete to prove against.
+                continue;
+            };
+            let Some(param_ct) =
+                crate::compiler::v2_map_emission::concrete_type_from_annotation(param_ann)
+            else {
+                // Param type not concretely resolvable at this layer (user
+                // struct / generic): leave to the receiver-side ABI check.
+                continue;
+            };
+            match concrete_type_for_expr(self, arg) {
+                Some(arg_ct) if arg_ct == param_ct => {}
+                Some(arg_ct) => {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "remote::call: argument #{} to '{}' has type `{}`, but the \
+                             declared parameter type is `{}`",
+                            i + 1,
+                            fn_name,
+                            arg_ct,
+                            param_ct
+                        ),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
+                None => {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "remote::call: cannot statically prove the type of argument #{} \
+                             to '{}' (declared parameter type `{}`) — annotate the value",
+                            i + 1,
+                            fn_name,
+                            param_ct
+                        ),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
+            }
+        }
+
+        // (3) Lower the positional args to a TypedObject `_0.._n` pack. Fields
+        // are emitted in call order, so the object's slot order is the
+        // positional argument order the receiver marshals against.
+        let pack_entries: Vec<ObjectEntry> = call_args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| ObjectEntry::Field {
+                key: format!("_{i}"),
+                value: arg.clone(),
+                type_annotation: None,
+            })
+            .collect();
+        let pack_expr = Expr::Object(pack_entries, namespace_span);
+
+        // Dispatch to the internal `__call_raising` sibling (§4.1.2).
+        let rewritten = vec![addr_expr, fn_ref_expr, pack_expr];
+        self.compile_module_namespace_call_on_binding(
+            binding_name,
+            namespace_name,
+            namespace_span,
+            "__call_raising",
+            &[],
+            &rewritten,
+        )?;
+
+        // (4) Instantiate `R` from `fn_ref`'s declared return type so the call
+        // site is typed at the callee's return type (not the `_` wildcard of
+        // `__call_raising`).
+        if let Some(ret_ann) = return_type.as_ref() {
+            self.last_expr_type_info = self.type_info_from_annotation(ret_ann);
+            self.last_expr_schema = self
+                .last_expr_type_info
+                .as_ref()
+                .and_then(Self::value_schema_from_type_info);
+        }
+        Ok(())
+    }
+
+    /// Resolve a `let`-bound closure value's retained [`ClosureBodyPeek`] by
+    /// binding name (distributed §4.1.1 R2). Locals take priority over module
+    /// bindings, mirroring the value-call return-inference lookup chain at the
+    /// top of `compile_module_function_call`. Returns `None` when the name is
+    /// not a closure binding whose literal was retained (e.g. a closure passed
+    /// in as a function parameter — its body is not statically reachable, so
+    /// `remote::call` cannot type-check it and reports the clean §4.1.1 error).
+    fn remote_closure_peek(&self, name: &str) -> Option<crate::compiler::ClosureBodyPeek> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            self.local_callable_closure_bodies.get(&local_idx).cloned()
+        } else if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
+            self.module_bindings.get(&scoped).and_then(|idx| {
+                self.module_binding_callable_closure_bodies
+                    .get(idx)
+                    .cloned()
+            })
+        } else {
+            self.module_bindings.get(name).and_then(|idx| {
+                self.module_binding_callable_closure_bodies
+                    .get(idx)
+                    .cloned()
+            })
+        }
     }
 
     /// Extract the field name from a simple closure like `row => row.field`.

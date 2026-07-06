@@ -25,6 +25,15 @@ impl VirtualMachine {
         // Content-addressed bytecode is the canonical runtime format.
         // Do not silently fall back to the flat instruction stream if linking fails.
         if let Some(ref ca_program) = program.content_addressed {
+            // Preserve the content-addressed blob store on the running program.
+            // The linker drops `content_addressed` (linker.rs sets it `None` on
+            // the LinkedProgram), but distributed per-function transfer
+            // (`remote::call` on a closure value — distributed §4.1.1/§4.4)
+            // resolves the callee's minimal blob closure from
+            // `ContentAddressedProgram.function_store` at call time. Re-attaching
+            // the store here (post-link) makes that `ContentBlobSupplier` source
+            // real for the SENDER without changing the linked execution program.
+            let ca_clone = ca_program.clone();
             let linked = crate::linker::link(ca_program).unwrap_or_else(|e| {
                 panic!(
                     "content-addressed linker failed ({} function blobs): {}",
@@ -33,6 +42,7 @@ impl VirtualMachine {
                 )
             });
             self.load_linked_program(linked);
+            self.program.content_addressed = Some(ca_clone);
             return;
         }
 
@@ -390,6 +400,13 @@ impl VirtualMachine {
             });
         }
         self.load_linked_program(linked);
+        // Preserve the content-addressed blob store on the running program for
+        // distributed per-function transfer (`remote::call` on a closure value —
+        // distributed §4.1.1/§4.4). The linker drops `content_addressed`; the
+        // SENDER resolves the callee's minimal blob closure from
+        // `ContentAddressedProgram.function_store` at call time. Mirror of the
+        // re-attach in `load_program`.
+        self.program.content_addressed = Some(program);
         Ok(())
     }
 

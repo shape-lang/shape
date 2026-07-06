@@ -55,6 +55,15 @@ rpassword = "5"
 tempfile = "3.24"
 flate2 = "1"
 tar = "0.4"
+# WF-2C-fu R4: active TLS-on-TCP termination for the `shape serve` accept loop.
+# These are NOT a new TLS stack — tokio-rustls 0.26 / rustls 0.23 are already in
+# the workspace lockfile (transitive via reqwest → hyper-rustls; shape-wire's
+# `quic` feature). We only surface them as direct deps of the CLI so the serve
+# accept loop can build a `TlsAcceptor`. `rustls-pemfile` parses the operator's
+# `--tls-cert`/`--tls-key` PEM files into rustls-pki-types DER.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
 
 # Cluster-2 closure-wave-F (2026-05-16): tracing-subscriber for the
 # `--trace-jit` CLI flag. Optional deps under the `jit-trace` feature; the
@@ -73,6 +82,10 @@ tempfile = "3.24"
 shape-wire = { workspace = true }
 assert_cmd = "2.0"
 predicates = "3.1"
+# WF-2C-fu R4: throwaway self-signed cert generation for the TLS-termination
+# integration test (no secrets committed; the cert lives in a tempdir). Already
+# in the workspace lockfile via shape-wire's `quic` feature.
+rcgen = "0.13"
 
 [[bin]]
 name = "shape"
