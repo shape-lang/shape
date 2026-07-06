@@ -418,47 +418,27 @@ fn resolve_json_schema_id(
     ambient.get("Json").map(|schema| schema.id as u64)
 }
 
-/// Resolve the `TypeSchema` for a `TypedObject` node, robust against registry
-/// by-id COLLISIONS.
+/// Resolve the `TypeSchema` for a `TypedObject` node from its numeric handle.
 ///
-/// WF-2E (2026-07-05): a `TypedObject` carries only a numeric `schema_id`, and
-/// the schema registries can map one id to MORE THAN ONE schema — observed:
-/// a predeclared `XmlNode`-shaped schema and the builtin `Json` enum both
-/// answer to id 41, and `get_by_id` / `lookup_schema_by_id_public` return the
-/// `Json` schema (2 fields) for an XmlNode node (3 fields), so the walk emits
-/// "node missing 'name'". The node's own STRUCTURE disambiguates: its actual
-/// slot count is the arity of its true schema. This resolver gathers every
-/// candidate schema registered under `schema_id` (execution registry by-id,
-/// ambient by-id, and the ambient predeclared table — the predeclared entry is
-/// otherwise unreachable because `lookup_schema_by_id` returns the colliding
-/// by-id hit first) and prefers the one whose field count equals `slot_count`.
+/// WF-3A (ADR-006 §2.7.30): schema identity is content-derived and
+/// per-registry interned, so within any single registry a handle resolves to
+/// exactly one structure — the WF-2E id-41 `XmlNode`/`Json` collision (which
+/// required a runtime arity heuristic across three registries to disambiguate)
+/// is structurally impossible. This is a single `get_by_id`: prefer the
+/// caller-supplied execution registry (where the node was constructed), then
+/// fall back to the ambient/predeclared lookup for ad-hoc / const-eval nodes.
 fn resolve_typed_object_schema(
     schema_id: u64,
-    slot_count: usize,
     schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
 ) -> Option<crate::type_schema::TypeSchema> {
     use crate::type_schema::lookup_schema_by_id_public;
     let id = schema_id as u32;
-    let mut candidates: Vec<crate::type_schema::TypeSchema> = Vec::new();
     if let Some(registry) = schemas {
         if let Some(schema) = registry.get_by_id(id) {
-            candidates.push(schema.clone());
+            return Some(schema.clone());
         }
     }
-    if let Some(schema) = lookup_schema_by_id_public(id) {
-        candidates.push(schema);
-    }
-    let ambient = crate::type_schema::current_registry();
-    if let Some(schema) = ambient.lookup_predeclared_by_id(id) {
-        candidates.push(schema);
-    }
-    // Prefer the candidate whose arity matches the node's actual slot count
-    // (the collision-robust choice); fall back to the first candidate.
-    candidates
-        .iter()
-        .find(|s| s.fields.len() == slot_count)
-        .cloned()
-        .or_else(|| candidates.into_iter().next())
+    lookup_schema_by_id_public(id)
 }
 
 /// Attempt to invert a `Json` enum `TypedObject` node back to its logical
@@ -585,7 +565,7 @@ fn typed_object_to_json_value(
         }
     }
 
-    let schema = resolve_typed_object_schema(schema_id, slots.len(), schemas).ok_or_else(|| {
+    let schema = resolve_typed_object_schema(schema_id, schemas).ok_or_else(|| {
         format!(
             "heap_to_json_value: unknown TypedObject schema id {}",
             schema_id

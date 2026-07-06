@@ -1098,10 +1098,13 @@ impl BytecodeCompiler {
         left_schema_id: shape_runtime::type_schema::SchemaId,
         right_schema_id: shape_runtime::type_schema::SchemaId,
     ) -> Result<shape_runtime::type_schema::SchemaId> {
+        // WF-3A: the by-name `__merged_L_R` dedup cache is gone — content-
+        // interning subsumes it. The merged schema is anonymous, so it interns
+        // by STRUCTURAL content id; two merges producing the same field layout
+        // share one handle automatically (and, critically, the inline `[z]`
+        // schema and the merged `[x,y,z]` schema now get DISTINCT handles — the
+        // object-spread collision root).
         let schema_name = format!("__merged_{}_{}", left_schema_id, right_schema_id);
-        if let Some(existing) = self.type_tracker.schema_registry().get(&schema_name) {
-            return Ok(existing.id);
-        }
 
         let (left_fields, right_fields) = {
             let registry = self.type_tracker.schema_registry();

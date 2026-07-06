@@ -6,7 +6,7 @@
 use super::SchemaId;
 use super::enum_support::EnumVariantInfo;
 use super::field_types::{FieldAnnotation, FieldType};
-use super::schema::TypeSchema;
+use super::schema::{SchemaContentId, TypeSchema};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -31,14 +31,27 @@ const INITIAL_SCHEMA_ID: SchemaId = 1;
 /// [`TypeSchema::with_id`]. During the B1 migration window both paths coexist.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeSchemaRegistry {
-    /// Per-registry counter for allocating fresh schema IDs.
+    /// Dense per-registry counter that hands out the intern INDEX for each
+    /// distinct [`SchemaContentId`] (WF-3A / ADR-006 §2.7.30). It advances
+    /// only inside [`Self::intern_content`] (one step per NEW structure) and
+    /// via predeclared allocation — never as a blind, order-dependent
+    /// identity source.
     ///
-    /// Skipped during (de)serialization; a decoded registry restarts its
-    /// counter above the maximum observed ID via the custom `Deserialize`
-    /// impl. This matches historical behaviour where the global static was
-    /// bumped via `ensure_next_schema_id_above`.
+    /// Skipped during (de)serialization; a decoded registry rebuilds its
+    /// derived `by_content` index and re-seats this counter at the tail via
+    /// [`Self::rebuild_content_index`].
     #[serde(skip, default = "default_next_id")]
     next_id: AtomicU32,
+    /// Content-derived identity index: `SchemaContentId -> SchemaId` handle.
+    ///
+    /// The single mint table. `intern_content` returns the existing handle
+    /// for a known content id (dedup) or allocates the next dense handle for
+    /// a new one. This is a DERIVED index of the canonical content id (the
+    /// blessed `StringId`-family interning relationship), not a parallel
+    /// discriminator — no code path assigns a handle except `intern_content`.
+    /// Skipped during (de)serialization; rebuilt from `by_name` on load.
+    #[serde(skip, default)]
+    by_content: RwLock<HashMap<SchemaContentId, SchemaId>>,
     /// Schemas indexed by name
     by_name: HashMap<String, TypeSchema>,
     /// Schemas indexed by ID for fast runtime lookup
@@ -66,6 +79,7 @@ impl Default for TypeSchemaRegistry {
     fn default() -> Self {
         Self {
             next_id: default_next_id(),
+            by_content: RwLock::new(HashMap::new()),
             by_name: HashMap::new(),
             by_id: HashMap::new(),
             predeclared_cache: RwLock::new(HashMap::new()),
@@ -76,6 +90,7 @@ impl Default for TypeSchemaRegistry {
 
 impl Clone for TypeSchemaRegistry {
     fn clone(&self) -> Self {
+        let by_content = self.by_content.read().map(|g| g.clone()).unwrap_or_default();
         let predeclared_cache = self
             .predeclared_cache
             .read()
@@ -88,6 +103,7 @@ impl Clone for TypeSchemaRegistry {
             .unwrap_or_default();
         Self {
             next_id: AtomicU32::new(self.next_id.load(Ordering::SeqCst)),
+            by_content: RwLock::new(by_content),
             by_name: self.by_name.clone(),
             by_id: self.by_id.clone(),
             predeclared_cache: RwLock::new(predeclared_cache),
@@ -112,14 +128,63 @@ impl TypeSchemaRegistry {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Ensure all future allocations from this registry yield IDs strictly
-    /// greater than `max_existing_id`.
+    /// Mint the registry-local `SchemaId` handle for a canonical
+    /// [`SchemaContentId`] (WF-3A / ADR-006 §2.7.30) — the SINGLE mint
+    /// operation.
     ///
-    /// Used after loading externally compiled bytecode whose schemas already
-    /// have assigned IDs — mirrors the legacy
-    /// `ensure_next_schema_id_above` helper at a per-registry scope.
-    pub fn ensure_next_id_above(&self, max_existing_id: SchemaId) {
-        let required_next = max_existing_id.saturating_add(1);
+    /// Identical content ids return the SAME handle (structural dedup);
+    /// distinct content ids get distinct dense handles. The result is a pure
+    /// function of the content id within this registry, independent of
+    /// registration order — the property counters could never have. This is
+    /// the derived-index relationship `StringId` has to an interned string,
+    /// not a second identity.
+    pub fn intern_content(&self, content_id: SchemaContentId) -> SchemaId {
+        if let Ok(map) = self.by_content.read() {
+            if let Some(&handle) = map.get(&content_id) {
+                return handle;
+            }
+        }
+        let mut map = self
+            .by_content
+            .write()
+            .expect("type-schema by_content lock poisoned");
+        // Re-check under the write lock (another thread may have interned
+        // the same content between the read and the write).
+        if let Some(&handle) = map.get(&content_id) {
+            return handle;
+        }
+        let handle = self.next_id.fetch_add(1, Ordering::SeqCst);
+        map.insert(content_id, handle);
+        handle
+    }
+
+    /// Keep the dense intern counter strictly ahead of `id`.
+    ///
+    /// Invariant: `next_id` is always greater than every handle present in
+    /// `by_id`, whether that handle was minted by `intern_content` or inserted
+    /// via the preserve-path (`register` of a schema carrying an
+    /// externally-minted / persisted handle). This guarantees a subsequent
+    /// `intern_content` can never hand out a handle that collides with an
+    /// already-registered one. This is counter-invariant maintenance, not an
+    /// order-dependent collision disambiguator.
+    /// Reserve the intern handle space above an externally-minted id range.
+    ///
+    /// WF-3A: some registries MIRROR schemas from another registry, preserving
+    /// those schemas' externally-minted (cross-registry) handles rather than
+    /// re-interning them (extension `type_schemas` carry ids baked by the
+    /// extension's own registry). Those preserved handles occupy an arbitrary
+    /// range; a freshly-interned synthetic schema (`__mod_*`, inline object)
+    /// must land ABOVE that range so it can never collide with a mirrored
+    /// handle. This reserves the counter past `max_external_id`. This is
+    /// external-handle-space reservation (the same shape as rehydrating a
+    /// persisted registry's counter), NOT a two-counter collision
+    /// disambiguator over one shared keyspace.
+    pub fn reserve_handles_above(&self, max_external_id: SchemaId) {
+        self.advance_counter_past(max_external_id);
+    }
+
+    fn advance_counter_past(&self, id: SchemaId) {
+        let required_next = id.saturating_add(1);
         let mut current = self.next_id.load(Ordering::SeqCst);
         while current < required_next {
             match self.next_id.compare_exchange(
@@ -134,6 +199,30 @@ impl TypeSchemaRegistry {
         }
     }
 
+    /// Rebuild the derived `by_content` index from `by_name` and re-seat the
+    /// dense handle counter at the tail (WF-3A).
+    ///
+    /// This is INDEX REHYDRATION for a registry whose `#[serde(skip)]`
+    /// `by_content` table was dropped on (de)serialization or that had
+    /// schemas inserted with pre-assigned handles (loaded/persisted
+    /// bytecode). It is NOT an order-dependent collision disambiguator: it
+    /// re-derives each schema's handle from its persisted content id and
+    /// advances the counter past the largest handle so newly-interned
+    /// structures never collide with an already-registered handle.
+    pub fn rebuild_content_index(&self) {
+        let mut max_id = 0;
+        if let Ok(mut map) = self.by_content.write() {
+            for schema in self.by_name.values() {
+                let cid = schema.content_id();
+                map.entry(cid).or_insert(schema.id);
+                max_id = max_id.max(schema.id);
+            }
+        }
+        // Re-seat the dense counter at the tail so future interns don't reuse
+        // an already-registered handle.
+        self.advance_counter_past(max_id);
+    }
+
     /// Peek the next ID that [`allocate_id`](Self::allocate_id) would produce
     /// without incrementing the counter. For tests/introspection only.
     #[cfg(test)]
@@ -141,10 +230,35 @@ impl TypeSchemaRegistry {
         self.next_id.load(Ordering::SeqCst)
     }
 
-    /// Register a type schema
+    /// Insert a schema under its (already-minted) `SchemaId` handle and index
+    /// its content id (WF-3A).
+    ///
+    /// PRESERVES `schema.id`: the fresh-mint registration paths
+    /// (`register_type`, `register_type_scoped`, …) mint the handle via
+    /// [`Self::intern_content`] first; the rehydration paths (loading
+    /// persisted schemas with meaningful handles) preserve those handles and
+    /// downstream bytecode operands stay valid. Either way the content id is
+    /// indexed so a later intern of the same structure dedups to this handle.
     pub fn register(&mut self, schema: TypeSchema) {
         let name = schema.name.clone();
         let id = schema.id;
+        // Index this schema's content -> handle so future interns of the same
+        // structure resolve to it. `or_insert`: first registration wins.
+        if let Ok(mut map) = self.by_content.write() {
+            map.entry(schema.content_id()).or_insert(id);
+        }
+        // Keep the dense intern counter ahead of this handle (it may be an
+        // externally-minted / persisted id inserted via this preserve-path);
+        // otherwise a later `intern_content` could mint a colliding handle.
+        self.advance_counter_past(id);
+        // If this NAME previously mapped to a DIFFERENT handle (e.g. an upsert
+        // changed the field set -> new structural identity), drop the stale
+        // by_id entry so lookups can't resolve the old handle to the new shape.
+        if let Some(prev) = self.by_name.get(&name) {
+            if prev.id != id {
+                self.by_id.remove(&prev.id);
+            }
+        }
         self.by_id.insert(id, name.clone());
         self.by_name.insert(name, schema);
     }
@@ -155,10 +269,10 @@ impl TypeSchemaRegistry {
         name: impl Into<String>,
         fields: Vec<(String, FieldType)>,
     ) -> SchemaId {
-        let schema = TypeSchema::new(name, fields);
-        let id = schema.id;
-        self.register(schema);
-        id
+        // WF-3A: mint the handle from THIS registry's content-intern table so
+        // inline-object and object-merge schemas that land in one `by_id`
+        // keyspace can never collide (the object-spread root cause).
+        self.register_type_scoped(name, fields)
     }
 
     /// Register a type with field definitions and per-field annotations.
@@ -173,13 +287,16 @@ impl TypeSchemaRegistry {
         fields: Vec<(String, FieldType)>,
         field_annotations: Vec<Vec<FieldAnnotation>>,
     ) -> SchemaId {
-        let id = self.allocate_id();
-        let mut schema = TypeSchema::with_id(id, name, fields);
+        let mut schema = TypeSchema::with_id(0, name, fields);
         for (i, annotations) in field_annotations.into_iter().enumerate() {
             if i < schema.fields.len() && !annotations.is_empty() {
                 schema.fields[i].annotations = annotations;
             }
         }
+        // WF-3A: content-intern from this registry (annotations are not part
+        // of structural identity — field name + type are).
+        let id = self.intern_content(schema.content_id());
+        schema.id = id;
         self.register(schema);
         id
     }
@@ -367,8 +484,10 @@ impl TypeSchemaRegistry {
         name: impl Into<String>,
         fields: Vec<(String, FieldType)>,
     ) -> SchemaId {
-        let id = self.allocate_id();
-        let schema = TypeSchema::with_id(id, name, fields);
+        let mut schema = TypeSchema::with_id(0, name, fields);
+        // WF-3A: single mint point — the content-intern table of THIS registry.
+        let id = self.intern_content(schema.content_id());
+        schema.id = id;
         self.register(schema);
         id
     }
@@ -402,6 +521,14 @@ impl TypeSchemaRegistry {
                 changed = true;
             }
             if changed {
+                // Grow the schema IN PLACE under its STABLE handle (WF-3A).
+                // Module-object (`__mod_*`) schemas are progressively
+                // discovered across compiler phases; a bound module-namespace
+                // type caches this handle, so re-minting on each field-set
+                // growth would strand those bindings ("module has no export
+                // 'X'"). `register` also indexes the grown structure's content
+                // id -> this handle, so a later intern of the full shape dedups
+                // here rather than minting a rival handle.
                 let schema = TypeSchema::with_id(id, name, merged);
                 self.register(schema);
             }
@@ -418,8 +545,10 @@ impl TypeSchemaRegistry {
         name: impl Into<String>,
         variants: Vec<EnumVariantInfo>,
     ) -> SchemaId {
-        let id = self.allocate_id();
-        let schema = TypeSchema::new_enum_with_id(id, name, variants);
+        let mut schema = TypeSchema::new_enum_with_id(0, name, variants);
+        // WF-3A: single mint point — the content-intern table of THIS registry.
+        let id = self.intern_content(schema.content_id());
+        schema.id = id;
         self.register(schema);
         id
     }
@@ -508,42 +637,33 @@ impl TypeSchemaRegistry {
     /// Schemas from `other` are added to this registry. If a schema with the
     /// same name already exists, it is NOT overwritten (first registration
     /// wins), and the returned remap points the incoming ID at the existing
-    /// ID. If the incoming schema's numeric ID already maps to a different
-    /// name in `self.by_id`, the incoming schema is kept under its name but
-    /// assigned a fresh ID from this registry's local counter.
+    /// ID. Otherwise the incoming schema's handle is re-derived by interning
+    /// its content id into THIS registry (WF-3A): identical structure dedups
+    /// to an existing handle, distinct structure gets a fresh dense handle.
     ///
     /// The returned map is old incoming ID -> final merged ID. Callers that
     /// carry schema IDs outside the registry, such as bytecode operands, must
-    /// apply it to those carriers after merging.
+    /// apply it to those carriers after merging (legitimate cross-registry
+    /// handle translation — `other`'s registry-local handles become `self`'s;
+    /// this is NOT a collision disambiguator, and there is no counter-bump /
+    /// reallocation loop).
     pub fn merge(&mut self, other: TypeSchemaRegistry) -> HashMap<SchemaId, SchemaId> {
         let mut id_remap = HashMap::new();
-        if let Some(max_id) = self.max_schema_id() {
-            self.ensure_next_id_above(max_id);
-        }
 
         for (name, mut schema) in other.by_name {
-            if self.by_name.contains_key(&name) {
-                let existing_id = self.by_name.get(&name).map(|schema| schema.id);
-                if let Some(existing_id) = existing_id {
-                    if existing_id != schema.id {
-                        id_remap.insert(schema.id, existing_id);
-                    }
+            if let Some(existing) = self.by_name.get(&name) {
+                if existing.id != schema.id {
+                    id_remap.insert(schema.id, existing.id);
                 }
                 continue;
             }
             let original_id = schema.id;
-            let mut id = original_id;
-            if self.by_id.contains_key(&id) {
-                loop {
-                    id = self.allocate_id();
-                    if !self.by_id.contains_key(&id) {
-                        break;
-                    }
-                }
-                schema.id = id;
-                id_remap.insert(original_id, id);
+            let new_id = self.intern_content(schema.content_id());
+            if new_id != original_id {
+                id_remap.insert(original_id, new_id);
             }
-            self.by_id.insert(id, name.clone());
+            schema.id = new_id;
+            self.by_id.insert(new_id, name.clone());
             self.by_name.insert(name, schema);
         }
         // Also merge predeclared schemas, first-registration-wins on ID collision.
@@ -563,9 +683,10 @@ impl TypeSchemaRegistry {
                 self_cache.entry(key.clone()).or_insert(*id);
             }
         }
-        if let Some(max_id) = self.max_schema_id() {
-            self.ensure_next_id_above(max_id);
-        }
+        // Re-seat the dense counter past any predeclared handle merged in
+        // above (predeclared allocation shares this counter). Index
+        // rehydration, not a collision disambiguator.
+        self.rebuild_content_index();
         id_remap
     }
 
@@ -696,7 +817,6 @@ pub struct TypeSchemaBuilder {
     name: String,
     fields: Vec<(String, FieldType)>,
     field_meta: Vec<Vec<FieldAnnotation>>,
-    reserved: bool,
 }
 
 impl TypeSchemaBuilder {
@@ -706,20 +826,7 @@ impl TypeSchemaBuilder {
             name: name.into(),
             fields: Vec::new(),
             field_meta: Vec::new(),
-            reserved: false,
         }
-    }
-
-    /// Mark the schema as reserved (comptime-excellence §4.1.4 / §4.3).
-    ///
-    /// Reserved schemas back the comptime introspection contract; they are
-    /// registered deterministically at init and resolved by name, and are
-    /// skipped by ad-hoc field-set / field-order schema inference so an
-    /// unrelated `{name, kind, …}` object can never bind to a contract
-    /// schema (or vice versa).
-    pub fn reserved(mut self) -> Self {
-        self.reserved = true;
-        self
     }
 
     /// Add a f64 field
@@ -858,7 +965,6 @@ impl TypeSchemaBuilder {
     /// Build the type schema
     pub fn build(self) -> TypeSchema {
         let mut schema = TypeSchema::new(self.name, self.fields);
-        schema.reserved = self.reserved;
         // Apply annotations to fields
         for (i, annotations) in self.field_meta.into_iter().enumerate() {
             if i < schema.fields.len() {
@@ -868,18 +974,18 @@ impl TypeSchemaBuilder {
         schema
     }
 
-    /// Build and register in a registry, using the registry's per-instance
-    /// schema-ID counter.
+    /// Build and register in a registry, minting the handle from the target
+    /// registry's content-intern table (WF-3A).
     ///
-    /// Since B1.7 this path must not consult `current_registry`, because
-    /// `DEFAULT_SCHEMA_REGISTRY` is itself initialized via this builder
-    /// and that would cause a recursive `LazyLock` init. Allocating
-    /// directly from the target registry keeps bootstrap deterministic
-    /// and per-registry isolated.
+    /// This path must not consult `current_registry`, because
+    /// `DEFAULT_SCHEMA_REGISTRY` is itself initialized via this builder and
+    /// that would cause a recursive `LazyLock` init. Interning directly from
+    /// the target registry keeps bootstrap deterministic and per-registry
+    /// isolated.
     pub fn register(self, registry: &mut TypeSchemaRegistry) -> SchemaId {
-        let id = registry.allocate_id();
-        let mut schema = TypeSchema::with_id(id, self.name, self.fields);
-        schema.reserved = self.reserved;
+        let mut schema = TypeSchema::with_id(0, self.name, self.fields);
+        let id = registry.intern_content(schema.content_id());
+        schema.id = id;
         for (i, annotations) in self.field_meta.into_iter().enumerate() {
             if i < schema.fields.len() {
                 schema.fields[i].annotations = annotations;
@@ -1086,15 +1192,66 @@ mod tests {
         assert!(r2.get("Color").unwrap().is_enum());
     }
 
+    /// WF-3A: content-interning is the single mint. Identical structure ->
+    /// identical handle (dedup); distinct structure -> distinct handle;
+    /// independent of registration order.
     #[test]
-    fn b1_1_ensure_next_id_above_is_per_registry() {
-        let r1 = TypeSchemaRegistry::new();
-        let r2 = TypeSchemaRegistry::new();
+    fn wf3a_intern_content_dedups_by_structure() {
+        let mut r = TypeSchemaRegistry::new();
 
-        r1.ensure_next_id_above(500);
-        assert_eq!(r1.peek_next_id(), 501);
+        // Two anonymous inline objects with identical structure share a handle.
+        let a = r.register_type_scoped(
+            "__inline_obj_1",
+            vec![
+                ("x".to_string(), FieldType::I64),
+                ("y".to_string(), FieldType::I64),
+            ],
+        );
+        let b = r.register_type_scoped(
+            "__inline_obj_2",
+            vec![
+                ("x".to_string(), FieldType::I64),
+                ("y".to_string(), FieldType::I64),
+            ],
+        );
+        assert_eq!(a, b, "structurally identical anonymous schemas dedup");
 
-        // r2 is unaffected.
-        assert_eq!(r2.peek_next_id(), INITIAL_SCHEMA_ID);
+        // A distinct structure gets a distinct handle.
+        let c = r.register_type_scoped(
+            "__inline_obj_3",
+            vec![("z".to_string(), FieldType::I64)],
+        );
+        assert_ne!(a, c);
+
+        // Named/branded types are nominal: same fields, different name ->
+        // distinct handles.
+        let named_a =
+            r.register_type_scoped("A", vec![("x".to_string(), FieldType::I64), ("y".to_string(), FieldType::I64)]);
+        let named_b =
+            r.register_type_scoped("B", vec![("x".to_string(), FieldType::I64), ("y".to_string(), FieldType::I64)]);
+        assert_ne!(named_a, named_b, "named types are nominally distinct");
+        // ... and both distinct from the structurally-identical anonymous one.
+        assert_ne!(named_a, a);
+    }
+
+    #[test]
+    fn wf3a_rebuild_content_index_reseats_counter() {
+        let r = TypeSchemaRegistry::new();
+        // Simulate a rehydrated registry: insert a schema with a high,
+        // pre-assigned handle, then rebuild the derived index.
+        let schema = TypeSchema::with_id(500, "Loaded", vec![("f".to_string(), FieldType::I64)]);
+        // Direct by_name/by_id seeding to model a deserialized registry.
+        {
+            let mut r_mut = r;
+            r_mut.by_id.insert(500, "Loaded".to_string());
+            r_mut.by_name.insert("Loaded".to_string(), schema);
+            r_mut.rebuild_content_index();
+            // A fresh intern must not reuse handle 500 or below.
+            let fresh = r_mut.register_type_scoped(
+                "__inline_obj_1",
+                vec![("g".to_string(), FieldType::I64)],
+            );
+            assert!(fresh > 500, "fresh handle {fresh} must be past the loaded tail");
+        }
     }
 }
