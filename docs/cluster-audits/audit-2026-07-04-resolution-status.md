@@ -80,7 +80,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | CRIT | ~~`extensions/*.so` debug-profile load SIGSEGVs host~~ → **framing corrected: structural-ABI validation gap** (integer gate only, no repr(C) layout fingerprint) | WF-2A-fu | ✅ merged `ddb6a01e` (fingerprint gate; skew now fails cleanly, not SIGSEGV) · **Fable** |
 | CRIT | `[native-dependencies]` alias resolution dead (`resolve_library_target` hardcoded) | WF-2A-fu | ✅ merged `ddb6a01e` (resolution set threaded into VM+JIT) · **Fable** (differential vs pre-fix) |
 | HIGH | Module-scope closure-capture Drop finalizer leak (§2.7.30.4) | WF-3C | ⏳ (with real GC) |
-| HIGH | `--max-output-bytes` inert; `--max-memory-bytes` `panic!`-exits (serve DoS) | WF-3B | ⏳ |
+| HIGH | `--max-output-bytes` inert; `--max-memory-bytes` `panic!`-exits (serve DoS) | WF-3B | ✅ merged `47c8e031` (record_output wired at print sink; grow refuses+surfaces, exit 1 not 101; serve worker survives) · **Opus-indep** |
 | HIGH | `remote::call` Result fiction + closure args skip compile-check | WF-3E | ✅ merged `800fb6b9` (Ok+Err reachable; integration-tested) |
 | MED | `time::millis()->float` breaks operand-position inference | WF-3A-edges | ⏳ |
 | MED | Two closure-return compile bugs (tail-closure param; parameterized-closure return-kind) | WF-3A-edges | ⏳ |
