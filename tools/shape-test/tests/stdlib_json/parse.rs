@@ -133,3 +133,47 @@ fn json_is_valid_false() {
     .with_stdlib()
     .expect_run_ok();
 }
+
+// --- WF-3A-tail regression: json navigation on the marshalled Json enum (#16) ---
+// Before the module-call declared-return propagation fix, `match r { Ok(v) => ... }`
+// left `v` untyped, so `.is_null()` / `.get(..)` on the marshalled Json enum failed
+// with "no method 'is_null' on receiver kind Ptr(TypedObject)". These assert the
+// payload type reaches the match binding and the extend-Json methods dispatch.
+#[test]
+fn json_nav_is_null_and_get_on_matched_ok() {
+    ShapeTest::new(
+        r#"
+        use std::core::json
+        let r = json::parse("{\"name\": \"Alice\", \"age\": 30}")
+        match r {
+            Ok(v) => {
+                print(v.is_null())
+                print(v.get("name"))
+            },
+            Err(e) => print(e),
+        }
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("false")
+    .expect_output_contains("Alice");
+}
+
+#[test]
+fn json_nav_nested_get_on_matched_ok() {
+    ShapeTest::new(
+        r#"
+        use std::core::json
+        let r = json::parse("{\"nested\": {\"x\": 5}}")
+        match r {
+            Ok(v) => {
+                let nested = v.get("nested")
+                print(nested.get("x"))
+            },
+            Err(e) => print(e),
+        }
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("5");
+}
