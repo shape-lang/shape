@@ -932,6 +932,21 @@ impl BytecodeExecutor {
             }
         };
 
+        // Post-run memory-ceiling backstop. A breach recorded on an
+        // infallible allocation path is normally surfaced at the next
+        // dispatch-loop safepoint, but a JIT-native run carries no
+        // per-instruction safepoint — so if one was recorded during this
+        // execution and the run still returned `Ok`, surface it here as a
+        // clean error rather than returning a truncated result. The offending
+        // buffer was already bounded at the ceiling (grow refused), so this is
+        // purely the surfacing hop — never a panic.
+        if let Some(breach) = shape_value::v2::alloc_budget::take_breach() {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: breach.to_string(),
+                location: None,
+            });
+        }
+
         // REPL save-side: copy this cell's value bindings back into the
         // context so the next cell can reference them.
         if repl_persistence {
