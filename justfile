@@ -14,7 +14,15 @@ test-mem-cap-kib := "50331648"
 default: build-extensions build-treesitter
 
 # Build extension shared libraries and copy them into extensions/.
-build-extensions profile="debug":
+# WF-2A extension-hardening: default to `release` so `just build-extensions`
+# produces an artifact matching the typical release host (`cargo build
+# --release --bin shape`), reconciling the book (python-extension.mdx documents
+# --release). Correctness no longer depends on this: the loader's structural
+# ABI build-fingerprint gate (crates/shape-runtime/src/plugins/loader.rs) makes
+# any true host/extension incompatibility fail cleanly at load, and the
+# fingerprint is profile-independent so a `debug` build still loads into a
+# release host. Pass `profile=debug` for a faster local build.
+build-extensions profile="release":
 	mkdir -p extensions
 	for crate in {{extension-crates}}; do \
 	  echo "Building ${crate} (profile={{profile}})"; \

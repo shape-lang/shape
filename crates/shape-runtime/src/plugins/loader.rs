@@ -157,6 +157,66 @@ impl PluginLoader {
             });
         }
 
+        // Structural ABI build-fingerprint check — REQUIRED (WF-2A
+        // extension-hardening).
+        //
+        // The `shape_abi_version` integer above is hand-maintained and cannot
+        // detect a `#[repr(C)]` layout skew (a reordered / added / retyped
+        // vtable field) while the integer stays `4`. Such a `.so` PASSES the
+        // integer gate, then the host dispatches through the vtable at
+        // host-expected byte offsets that do not match the extension's actual
+        // layout — a wild call → SIGSEGV in release (or a misaligned-pointer
+        // abort in debug). This fingerprint folds the actual compiled layout
+        // (struct sizes + every field offset) of `LanguageRuntimeVTable` /
+        // `PluginInfo` plus the ABI version. Host and extension each compute it
+        // from their own `shape-abi-v1`; a mismatch means the extension's
+        // boundary layout differs from the host's, so we REFUSE it cleanly
+        // here rather than dispatch into a structurally-incompatible vtable.
+        //
+        // It is profile-independent (captures `#[repr(C)]` layout only, which is
+        // identical in debug and release), so a matched-source debug-built
+        // extension still loads into a release host.
+        let get_fingerprint = unsafe {
+            lib.get::<shape_abi_v1::GetAbiBuildFingerprintFn>(b"shape_abi_build_fingerprint")
+        }
+        .map_err(|e| ShapeError::RuntimeError {
+            message: format!(
+                "Plugin '{}' missing required 'shape_abi_build_fingerprint' \
+                 export (WF-2A extension-hardening structural-ABI gate). The \
+                 host cannot verify the extension's #[repr(C)] boundary layout \
+                 matches its own, so it refuses to load rather than risk a \
+                 wild-call SIGSEGV through a skewed vtable. Rebuild the \
+                 extension against the current Shape ABI — the \
+                 `shape_abi_v1::language_runtime_plugin!` macro generates this \
+                 symbol automatically. Underlying loader error: {}",
+                path.display(),
+                e
+            ),
+            location: None,
+        })?;
+        let plugin_fingerprint = unsafe { get_fingerprint() };
+        let host_fingerprint = shape_abi_v1::abi_build_fingerprint();
+        if plugin_fingerprint != host_fingerprint {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "Plugin '{}' structural ABI mismatch: host build \
+                     fingerprint is {:#018x}, plugin reports {:#018x} (ABI \
+                     version {} matched, but the compiled #[repr(C)] vtable / \
+                     PluginInfo layout differs — a reordered/added/retyped \
+                     boundary field the version integer cannot catch). \
+                     Dispatching through this vtable would call host-expected \
+                     offsets that do not match the extension's layout (wild \
+                     call → SIGSEGV), so it is refused. Rebuild the extension \
+                     against this exact Shape ABI revision.",
+                    path.display(),
+                    host_fingerprint,
+                    plugin_fingerprint,
+                    ABI_VERSION,
+                ),
+                location: None,
+            });
+        }
+
         // Get plugin info
         let get_info: Symbol<GetPluginInfoFn> = unsafe {
             lib.get(b"shape_plugin_info")
@@ -720,5 +780,118 @@ mod tests {
         };
         let parsed = parse_sections_manifest(&MANIFEST).expect("empty should parse");
         assert!(parsed.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // WF-2A extension-hardening — extension-load compatibility validation.
+    //
+    // Regression guard for CRIT-A: a `.so` that PASSES the integer
+    // `shape_abi_version` gate but whose structural `#[repr(C)]` boundary
+    // layout differs from the host (modeled here by a mismatched — or
+    // entirely absent — `shape_abi_build_fingerprint` symbol) must be
+    // rejected CLEANLY with a diagnostic `Err`, never dispatched into and
+    // never a SIGSEGV. If the loader regressed to the old integer-only gate,
+    // it would proceed past this fixture toward the vtable and (in the real
+    // skew case) wild-call → crash. Here we prove the clean-refuse contract:
+    // the very fact that `load()` RETURNS (with an `Err`) and the test
+    // process survives is the no-segfault proof.
+    // ------------------------------------------------------------------
+
+    /// Compile a tiny C source to a `.so` in a unique temp dir using the
+    /// system `cc`. Returns `None` (test skips) if no C compiler is available.
+    #[cfg(unix)]
+    fn compile_c_so(tag: &str, c_src: &str) -> Option<(PathBuf, PathBuf)> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        // Probe for a usable compiler; skip cleanly on hosts without one.
+        if Command::new(&cc).arg("--version").output().is_err() {
+            return None;
+        }
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("shape_loader_gate_{}_{}", tag, nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("fixture.c");
+        let so = dir.join("libfixture.so");
+        std::fs::write(&src, c_src).unwrap();
+        let status = Command::new(&cc)
+            .arg("-shared")
+            .arg("-fPIC")
+            .arg("-o")
+            .arg(&so)
+            .arg(&src)
+            .status();
+        match status {
+            Ok(s) if s.success() => Some((dir, so)),
+            _ => {
+                let _ = std::fs::remove_dir_all(&dir);
+                None
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abi_fingerprint_mismatch_so_is_refused_cleanly_not_segfault() {
+        // ABI version matches the host, so the integer gate PASSES; the
+        // structural fingerprint deliberately does NOT match (host_fp + 1),
+        // modeling a `#[repr(C)]` layout skew the version integer can't see.
+        let host_fp = shape_abi_v1::abi_build_fingerprint();
+        let bogus_fp = host_fp.wrapping_add(1);
+        let c_src = format!(
+            "unsigned int shape_abi_version(void) {{ return {ver}u; }}\n\
+             unsigned long long shape_abi_build_fingerprint(void) {{ return {fp}ULL; }}\n",
+            ver = ABI_VERSION,
+            fp = bogus_fp,
+        );
+        let Some((dir, so)) = compile_c_so("mismatch", &c_src) else {
+            eprintln!("skipping: no C compiler available");
+            return;
+        };
+
+        let mut loader = PluginLoader::new();
+        // Must RETURN (no segfault) with a clean, descriptive Err.
+        let result = loader.load(&so);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = result.expect_err("layout-skewed .so must be refused, not loaded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("structural ABI mismatch"),
+            "expected structural-ABI-mismatch diagnostic, got: {msg}"
+        );
+        // The plugin must NOT have been registered.
+        assert!(!loader.is_loaded("fixture"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abi_missing_fingerprint_symbol_is_refused_cleanly() {
+        // Passes the integer gate but omits the required structural
+        // fingerprint symbol entirely (an old / hand-rolled extension). The
+        // loader must refuse it with a clear "missing ... fingerprint" Err
+        // rather than proceed toward the vtable.
+        let c_src = format!(
+            "unsigned int shape_abi_version(void) {{ return {ver}u; }}\n",
+            ver = ABI_VERSION,
+        );
+        let Some((dir, so)) = compile_c_so("missing_fp", &c_src) else {
+            eprintln!("skipping: no C compiler available");
+            return;
+        };
+
+        let mut loader = PluginLoader::new();
+        let result = loader.load(&so);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = result.expect_err("extension without fingerprint symbol must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shape_abi_build_fingerprint"),
+            "expected missing-fingerprint diagnostic, got: {msg}"
+        );
+        assert!(!loader.is_loaded("fixture"));
     }
 }

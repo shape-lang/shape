@@ -480,6 +480,23 @@ pub struct VirtualMachine {
     pub(crate) native_library_cache:
         HashMap<String, std::sync::Arc<libloading::Library>>,
 
+    /// Resolved package-scoped `[native-dependencies]` map for the current
+    /// host (ffi-rebuild §4.11 / WF-2A). Threaded from the `BytecodeExecutor`'s
+    /// `native_resolution_context` at VM construction so the link-now path
+    /// (`invoke_foreign_kinded` / `eager_link_all`) can resolve an `extern C`
+    /// declaration whose `library` names a `[native-dependencies]` alias to its
+    /// real vendored/staged/path `dlopen` target. `None` = no project context
+    /// (bare script / test); alias resolution then falls through to the
+    /// well-known system table and verbatim passthrough. Pure resolution
+    /// metadata — never a Shape value, no NativeKind carrier involved.
+    pub(crate) native_resolutions:
+        Option<std::sync::Arc<shape_runtime::native_resolution::NativeResolutionSet>>,
+
+    /// Root project package key (`name@version`) for the currently loaded
+    /// program, used as the fallback lookup key in `native_resolutions` when an
+    /// `extern C` declaration carried no explicit package provenance.
+    pub(crate) native_root_package_key: Option<String>,
+
     /// Depth of live foreign frames (polyglot-distributed §4.5 barrier rule).
     /// Incremented by `invoke_foreign_kinded` around the vtable/libffi dispatch
     /// and by any callback invoker on re-entry, decremented when it returns.

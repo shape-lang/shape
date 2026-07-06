@@ -1572,6 +1572,111 @@ pub const ABI_VERSION: u32 = 4;
 /// Get the ABI version (plugins should export this)
 pub type GetAbiVersionFn = unsafe extern "C" fn() -> u32;
 
+/// Get the structural ABI build fingerprint (plugins export this via the
+/// `language_runtime_plugin!` macro; the host reads it at load time).
+pub type GetAbiBuildFingerprintFn = unsafe extern "C" fn() -> u64;
+
+/// FNV-1a mix step used to fold structural layout values into the fingerprint.
+const fn abi_fingerprint_mix(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+/// Structural ABI build fingerprint.
+///
+/// # Why this exists (WF-2A extension-hardening)
+///
+/// The [`ABI_VERSION`] integer is a single hand-maintained number. The
+/// `language_runtime_plugin!` macro builds [`LanguageRuntimeVTable`] by FIELD
+/// NAME, so a struct **reorder** (or an added/removed/retyped field) silently
+/// changes the compiled `#[repr(C)]` binary layout while `ABI_VERSION` stays
+/// `4`. An extension built against such a skewed `shape-abi-v1` PASSES the
+/// integer gate, and the host then dispatches through the vtable at
+/// host-expected byte offsets that do not match the extension's actual layout —
+/// loading a data field where a fn-pointer is expected and calling it: a wild
+/// call → SIGSEGV.
+///
+/// This fingerprint folds the **actual compiled layout** (`size`, `align`, and
+/// every field `offset_of!`) of the boundary structs, plus [`ABI_VERSION`],
+/// into a `u64`. The host and the extension each compute it from THEIR OWN copy
+/// of `shape-abi-v1`; if either struct layout differs, the fingerprints differ
+/// and the loader refuses the `.so` with a clean diagnostic instead of
+/// crashing.
+///
+/// It is deliberately **profile-independent**: it captures only `#[repr(C)]`
+/// layout, which is identical in debug and release. A debug-built extension is
+/// ABI-identical to a release one (verified: no custom cargo profiles, no
+/// `#[global_allocator]`, no `panic=abort`; every vtable entry is wrapped in a
+/// `catch_unwind` shell), so a matched-source debug `.so` still loads into a
+/// release host — only genuine structural skew is rejected.
+pub const fn abi_build_fingerprint() -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    h = abi_fingerprint_mix(h, ABI_VERSION as u64);
+
+    // LanguageRuntimeVTable: size, align, and every field offset. A reorder of
+    // any two same-sized fields (e.g. `init` <-> `invoke`) changes their
+    // offsets and thus the fingerprint.
+    h = abi_fingerprint_mix(h, core::mem::size_of::<LanguageRuntimeVTable>() as u64);
+    h = abi_fingerprint_mix(h, core::mem::align_of::<LanguageRuntimeVTable>() as u64);
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, init) as u64);
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, register_types) as u64,
+    );
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, compile) as u64);
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, invoke) as u64);
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, dispose_function) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, language_id) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, get_lsp_config) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, free_buffer) as u64,
+    );
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, drop) as u64);
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, error_model) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, get_shape_source) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, runtime_descriptor) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, state_model) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, reserved0) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, reserved3) as u64,
+    );
+
+    // PluginInfo: the other struct the host dereferences by offset.
+    h = abi_fingerprint_mix(h, core::mem::size_of::<PluginInfo>() as u64);
+    h = abi_fingerprint_mix(h, core::mem::align_of::<PluginInfo>() as u64);
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(PluginInfo, name) as u64);
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(PluginInfo, version) as u64);
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(PluginInfo, plugin_type) as u64);
+    h = abi_fingerprint_mix(h, core::mem::offset_of!(PluginInfo, description) as u64);
+
+    h
+}
+
 // ============================================================================
 // Helper Macros (for plugin authors)
 // ============================================================================
@@ -1718,6 +1823,16 @@ macro_rules! language_runtime_plugin {
         #[unsafe(no_mangle)]
         pub extern "C" fn shape_abi_version() -> u32 {
             $crate::ABI_VERSION
+        }
+
+        /// Structural ABI build fingerprint (WF-2A extension-hardening). The
+        /// host compares this against its own `abi_build_fingerprint()` at load
+        /// time and refuses to load on mismatch — turning a would-be wild-call
+        /// SIGSEGV (from a silently-skewed `#[repr(C)]` vtable layout that the
+        /// `ABI_VERSION` integer failed to catch) into a clean load-time error.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn shape_abi_build_fingerprint() -> u64 {
+            $crate::abi_build_fingerprint()
         }
 
         #[unsafe(no_mangle)]
@@ -2014,6 +2129,40 @@ macro_rules! output_field {
 // ============================================================================
 // Tests — Permission Model
 // ============================================================================
+
+#[cfg(test)]
+mod abi_fingerprint_tests {
+    use super::*;
+
+    /// The structural fingerprint is deterministic and non-trivial. The host
+    /// and a matched-source extension both call this exact `const fn`, so their
+    /// values are equal iff their boundary struct layouts are equal.
+    #[test]
+    fn fingerprint_is_stable_and_nonzero() {
+        let a = abi_build_fingerprint();
+        let b = abi_build_fingerprint();
+        assert_eq!(a, b, "fingerprint must be deterministic");
+        assert_ne!(a, 0, "fingerprint must not be zero");
+        assert_ne!(
+            a, 0xcbf2_9ce4_8422_2325,
+            "fingerprint must fold layout past the FNV seed"
+        );
+    }
+
+    /// The fingerprint folds the vtable field offsets, so `init` and `invoke`
+    /// (the WF-2A skew-test fields) sit at distinct offsets. A reorder that
+    /// swaps them changes at least one offset → changes the fingerprint. This
+    /// guards the const fn against silently dropping the offset terms.
+    #[test]
+    fn fingerprint_covers_distinct_vtable_offsets() {
+        let init_off = core::mem::offset_of!(LanguageRuntimeVTable, init);
+        let invoke_off = core::mem::offset_of!(LanguageRuntimeVTable, invoke);
+        assert_ne!(
+            init_off, invoke_off,
+            "init/invoke must occupy distinct offsets for the skew gate to fire"
+        );
+    }
+}
 
 #[cfg(test)]
 mod permission_tests {

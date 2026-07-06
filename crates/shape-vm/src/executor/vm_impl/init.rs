@@ -63,6 +63,8 @@ impl VirtualMachine {
             foreign_fn_handles: Vec::new(),
             language_runtimes: HashMap::new(),
             native_library_cache: HashMap::new(),
+            native_resolutions: None,
+            native_root_package_key: None,
             foreign_reentry_depth: 0,
             foreign_frame_stack: Vec::new(),
             function_hashes: Vec::new(),
@@ -147,6 +149,21 @@ impl VirtualMachine {
         self.language_runtimes = runtimes;
     }
 
+    /// Install the resolved package-scoped `[native-dependencies]` map
+    /// (ffi-rebuild §4.11 / WF-2A). Threaded from the `BytecodeExecutor`'s
+    /// `native_resolution_context` so the link-now path can map an `extern C`
+    /// declaration's `[native-dependencies]` alias to its real `dlopen` target.
+    pub fn set_native_resolutions(
+        &mut self,
+        resolutions: Option<
+            Arc<shape_runtime::native_resolution::NativeResolutionSet>,
+        >,
+        root_package_key: Option<String>,
+    ) {
+        self.native_resolutions = resolutions;
+        self.native_root_package_key = root_package_key;
+    }
+
     /// Opt-in eager link (ffi-rebuild §4.2 / stage 1): walk EVERY foreign
     /// function and link/compile it up front, reporting ALL failures (not
     /// first-fail). This is the CI/deploy validation mode (`shape run
@@ -165,10 +182,14 @@ impl VirtualMachine {
             let language = entry.language.clone();
             if let Some(spec) = entry.native_abi.clone() {
                 let layouts = self.program.native_struct_layouts.clone();
+                let resolutions = self.native_resolutions.clone();
+                let root_key = self.native_root_package_key.clone();
                 match crate::executor::control_flow::native_abi::link_native_function(
                     &spec,
                     &layouts,
                     &mut self.native_library_cache,
+                    resolutions.as_deref(),
+                    root_key.as_deref(),
                 ) {
                     Ok(linked) => {
                         if idx >= self.foreign_fn_handles.len() {

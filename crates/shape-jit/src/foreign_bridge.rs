@@ -45,6 +45,8 @@ impl Drop for JitForeignBridgeState {
 pub(crate) fn link_foreign_functions_for_jit(
     program: &BytecodeProgram,
     exec_ctx: Option<&ExecutionContext>,
+    resolutions: Option<&shape_runtime::native_resolution::NativeResolutionSet>,
+    root_package_key: Option<&str>,
 ) -> Result<Option<Box<JitForeignBridgeState>>, String> {
     if program.foreign_functions.is_empty() {
         return Ok(None);
@@ -55,10 +57,15 @@ pub(crate) fn link_foreign_functions_for_jit(
 
     for entry in &program.foreign_functions {
         if let Some(native_spec) = &entry.native_abi {
+            // ffi-rebuild §4.11 / WF-2A: same resolution the VM link-now path
+            // uses, so `--mode vm` and `--mode jit` resolve a
+            // `[native-dependencies]` alias identically.
             let linked = native_abi::link_native_function(
                 native_spec,
                 &program.native_struct_layouts,
                 &mut native_library_cache,
+                resolutions,
+                root_package_key,
             )
             .map_err(|e| format!("Failed to link native function '{}': {}", entry.name, e))?;
 

@@ -643,10 +643,23 @@ impl JITExecutor {
         };
 
         let foreign_bridge = {
+            // ffi-rebuild §4.11 / WF-2A: pass the bytecode executor's resolved
+            // `[native-dependencies]` map + root package key so the JIT foreign
+            // bridge resolves an `extern C` alias identically to `--mode vm`.
+            let native_resolutions = self
+                .bytecode_executor
+                .native_resolution_context()
+                .cloned();
+            let native_root_key = self
+                .bytecode_executor
+                .root_package_key()
+                .map(str::to_string);
             let runtime = engine.get_runtime_mut();
             crate::foreign_bridge::link_foreign_functions_for_jit(
                 bytecode,
                 runtime.persistent_context(),
+                native_resolutions.as_ref(),
+                native_root_key.as_deref(),
             )
             .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
                 message: format!("JIT foreign-function linking failed: {}", e),
