@@ -178,47 +178,211 @@ impl BytecodeExecutor {
         self.compile_program_impl(engine, program)
     }
 
-    /// Resume execution from a snapshot — Phase-2c stub.
+    /// Resume execution from a snapshot with the SAME code (design §4.5.1).
     ///
-    /// The legacy body built a `Snapshot::Resumed` marker via the deleted
-    /// `create_typed_enum_nb` returning a `ValueWord`, pushed it via the
-    /// deleted raw-bits stack push, then ran the suspend/resume loop —
-    /// every step of which depended on `ValueWord` / `EnumValue` /
-    /// `nb_to_wire`. Phase-2c (ADR-006 §2.7.4) rebuilds the marker as a
-    /// kinded `Arc<TypedObjectStorage>` payload + parallel-kind track,
-    /// pushed via `push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))`.
+    /// Orchestration over the existing STAGE-R5 `from_snapshot` restore: rebuild
+    /// the VM from `VmSnapshot`, push `Ok(Snapshot::Resumed)` as the
+    /// `snapshot()` call site's return value (§4.1.3), and run the normal
+    /// dispatch loop from `VmSnapshot.ip`. Permissions/limits are the RESUMING
+    /// host's and are re-verified before any bytecode executes (zero-trust,
+    /// §4.7.3). The kinded suspend/resume marker rebuild the stub cited is done
+    /// via `build_snapshot_resumed_marker` — ordinary kinded enum construction,
+    /// no ValueWord (Constraint 1 / ADR-006 §2.7.4).
     pub fn resume_snapshot(
         &self,
-        _engine: &mut ShapeEngine,
-        _vm_snapshot: shape_runtime::snapshot::VmSnapshot,
-        _bytecode: BytecodeProgram,
+        engine: &mut ShapeEngine,
+        vm_snapshot: shape_runtime::snapshot::VmSnapshot,
+        bytecode: BytecodeProgram,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        Err(shape_runtime::error::ShapeError::RuntimeError {
-            message: "resume_snapshot: snapshot rebuild depends on the deleted \
-                      ValueWord carrier and the deleted `create_typed_enum_nb` / \
-                      `nb_to_wire` host-API surface — Phase-2c, see ADR-006 §2.7.4."
+        self.resume_from_snapshot_impl(engine, vm_snapshot, bytecode)
+    }
+
+    /// Recompile edited source and resume from a snapshot (design §4.5.2).
+    ///
+    /// **Sound-relocation is gated on the §4.2.2 frame-relocation producer**
+    /// (per-frame `local_ip` + top-level `ip_blob_hash`/`ip_local_offset`),
+    /// which is not yet populated at capture — so an ip captured against the
+    /// snapshot's bytecode cannot be soundly re-mapped into freshly-compiled
+    /// bytecode (recompilation is not byte-stable, and heuristic line-mapping
+    /// into changed bytecode is rejected, §5.11). Rather than a check that is
+    /// both unreliable (identical source does not recompile identically) and
+    /// unsound if it passed (no frame-safety proof), this v1 recompiles the
+    /// source to validate it and then **cleanly refuses** with the §4.5.2 /
+    /// §4.11 mismatch message, directing the user to plain `--resume <hash>`
+    /// (which restores the snapshot's own authoritative bytecode and is fully
+    /// supported). Recompile-and-resume of edited source lands with the
+    /// relocation producer (design §6 Stage 4).
+    pub fn recompile_and_resume(
+        &mut self,
+        engine: &mut ShapeEngine,
+        vm_snapshot: shape_runtime::snapshot::VmSnapshot,
+        _old_bytecode: BytecodeProgram,
+        program: &Program,
+    ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
+        use shape_runtime::error::ShapeError;
+
+        // Recompile so a broken edit still fails at compile (not silently).
+        let _new_bytecode = self.compile_program_impl(engine, program)?;
+        let _ = vm_snapshot;
+
+        // §4.5.2 mismatch table / §4.11 catalog (ResumeFunctionChanged shape):
+        // edited-source resume is a clean refuse until the relocation producer
+        // lands; plain resume runs the snapshot's original code.
+        Err(ShapeError::RuntimeError {
+            message: "cannot resume with an edited source file in this build: sound \
+                      ip relocation into recompiled code requires the frame-relocation \
+                      metadata that this snapshot does not yet carry. Resume the \
+                      original code with `shape --resume <hash>` (no source file)."
                 .to_string(),
             location: None,
         })
     }
 
-    /// Recompile source and resume from a snapshot — Phase-2c stub.
-    ///
-    /// Same surface as `resume_snapshot`: the snapshot-to-host marker
-    /// hop depends on the deleted `ValueWord` carrier (ADR-006 §2.7.4).
-    pub fn recompile_and_resume(
-        &mut self,
-        _engine: &mut ShapeEngine,
-        _vm_snapshot: shape_runtime::snapshot::VmSnapshot,
-        _old_bytecode: BytecodeProgram,
-        _program: &Program,
+    /// Shared restore → re-prime → resume → project spine for both resume entry
+    /// points (design §4.5.1). Zero-trust: the resuming host's permission
+    /// envelope (installed on `self` by the CLI) is re-verified against the
+    /// program's required-permission union before any bytecode runs (§4.7.3).
+    fn resume_from_snapshot_impl(
+        &self,
+        engine: &mut ShapeEngine,
+        vm_snapshot: shape_runtime::snapshot::VmSnapshot,
+        bytecode: BytecodeProgram,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        Err(shape_runtime::error::ShapeError::RuntimeError {
-            message: "recompile_and_resume: snapshot resume depends on the \
-                      deleted ValueWord carrier and the kinded suspend/resume \
-                      marker rebuild is Phase-2c (ADR-006 §2.7.4)."
-                .to_string(),
-            location: None,
+        use shape_runtime::error::ShapeError;
+
+        // Snapshot store (needed by `from_snapshot` to fetch chunked sidecars)
+        // + the envelope seed for chained snapshots on the resumed VM.
+        let (store, seed) = match engine.snapshot_install_context()? {
+            Some((store, seed)) => (store, seed),
+            None => {
+                return Err(ShapeError::RuntimeError {
+                    message: "resume: no snapshot store is configured on the engine"
+                        .to_string(),
+                    location: None,
+                });
+            }
+        };
+
+        // §4.7.3 permission re-verification (fail closed BEFORE execution).
+        // Zero trust in the snapshot's self-declaration: recompute the required
+        // union from the program's content-addressed blobs and require it a
+        // subset of the resuming host's grant.
+        if let (Some(granted), Some(ca)) = (
+            self.granted_permissions.as_ref(),
+            bytecode.content_addressed.as_ref(),
+        ) {
+            let linked = crate::linker::link(ca).map_err(|e| ShapeError::SemanticError {
+                message: format!("resume: failed to link snapshot program: {e}"),
+                location: None,
+            })?;
+            if !linked.total_required_permissions.is_subset(granted) {
+                let missing = linked.total_required_permissions.difference(granted);
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot resume: this snapshot needs permission(s) not granted \
+                         here: {missing:?}. Re-run with those permissions granted."
+                    ),
+                    location: None,
+                });
+            }
+        }
+
+        // Restore the VM (STAGE-R5 two-pass identity restore + call-stack
+        // rebuild). `from_snapshot` sets `vm.ip = snapshot.ip` — the
+        // post-`snapshot()`-call instruction.
+        let mut vm = VirtualMachine::from_snapshot(bytecode, &vm_snapshot, &store).map_err(|e| {
+            ShapeError::RuntimeError {
+                message: format!("resume: failed to restore VM state: {e}"),
+                location: None,
+            }
+        })?;
+
+        // Re-prime the restored VM with the resuming host's execution envelope.
+        if let Some(limits) = self.resource_limits.clone() {
+            vm = vm.with_resource_limits(limits);
+        }
+        vm.set_interrupt(self.interrupt.clone());
+        vm.set_permissions(
+            self.granted_permissions.clone(),
+            self.scope_constraints.clone(),
+        );
+        for ext in &self.extensions {
+            vm.register_extension(ext.clone());
+        }
+        vm.populate_module_objects();
+        // Chained snapshots: a resumed VM is indistinguishable from a running
+        // one and may snapshot again (§4.5.1 step 5).
+        vm.set_snapshot_context(store, seed);
+
+        // Push `Ok(Snapshot::Resumed)` as the value the instruction at the
+        // resume ip expects for `snapshot()` (§4.1.3 / §4.5.1 step 4).
+        let resumed = vm
+            .build_snapshot_resumed_marker()
+            .map_err(|e| ShapeError::RuntimeError {
+                message: format!("resume: {e}"),
+                location: None,
+            })?;
+        vm.push_kinded_slot(resumed)
+            .map_err(|e| ShapeError::RuntimeError {
+                message: format!("resume: failed to push resume marker: {e}"),
+                location: None,
+            })?;
+
+        // Run the dispatch loop from `resume_ip` with a live context for
+        // stdlib I/O + wire-conversion lookups (§4.5.1 step 5).
+        let mut owned_ctx_fallback;
+        let ctx_borrow: &mut ExecutionContext = match engine.runtime.persistent_context_mut() {
+            Some(ctx) => ctx,
+            None => {
+                owned_ctx_fallback = ExecutionContext::new_empty();
+                &mut owned_ctx_fallback
+            }
+        };
+
+        let completion: KindedSlot = match vm.execute(Some(ctx_borrow)) {
+            Ok(completion) => completion,
+            Err(shape_value::VMError::Interrupted) => {
+                // A resumed run can itself be interrupted (§4.5.1 step 5).
+                use crate::executor::snapshot::SnapshotOutcome;
+                let snapshot_hash = match vm.capture_interrupt_snapshot(Some(ctx_borrow)) {
+                    SnapshotOutcome::Saved(hash) => Some(hash),
+                    SnapshotOutcome::Barrier(_) | SnapshotOutcome::PersistFailed(_) => None,
+                };
+                return Err(ShapeError::Interrupted { snapshot_hash });
+            }
+            Err(e) => {
+                let message = match &e {
+                    shape_value::VMError::Suspended { future_id, .. }
+                        if *future_id == crate::executor::SNAPSHOT_FUTURE_ID =>
+                    {
+                        "internal error: snapshot() reached the host boundary — \
+                         this is a shape bug, please report it"
+                            .to_string()
+                    }
+                    _ => e.to_string(),
+                };
+                return Err(ShapeError::RuntimeError {
+                    message,
+                    location: None,
+                });
+            }
+        };
+
+        // Host-boundary projection (§4.5.1 step 6) — identical kinded path as a
+        // fresh run (`wire_conversion::slot_*`).
+        let bits = completion.raw();
+        let kind = completion.kind();
+        let envelope = wire_conversion::slot_to_envelope(bits, kind, "", ctx_borrow);
+        let (content_json, content_html, content_terminal) =
+            wire_conversion::slot_extract_content(bits, kind);
+
+        Ok(shape_runtime::engine::ProgramExecutorResult {
+            wire_value: envelope.value,
+            type_info: Some(envelope.type_info),
+            execution_type: ExecutionType::Script,
+            content_json,
+            content_html,
+            content_terminal,
         })
     }
 }
@@ -417,7 +581,12 @@ impl ProgramExecutor for BytecodeExecutor {
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
         // Phase 1 — compile (does not depend on the deleted ValueWord).
-        let _schema_scope = engine.runtime.enter_schema_scope();
+        // `compile_program_impl` installs the runtime's schema scope for the
+        // duration of the compile; `execute_compiled` re-installs it for
+        // execution. No ambient schema-registry scope spans the two phases,
+        // so a caller that already holds a compiled `BytecodeProgram` can run
+        // it via `execute_compiled` without a second compile advancing the
+        // shared `schema_registry.next_id` counter.
 
         // REPL cross-cell persistence (WS-11): re-prepend `fn` / `type` /
         // `enum` / `trait` / `impl` / type-alias / annotation definitions
@@ -443,6 +612,54 @@ impl ProgramExecutor for BytecodeExecutor {
         };
 
         let bytecode = self.compile_program_impl(engine, compile_target)?;
+
+        // Phase 2 — execute the just-built bytecode on the interpreter.
+        // Extracted into `execute_compiled` so the JIT `[jit-fallback]` path
+        // (`crates/shape-jit/src/executor.rs`) can run the ALREADY-COMPILED
+        // inspection bytecode WITHOUT a second `compile_program_impl`. The
+        // double-compile was the definitional cause of the object-merge
+        // schema-id collision (WF-1A-followup / fix-plan §6quinquies): the
+        // inspection compile advances `engine.runtime.schema_registry.next_id`
+        // (ambient-domain merged/named-type id allocation), and a second
+        // compile on the same counter-advanced registry shifts those ambient
+        // ids UP while the compiler-LOCAL inline-object ids reset to their
+        // per-compile base — colliding in the shared `SchemaId` namespace and
+        // resolving a wide merged object against a narrow inline schema
+        // (`MakeFieldRef field_idx N out of bounds`). Running the pre-built
+        // bytecode removes the second compile, so the fallback observes no
+        // schema-registry state mutated by the inspection compile.
+        self.execute_compiled(engine, bytecode, program)
+    }
+}
+
+impl BytecodeExecutor {
+    /// Execute an ALREADY-COMPILED `bytecode` under the bytecode interpreter
+    /// and project its completion value across the host boundary.
+    ///
+    /// This is the post-compile half of [`ProgramExecutor::execute_program`],
+    /// extracted so a caller that already holds a compiled `BytecodeProgram`
+    /// can run it WITHOUT recompiling. `program` is the ORIGINAL
+    /// (un-augmented) source program; it is consumed only for REPL cross-cell
+    /// bookkeeping and completion-shape terminal rendering — it is never
+    /// recompiled here.
+    ///
+    /// The JIT `[jit-fallback]` path calls this with the bytecode built by
+    /// `compile_program_for_inspection`, so the fallback interpreter run
+    /// never observes schema-registry state (the `next_id` counter on
+    /// `engine.runtime.schema_registry`) mutated by a second compile
+    /// (WF-1A-followup / fix-plan §6quinquies). Because it runs the exact
+    /// same bytecode `--mode vm` would compile, it is provably
+    /// semantics-identical to the VM oracle.
+    pub fn execute_compiled(
+        &mut self,
+        engine: &mut ShapeEngine,
+        bytecode: BytecodeProgram,
+        program: &Program,
+    ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
+        // Install this engine's runtime-scoped schema registry as the ambient
+        // handle for the duration of execution — wire-conversion / completion
+        // projection consult `current_registry()`.
+        let _schema_scope = engine.runtime.enter_schema_scope();
 
         // Build a VM and prime extensions / foreign-function links.
         // These steps don't reach into the deleted ValueWord carrier
@@ -531,6 +748,16 @@ impl ProgramExecutor for BytecodeExecutor {
             }
         }
 
+        // Install the snapshot persistence context (design §4.1 / §4.3.4) so
+        // an in-flight `snapshot()` captures → persists → continues. Must run
+        // after `load_program` (which populates `function_hashes`) so the
+        // cached `CodeManifest` sees the program's blob hashes. `None` = the
+        // engine has no store configured; `snapshot()` then refuses cleanly
+        // with the `NoStore` barrier rather than trapping.
+        if let Some((snap_store, snap_seed)) = engine.snapshot_install_context()? {
+            vm.set_snapshot_context(snap_store, snap_seed);
+        }
+
         // Phase 2 — execute. `vm.execute(ctx)` returns
         // `Result<KindedSlot, VMError>` (dispatch.rs:25). The slot's
         // kind is sourced from `BytecodeProgram::top_level_frame.
@@ -593,9 +820,58 @@ impl ProgramExecutor for BytecodeExecutor {
                 .and_then(|l| l.max_memory_bytes),
         );
 
+        // WF-2E (2026-07-05): install the program's own schema registry
+        // (the superset containing inline object-literal schemas, merged
+        // stdlib, and user types — the same registry the VM hands module
+        // bodies as `ctx.schemas`) as the ambient thread-local scope for
+        // the duration of this run. Without this, marshal-boundary readers
+        // that resolve a `TypedObject`'s field names through the ambient
+        // `lookup_schema_by_id_public` (e.g. `FromSlot<JsonValue>` in a
+        // native module arg that has no per-arg `ModuleContext`) fall back
+        // to `runtime.schema_registry_arc()`, which never received the
+        // inline schemas, and fail with "unknown TypedObject schema id N".
+        // The guard restores the prior ambient value on drop.
+        let _program_schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(
+            std::sync::Arc::new(vm.program.type_schema_registry.clone()),
+        );
+
         let completion: KindedSlot = match vm.execute(Some(ctx_borrow)) {
             Ok(completion) => completion,
+            Err(shape_value::VMError::Interrupted) => {
+                // Design §4.4: the Ctrl+C host-boundary consumer. Capture →
+                // persist → terminate. The VM already carries the snapshot
+                // context (installed above) and `self.ip` is the un-executed
+                // instruction (§4.4 no-skip rule), so this persists a valid
+                // resume point. The CLI prints the resume command and exits
+                // 130 on `ShapeError::Interrupted`.
+                use crate::executor::snapshot::SnapshotOutcome;
+                let snapshot_hash = match vm.capture_interrupt_snapshot(Some(ctx_borrow)) {
+                    SnapshotOutcome::Saved(hash) => Some(hash),
+                    // No-save (a persistent barrier / store failure): terminate
+                    // now with nothing written (design §4.4 terminate-immediate).
+                    SnapshotOutcome::Barrier(_) | SnapshotOutcome::PersistFailed(_) => None,
+                };
+                return Err(shape_runtime::error::ShapeError::Interrupted { snapshot_hash });
+            }
             Err(e) => {
+                // Design §4.4: the in-loop consumer (§4.1) handles every
+                // `snapshot()` suspension, so a `SNAPSHOT_FUTURE_ID`
+                // suspension is unreachable-by-construction here. If one ever
+                // does reach the host boundary, render a named-bug message —
+                // NEVER the leaked internal
+                // `Suspended on future 18446744073709551615` sentinel string
+                // (design §4.11 rendering rule; this is the leak class the
+                // rule kills).
+                let message = match &e {
+                    shape_value::VMError::Suspended { future_id, .. }
+                        if *future_id == crate::executor::SNAPSHOT_FUTURE_ID =>
+                    {
+                        "internal error: snapshot() reached the host boundary — \
+                         this is a shape bug, please report it"
+                            .to_string()
+                    }
+                    _ => e.to_string(),
+                };
                 let payload = vm.take_last_uncaught_exception().map(|payload| {
                     uncaught_exception_payload_to_wire(
                         payload,
@@ -605,7 +881,7 @@ impl ProgramExecutor for BytecodeExecutor {
                 });
                 runtime.set_last_runtime_error(payload);
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
-                    message: e.to_string(),
+                    message,
                     location: None,
                 });
             }

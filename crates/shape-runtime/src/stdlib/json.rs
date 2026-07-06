@@ -58,7 +58,6 @@
 //! gate caught the cross-cutting concern; Option A2 chosen over A1 to
 //! preserve per-file atomicity).
 
-use crate::json_value::JsonValue;
 use crate::marshal::{register_typed_fn_1, register_typed_fn_2};
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::type_schema::TypeSchemaRegistry;
@@ -97,9 +96,18 @@ const JSON_VARIANT_OBJECT: i64 = 6;
 /// numbers map to `Json::Number(f64)`. Preserves the `int` / `number`
 /// distinction at the boundary.
 fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> HeapValue {
-    let (variant_id, payload_slot, payload_is_heap) = match value {
-        serde_json::Value::Null => (JSON_VARIANT_NULL, ValueSlot::none(), false),
-        serde_json::Value::Bool(b) => (JSON_VARIANT_BOOL, ValueSlot::from_bool(b), false),
+    use shape_value::NativeKind;
+    // Each arm yields `(variant_id, payload_slot, payload_kind)` where
+    // `payload_kind` is the STAMPED `NativeKind` of the payload slot per
+    // ADR-006 §2.7.7 — used both for the `field_kinds` track (so field
+    // reads + `drop_fields` dispatch correctly) and to derive the
+    // `heap_mask` bit (heap-bearing payloads only). Slot 0 (`__variant`)
+    // is always `Int64`.
+    let (variant_id, payload_slot, payload_kind) = match value {
+        serde_json::Value::Null => (JSON_VARIANT_NULL, ValueSlot::none(), NativeKind::Null),
+        serde_json::Value::Bool(b) => {
+            (JSON_VARIANT_BOOL, ValueSlot::from_bool(b), NativeKind::Bool)
+        }
         serde_json::Value::Number(n) => {
             // Prefer Json::Int for integral i64-fitting numbers.
             if let Some(i) = n.as_i64() {
@@ -111,19 +119,20 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
                             ValueSlot::from_int(i),
                         ],
                         0,
+                        vec![NativeKind::Int64, NativeKind::Int64],
                     );
                 }
             }
             (
                 JSON_VARIANT_NUMBER,
                 ValueSlot::from_number(n.as_f64().unwrap_or(0.0)),
-                false,
+                NativeKind::Float64,
             )
         }
         serde_json::Value::String(s) => (
             JSON_VARIANT_STR,
             ValueSlot::from_string_arc(Arc::new(s)),
-            true,
+            NativeKind::String,
         ),
         serde_json::Value::Array(arr) => {
             // V3-S5 ckpt-5-prime²c (2026-05-15) Migration shape (a): every
@@ -161,6 +170,20 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             > = shape_value::v2::typed_array::TypedArray::<
                 *const shape_value::TypedObjectStorage,
             >::from_slice(&element_ptrs);
+            // WF-2E (2026-07-05): stamp the element-type discriminant so the
+            // drop path (`release_v2_typed_array` from `drop_fields`) and any
+            // reader (`typed_array_to_json_value`, `__json_array_at`) select
+            // the `*const TypedObjectStorage` monomorphization. Mirrors the
+            // parse-side `project_json_value_to_slot` Array arm
+            // (`modules.rs`). Without the stamp the now-populated
+            // `field_kinds[1] = Ptr(TypedArray)` would drive `release_v2_
+            // typed_array` on an unstamped (ELEM_TYPE_UNKNOWN) carrier.
+            unsafe {
+                shape_value::v2::typed_array::stamp_elem_type(
+                    arr_ptr as *mut u8,
+                    shape_value::v2::typed_array::ELEM_TYPE_TYPED_OBJECT,
+                )
+            };
             // `from_slice` copies each raw pointer bit-for-bit (raw
             // pointers are Copy). The refcount shares were transferred
             // from `TypedObjectPtr` wrappers via `into_raw()` already;
@@ -169,7 +192,7 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             (
                 JSON_VARIANT_ARRAY,
                 ValueSlot::from_u64(arr_ptr as u64),
-                true,
+                NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray),
             )
         }
         serde_json::Value::Object(map) => {
@@ -197,23 +220,55 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
             (
                 JSON_VARIANT_OBJECT,
                 ValueSlot::from_hashmap(Arc::new(kref)),
-                true,
+                NativeKind::Ptr(shape_value::heap_value::HeapKind::HashMap),
             )
         }
     };
+    // Heap-bearing payload kinds set the heap_mask bit for slot 1 so
+    // `drop_fields` retires the payload's share on the matching
+    // `field_kinds[1]` arm. Inline-scalar payloads (Bool/Int/Number/Null)
+    // do not.
+    let payload_is_heap = matches!(
+        payload_kind,
+        NativeKind::String
+            | NativeKind::StringV2
+            | NativeKind::DecimalV2
+            | NativeKind::Ptr(_)
+    );
     let heap_mask = if payload_is_heap { 1u64 << 1 } else { 0u64 };
     build_typed_object(
         json_schema_id,
         vec![ValueSlot::from_int(variant_id), payload_slot],
         heap_mask,
+        vec![NativeKind::Int64, payload_kind],
     )
 }
 
 /// Build a `HeapValue::TypedObject(Arc<TypedObjectStorage>)` from raw
-/// slots + a `heap_mask`. The schema's `FieldType`s are the source of
-/// truth at read time — no per-slot kind table is recorded on this
-/// fast path (mirrors `type_schema::typed_object_from_pairs`).
-fn build_typed_object(schema_id: u64, slots: Vec<ValueSlot>, heap_mask: u64) -> HeapValue {
+/// slots + a `heap_mask` + the per-slot `field_kinds` track.
+///
+/// WF-2E (2026-07-05): `field_kinds` MUST carry one `NativeKind` per slot
+/// (the STAMPED kind of the value actually stored — ADR-006 §2.5 / §2.7.7).
+/// The pre-WF-2E body passed an empty `field_kinds`, which drove two live
+/// bugs: (1) `read_typed_object_field` (`property_access.rs`) aborts with
+/// "Field '<f>' index N exceeds field_kinds length 0" on every typed-parse
+/// field read (`json::parse(str, Type)` → `t.field`); (2) `drop_fields`
+/// walked `min(slots.len(), field_kinds.len()) = 0` entries and leaked
+/// every heap-bearing field. Populating the track from the caller's known
+/// per-slot kinds is the correct fix — no per-read schema-vs-slot kind
+/// reinterpretation, matching the VM's own `op_new_typed_object`
+/// construction contract.
+fn build_typed_object(
+    schema_id: u64,
+    slots: Vec<ValueSlot>,
+    heap_mask: u64,
+    field_kinds: Vec<shape_value::NativeKind>,
+) -> HeapValue {
+    debug_assert_eq!(
+        slots.len(),
+        field_kinds.len(),
+        "json build_typed_object: slots/field_kinds length mismatch"
+    );
     // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): variant signature
     // flipped to `HeapValue::TypedObject(TypedObjectPtr)`. Wrap the
     // `_new`-returned raw pointer (refcount=1) in `TypedObjectPtr`,
@@ -222,92 +277,73 @@ fn build_typed_object(schema_id: u64, slots: Vec<ValueSlot>, heap_mask: u64) -> 
         schema_id,
         slots.into_boxed_slice(),
         heap_mask,
-        Arc::from(Vec::<shape_value::NativeKind>::new().into_boxed_slice()),
+        Arc::from(field_kinds.into_boxed_slice()),
     );
     HeapValue::TypedObject(shape_value::heap_value::TypedObjectPtr::new(storage))
 }
 
-/// Convert a `serde_json::Value` into the strict-typed `JsonValue` sum
-/// (`crate::json_value::JsonValue`).
-///
-/// Stage D Step 4 (2026-05-07). Used by `json.parse` to produce an
-/// `Arc<HeapValue>`-free recursive value tree that wraps directly into
-/// `ConcreteReturn::JsonValue`. Same int-vs-number split rule as the
-/// legacy `json_value_to_enum`: integral JSON numbers fitting in `i64`
-/// map to `JsonValue::Int`; all other numbers map to `JsonValue::Number`.
-fn serde_json_to_json_value(value: serde_json::Value) -> JsonValue {
-    match value {
-        serde_json::Value::Null => JsonValue::Null,
-        serde_json::Value::Bool(b) => JsonValue::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                if !n.to_string().contains('.') {
-                    return JsonValue::Int(i);
-                }
-            }
-            JsonValue::Number(n.as_f64().unwrap_or(0.0))
-        }
-        serde_json::Value::String(s) => JsonValue::String(s),
-        serde_json::Value::Array(arr) => {
-            JsonValue::Array(arr.into_iter().map(serde_json_to_json_value).collect())
-        }
-        serde_json::Value::Object(map) => {
-            let pairs: Vec<(String, JsonValue)> = map
-                .into_iter()
-                .map(|(k, v)| (k, serde_json_to_json_value(v)))
-                .collect();
-            JsonValue::Object(pairs)
-        }
-    }
-}
-
 /// Build a single `ValueSlot` for a schema field given its declared type
-/// and a JSON value. Returns `(slot, is_heap)` where `is_heap` is the
-/// bit to set in `heap_mask` if the slot stores a heap pointer.
+/// and a JSON value. Returns `(slot, kind, is_heap)` where `kind` is the
+/// STAMPED `NativeKind` recorded in the enclosing TypedObject's
+/// `field_kinds` track (ADR-006 §2.7.7) and `is_heap` is the bit to set
+/// in `heap_mask` if the slot stores a heap pointer.
 ///
 /// For typed fields (I64/F64/Bool/String/Decimal/Object-with-known-schema),
 /// produces the strict-typed slot directly via `ValueSlot::from_*`
 /// primitives. For `FieldType::Any` and untypable shapes (Array, mixed
 /// types, Object-without-known-schema), falls back to a Json-enum-tree
-/// HeapValue via `build_json_enum_heap_value`.
+/// HeapValue via `build_json_enum_heap_value`. Every heap fallback yields
+/// a `HeapValue::TypedObject` (a Json enum node), so its stamped kind is
+/// `Ptr(HeapKind::TypedObject)`.
 fn build_field_slot_from_json(
     value: &serde_json::Value,
     field_type: &crate::type_schema::FieldType,
     registry: &TypeSchemaRegistry,
     json_schema_id: u64,
-) -> Result<(ValueSlot, bool), String> {
+) -> Result<(ValueSlot, shape_value::NativeKind, bool), String> {
     use crate::type_schema::FieldType;
     use serde_json::Value;
+    use shape_value::heap_value::HeapKind;
+    use shape_value::NativeKind;
+    let typed_object_kind = NativeKind::Ptr(HeapKind::TypedObject);
     match (value, field_type) {
-        (Value::Null, _) => Ok((ValueSlot::none(), false)),
-        (Value::Bool(b), FieldType::Bool) => Ok((ValueSlot::from_bool(*b), false)),
-        (Value::Number(n), FieldType::I64) => {
-            Ok((ValueSlot::from_int(n.as_i64().unwrap_or(0)), false))
+        (Value::Null, _) => Ok((ValueSlot::none(), NativeKind::Null, false)),
+        (Value::Bool(b), FieldType::Bool) => {
+            Ok((ValueSlot::from_bool(*b), NativeKind::Bool, false))
         }
-        (Value::Number(n), FieldType::F64) | (Value::Number(n), FieldType::Decimal) => {
-            Ok((ValueSlot::from_number(n.as_f64().unwrap_or(0.0)), false))
-        }
-        (Value::String(s), FieldType::String) => {
-            Ok((ValueSlot::from_string_arc(Arc::new(s.clone())), true))
-        }
+        (Value::Number(n), FieldType::I64) => Ok((
+            ValueSlot::from_int(n.as_i64().unwrap_or(0)),
+            NativeKind::Int64,
+            false,
+        )),
+        (Value::Number(n), FieldType::F64) | (Value::Number(n), FieldType::Decimal) => Ok((
+            ValueSlot::from_number(n.as_f64().unwrap_or(0.0)),
+            NativeKind::Float64,
+            false,
+        )),
+        (Value::String(s), FieldType::String) => Ok((
+            ValueSlot::from_string_arc(Arc::new(s.clone())),
+            NativeKind::String,
+            true,
+        )),
         (Value::Object(obj), FieldType::Object(type_name)) => {
             if let Some(nested_schema) = registry.get(type_name) {
                 let nested_hv =
                     build_typed_object_from_json(nested_schema, obj, registry, json_schema_id)?;
-                Ok((heap_to_slot(nested_hv), true))
+                Ok((heap_to_slot(nested_hv), typed_object_kind, true))
             } else {
                 // Nested type's schema not registered — fall back to a
                 // typed `Json::Object` HeapValue per the legacy contract.
                 let json_hv =
                     build_json_enum_heap_value(Value::Object(obj.clone()), json_schema_id);
-                Ok((heap_to_slot(json_hv), true))
+                Ok((heap_to_slot(json_hv), typed_object_kind, true))
             }
         }
         // FieldType::Any or any other shape (Array, type-mismatched, etc.)
         // → fall back to a Json enum tree at the slot.
         _ => {
             let json_hv = build_json_enum_heap_value(value.clone(), json_schema_id);
-            Ok((heap_to_slot(json_hv), true))
+            Ok((heap_to_slot(json_hv), typed_object_kind, true))
         }
     }
 }
@@ -358,24 +394,37 @@ fn build_typed_object_from_json(
     registry: &TypeSchemaRegistry,
     json_schema_id: u64,
 ) -> Result<HeapValue, String> {
+    use shape_value::NativeKind;
     let num_fields = schema.fields.len();
     let mut slots = vec![ValueSlot::none(); num_fields];
+    let mut field_kinds = vec![NativeKind::Null; num_fields];
     let mut heap_mask = 0u64;
 
     for field in &schema.fields {
         let wire = field.wire_name();
-        let (slot, is_heap) = if let Some(jv) = map.get(wire) {
+        let (slot, kind, is_heap) = if let Some(jv) = map.get(wire) {
             build_field_slot_from_json(jv, &field.field_type, registry, json_schema_id)?
         } else {
-            (ValueSlot::none(), false)
+            // Missing field → `none()` slot. Stamp the declared field's
+            // native kind when it resolves (so a downstream read pushes the
+            // declared kind with null/zero bits, which the clone/drop paths
+            // treat as an absent value), else fall back to `Null`.
+            let declared = field.field_type.to_native_kind().unwrap_or(NativeKind::Null);
+            (ValueSlot::none(), declared, false)
         };
         slots[field.index as usize] = slot;
+        field_kinds[field.index as usize] = kind;
         if is_heap {
             heap_mask |= 1u64 << field.index;
         }
     }
 
-    Ok(build_typed_object(schema.id as u64, slots, heap_mask))
+    Ok(build_typed_object(
+        schema.id as u64,
+        slots,
+        heap_mask,
+        field_kinds,
+    ))
 }
 
 /// Create the `json` module with JSON parsing and serialization functions.
@@ -401,7 +450,7 @@ pub fn create_json_module() -> ModuleExports {
             let parsed: serde_json::Value = serde_json::from_str(text.as_str())
                 .map_err(|e| format!("json.parse() failed: {}", e))?;
 
-            let result = serde_json_to_json_value(parsed);
+            let result = crate::json_value::serde_json_to_json_value(parsed);
 
             Ok(TypedReturn::Ok(ConcreteReturn::JsonValue(result)))
         },
@@ -471,12 +520,12 @@ pub fn create_json_module() -> ModuleExports {
 
     // json.stringify(value: any, pretty?: bool) -> Result<string>
     //
-    // Phase 1.B body shim: pre-bulldozer this called
-    // `value.to_json_value()` on a `&ValueWord`. Post-ADR-006 the
-    // generic value→JSON serializer is the deferred N7 workstream
-    // (HeapValue→JSON unified across http/yaml/toml/msgpack/json).
-    // Until N7 lands, the body returns an error rather than emit a
-    // partial / unsound serializer. Variadic shape preserves the
+    // WF-2E (2026-07-05): the deferred "N7" serializer is landed on the
+    // shared object-graph marshal. The `value` slot is walked into a
+    // `JsonValue` tree via the canonical `slot_to_json_value` (dispatching
+    // on the stamped `NativeKind`, using `ctx.schemas` for TypedObject
+    // field names), then rendered via `json_value_to_serde_json` +
+    // `serde_json::to_string[_pretty]`. Variadic shape preserves the
     // optional `pretty` arg per §2.7.4 ruling.
     register_typed_function(
         &mut module,
@@ -500,14 +549,20 @@ pub fn create_json_module() -> ModuleExports {
             },
         ],
         ConcreteType::Result(Box::new(ConcreteType::String)),
-        |args, _ctx| {
-            let _value = args
+        |args, ctx| {
+            let value = args
                 .first()
                 .ok_or_else(|| "json.stringify() requires a value argument".to_string())?;
-            let _pretty = args.get(1).map(|a| a.slot().as_bool()).unwrap_or(false);
-            Ok(TypedReturn::Err(ConcreteReturn::String(
-                "json.stringify() pending N7 (HeapValue→JSON) — see ADR-006 §2.7.4".to_string(),
-            )))
+            let pretty = args.get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+            let jv = crate::json_value::slot_to_json_value(value, Some(ctx.schemas))?;
+            let serde_v = crate::json_value::json_value_to_serde_json(&jv);
+            let out = if pretty {
+                serde_json::to_string_pretty(&serde_v)
+            } else {
+                serde_json::to_string(&serde_v)
+            }
+            .map_err(|e| format!("json.stringify() serialization failed: {}", e))?;
+            Ok(TypedReturn::Ok(ConcreteReturn::String(out)))
         },
     );
 

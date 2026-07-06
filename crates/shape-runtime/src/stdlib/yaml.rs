@@ -2,98 +2,95 @@
 //!
 //! Exports: yaml.parse(text), yaml.parse_all(text), yaml.stringify(value), yaml.is_valid(text)
 //!
-//! Phase 1.B (ADR-006 §2.7.4) status: yaml.parse / yaml.parse_all /
-//! yaml.stringify REMAIN DEFERRED pending the **N4** (any-input typed
-//! marshal) and **N6** (any-output typed marshal) architectural
-//! decisions per `docs/defections.md` HashMap-marshal cluster's
-//! sub-decision queue.
+//! WF-2E (2026-07-05): the pre-marshal-core "pending N4/N6" stubs are
+//! REMOVED. `yaml.parse` / `yaml.parse_all` / `yaml.stringify` are now real
+//! serializers built on the shared object-graph marshal
+//! (`crate::json_value`):
 //!
-//! - `yaml.parse(text) -> Result<any>` and
-//!   `yaml.parse_all(text) -> Result<Array<any>>` return polymorphic
-//!   recursive `serde_yaml::Value`-equivalent trees. Mapping to N6.
-//! - `yaml.stringify(value: any)` takes a polymorphic `value: any`
-//!   input parameter that maps to N4.
-//!
-//! `yaml.is_valid(text)` is migratable standalone.
-//!
-//! Until N4 + N6 land, the bodies use the variadic
-//! [`register_typed_function`] shape (per ADR-006 §2.7.4 ruling) and
-//! return `Err(...)` for the deferred halves; `is_valid` is fully
-//! functional.
+//! - `yaml.parse(text) -> Result<Json>` decodes the YAML text into a
+//!   `serde_json::Value` (via `serde_yaml::from_str`), funnels it through
+//!   the shared `serde_json_to_json_value` wire→intermediate step, and
+//!   returns the strict-typed `Json` enum (`ConcreteReturn::JsonValue`).
+//!   Same shape/navigation surface as `json.parse` (`.get(key)` /
+//!   `.at(index)` / pattern matching). YAML `null` maps to `Json::Null`.
+//! - `yaml.parse_all(text) -> Result<Json>` walks the multi-document YAML
+//!   stream (documents separated by `---`) via
+//!   `serde_yaml::Deserializer::from_str`, decoding each document to a
+//!   `JsonValue` and collecting them into a `Json::Array`. `result.at(i)`
+//!   yields document `i`; `result.len()` yields the document count.
+//! - `yaml.stringify(value) -> Result<string>` receives the argument fully
+//!   walked into a `JsonValue` tree at the marshal boundary
+//!   (`FromSlot<JsonValue>` → `slot_to_json_value`, dispatching on the
+//!   STAMPED `NativeKind` — no pointer reinterpretation), converts it to a
+//!   `serde_yaml::Value` via `json_value_to_serde_yaml`, and renders with
+//!   `serde_yaml::to_string`.
+//! - `yaml.is_valid(text)` uses the typed `Arc<String>` marshal directly.
 
+use crate::json_value::JsonValue;
+use crate::marshal::{register_typed_fn_1, register_typed_fn_1_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::typed_module_exports::{
-    ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
-};
-use shape_value::KindedSlot;
+use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use serde::Deserialize;
 use std::sync::Arc;
-
-/// Read a [`KindedSlot`]'s bits as an `Arc<String>` payload. See
-/// `stdlib/json.rs` for the same Phase 1.B variadic shim.
-fn slot_as_string(slot: &KindedSlot) -> Option<Arc<String>> {
-    let bits = slot.slot().raw();
-    if bits == 0 {
-        return None;
-    }
-    unsafe {
-        let arc = Arc::<String>::from_raw(bits as *const String);
-        let cloned = arc.clone();
-        std::mem::forget(arc);
-        Some(cloned)
-    }
-}
 
 /// Create the `yaml` module with YAML parsing and serialization functions.
 pub fn create_yaml_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::yaml");
     module.description = "YAML parsing and serialization".to_string();
 
-    // yaml.parse(text: string) -> Result<HashMap>
-    register_typed_function(
+    // yaml.parse(text: string) -> Result<Json>
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse",
         "Parse a YAML string into Shape values",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "YAML string to parse".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Result(Box::new(ConcreteType::HashMap)),
-        |_args, _ctx| {
-            Ok(TypedReturn::Err(ConcreteReturn::String(
-                "yaml.parse() pending N6 (any-output marshal) — see ADR-006 §2.7.4".to_string(),
-            )))
+        "text",
+        "string",
+        ConcreteType::Result(Box::new(ConcreteType::JsonValue("Json".to_string()))),
+        |text: Arc<String>, _ctx| {
+            let parsed: serde_json::Value = serde_yaml::from_str(text.as_str())
+                .map_err(|e| format!("yaml.parse() failed: {}", e))?;
+            let result = crate::json_value::serde_json_to_json_value(parsed);
+            Ok(TypedReturn::Ok(ConcreteReturn::JsonValue(result)))
         },
     );
 
-    // yaml.parse_all(text: string) -> Result<Array>
-    register_typed_function(
+    // yaml.parse_all(text: string) -> Result<Json>
+    //
+    // Multi-document YAML: each `---`-separated document is decoded to a
+    // `JsonValue` and collected into a single `Json::Array`. Consumers use
+    // `result.at(i)` / `result.len()` (the `Json` enum navigation surface).
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse_all",
         "Parse a multi-document YAML string into an array of Shape values",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "YAML string with one or more documents".to_string(),
-            ..Default::default()
-        }],
-        ConcreteType::Result(Box::new(ConcreteType::Array)),
-        |_args, _ctx| {
-            Ok(TypedReturn::Err(ConcreteReturn::String(
-                "yaml.parse_all() pending N6 (any-output marshal) — see ADR-006 §2.7.4".to_string(),
-            )))
+        "text",
+        "string",
+        ConcreteType::Result(Box::new(ConcreteType::JsonValue("Json".to_string()))),
+        |text: Arc<String>, _ctx| {
+            let mut docs: Vec<JsonValue> = Vec::new();
+            for de in serde_yaml::Deserializer::from_str(text.as_str()) {
+                let parsed = serde_json::Value::deserialize(de)
+                    .map_err(|e| format!("yaml.parse_all() failed: {}", e))?;
+                docs.push(crate::json_value::serde_json_to_json_value(parsed));
+            }
+            Ok(TypedReturn::Ok(ConcreteReturn::JsonValue(JsonValue::Array(
+                docs,
+            ))))
         },
     );
 
-    // yaml.stringify(value: any) -> Result<string>
-    register_typed_function(
+    // yaml.stringify(value) -> Result<string>
+    //
+    // WF-2E: the `value` argument arrives fully walked into a `JsonValue`
+    // tree at the marshal boundary (`FromSlot<JsonValue>` →
+    // `slot_to_json_value`, dispatching on the stamped `NativeKind`),
+    // converted to a `serde_yaml::Value` and rendered via
+    // `serde_yaml::to_string`.
+    register_typed_fn_1_full::<_, crate::marshal::PolymorphicArg>(
         &mut module,
         "stringify",
         "Serialize Shape values to a YAML string",
-        vec![ModuleParam {
+        [ModuleParam {
             name: "value".to_string(),
             type_name: "any".to_string(),
             required: true,
@@ -101,32 +98,26 @@ pub fn create_yaml_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::Result(Box::new(ConcreteType::String)),
-        |_args, _ctx| {
-            Ok(TypedReturn::Err(ConcreteReturn::String(
-                "yaml.stringify() pending N4 (any-input marshal) — see ADR-006 §2.7.4".to_string(),
-            )))
+        |value: crate::marshal::PolymorphicArg, ctx| {
+            // WF-2E: walk via the EXECUTION registry (`ctx.schemas`) — see the
+            // xml.stringify note; the ambient `None` path diverges VM↔JIT.
+            let value: JsonValue = value.to_json_value(ctx.schemas)?;
+            let yaml_value = crate::json_value::json_value_to_serde_yaml(&value);
+            let out = serde_yaml::to_string(&yaml_value)
+                .map_err(|e| format!("yaml.stringify() serialization failed: {}", e))?;
+            Ok(TypedReturn::Ok(ConcreteReturn::String(out)))
         },
     );
 
     // yaml.is_valid(text: string) -> bool
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "is_valid",
         "Check if a string is valid YAML",
-        vec![ModuleParam {
-            name: "text".to_string(),
-            type_name: "string".to_string(),
-            required: true,
-            description: "String to validate as YAML".to_string(),
-            ..Default::default()
-        }],
+        "text",
+        "string",
         ConcreteType::Bool,
-        |args, _ctx| {
-            let slot = args
-                .first()
-                .ok_or_else(|| "yaml.is_valid() requires a string argument".to_string())?;
-            let text = slot_as_string(slot)
-                .ok_or_else(|| "yaml.is_valid() requires a string argument".to_string())?;
+        |text: Arc<String>, _ctx| {
             let valid = serde_yaml::from_str::<serde_yaml::Value>(text.as_str()).is_ok();
             Ok(TypedReturn::Concrete(ConcreteReturn::Bool(valid)))
         },
@@ -159,7 +150,54 @@ mod tests {
         assert!(typed.get("is_valid").is_some());
     }
 
-    // Behavioural roundtrip tests deleted alongside `module.invoke_export()`
-    // and the deleted `ValueWord` constructors. They return when N4 + N6
-    // land and the bodies become real serializers.
+    /// WF-2E: `yaml.parse` decodes a YAML mapping into a `JsonValue::Object`
+    /// via the shared wire→intermediate path.
+    #[test]
+    fn test_yaml_parse_mapping() {
+        let parsed: serde_json::Value =
+            serde_yaml::from_str("server:\n  host: localhost\n  port: 8080\n").expect("yaml parse");
+        let jv = crate::json_value::serde_json_to_json_value(parsed);
+        match &jv {
+            JsonValue::Object(pairs) => {
+                assert_eq!(pairs[0].0, "server");
+                match &pairs[0].1 {
+                    JsonValue::Object(inner) => {
+                        assert!(inner.iter().any(|(k, v)| k == "host"
+                            && *v == JsonValue::String("localhost".to_string())));
+                    }
+                    other => panic!("expected nested object, got {:?}", other),
+                }
+            }
+            other => panic!("expected object, got {:?}", other),
+        }
+    }
+
+    /// WF-2E: `yaml.parse_all` collects each `---`-separated document into a
+    /// `Json::Array`.
+    #[test]
+    fn test_yaml_parse_all_multidoc() {
+        let text = "---\nname: doc1\n---\nname: doc2\n---\nname: doc3\n";
+        let mut docs: Vec<JsonValue> = Vec::new();
+        for de in serde_yaml::Deserializer::from_str(text) {
+            let parsed = serde_json::Value::deserialize(de).expect("yaml doc parse");
+            docs.push(crate::json_value::serde_json_to_json_value(parsed));
+        }
+        assert_eq!(docs.len(), 3);
+    }
+
+    /// WF-2E: `yaml.stringify` round-trips a `JsonValue::Object` to a YAML
+    /// string via the shared `json_value_to_serde_yaml` encoder.
+    #[test]
+    fn test_yaml_stringify_object() {
+        let value = JsonValue::Object(vec![
+            ("name".to_string(), JsonValue::String("my-project".to_string())),
+            ("version".to_string(), JsonValue::Int(42)),
+            ("active".to_string(), JsonValue::Bool(true)),
+        ]);
+        let yaml_value = crate::json_value::json_value_to_serde_yaml(&value);
+        let out = serde_yaml::to_string(&yaml_value).expect("yaml serialize");
+        assert!(out.contains("name: my-project"));
+        assert!(out.contains("version: 42"));
+        assert!(out.contains("active: true"));
+    }
 }

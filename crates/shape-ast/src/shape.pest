@@ -61,7 +61,7 @@ path_segment = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 
 import_stmt = {
     "from" ~ module_path ~ "use" ~ "{" ~ import_item_list ~ "}" ~ ";"?    // from std::core::math use { sum }
-    | &use_word_boundary ~ "use" ~ module_path ~ "as" ~ ident ~ ";"?      // use std::core::math as math
+    | &use_word_boundary ~ "use" ~ module_path ~ as_keyword ~ ident ~ ";"? // use std::core::math as math
     | &use_word_boundary ~ "use" ~ module_path ~ ";"?                      // use std::core::math
 }
 use_word_boundary = @{ "use" ~ !(ASCII_ALPHANUMERIC | "_") }
@@ -72,7 +72,7 @@ module_decl = {
 import_item_list = { import_item ~ ("," ~ import_item)* ~ ","? }
 import_item = { annotation_import_item | regular_import_item }
 annotation_import_item = { "@" ~ ident }
-regular_import_item = { ident ~ ("as" ~ ident)? }
+regular_import_item = { ident ~ (as_keyword ~ ident)? }
 
 pub_item = {
     "pub" ~ foreign_function_def                                     // pub fn python foo() {}

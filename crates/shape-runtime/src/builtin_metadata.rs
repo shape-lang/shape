@@ -605,13 +605,13 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     // Resumability
     BuiltinMetadata {
         name: "snapshot",
-        signature: "snapshot() -> Snapshot",
-        description: "Create a snapshot suspension point. Returns Snapshot::Hash(id) after saving, or Snapshot::Resumed when restoring from a snapshot.",
+        signature: "snapshot() -> Result<Snapshot, SnapshotError>",
+        description: "Create a snapshot suspension point. Returns Ok(Snapshot::Hash(id)) after saving (the run continues), Ok(Snapshot::Resumed) when restoring, or Err(SnapshotError::...) if the state cannot be captured or the store write fails.",
         category: "Resumability",
         parameters: &[],
-        return_type: "Snapshot",
+        return_type: "Result<Snapshot, SnapshotError>",
         example: Some(
-            "let result = snapshot()\nmatch result {\n    Snapshot::Hash(id) => print(\"Saved: \" + id),\n    Snapshot::Resumed => print(\"Restored!\"),\n}",
+            "match snapshot() {\n    Ok(Snapshot::Hash(id)) => print(\"Saved: \" + id),\n    Ok(Snapshot::Resumed) => print(\"Restored!\"),\n    Err(e) => print(\"No checkpoint\"),\n}",
         ),
     },
     BuiltinMetadata {

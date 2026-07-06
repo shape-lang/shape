@@ -156,6 +156,7 @@ fn test_w17_state_bodies_return_structured_errors() {
         scope_constraints: None,
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     };
 
     // Every state body returns Err(String) with the W17 marker. We

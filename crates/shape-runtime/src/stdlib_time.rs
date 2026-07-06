@@ -17,15 +17,29 @@ use crate::typed_module_exports::{
 };
 use shape_value::KindedSlot;
 
-/// Read a `KindedSlot` argument as `f64` for time-module APIs.
+/// Read a `KindedSlot` numeric argument as `f64` for time-module APIs.
 ///
-/// Phase 1.B variadic shim: the bodies receive `KindedSlot`s whose
-/// per-position kind is the body's contract (Phase 2c lands proper
-/// per-position kind threading from the schema). Until then, time-
-/// module bodies treat each numeric arg as `f64` raw bits — the
-/// pre-bulldozer `as_number_coerce()` shape.
+/// Kind-checked per ADR-006 §2.7.7: the value is read through the
+/// stamped `NativeKind` accessors (`as_f64` for `Float64`, `as_i64` for
+/// `Int64`), NEVER via a kind-blind raw-bits reinterpretation. A `number`
+/// (`float`) arg arrives `Float64`; an `int` arg is widened losslessly.
+/// Any other kind yields `None` so the caller can surface a clean error
+/// instead of reinterpreting heap-pointer bits as an `f64`.
 fn slot_as_f64(slot: &KindedSlot) -> Option<f64> {
-    Some(slot.slot().as_f64())
+    slot.as_f64().or_else(|| slot.as_i64().map(|i| i as f64))
+}
+
+/// Read a `KindedSlot` argument as `i64` for time-module APIs.
+///
+/// Kind-checked per ADR-006 §2.7.7: an `int` arg arrives `Int64`; a
+/// `number` arg is truncated defensively. Any other kind yields `None`.
+/// This is the typed read for `time.benchmark`'s iteration count — the
+/// deleted `slot.slot().as_f64()` kind-blind read reinterpreted the raw
+/// `Int64` bits (e.g. `100`) as an `f64` bit pattern (a subnormal near
+/// zero), which then truncated to `0` and tripped the "iterations must be
+/// > 0" guard on every explicit-count call.
+fn slot_as_i64(slot: &KindedSlot) -> Option<i64> {
+    slot.as_i64().or_else(|| slot.as_f64().map(|f| f as i64))
 }
 
 /// Create the `time` module with precision timing functions.
@@ -119,31 +133,49 @@ pub fn create_time_module() -> ModuleExports {
                 ..Default::default()
             },
         ],
-        ConcreteType::TypedObject,
-        |args, _ctx| {
-            let _func = args
+        // Named result type declared in `stdlib-src/core/time.shape`; the
+        // body returns `TypedReturn::TypedObject`, which the marshal boundary
+        // resolves to the `BenchmarkResult` schema by its field-name set. A
+        // named type (vs the anonymous `TypedObject` form) yields one stable
+        // schema id shared by the program registry and the ambient scope,
+        // so `report.iterations` resolves identically under `--mode vm` and
+        // `--mode jit`.
+        ConcreteType::Named("BenchmarkResult".to_string()),
+        |args, ctx| {
+            let func = args
                 .first()
                 .ok_or_else(|| "time.benchmark() requires a function argument".to_string())?;
 
-            let iterations = args.get(1).and_then(slot_as_f64).unwrap_or(1000.0) as u64;
+            // Iteration count is a typed `int` (see stdlib-src/core/time.shape):
+            // read it through the stamped carrier, never as kind-blind f64 bits.
+            let iterations = args.get(1).and_then(slot_as_i64).unwrap_or(1000);
 
-            if iterations == 0 {
+            if iterations <= 0 {
                 return Err("time.benchmark() iterations must be > 0".to_string());
             }
 
-            // Module-level benchmark just measures wrapper overhead. The
-            // VM-level benchmark builtin executes the callable in a loop;
-            // this body cannot call back into the VM.
+            // Drive the callback back through the VM. `ctx.invoke_callable`
+            // is the ADR-006 §2.7.11 / Q12 value-call ABI reached from the
+            // native-module boundary (wired in
+            // `vm_impl/modules.rs::invoke_module_fn_id_stub`). Each call runs
+            // the user callable to completion; a body error aborts the
+            // benchmark and propagates verbatim.
+            let invoke = ctx.invoke_callable.ok_or_else(|| {
+                "time.benchmark() requires a callable-invoker in the module context \
+                 (call it from a running VM, not a context-less dispatch)"
+                    .to_string()
+            })?;
+
             let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                invoke(func, &[])?;
+            }
             let elapsed = start.elapsed();
             let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
 
             Ok(TypedReturn::TypedObject(vec![
                 ("elapsed_ms".to_string(), ConcreteReturn::F64(elapsed_ms)),
-                (
-                    "iterations".to_string(),
-                    ConcreteReturn::F64(iterations as f64),
-                ),
+                ("iterations".to_string(), ConcreteReturn::I64(iterations)),
                 (
                     "avg_ms".to_string(),
                     ConcreteReturn::F64(elapsed_ms / iterations as f64),

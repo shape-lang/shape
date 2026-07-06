@@ -24,6 +24,7 @@ fn test_ctx() -> ModuleContext<'static> {
         scope_constraints: None,
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     }
 }
 

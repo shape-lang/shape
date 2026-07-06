@@ -202,6 +202,7 @@ mod tests {
             mutable_captures: Vec::new(),
             frame_descriptor: None,
             capture_kinds: Vec::new(),
+            capture_names: Vec::new(),
             instructions: Vec::new(),
             constants: Vec::new(),
             strings: Vec::new(),

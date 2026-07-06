@@ -4,6 +4,7 @@
 mod additional;
 mod arithmetic;
 mod async_ops;
+pub(crate) mod async_runtime;
 mod builtins;
 mod call_convention;
 mod comparison;
@@ -18,7 +19,7 @@ pub(crate) mod objects;
 mod osr;
 pub(crate) mod result_option_carrier;
 mod resume;
-mod snapshot;
+pub(crate) mod snapshot;
 mod stack_ops;
 pub mod state_builtins;
 pub mod time_travel;
@@ -583,6 +584,25 @@ pub struct VirtualMachine {
     /// point so HashMapData helpers (both VM-side and JIT-FFI-side) can
     /// reach it without passing `&mut vm` through raw `extern "C"` calls.
     pub(crate) shape_table: std::sync::Arc<shape_value::ShapeTableHandle>,
+
+    /// Content-addressed snapshot store, installed by the host before
+    /// `execute` (design §4.1). The in-loop suspension consumer persists
+    /// `snapshot()` checkpoints here; `None` means the host opted out
+    /// (embedded API without `set_snapshot_context`) and `snapshot()`
+    /// refuses with the `NoStore` barrier. Owned via `Arc` — this retires
+    /// the time-travel recorder's `*const SnapshotStore` reinterpretation
+    /// (design Alternative #13).
+    pub(crate) snapshot_store: Option<std::sync::Arc<shape_runtime::snapshot::SnapshotStore>>,
+
+    /// Engine-owned envelope halves (semantic hash + script path) the
+    /// dispatch loop cannot reach on its own (design §4.3.4). Installed
+    /// alongside `snapshot_store`.
+    pub(crate) snapshot_seed: Option<shape_runtime::snapshot::SnapshotEnvelopeSeed>,
+
+    /// CodeManifest for the loaded program (design §4.3.2 / Q16), cached at
+    /// program load. Referenced by every snapshot this VM persists so a
+    /// resume can verify/fetch exactly the code it needs.
+    pub(crate) code_manifest: Option<shape_runtime::snapshot::CodeManifest>,
 }
 
 /// Data for resuming a single call frame mid-function.

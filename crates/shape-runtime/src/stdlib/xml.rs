@@ -39,6 +39,7 @@
 //! the csv_module migration (commit `9f6b1d3`). New typed-marshal test
 //! harness arrives with the shape-vm cleanup workstream.
 
+use crate::json_value::JsonValue;
 use crate::marshal::{register_typed_fn_1, register_typed_fn_1_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::type_schema::register_predeclared_any_schema;
@@ -123,6 +124,20 @@ impl ElementData {
             .collect();
         let children_arr: *mut TypedArray<*const TypedObjectStorage> =
             TypedArray::<*const TypedObjectStorage>::from_slice(&child_ptrs);
+        // WF-2E (2026-07-05): `from_slice` does NOT stamp the element-type
+        // discriminant (offset-7 header byte) — it stays `ELEM_TYPE_UNKNOWN`
+        // (0). Stamp it `ELEM_TYPE_TYPED_OBJECT` so the producer-side element
+        // contract is complete: any element-type-aware consumer (drop
+        // dispatch, and the WF-2E object-graph marshal reader
+        // `typed_array_to_json_value`) reads the children as TypedObjects.
+        // Without this stamp, `xml.parse(...) |> xml.stringify` fails with
+        // "element-type discriminant 0 has no JSON serialization policy".
+        unsafe {
+            shape_value::v2::typed_array::stamp_elem_type(
+                children_arr as *mut u8,
+                shape_value::v2::typed_array::ELEM_TYPE_TYPED_OBJECT,
+            );
+        }
         // `from_slice` copies each `*const TypedObjectStorage` bit-for-bit
         // (raw pointers are Copy). The refcount shares were transferred
         // from the source `TypedObjectPtr` wrappers into raw pointers
@@ -323,210 +338,70 @@ fn parse_empty_element(start: &BytesStart) -> Result<ElementData, String> {
     })
 }
 
-/// Walk a top-level node — represented as a `(keys, values)` pair-list
-/// from the marshal boundary — and emit the corresponding XML via the
-/// writer. The top-level input from `xml.stringify` is still keyed by
-/// field name (the `Vec<(Arc<String>, Arc<HeapValue>)>` FromSlot
-/// shape); children recurse through `write_typed_object_node` against
-/// `HeapValue::TypedObject` arms now that `into_typed_object_arc`
-/// produces TypedObject per child (W17-out-of-bundle-A-followups,
-/// 2026-05-12).
-fn write_node_pairs(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    pairs: &[(Arc<String>, Arc<HeapValue>)],
-) -> Result<(), String> {
-    // V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE: the top-level pair-list
-    // shape carries `Arc<HeapValue>` values, but the `HeapValue::TypedArray`
-    // outer arm is deleted (V3-S5 ckpt-5). The `children` field now arrives
-    // as a `*mut TypedArray<TypedObjectPtr>` raw pointer, which has no
-    // `HeapValue::*` wrapper — `Vec<(Arc<String>, Arc<HeapValue>)>` cannot
-    // express it. xml.stringify's top-level reader thus requires the Round 2
-    // `Vec<Arc<HeapValue>>` rewire follow-up to add a per-element-T marshal
-    // path (pairs with `from_typed_array_<T>` constructor wave at
-    // `crates/shape-value/src/slot.rs:142`).
-    let _ = (writer, pairs);
-    let _ = write_xml_element; // keep helper reachable
-    Err(
-        "xml.method stringify() -> V3-S5 ckpt-5-prime²c SURFACE — top-level \
-         pair-list reader needs Vec<Arc<HeapValue>> rewire for the deleted \
-         outer-array-arm. Round 2 follow-up (pairs with per-element-kind \
-         constructor wave). ADR-006 §2.7.24 Q25.A SUPERSEDED."
-            .to_string(),
-    )
-}
-
-/// Walk a child node — represented as an `Arc<TypedObjectStorage>` with
-/// the `XmlNode` schema. Reads each field via `field_index_in_schema`
-/// since the schema is auto-registered and field-order is locked to
-/// `XML_NODE_FIELDS`.
+/// Serialize an XML node tree to an XML string.
 ///
-/// W17-out-of-bundle-A-followups (2026-05-12): replaces the previous
-/// `write_node_heap` HashMap-element reader. The construction side
-/// (`ElementData::into_typed_object_arc`) builds TypedObjects per
-/// child, so the array's elements arrive here as TypedObjects, not
-/// HashMaps.
-fn write_typed_object_node(
+/// WF-2E object-graph-marshal consumer (2026-07-05). The `value` argument
+/// arrives fully walked into a `JsonValue` tree at the marshal boundary
+/// (typed, kind-directed — no pointer reinterpretation), so this walker
+/// only has to emit XML from the tree. A node is a `JsonValue::Object`
+/// with a required `name` string field and optional `attributes`
+/// (object of string→scalar), `children` (array of nodes), and `text`
+/// (string) fields — the same `XmlNode` shape `xml.parse` produces.
+fn write_xml_json_node(
     writer: &mut Writer<Cursor<Vec<u8>>>,
-    storage: &TypedObjectStorage,
+    node: &JsonValue,
 ) -> Result<(), String> {
-    // Match field order from `XML_NODE_FIELDS`. The construction side
-    // writes slots in this exact order; the schema registration uses
-    // the same field list, so positional access is sound.
-    let slots = storage.slots();
-    if slots.len() != XML_NODE_FIELDS.len() {
-        return Err(format!(
-            "xml.stringify(): child TypedObject has {} slots, expected {}",
-            slots.len(),
-            XML_NODE_FIELDS.len()
-        ));
+    let fields = match node {
+        JsonValue::Object(fields) => fields,
+        other => {
+            return Err(format!(
+                "xml.stringify(): expected an object node with a 'name' field, got {}",
+                other.type_name()
+            ));
+        }
+    };
+
+    let mut name: Option<&str> = None;
+    let mut attributes: Option<&Vec<(String, JsonValue)>> = None;
+    let mut children: Option<&Vec<JsonValue>> = None;
+    let mut text: Option<&str> = None;
+    for (k, v) in fields.iter() {
+        match (k.as_str(), v) {
+            ("name", JsonValue::String(s)) => name = Some(s.as_str()),
+            ("attributes", JsonValue::Object(attrs)) => attributes = Some(attrs),
+            ("children", JsonValue::Array(arr)) => children = Some(arr),
+            ("text", JsonValue::String(s)) => text = Some(s.as_str()),
+            // Absent / null fields (e.g. `attributes: null`) are ignored.
+            _ => {}
+        }
     }
-    let name_slot = &slots[0];
-    let attrs_slot = &slots[1];
-    let children_slot = &slots[2];
-    let text_slot = &slots[3];
 
-    // SAFETY for each slot: the construction-side contract in
-    // `ElementData::into_typed_object_arc` writes each slot as
-    // `ValueSlot::from_string_arc` / `from_hashmap` / `from_typed_array`
-    // — the bits are `Arc::into_raw::<T>` for the matching `T`. We
-    // bump the strong count, recover via `Arc::from_raw`, then drop the
-    // bumped share after extracting a clone of the payload (the
-    // storage's own share remains intact; this is the canonical
-    // 5-arm receiver-recovery shape from `3ac2f11`).
-    let name: String = unsafe {
-        let bits = name_slot.raw();
-        if bits == 0 {
-            return Err("xml.method stringify() -> TypedObject name slot is null".to_string());
-        }
-        let arc_ptr = bits as *const String;
-        Arc::increment_strong_count(arc_ptr);
-        let arc = Arc::from_raw(arc_ptr);
-        let owned = (*arc).clone();
-        // `arc` Drop here releases our bumped share; storage's share
-        // is untouched.
-        owned
-    };
-    let attrs_kref: Option<shape_value::heap_value::HashMapKindedRef> = unsafe {
-        let bits = attrs_slot.raw();
-        if bits == 0 {
-            None
-        } else {
-            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): the
-            // `ValueSlot::from_hashmap` shape stores
-            // `Arc::into_raw(Arc<HashMapKindedRef>)` per ADR-006
-            // §2.7.24 Q25.B SUPERSEDED. Bump and clone-out the
-            // kinded ref (single Arc share); the storage's share
-            // is untouched (`5-arm receiver-recovery` shape from
-            // `3ac2f11`).
-            let arc_ptr = bits as *const shape_value::heap_value::HashMapKindedRef;
-            Arc::increment_strong_count(arc_ptr);
-            let arc = Arc::from_raw(arc_ptr);
-            let cloned = (*arc).clone();
-            // `arc` Drop here releases our bumped outer Arc share.
-            Some(cloned)
-        }
-    };
-    // V3-S5 ckpt-5-prime²c (2026-05-15): the children slot now holds a
-    // raw `*mut TypedArray<*const TypedObjectStorage>` per Migration
-    // shape (a) — no outer Arc/wrapper. Element-kind enforcement is by
-    // the storage's `field_kinds[2] = Ptr(HeapKind::TypedArray)` +
-    // body-side element-`T` choice. `TypedObjectStorage` impls
-    // `v2::heap_element::HeapElement` (`heap_value.rs:3971`), so the
-    // element pointers carry on-header refcount shares.
-    let children_ptr: *const TypedArray<*const TypedObjectStorage> = {
-        let bits = children_slot.raw();
-        if bits == 0 {
-            std::ptr::null()
-        } else {
-            bits as usize as *const TypedArray<*const TypedObjectStorage>
-        }
-    };
-    let text: Option<String> = unsafe {
-        let bits = text_slot.raw();
-        if bits == 0 {
-            None
-        } else {
-            let arc_ptr = bits as *const String;
-            Arc::increment_strong_count(arc_ptr);
-            let arc = Arc::from_raw(arc_ptr);
-            let owned = (*arc).clone();
-            if owned.is_empty() { None } else { Some(owned) }
-        }
-    };
+    let name =
+        name.ok_or_else(|| "xml.stringify(): node missing 'name' string field".to_string())?;
+    let mut elem = BytesStart::new(name);
 
-    write_xml_element(
-        writer,
-        Some(name),
-        attrs_kref.as_ref(),
-        children_ptr,
-        text.as_deref(),
-    )
-}
-
-/// Shared element-writer body — emits the XML representation of a node
-/// given the four parsed XmlNode fields. Pulled out so the top-level
-/// `write_node_pairs` path and the recursive
-/// `write_typed_object_node` path share the same output discipline.
-///
-/// V3-S5 ckpt-5-prime²c (2026-05-15): `children` is the raw
-/// `*const TypedArray<TypedObjectPtr>` carrier per Migration shape (a).
-/// Null pointer means "no children".
-fn write_xml_element(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    name: Option<String>,
-    attrs: Option<&shape_value::heap_value::HashMapKindedRef>,
-    children: *const TypedArray<*const TypedObjectStorage>,
-    text: Option<&str>,
-) -> Result<(), String> {
-    let name = name.ok_or_else(|| "xml.stringify(): node missing 'name' field".to_string())?;
-
-    let mut elem = BytesStart::new(name.clone());
-
-    if let Some(attrs) = attrs {
-        // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk —
-        // attributes are always `HashMap<string, string>` (V = String).
-        // Other V variants are a producer-side type error (xml.stringify
-        // declares the attribute slot type at the marshal boundary).
-        use shape_value::heap_value::HashMapKindedRef;
-        match attrs {
-            HashMapKindedRef::String(arc) => {
-                let n = arc.len();
-                for i in 0..n {
-                    let key: String = unsafe {
-                        let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
-                            arc.keys, i as u32,
-                        );
-                        shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
-                    };
-                    let val: String = unsafe {
-                        let v_ptr: *const shape_value::v2::string_obj::StringObj =
-                            *(*arc.values).data.add(i);
-                        shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned()
-                    };
-                    elem.push_attribute((key.as_bytes(), val.as_bytes()));
+    if let Some(attrs) = attributes {
+        for (k, v) in attrs.iter() {
+            let val = match v {
+                JsonValue::String(s) => s.clone(),
+                JsonValue::Int(i) => i.to_string(),
+                JsonValue::Number(n) => n.to_string(),
+                JsonValue::Bool(b) => b.to_string(),
+                JsonValue::Null => String::new(),
+                other => {
+                    return Err(format!(
+                        "xml.stringify(): attribute '{}' has non-scalar value ({})",
+                        k,
+                        other.type_name()
+                    ));
                 }
-            }
-            other => {
-                return Err(format!(
-                    "xml.stringify(): attributes HashMap must be HashMap<string, string>, \
-                     got V={:?}",
-                    other.values_kind()
-                ));
-            }
+            };
+            elem.push_attribute((k.as_bytes(), val.as_bytes()));
         }
     }
 
-    // V3-S5 ckpt-5-prime²c (2026-05-15) Migration shape (a): children
-    // carrier is `*const TypedArray<TypedObjectPtr>`. Null means "no
-    // children". Element discriminator is the body-side `T` choice +
-    // schema's `field_kinds[2] = Ptr(HeapKind::TypedArray)`.
-    let child_count: u32 = if children.is_null() {
-        0
-    } else {
-        unsafe { TypedArray::<*const TypedObjectStorage>::len(children) }
-    };
-    let has_children = child_count > 0;
-    let has_text = text.is_some();
+    let has_children = children.map(|c| !c.is_empty()).unwrap_or(false);
+    let has_text = text.map(|t| !t.is_empty()).unwrap_or(false);
 
     if !has_children && !has_text {
         writer
@@ -534,27 +409,20 @@ fn write_xml_element(
             .map_err(|e| format!("xml.stringify() write error: {}", e))?;
     } else {
         writer
-            .write_event(Event::Start(elem.clone()))
+            .write_event(Event::Start(elem))
             .map_err(|e| format!("xml.stringify() write error: {}", e))?;
 
-        if let Some(text) = text {
-            writer
-                .write_event(Event::Text(BytesText::new(text)))
-                .map_err(|e| format!("xml.stringify() write error: {}", e))?;
+        if let Some(t) = text {
+            if !t.is_empty() {
+                writer
+                    .write_event(Event::Text(BytesText::new(t)))
+                    .map_err(|e| format!("xml.stringify() write error: {}", e))?;
+            }
         }
 
-        if has_children {
-            // SAFETY: `children` is non-null (checked above) and points to
-            // a live `TypedArray<*const TypedObjectStorage>` per the
-            // construction contract in `ElementData::into_typed_object_arc`.
-            let slice = unsafe { TypedArray::<*const TypedObjectStorage>::as_slice(children) };
-            for &child_ptr in slice.iter() {
-                // SAFETY: per the construction contract each element is a
-                // live `*const TypedObjectStorage` with refcount >= 1 owed
-                // to the array's element slot.
-                unsafe {
-                    write_typed_object_node(writer, &*child_ptr)?;
-                }
+        if let Some(arr) = children {
+            for child in arr.iter() {
+                write_xml_json_node(writer, child)?;
             }
         }
 
@@ -607,23 +475,37 @@ pub fn create_xml_module() -> ModuleExports {
         },
     );
 
-    // xml.stringify(value: HashMap<string, any>) -> Result<string>
-    register_typed_fn_1_full::<_, Vec<(Arc<String>, Arc<HeapValue>)>>(
+    // xml.stringify(value: object) -> Result<string>
+    //
+    // WF-2E (2026-07-05): the `value` node is walked into a `JsonValue`
+    // tree at the marshal boundary via the shared object-graph marshal
+    // (`FromSlot<JsonValue>` → `slot_to_json_value`), dispatching on the
+    // stamped `NativeKind`. This replaces the SIGSEGV-prone
+    // `Vec<(Arc<String>, Arc<HeapValue>)>` shape whose blind `from_slot`
+    // cast a `Ptr(HeapKind::TypedObject)` node (every object literal, and
+    // `xml.parse`'s own output) as a `HashMapKindedRef` and segfaulted.
+    register_typed_fn_1_full::<_, crate::marshal::PolymorphicArg>(
         &mut module,
         "stringify",
-        "Serialize a Shape HashMap node to an XML string",
+        "Serialize a Shape XML node object to an XML string",
         [ModuleParam {
             name: "value".to_string(),
-            type_name: "HashMap<string, any>".to_string(),
+            type_name: "object".to_string(),
             required: true,
             description: "Node value to serialize (with name, attributes, children, text? fields)"
                 .to_string(),
             ..Default::default()
         }],
         ConcreteType::Result(Box::new(ConcreteType::String)),
-        |pairs: Vec<(Arc<String>, Arc<HeapValue>)>, _ctx| {
+        |value: crate::marshal::PolymorphicArg, ctx| {
+            // WF-2E (2026-07-05): walk the node into a `JsonValue` tree using
+            // the EXECUTION registry (`ctx.schemas`) for TypedObject field-name
+            // resolution — the ambient `None` path resolves through
+            // `current_registry()`, which under JIT can be the process-default
+            // registry lacking the program's `XmlNode` schema (VM↔JIT divergence).
+            let value: JsonValue = value.to_json_value(ctx.schemas)?;
             let mut writer = Writer::new(Cursor::new(Vec::new()));
-            write_node_pairs(&mut writer, &pairs)?;
+            write_xml_json_node(&mut writer, &value)?;
 
             let output = String::from_utf8(writer.into_inner().into_inner())
                 .map_err(|e| format!("xml.stringify(): invalid UTF-8 output: {}", e))?;

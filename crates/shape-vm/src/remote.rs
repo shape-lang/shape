@@ -80,6 +80,17 @@ pub struct RemoteCallRequest {
     /// (SharedCell, typed frame-pointer capture, or inline scalar).
     pub upvalues: Option<Vec<SerializableVMValue>>,
 
+    /// Per-capture `NativeKind` track, lockstep (index-aligned, equal length)
+    /// with `upvalues` — the ADR-006 §2.7.7/§2.7.8 parallel-vec shape carried
+    /// across the wire (distributed §4.4). REQUIRED when `upvalues` is `Some`:
+    /// the receiver materializes each capture at its proven kind and cross-
+    /// checks against the callee blob's hash-covered `capture_kinds`. A closure
+    /// request with `upvalues: Some` but `upvalue_kinds: None` is a structured
+    /// `ArgumentError` — never a Bool-default, never a kind fabricated from raw
+    /// bits (CLAUDE.md §Forbidden Patterns).
+    #[serde(default)]
+    pub upvalue_kinds: Option<Vec<shape_value::NativeKind>>,
+
     /// Type schema registry — sent separately because `BytecodeProgram`
     /// has `#[serde(skip)]` on its registry (it's populated at compile time).
     pub type_schemas: TypeSchemaRegistry,
@@ -103,26 +114,85 @@ pub struct RemoteCallResponse {
     pub result: Result<SerializableVMValue, RemoteCallError>,
 }
 
-/// Error from remote execution.
+/// Error from remote execution (the wire-level error carried in
+/// `RemoteCallResponse`). This is the RECEIVER→SENDER structured signal; the
+/// sender's `remote::call` maps it onto the user-facing Shape `RemoteError`
+/// enum (see `stdlib-src/core/remote.shape`) per the normative §4.9 table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteCallError {
     /// Human-readable error message.
     pub message: String,
     /// Optional error kind for programmatic handling.
     pub kind: RemoteErrorKind,
+    /// Content hashes the receiver still needs to link the entry function.
+    /// Populated when `kind == MissingModuleFunction` (distributed §4.2 /
+    /// §4.3-4) so the sender can resupply all missing blobs in one round-trip.
+    #[serde(default)]
+    pub missing_blobs: Option<Vec<FunctionHash>>,
 }
 
 /// Classification of remote execution errors.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The first four variants are the pre-existing wire kinds (kept in place so
+/// `call_format == 0` senders keep decoding). The remainder are additive
+/// (distributed §4.2): under named msgpack encoding, variant order is
+/// non-semantic, so appending is wire-compatible for existing kinds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RemoteErrorKind {
     /// Function not found in the program.
     FunctionNotFound,
-    /// Argument deserialization failed.
+    /// Call-ABI mismatch class: arity, argument-kind, AND return-kind
+    /// cross-check failures — not only "bad argument" (distributed §4.2).
     ArgumentError,
     /// Runtime error during execution.
     RuntimeError,
-    /// Module function required on the remote side is missing.
+    /// Module function (dependency blob) required on the remote side is
+    /// missing. NOW CONSTRUCTED (distributed §4.3-4). The `missing_blobs`
+    /// field carries the hashes the sender must resupply.
     MissingModuleFunction,
+    /// Receiver refused the linked program's `required_permissions` union
+    /// against its own granted set (distributed §4.6). Message carries the
+    /// missing permission names.
+    PermissionDenied,
+    /// A received blob's recomputed content hash did not match its claimed
+    /// key — tampered or corrupt (distributed §4.3-2). Blob NOT cached.
+    HashMismatch,
+    /// Wire / call_format / protocol mismatch (distributed §4.2).
+    VersionSkew,
+    /// A closure capture was refused (distributed §4.4).
+    UnsupportedCapture,
+    /// Auth token missing or rejected (distributed §4.7).
+    AuthRequired,
+    /// Remote execution hit `ResourceLimits` (incl. wall-time overrun).
+    ResourceLimitExceeded,
+    /// Reserved — not produced in v1. Receiver execution-deadline overrun is
+    /// `ResourceLimitExceeded`; the sender-side read timeout is sender-LOCAL
+    /// and never crosses the wire (distributed §4.9).
+    Timeout,
+}
+
+impl RemoteCallError {
+    /// Construct an error with no `missing_blobs` payload (the common case).
+    pub fn new(kind: RemoteErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+            missing_blobs: None,
+        }
+    }
+
+    /// Construct a `MissingModuleFunction` error carrying the hashes the
+    /// sender must resupply (distributed §4.3-4).
+    pub fn missing_module_function(
+        message: impl Into<String>,
+        missing: Vec<FunctionHash>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            kind: RemoteErrorKind::MissingModuleFunction,
+            missing_blobs: Some(missing),
+        }
+    }
 }
 
 impl std::fmt::Display for RemoteCallError {
@@ -132,6 +202,65 @@ impl std::fmt::Display for RemoteCallError {
 }
 
 impl std::error::Error for RemoteCallError {}
+
+/// The pre-send / post-send split for a sender-local transport failure
+/// (distributed §4.9). This is the load-bearing distinction that userland
+/// retry / idempotency annotations branch on: a call that failed *before* its
+/// request frame was fully written provably did not execute and is retry-safe;
+/// a failure *after* the frame went out may have executed and must never be
+/// auto-retried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendPhase {
+    /// Pre-send: connect / DNS / send-frame / payload-cap failure. The request
+    /// was never fully sent, so the call did NOT execute → Shape `Transport`.
+    DidNotExecute,
+    /// Post-send: the reply was lost or timed out after the full request frame
+    /// was written. The call MAY have executed → Shape `ConnectionLost` /
+    /// `Timeout`. Never auto-retried.
+    MayHaveExecuted,
+}
+
+/// Classify a sender-local `TransportError` into the pre-send / post-send
+/// phase (distributed §4.9). Framing makes the boundary crisp: by the time the
+/// transport is reading a reply, the request frame was fully flushed, so any
+/// read-side failure is post-send.
+pub fn transport_send_phase(err: &shape_wire::transport::TransportError) -> SendPhase {
+    use shape_wire::transport::TransportError as TE;
+    match err {
+        // Connect / write-side / cap failures: the frame never fully went out.
+        TE::ConnectionFailed(_) | TE::SendFailed(_) | TE::PayloadTooLarge { .. } => {
+            SendPhase::DidNotExecute
+        }
+        // Read-side / timeout / reset: the frame was already sent.
+        TE::Timeout | TE::ReceiveFailed(_) | TE::ConnectionClosed => SendPhase::MayHaveExecuted,
+        // Ambiguous low-level io: assume the unsafe side (may have executed).
+        TE::Io(_) => SendPhase::MayHaveExecuted,
+    }
+}
+
+/// Map a sender-local `TransportError` to the user-facing Shape `RemoteError`
+/// variant name it becomes when surfaced by `remote::call` (distributed §4.9).
+/// Sender-local transport failures never cross the wire; this is the sender's
+/// own classification. Kept as a pure, testable function so the sender path
+/// (and its future `remote::call` wiring) share one vocabulary.
+pub fn transport_error_shape_variant(err: &shape_wire::transport::TransportError) -> &'static str {
+    use shape_wire::transport::TransportError as TE;
+    match err {
+        TE::ConnectionFailed(_) | TE::SendFailed(_) | TE::PayloadTooLarge { .. } => "Transport",
+        TE::Timeout => "Timeout",
+        TE::ReceiveFailed(_) | TE::ConnectionClosed | TE::Io(_) => "ConnectionLost",
+    }
+}
+
+/// Short hex rendering of a content hash for legible error messages
+/// (e.g. `3fa2b1c0…`), mirroring the design's §4.9 sample messages.
+fn short_hash(hash: &FunctionHash) -> String {
+    let b = &hash.0;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}…",
+        b[0], b[1], b[2], b[3]
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Wire message envelope (Phase 2: blob negotiation)
@@ -676,6 +805,24 @@ fn execute_inner_with_runtimes(
     run_remote_call(request, store, Some(language_runtimes), granted)
 }
 
+/// Collect every dependency content hash referenced by a blob in the store
+/// but not itself present in the store (distributed §4.3-4). The linker
+/// reports only the FIRST missing blob; this accumulates ALL of them so the
+/// sender can resupply in a single round-trip. Returned in first-seen order,
+/// deduplicated.
+fn missing_dependency_blobs(ca: &Program) -> Vec<FunctionHash> {
+    let mut missing: Vec<FunctionHash> = Vec::new();
+    let mut seen: std::collections::HashSet<FunctionHash> = std::collections::HashSet::new();
+    for blob in ca.function_store.values() {
+        for dep in &blob.dependencies {
+            if !ca.function_store.contains_key(dep) && seen.insert(*dep) {
+                missing.push(*dep);
+            }
+        }
+    }
+    missing
+}
+
 /// Shared marshal+dispatch core for `execute_inner` /
 /// `execute_inner_with_runtimes`. Per ADR-006 §2.7.4 the protocol is:
 ///
@@ -730,37 +877,120 @@ fn run_remote_call(
         }
     }
 
-    // Closures need per-capture kinded marshal (ADR-006 §2.7.8 / Q10);
-    // T1 does not cover that path. Surface-and-stop rather than
-    // dispatch a possibly-wrong call.
-    if request.upvalues.is_some() {
-        return Err(RemoteCallError {
-            message: "remote closure dispatch requires upvalue kind track \
-                      (ADR-006 §2.7.8 / Q10 cell-storage parallel-kind) — \
-                      not yet wired through the remote-call boundary"
-                .to_string(),
-            kind: RemoteErrorKind::RuntimeError,
-        });
+    // Closures cross the wire with an explicit per-capture NativeKind track
+    // (ADR-006 §2.7.8 / Q10; distributed §4.4). Validate the capture identity
+    // and the refusal matrix against the callee blob BEFORE load/execute, so
+    // statically-refusable captures (mutable / reference / resource / nested
+    // closure) and a missing kind track fail fast and never touch the VM.
+    // Materialization + dispatch happen after callee resolution (Step 3b).
+    if let Some(upvalues) = request.upvalues.as_ref() {
+        validate_remote_closure_captures(
+            &program,
+            upvalues,
+            request.upvalue_kinds.as_deref(),
+            request.function_hash,
+        )?;
     }
 
-    // Step 2: build VM and load program.
+    // Step 2: build VM and load program under RECEIVER-OWNED permission
+    // enforcement (distributed §4.6 — "never trust the sender").
     //
-    // WF-1D security wiring: remote/wire code is untrusted. Install the
-    // granted permission envelope so gated stdlib dispatch fails closed, and
-    // gate the load itself when the program is content-addressed (permissions
-    // baked into content hash, checked at load time) rather than using the
-    // plain, un-gated loader. The runtime `check_permission` gate is the
-    // backstop for non-content-addressed payloads.
+    // WF-1D + WF-2C security wiring: remote/wire code is untrusted. The
+    // fail-closed runtime gate below (`set_permissions(Some(...), _)`) is the
+    // security boundary against dishonest senders — `None` is forbidden here
+    // because `check_permission` is fail-OPEN when `None`. For content-
+    // addressed payloads we additionally (a) recompute every blob's content
+    // hash from the received bytes and reject mismatches (§4.3-2), (b)
+    // accumulate any missing dependency blobs into a structured
+    // `MissingModuleFunction` (§4.3-4), and (c) recompute the linker
+    // permission union from the VERIFIED blobs and gate the load against the
+    // receiver's granted set (§4.6) — never the sender's self-declared claim.
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.set_permissions(Some(granted.clone()), None);
     match program.content_addressed.clone() {
         Some(ca) => {
-            vm.load_program_with_permissions(ca, granted)
-                .map_err(|e| RemoteCallError {
-                    message: format!("Permission denied at load: {e}"),
-                    kind: RemoteErrorKind::RuntimeError,
+            // (a) §4.3-2: recompute each blob's content hash and reject any
+            // blob whose bytes do not match its claimed key. Permissions are
+            // baked into the hash, so a sender cannot claim `Pure` for a blob
+            // whose bytes demand `FsWrite` and still verify.
+            for (claimed, blob) in ca.function_store.iter() {
+                let recomputed = blob.compute_hash();
+                if recomputed != *claimed {
+                    return Err(RemoteCallError::new(
+                        RemoteErrorKind::HashMismatch,
+                        format!(
+                            "blob {} failed content verification — rejected \
+                             (recomputed {})",
+                            short_hash(claimed),
+                            short_hash(&recomputed),
+                        ),
+                    ));
+                }
+            }
+
+            // (b) §4.3-4: accumulate ALL dependency blobs referenced but not
+            // present, so the sender can resupply in a single round-trip. The
+            // fallible linker path replaces `load_program`'s panic on missing
+            // blobs — network input can never reach the panic.
+            let missing = missing_dependency_blobs(&ca);
+            if !missing.is_empty() {
+                return Err(RemoteCallError::missing_module_function(
+                    format!(
+                        "cannot link '{}': missing {} dependency blob(s)",
+                        request.function_name,
+                        missing.len(),
+                    ),
+                    missing,
+                ));
+            }
+
+            // (c) §4.6: recompute the linker permission union from the verified
+            // blobs, then gate the load against the receiver's granted set.
+            let linked = crate::linker::link(&ca).map_err(|e| {
+                RemoteCallError::new(
+                    RemoteErrorKind::RuntimeError,
+                    format!("link failed for '{}': {e}", request.function_name),
+                )
+            })?;
+            vm.load_linked_program_with_permissions(linked, granted)
+                .map_err(|e| match e {
+                    crate::executor::PermissionError::InsufficientPermissions {
+                        missing,
+                        ..
+                    } => {
+                        let names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
+                        RemoteCallError::new(
+                            RemoteErrorKind::PermissionDenied,
+                            format!(
+                                "remote call '{}' refused — the server does not grant [{}]",
+                                request.function_name,
+                                names.join(", "),
+                            ),
+                        )
+                    }
+                    crate::executor::PermissionError::LinkError(s) => RemoteCallError::new(
+                        RemoteErrorKind::RuntimeError,
+                        format!("link failed for '{}': {s}", request.function_name),
+                    ),
+                    crate::executor::PermissionError::DeterministicForeignRefused => {
+                        RemoteCallError::new(
+                            RemoteErrorKind::PermissionDenied,
+                            format!(
+                                "remote call '{}' refused — this program requires the Ffi \
+                                 permission (extern C / embedded Python/TypeScript), and a \
+                                 deterministic execution context cannot attest foreign bodies \
+                                 through the extension boundary",
+                                request.function_name,
+                            ),
+                        )
+                    }
                 })?;
         }
+        // Full-payload fallback: no content-addressed metadata to verify or
+        // link. `load_program` does not invoke the linker when
+        // `content_addressed` is `None`, so it cannot hit the linker panic
+        // path. The fail-closed runtime gate above is the security boundary
+        // for this path.
         None => vm.load_program(program),
     }
     vm.populate_module_objects();
@@ -780,12 +1010,14 @@ fn run_remote_call(
                     .position(|f| f.name == request.function_name)
                     .map(|p| p as u16)
             })
-            .ok_or_else(|| RemoteCallError {
-                message: format!(
-                    "function not found by hash; name='{}', id={:?}",
-                    request.function_name, request.function_id,
-                ),
-                kind: RemoteErrorKind::FunctionNotFound,
+            .ok_or_else(|| {
+                RemoteCallError::new(
+                    RemoteErrorKind::FunctionNotFound,
+                    format!(
+                        "function not found by hash; name='{}', id={:?}",
+                        request.function_name, request.function_id,
+                    ),
+                )
             })?
     } else if let Some(id) = request.function_id {
         id
@@ -795,11 +1027,22 @@ fn run_remote_call(
             .iter()
             .position(|f| f.name == request.function_name)
             .map(|p| p as u16)
-            .ok_or_else(|| RemoteCallError {
-                message: format!("function '{}' not found", request.function_name),
-                kind: RemoteErrorKind::FunctionNotFound,
+            .ok_or_else(|| {
+                RemoteCallError::new(
+                    RemoteErrorKind::FunctionNotFound,
+                    format!("function '{}' not found", request.function_name),
+                )
             })?
     };
+
+    // Step 3b: closure dispatch. A closure's frame ABI differs from a plain
+    // function — captures are the leading frame slots, so `Function.arity`
+    // counts them and the actual arguments start after the captures. Closures
+    // therefore take a dedicated marshal + `OwnedClosureBlock` materialization
+    // path (distributed §4.4). The capture track was already validated above.
+    if let Some(upvalues) = request.upvalues.as_ref() {
+        return finish_remote_closure_call(&mut vm, func_id, upvalues, &request.arguments, store);
+    }
 
     // Step 4: pick per-arg expected kinds from the callee's frame
     // descriptor. ADR-006 §2.7.5.1: a present FunctionBlob has every
@@ -808,49 +1051,51 @@ fn run_remote_call(
         .program
         .functions
         .get(func_id as usize)
-        .ok_or_else(|| RemoteCallError {
-            message: format!("function_id {} out of range", func_id),
-            kind: RemoteErrorKind::FunctionNotFound,
+        .ok_or_else(|| {
+            RemoteCallError::new(
+                RemoteErrorKind::FunctionNotFound,
+                format!("function_id {} out of range", func_id),
+            )
         })?;
 
     let arity = function.arity as usize;
     if request.arguments.len() != arity {
-        return Err(RemoteCallError {
-            message: format!(
+        return Err(RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            format!(
                 "argument count mismatch for function '{}': expected {}, got {}",
                 function.name,
                 arity,
                 request.arguments.len(),
             ),
-            kind: RemoteErrorKind::ArgumentError,
-        });
+        ));
     }
 
     let frame_desc = function.frame_descriptor.clone();
     let arg_kinds: Vec<shape_value::NativeKind> = if let Some(ref fd) = frame_desc {
         if fd.slots.len() < arity {
-            return Err(RemoteCallError {
-                message: format!(
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
                     "function '{}' frame_descriptor has {} slots but arity is {}",
                     function.name,
                     fd.slots.len(),
                     arity,
                 ),
-                kind: RemoteErrorKind::ArgumentError,
-            });
+            ));
         }
         fd.slots.iter().take(arity).copied().collect()
     } else if arity == 0 {
         Vec::new()
     } else {
-        return Err(RemoteCallError {
-            message: format!(
+        return Err(RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            format!(
                 "function '{}' has no frame_descriptor — cannot derive \
                  per-arg NativeKind for marshal protocol (ADR-006 §2.7.5.1)",
                 function.name,
             ),
-            kind: RemoteErrorKind::ArgumentError,
-        });
+        ));
     };
 
     let return_kind = frame_desc.as_ref().and_then(|fd| fd.abi_return_kind());
@@ -865,27 +1110,28 @@ fn run_remote_call(
     let mut args: Vec<KindedSlot> = Vec::with_capacity(arity);
     for (idx, sv) in request.arguments.iter().enumerate() {
         let expected = arg_kinds[idx];
-        let (bits, kind) =
-            serializable_to_slot(sv, expected, store).map_err(|e| RemoteCallError {
-                message: format!(
+        let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|e| {
+            RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
                     "arg {} marshal failure (expected kind {:?}): {}",
                     idx, expected, e,
                 ),
-                kind: RemoteErrorKind::ArgumentError,
-            })?;
+            )
+        })?;
         args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
     }
 
     // Step 6: dispatch.
-    let result = vm
-        .execute_function_by_id(func_id, args, None)
-        .map_err(|e| RemoteCallError {
-            message: format!(
+    let result = vm.execute_function_by_id(func_id, args, None).map_err(|e| {
+        RemoteCallError::new(
+            RemoteErrorKind::RuntimeError,
+            format!(
                 "remote execution of '{}' failed: {:?}",
                 function_name_owned, e,
             ),
-            kind: RemoteErrorKind::RuntimeError,
-        })?;
+        )
+    })?;
 
     // Step 7: project the returned KindedSlot → SerializableVMValue.
     // The slot owns one strong-count share that we must release after
@@ -898,23 +1144,397 @@ fn run_remote_call(
     // by the marshal boundary.
     if let Some(declared) = return_kind {
         if kind != declared {
-            return Err(RemoteCallError {
-                message: format!(
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
                     "function '{}' returned kind {:?} but frame_descriptor \
                      declared return_kind {:?}",
                     function_name_owned, kind, declared,
                 ),
-                kind: RemoteErrorKind::RuntimeError,
-            });
+            ));
         }
     }
-    let serialized = slot_to_serializable(bits, kind, store).map_err(|e| RemoteCallError {
-        message: format!("return-value marshal failure: {}", e),
-        kind: RemoteErrorKind::RuntimeError,
+    let serialized = slot_to_serializable(bits, kind, store).map_err(|e| {
+        RemoteCallError::new(
+            RemoteErrorKind::RuntimeError,
+            format!("return-value marshal failure: {}", e),
+        )
     })?;
     // `result` drops here, retiring the strong-count share via
     // `KindedSlot::Drop` (ADR-006 §2.7.6 / Q8).
     drop(result);
+    Ok(serialized)
+}
+
+/// Render a capture's `NativeKind` in Shape-surface words for user-facing
+/// refusal messages (distributed §4.4: no `NativeKind` / `HeapKind` jargon and
+/// no slot indices in messages the user reads).
+fn capture_type_surface(kind: shape_value::NativeKind) -> &'static str {
+    use shape_value::{HeapKind, NativeKind};
+    match kind {
+        NativeKind::Int64 | NativeKind::Int32 | NativeKind::Int8 => "an int",
+        NativeKind::Float64 => "a number",
+        NativeKind::Bool => "a bool",
+        NativeKind::String | NativeKind::StringV2 => "a string",
+        NativeKind::DecimalV2 => "a decimal",
+        NativeKind::Null => "null",
+        NativeKind::Ptr(HeapKind::TypedArray) => "an array",
+        NativeKind::Ptr(HeapKind::TypedObject) => "an object",
+        NativeKind::Ptr(HeapKind::HashMap) => "a map",
+        NativeKind::Ptr(HeapKind::Closure) => "a closure",
+        NativeKind::Ptr(HeapKind::Reference) => "a reference",
+        NativeKind::Ptr(HeapKind::SharedCell) => "a shared cell",
+        NativeKind::Ptr(HeapKind::IoHandle) => "an open resource handle",
+        NativeKind::Ptr(HeapKind::Future) => "a pending async value",
+        NativeKind::Ptr(HeapKind::TaskGroup) => "a task group",
+        NativeKind::Ptr(HeapKind::String) => "a string",
+        _ => "an unsupported value",
+    }
+}
+
+/// Validate a remote closure call's capture track against the callee blob
+/// BEFORE any load/execute (distributed §4.4). Runs, in order:
+///
+/// 1. the kind-track presence + length check (`upvalues` without a lockstep
+///    `upvalue_kinds` track is a structured `ArgumentError` — never a
+///    Bool-default, never a kind fabricated from raw bits; ADR-006 §2.7.7/§2.7.8);
+/// 2. the `upvalue_kinds` ↔ hash-covered `capture_kinds` cross-check (§4.8);
+/// 3. the refusal matrix (mutable / reference / shared-cell / resource /
+///    nested-closure captures) — all refusals are `UnsupportedCapture` naming
+///    the captured *variable* (from the blob's non-hash `capture_names`) and
+///    rendering its type in Shape-surface words.
+///
+/// Returns the first fault encountered; `Ok(())` means the captures are all
+/// immutable, kind-consistent, and safe to materialize.
+fn validate_remote_closure_captures(
+    program: &BytecodeProgram,
+    upvalues: &[SerializableVMValue],
+    upvalue_kinds: Option<&[shape_value::NativeKind]>,
+    function_hash: Option<FunctionHash>,
+) -> Result<(), RemoteCallError> {
+    use shape_value::{HeapKind, NativeKind};
+
+    // (1) The kind track is REQUIRED alongside upvalues.
+    let upvalue_kinds = upvalue_kinds.ok_or_else(|| {
+        RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            "closure request carries upvalues but no upvalue_kinds track \
+             (ADR-006 §2.7.8) — the receiver refuses to materialize captures \
+             from a kind-blind payload",
+        )
+    })?;
+    if upvalues.len() != upvalue_kinds.len() {
+        return Err(RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            format!(
+                "closure capture track length mismatch: {} upvalue(s) vs {} kind(s)",
+                upvalues.len(),
+                upvalue_kinds.len(),
+            ),
+        ));
+    }
+
+    // Resolve the callee blob for its hash-covered capture identity + names.
+    let blob = function_hash
+        .and_then(|h| {
+            program
+                .content_addressed
+                .as_ref()
+                .and_then(|ca| ca.function_store.get(&h))
+        })
+        .ok_or_else(|| {
+            RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                "closure call carries no resolvable content hash — cannot verify \
+                 capture identity (a closure must ship its function blob)",
+            )
+        })?;
+
+    // (2) capture_kinds is hash-covered call-ABI identity (§4.8). A shipped
+    // upvalue_kinds track that disagrees with the blob it arrived with is a
+    // protocol-integrity fault.
+    if blob.capture_kinds.len() != upvalue_kinds.len() {
+        return Err(RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            format!(
+                "closure '{}' declares {} capture(s) but the request carries {} \
+                 upvalue kind(s)",
+                blob.name,
+                blob.capture_kinds.len(),
+                upvalue_kinds.len(),
+            ),
+        ));
+    }
+    for (i, (declared, shipped)) in blob
+        .capture_kinds
+        .iter()
+        .zip(upvalue_kinds.iter())
+        .enumerate()
+    {
+        if declared != shipped {
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
+                    "closure '{}' capture {} kind disagrees with the callee blob \
+                     (request {:?}, blob {:?})",
+                    blob.name, i, shipped, declared,
+                ),
+            ));
+        }
+    }
+
+    // (3) Refusal matrix. Name the captured VARIABLE; render its type in
+    // Shape-surface words. Every refusal is `UnsupportedCapture`.
+    let name_of = |i: usize| -> String {
+        blob.capture_names
+            .get(i)
+            .filter(|n| !n.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("capture #{i}"))
+    };
+    for (i, kind) in blob.capture_kinds.iter().enumerate() {
+        if blob.mutable_captures.get(i).copied().unwrap_or(false) {
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::UnsupportedCapture,
+                format!(
+                    "closure captures '{}' mutably — a remote call copies captures \
+                     by value, so writes on the remote node would be lost; pass it \
+                     as an argument and return the new value",
+                    name_of(i),
+                ),
+            ));
+        }
+        let reason = match kind {
+            NativeKind::Ptr(HeapKind::Closure) => Some(
+                "is itself a closure — hoist it to a named top-level function (a \
+                 static dependency) or pass its result as a value"
+                    .to_string(),
+            ),
+            NativeKind::Ptr(HeapKind::Reference) => Some(
+                "is a reference (& / &mut) — references do not cross nodes; pass the \
+                 referenced value and return the result"
+                    .to_string(),
+            ),
+            NativeKind::Ptr(HeapKind::SharedCell) => Some(
+                "is a shared mutable cell — cross-node coherence is not supported; \
+                 pass the value as an argument and return the new value"
+                    .to_string(),
+            ),
+            NativeKind::Ptr(HeapKind::IoHandle)
+            | NativeKind::Ptr(HeapKind::Future)
+            | NativeKind::Ptr(HeapKind::TaskGroup) => Some(format!(
+                "is {} — open resources have no meaningful remote identity",
+                capture_type_surface(*kind),
+            )),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::UnsupportedCapture,
+                format!("closure capture '{}' {}", name_of(i), reason),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Marshal + materialize + execute a remote CLOSURE call (distributed §4.4).
+///
+/// Called only after [`validate_remote_closure_captures`] has cleared the
+/// capture track (all captures immutable, kind-consistent). Rebuilds the
+/// captures into a fresh `OwnedClosureBlock` at their proven `NativeKind`s (the
+/// ADR-006 §2.7.8 cell-storage parallel-kind track — the same template as
+/// `VirtualMachine::from_snapshot`'s `restore_call_stack`), marshals the actual
+/// arguments at the callee's post-capture frame slots, and dispatches through
+/// the §2.7.11 value-call ABI (`execute_closure`).
+fn finish_remote_closure_call(
+    vm: &mut crate::executor::VirtualMachine,
+    func_id: u16,
+    upvalues: &[SerializableVMValue],
+    arguments: &[SerializableVMValue],
+    store: &SnapshotStore,
+) -> Result<SerializableVMValue, RemoteCallError> {
+    use shape_runtime::snapshot::{serializable_to_slot, slot_to_serializable};
+    use shape_value::v2::closure_layout::CaptureKind;
+    use shape_value::v2::closure_raw::{
+        OwnedClosureBlock, alloc_typed_closure, write_capture_raw_u64,
+    };
+    use shape_value::{KindedSlot, ValueSlot};
+
+    // Resolve the receiver-side ClosureLayout (rebuilt by the linker from the
+    // propagated `closure_function_layouts_by_name` side-table). Absence ⇒
+    // surface-and-stop — no Bool-default fabrication (ADR-006 §2.7.8 #4).
+    let layout = vm
+        .program
+        .closure_function_layouts
+        .get(func_id as usize)
+        .and_then(|o| o.clone())
+        .ok_or_else(|| {
+            RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
+                    "closure function {func_id} has no registered ClosureLayout on \
+                     the receiver — cannot materialize captures (ADR-006 §2.7.8)"
+                ),
+            )
+        })?;
+
+    let capture_count = layout.capture_count();
+    if capture_count != upvalues.len() {
+        return Err(RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            format!(
+                "closure capture count mismatch: receiver layout expects {} but the \
+                 request carries {}",
+                capture_count,
+                upvalues.len(),
+            ),
+        ));
+    }
+
+    // Defend the invariant: after `validate_*` every surviving capture is
+    // Immutable. A non-Immutable layout capture reaching here is an
+    // inconsistency, not something to Bool-default around.
+    for i in 0..capture_count {
+        if !matches!(layout.capture_storage_kind(i), CaptureKind::Immutable) {
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::UnsupportedCapture,
+                format!(
+                    "closure capture #{i} is not an immutable by-value capture — \
+                     only immutable captures cross the wire in v1"
+                ),
+            ));
+        }
+    }
+
+    // Callee arity: a closure's `Function.arity` counts the leading capture
+    // slots (compile_expr_closure builds params = captures ++ params), so the
+    // actual argument count is `arity - capture_count`.
+    let (arity, frame_desc, callee_name) = {
+        let f = vm.program.functions.get(func_id as usize).ok_or_else(|| {
+            RemoteCallError::new(
+                RemoteErrorKind::FunctionNotFound,
+                format!("function_id {func_id} out of range"),
+            )
+        })?;
+        (f.arity as usize, f.frame_descriptor.clone(), f.name.clone())
+    };
+    let actual_arity = arity.saturating_sub(capture_count);
+    if arguments.len() != actual_arity {
+        return Err(RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            format!(
+                "closure '{}' takes {} argument(s) but the request carried {}",
+                callee_name,
+                actual_arity,
+                arguments.len(),
+            ),
+        ));
+    }
+
+    // Per-arg expected kinds: the callee's frame descriptor lays out
+    // [captures.. , params.. , locals..]; the actual params start at
+    // `capture_count`. ADR-006 §2.7.5.1: every slot kind is proven.
+    let arg_kinds: Vec<shape_value::NativeKind> = if let Some(ref fd) = frame_desc {
+        if fd.slots.len() < capture_count + actual_arity {
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
+                    "closure '{}' frame_descriptor has {} slots but needs {} \
+                     (captures {} + args {})",
+                    callee_name,
+                    fd.slots.len(),
+                    capture_count + actual_arity,
+                    capture_count,
+                    actual_arity,
+                ),
+            ));
+        }
+        fd.slots[capture_count..capture_count + actual_arity].to_vec()
+    } else if actual_arity == 0 {
+        Vec::new()
+    } else {
+        return Err(RemoteCallError::new(
+            RemoteErrorKind::ArgumentError,
+            format!(
+                "closure '{}' has no frame_descriptor — cannot derive per-arg \
+                 NativeKind for the marshal protocol (ADR-006 §2.7.5.1)",
+                callee_name,
+            ),
+        ));
+    };
+    let return_kind = frame_desc.as_ref().and_then(|fd| fd.abi_return_kind());
+
+    // Materialize captures into a fresh OwnedClosureBlock at each capture's
+    // proven kind (mirrors `restore_call_stack`).
+    //
+    // SAFETY: `alloc_typed_closure` returns a zeroed block sized for the
+    // layout; `write_capture_raw_u64` writes in-bounds for `i < capture_count`;
+    // `from_raw` adopts the single owning share, retired when `block` drops at
+    // scope exit. On a mid-loop marshal error the partially-written allocation
+    // leaks (no double-free) — the same error-path behaviour as the snapshot
+    // restore template.
+    let ptr = unsafe { alloc_typed_closure(func_id, 0, &layout) };
+    for (i, sv) in upvalues.iter().enumerate() {
+        let expected = layout.capture_native_kind(i);
+        let (bits, _kind) = serializable_to_slot(sv, expected, store).map_err(|e| {
+            RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!("closure capture {i} marshal failure (expected {expected:?}): {e}"),
+            )
+        })?;
+        // SAFETY: i < capture_count (checked above).
+        unsafe { write_capture_raw_u64(ptr, &layout, i, bits) };
+    }
+    // SAFETY: `ptr` is a live block with all captures initialised.
+    let block = unsafe { OwnedClosureBlock::from_raw(ptr as *const u8, layout) };
+
+    // Marshal the actual arguments.
+    let mut args: Vec<KindedSlot> = Vec::with_capacity(actual_arity);
+    for (idx, sv) in arguments.iter().enumerate() {
+        let expected = arg_kinds[idx];
+        let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|e| {
+            RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!("closure arg {idx} marshal failure (expected {expected:?}): {e}"),
+            )
+        })?;
+        args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+    }
+
+    // Dispatch through the value-call ABI. `execute_closure` borrows the block
+    // (share-neutral: it clones each capture into the frame), so `block` keeps
+    // owning its shares and drops them at scope exit.
+    let result = vm.execute_closure(&block, args, None).map_err(|e| {
+        RemoteCallError::new(
+            RemoteErrorKind::RuntimeError,
+            format!("remote closure execution of '{}' failed: {:?}", callee_name, e),
+        )
+    })?;
+
+    let (bits, kind) = (result.slot.raw(), result.kind);
+    if let Some(declared) = return_kind {
+        if kind != declared {
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
+                    "closure '{}' returned kind {:?} but frame_descriptor declared {:?}",
+                    callee_name, kind, declared,
+                ),
+            ));
+        }
+    }
+    let serialized = slot_to_serializable(bits, kind, store).map_err(|e| {
+        RemoteCallError::new(
+            RemoteErrorKind::RuntimeError,
+            format!("closure return-value marshal failure: {e}"),
+        )
+    })?;
+    // `result` drops first (retiring its return share), then `block` (retiring
+    // the capture shares via the layout's capture-mask walk).
+    drop(result);
+    drop(block);
     Ok(serialized)
 }
 
@@ -1101,22 +1721,73 @@ pub fn build_call_request(
         function_hash,
         arguments,
         upvalues: None,
+        // Named-function call: no upvalues, hence no capture-kind track.
+        upvalue_kinds: None,
         type_schemas: program.type_schema_registry.clone(),
         program_hash: hash,
         function_blobs: blobs,
     }
 }
 
+/// Build a `RemoteCallRequest` for a function identified by its **id** — the
+/// canonical sender-side entry when the caller already holds the resolved
+/// function value (e.g. `@remote`'s `ctx.target`, or a `remote::call` fn-ref).
+///
+/// Mirrors [`build_call_request`] but keys off the id directly instead of a
+/// name lookup, so a name collision can never misroute the call (distributed
+/// §4.3-1 canonical identity). Named-function call: no upvalues.
+pub fn build_call_request_by_id(
+    program: &BytecodeProgram,
+    function_id: u16,
+    arguments: Vec<SerializableVMValue>,
+) -> Result<RemoteCallRequest, String> {
+    let function = program
+        .functions
+        .get(function_id as usize)
+        .ok_or_else(|| format!("function id {function_id} out of range"))?;
+    let function_name = function.name.clone();
+    let function_hash = program
+        .function_blob_hashes
+        .get(function_id as usize)
+        .copied()
+        .flatten();
+    let blobs = function_hash.and_then(|h| build_minimal_blobs_by_hash(program, h));
+    let request_program = if blobs.is_some() {
+        create_stub_program(program)
+    } else {
+        program.clone()
+    };
+    Ok(RemoteCallRequest {
+        program: request_program,
+        function_name,
+        function_id: Some(function_id),
+        function_hash,
+        arguments,
+        upvalues: None,
+        upvalue_kinds: None,
+        type_schemas: program.type_schema_registry.clone(),
+        program_hash: program_hash(program),
+        function_blobs: blobs,
+    })
+}
+
 /// Build a `RemoteCallRequest` for a closure.
 ///
-/// Serializes the closure's captured upvalues alongside the function call.
-/// When the closure's function has a matching content-addressed blob, sends
-/// the minimal blob set instead of the full program.
+/// Serializes the closure's captured upvalues **and** their per-capture
+/// `NativeKind` track alongside the function call (distributed §4.4). When the
+/// closure's function has a matching content-addressed blob, sends the minimal
+/// blob set instead of the full program.
+///
+/// `upvalue_kinds` MUST be lockstep with `upvalues` (equal length, index-
+/// aligned) — the sender reads them from the closure's §2.7.8 cell-storage
+/// parallel-kind track, never fabricated from raw bits. The receiver cross-
+/// checks them against the callee blob's hash-covered `capture_kinds`.
 pub fn build_closure_call_request(
     program: &BytecodeProgram,
     function_id: u16,
     arguments: Vec<SerializableVMValue>,
     upvalues: Vec<SerializableVMValue>,
+    upvalue_kinds: Vec<shape_value::NativeKind>,
 ) -> RemoteCallRequest {
     let hash = program_hash(program);
 
@@ -1138,6 +1809,9 @@ pub fn build_closure_call_request(
         function_hash,
         arguments,
         upvalues: Some(upvalues),
+        // Lockstep per-capture kind track (ADR-006 §2.7.7/§2.7.8). Carried
+        // explicitly so the receiver never fabricates Bool-default kinds.
+        upvalue_kinds: Some(upvalue_kinds),
         type_schemas: program.type_schema_registry.clone(),
         program_hash: hash,
         function_blobs: blobs,
@@ -1165,6 +1839,121 @@ pub fn build_call_request_negotiated(
     }
 
     request
+}
+
+/// Orchestrate a remote call with a bounded, retry-**once** resupply of missing
+/// dependency blobs (distributed §4.3-5). This is the SENDER side of the
+/// content-addressed missing-blob protocol: it reacts to the receiver's
+/// structured `MissingModuleFunction` event by looking the named hashes up in
+/// its own content store, attaching them, and retrying a single time.
+///
+/// `send` performs one request → response round-trip and is transport-agnostic:
+/// the caller supplies the loopback / TCP / in-process plumbing, so this loop is
+/// unit-testable without a socket and reusable by the real `remote::call` path.
+///
+/// Retry policy (distributed §4.3-5 / OQ-8, deliberately narrow):
+/// - Retry **only** on `MissingModuleFunction` — it is provably pre-execution,
+///   so resupplying and retrying cannot double-execute a side-effecting call.
+///   `Timeout` / connection-loss / any other class is returned unchanged (never
+///   auto-retried — they may have executed).
+/// - Retry **at most once**. A second `MissingModuleFunction` surfaces
+///   terminally (the surface layer maps it to `Protocol` — "still missing after
+///   resupply"); there is no unbounded resupply chatter.
+/// - If the receiver names a hash the sender's own store does not hold (store
+///   eviction; impossible for a closure the sender just computed), the call
+///   aborts with a defined terminal error — never a hang.
+pub fn call_with_resupply<F>(
+    sender_program: &BytecodeProgram,
+    mut request: RemoteCallRequest,
+    mut send: F,
+) -> RemoteCallResponse
+where
+    F: FnMut(&RemoteCallRequest) -> RemoteCallResponse,
+{
+    let first = send(&request);
+
+    // Only a MissingModuleFunction carrying hashes is retry-eligible.
+    let missing = match &first.result {
+        Err(e) if matches!(e.kind, RemoteErrorKind::MissingModuleFunction) => {
+            match &e.missing_blobs {
+                Some(m) if !m.is_empty() => m.clone(),
+                // MissingModuleFunction without a hash list: nothing actionable
+                // to resupply — surface as-is.
+                _ => return first,
+            }
+        }
+        _ => return first,
+    };
+
+    // Look each missing hash up in the sender's own content store.
+    let store = match sender_program.content_addressed.as_ref() {
+        Some(ca) => &ca.function_store,
+        None => {
+            return RemoteCallResponse {
+                result: Err(RemoteCallError::missing_module_function(
+                    "receiver reported missing blobs but the sender has no \
+                     content-addressed store to resupply from"
+                        .to_string(),
+                    missing,
+                )),
+            };
+        }
+    };
+    let mut resupply: Vec<(FunctionHash, FunctionBlob)> = Vec::with_capacity(missing.len());
+    for h in &missing {
+        match store.get(h) {
+            Some(blob) => resupply.push((*h, blob.clone())),
+            None => {
+                // §4.3-5 terminal: the sender cannot supply a hash it lacks.
+                return RemoteCallResponse {
+                    result: Err(RemoteCallError::missing_module_function(
+                        format!(
+                            "receiver is missing blob {} and the sender cannot \
+                             resupply it",
+                            short_hash(h),
+                        ),
+                        vec![*h],
+                    )),
+                };
+            }
+        }
+    }
+
+    // Attach the resupply blobs (dedup against any already present) and retry.
+    match request.function_blobs.as_mut() {
+        Some(existing) => {
+            let have: std::collections::HashSet<FunctionHash> =
+                existing.iter().map(|(h, _)| *h).collect();
+            for (h, b) in resupply {
+                if !have.contains(&h) {
+                    existing.push((h, b));
+                }
+            }
+        }
+        None => request.function_blobs = Some(resupply),
+    }
+
+    let second = send(&request);
+
+    // Bounded loop: a second missing-blob failure is terminal. Reword so the
+    // surface layer's message is truthful about the exhausted retry (the kind
+    // stays MissingModuleFunction → surface `Protocol`).
+    if let Err(e) = &second.result {
+        if matches!(e.kind, RemoteErrorKind::MissingModuleFunction) {
+            let still = e
+                .missing_blobs
+                .as_ref()
+                .map(|m| m.len())
+                .unwrap_or_default();
+            return RemoteCallResponse {
+                result: Err(RemoteCallError::missing_module_function(
+                    format!("receiver still missing {still} blob(s) after resupply"),
+                    e.missing_blobs.clone().unwrap_or_default(),
+                )),
+            };
+        }
+    }
+    second
 }
 
 /// Handle a blob negotiation request on the server side.
@@ -1763,6 +2552,7 @@ mod tests {
             mutable_captures: Vec::new(),
             frame_descriptor: None,
             capture_kinds: Vec::new(),
+            capture_names: Vec::new(),
             instructions: vec![
                 Instruction::simple(OpCode::PushNull),
                 Instruction::simple(OpCode::ReturnValue),
@@ -2610,4 +3400,496 @@ mod tests {
     // Phase-2c snapshot rebuild lands (ADR-006 §2.7.4 + addendum). The
     // wire schema (`function_id: u32`, `type_id: u32`, `upvalues: Vec<…>`)
     // is preserved verbatim.
+
+    // -----------------------------------------------------------------------
+    // WF-2C: receiver-owned permission enforcement + blob hash verification +
+    // structured missing-blob signalling (distributed §4.3 / §4.6) +
+    // sender-local transport pre-send/post-send classification (§4.9).
+    // -----------------------------------------------------------------------
+
+    /// Build a content-addressed `Program` around a blob store for the
+    /// receiver-enforcement tests.
+    fn mk_ca_program(entry: FunctionHash, store: HashMap<FunctionHash, FunctionBlob>) -> Program {
+        Program {
+            entry,
+            function_store: store,
+            top_level_locals_count: 0,
+            top_level_local_storage_hints: Vec::new(),
+            module_binding_names: Vec::new(),
+            module_binding_storage_hints: Vec::new(),
+            function_local_storage_hints: Vec::new(),
+            top_level_frame: None,
+            top_level_local_concrete_types: Vec::new(),
+            function_local_concrete_types: Vec::new(),
+            function_return_concrete_types: Vec::new(),
+            monomorphized_method_call_sites: HashMap::new(),
+            value_call_return_concrete_types: HashMap::new(),
+            operator_trait_dispatch_sites: HashMap::new(),
+            data_schema: None,
+            type_schema_registry: shape_runtime::type_schema::TypeSchemaRegistry::new(),
+            trait_method_symbols: HashMap::new(),
+            foreign_functions: Vec::new(),
+            native_struct_layouts: Vec::new(),
+            debug_info: crate::bytecode::DebugInfo::new("<test>".to_string()),
+            closure_function_layouts_by_name: HashMap::new(),
+            trait_vtables: HashMap::new(),
+            has_imported_const_inline: false,
+            has_w17_marshal_residual: false,
+            has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
+        }
+    }
+
+    /// Build a receiver request whose entry blob is `entry`, carrying `program`
+    /// as the content-addressed payload.
+    fn mk_ca_request(program: BytecodeProgram, entry: FunctionHash, name: &str) -> RemoteCallRequest {
+        RemoteCallRequest {
+            program,
+            function_name: name.to_string(),
+            function_id: None,
+            function_hash: Some(entry),
+            arguments: vec![],
+            upvalues: None,
+            upvalue_kinds: None,
+            type_schemas: shape_runtime::type_schema::TypeSchemaRegistry::new(),
+            program_hash: [0u8; 32],
+            function_blobs: None,
+        }
+    }
+
+    #[test]
+    fn receiver_refuses_fn_requiring_fswrite_when_receiver_grants_pure() {
+        use shape_abi_v1::Permission;
+        // Honest blob that DECLARES fs.write, finalized so its content hash
+        // verifies. The receiver grants nothing (pure) → PermissionDenied,
+        // decided by the RECEIVER's config — never the sender's claim.
+        let mut blob = mk_blob("writes_file", mk_hash(1), vec![]);
+        let mut required = PermissionSet::pure();
+        required.insert(Permission::FsWrite);
+        blob.required_permissions = required;
+        blob.finalize();
+        let hash = blob.content_hash;
+        let mut store = HashMap::new();
+        store.insert(hash, blob);
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(mk_ca_program(hash, store));
+
+        let request = mk_ca_request(program, hash, "writes_file");
+        let granted = PermissionSet::pure(); // receiver does NOT grant fs.write
+        let resp = execute_remote_call(request, &temp_store(), &granted);
+        match resp.result {
+            Err(e) => {
+                assert_eq!(
+                    e.kind,
+                    RemoteErrorKind::PermissionDenied,
+                    "expected PermissionDenied, msg={}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("fs.write"),
+                    "deny message names the missing permission: {}",
+                    e.message
+                );
+            }
+            Ok(v) => panic!("expected PermissionDenied, got Ok({:?})", v),
+        }
+    }
+
+    #[test]
+    fn receiver_admits_fn_requiring_fswrite_when_receiver_grants_it() {
+        use shape_abi_v1::Permission;
+        // Same honest blob; the receiver DOES grant fs.write → the load gate
+        // opens. Proves enforcement follows the RECEIVER's config: flipping
+        // only the granted set flips the outcome.
+        let mut blob = mk_blob("writes_file", mk_hash(1), vec![]);
+        let mut required = PermissionSet::pure();
+        required.insert(Permission::FsWrite);
+        blob.required_permissions = required;
+        blob.finalize();
+        let hash = blob.content_hash;
+        let mut store = HashMap::new();
+        store.insert(hash, blob);
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(mk_ca_program(hash, store));
+
+        let request = mk_ca_request(program, hash, "writes_file");
+        let mut granted = PermissionSet::pure();
+        granted.insert(Permission::FsWrite);
+        let resp = execute_remote_call(request, &temp_store(), &granted);
+        // Must NOT refuse when the receiver grants the permission.
+        if let Err(ref e) = resp.result {
+            assert_ne!(
+                e.kind,
+                RemoteErrorKind::PermissionDenied,
+                "receiver granted fs.write but still refused: {}",
+                e.message
+            );
+        }
+    }
+
+    #[test]
+    fn receiver_rejects_blob_with_mismatched_content_hash() {
+        // Store an honest blob under a WRONG key; recompute-verify catches it.
+        let mut blob = mk_blob("f", mk_hash(1), vec![]);
+        blob.finalize();
+        let wrong_key = mk_hash(0xEE);
+        assert_ne!(blob.content_hash, wrong_key, "test setup: keys must differ");
+        let mut store = HashMap::new();
+        store.insert(wrong_key, blob);
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(mk_ca_program(wrong_key, store));
+
+        let request = mk_ca_request(program, wrong_key, "f");
+        let resp = execute_remote_call(request, &temp_store(), &PermissionSet::pure());
+        match resp.result {
+            Err(e) => assert_eq!(
+                e.kind,
+                RemoteErrorKind::HashMismatch,
+                "expected HashMismatch, msg={}",
+                e.message
+            ),
+            Ok(v) => panic!("expected HashMismatch, got Ok({:?})", v),
+        }
+    }
+
+    #[test]
+    fn receiver_reports_missing_dependency_as_missing_module_function() {
+        // Entry blob references a dependency hash that is absent from the
+        // store → structured MissingModuleFunction (no panic), with the
+        // absent hash reported so the sender can resupply (§4.3-4).
+        let dep_hash = mk_hash(2);
+        let mut blob = mk_blob("f", mk_hash(1), vec![dep_hash]);
+        blob.finalize();
+        let entry = blob.content_hash;
+        let mut store = HashMap::new();
+        store.insert(entry, blob);
+        // dep_hash intentionally absent.
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(mk_ca_program(entry, store));
+
+        let request = mk_ca_request(program, entry, "f");
+        let resp = execute_remote_call(request, &temp_store(), &PermissionSet::pure());
+        match resp.result {
+            Err(e) => {
+                assert_eq!(e.kind, RemoteErrorKind::MissingModuleFunction, "msg={}", e.message);
+                let missing = e
+                    .missing_blobs
+                    .expect("MissingModuleFunction populates missing_blobs");
+                assert!(
+                    missing.contains(&dep_hash),
+                    "missing_blobs reports the absent dependency hash"
+                );
+            }
+            Ok(v) => panic!("expected MissingModuleFunction, got Ok({:?})", v),
+        }
+    }
+
+    #[test]
+    fn transport_error_phase_and_variant_distinguish_presend_from_timeout() {
+        use shape_wire::transport::TransportError;
+        // Pre-send connect failure: the call provably did not execute.
+        let connect = TransportError::ConnectionFailed("refused".to_string());
+        assert_eq!(transport_send_phase(&connect), SendPhase::DidNotExecute);
+        assert_eq!(transport_error_shape_variant(&connect), "Transport");
+
+        // Post-send read timeout: the call MAY have executed — a DISTINCT
+        // classification from the pre-send Transport failure.
+        let timeout = TransportError::Timeout;
+        assert_eq!(transport_send_phase(&timeout), SendPhase::MayHaveExecuted);
+        assert_eq!(transport_error_shape_variant(&timeout), "Timeout");
+
+        // A reset after the frame went out is post-send ConnectionLost.
+        let lost = TransportError::ConnectionClosed;
+        assert_eq!(transport_send_phase(&lost), SendPhase::MayHaveExecuted);
+        assert_eq!(transport_error_shape_variant(&lost), "ConnectionLost");
+
+        // The two phases are not equal — the split is observable.
+        assert_ne!(
+            transport_send_phase(&connect),
+            transport_send_phase(&timeout),
+            "pre-send Transport must be distinguishable from post-send Timeout"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // WF-2C: minimal blob-closure transfer, sender-side retry-once resupply,
+    // and closures crossing the wire with an explicit upvalue_kinds parallel
+    // track + refusal matrix (distributed §4.3 / §4.4).
+    // -----------------------------------------------------------------------
+
+    /// Locate the (function_id, content hash) of the single closure function in
+    /// a compiled content-addressed program.
+    fn find_closure(program: &BytecodeProgram) -> (u16, FunctionHash) {
+        let fid = program
+            .functions
+            .iter()
+            .position(|f| f.is_closure)
+            .expect("program defines a closure") as u16;
+        let hash = program
+            .function_blob_hashes
+            .get(fid as usize)
+            .copied()
+            .flatten()
+            .expect("closure function has a content hash");
+        (fid, hash)
+    }
+
+    #[test]
+    fn remote_named_function_executes_end_to_end() {
+        // Baseline: a plain named function marshals + executes through the
+        // receiver, so the closure/resupply cases below build on a known-good
+        // execution path (the marshal template is unchanged by WF-2C).
+        let program = compile("fn add(a: int, b: int) -> int { a + b }");
+        let req = build_call_request(
+            &program,
+            "add",
+            vec![SerializableVMValue::Int(3), SerializableVMValue::Int(4)],
+        );
+        let resp = execute_remote_call(req, &temp_store(), &PermissionSet::pure());
+        match resp.result {
+            Ok(SerializableVMValue::Int(v)) => assert_eq!(v, 7),
+            other => panic!("expected Ok(Int(7)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_closure_with_immutable_captures_executes() {
+        // A closure capturing an immutable int crosses the wire with its
+        // upvalue_kinds track and executes on the receiver (distributed §4.4).
+        let program = compile(
+            "fn make_adder(n: int) -> int {
+    let add_n = |x| x + n
+    return add_n(0)
+}",
+        );
+        let (fid, hash) = find_closure(&program);
+
+        // The compiler stamps the closure blob's per-capture identity: the
+        // proven kind track (hash-covered §4.8) and the non-hash capture NAMES
+        // (§4.4, for legible refusal messages). Assert the full compiler→blob
+        // wiring, not just synthetic-blob behaviour.
+        let blob = program
+            .content_addressed
+            .as_ref()
+            .and_then(|ca| ca.function_store.get(&hash))
+            .expect("closure blob present in the content-addressed store");
+        assert_eq!(
+            blob.capture_kinds,
+            vec![shape_value::NativeKind::Int64],
+            "closure captures one int (n)"
+        );
+        assert_eq!(
+            blob.capture_names,
+            vec!["n".to_string()],
+            "compiler recorded the captured variable name"
+        );
+
+        let req = build_closure_call_request(
+            &program,
+            fid,
+            vec![SerializableVMValue::Int(5)],    // arg:     x = 5
+            vec![SerializableVMValue::Int(10)],   // capture: n = 10
+            vec![shape_value::NativeKind::Int64], // per-capture kind track
+        );
+        let resp = execute_remote_call(req, &temp_store(), &PermissionSet::pure());
+        match resp.result {
+            Ok(SerializableVMValue::Int(v)) => assert_eq!(v, 15, "x + n = 5 + 10"),
+            other => panic!("expected Ok(Int(15)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_closure_mutable_capture_refused_with_legible_message() {
+        // A mutable capture is refused (Q27) with a message that names the
+        // captured VARIABLE and gives Shape-surface remediation — never a slot
+        // index (§4.4 legibility rule).
+        let mut blob = mk_blob("counter_closure", mk_hash(1), vec![]);
+        blob.is_closure = true;
+        blob.captures_count = 1;
+        blob.capture_kinds = vec![shape_value::NativeKind::Int64];
+        blob.mutable_captures = vec![true];
+        blob.capture_names = vec!["counter".to_string()];
+        blob.finalize();
+        let hash = blob.content_hash;
+        let mut store = HashMap::new();
+        store.insert(hash, blob);
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(mk_ca_program(hash, store));
+
+        let mut request = mk_ca_request(program, hash, "counter_closure");
+        request.upvalues = Some(vec![SerializableVMValue::Int(0)]);
+        request.upvalue_kinds = Some(vec![shape_value::NativeKind::Int64]);
+
+        let resp = execute_remote_call(request, &temp_store(), &PermissionSet::pure());
+        match resp.result {
+            Err(e) => {
+                assert_eq!(
+                    e.kind,
+                    RemoteErrorKind::UnsupportedCapture,
+                    "msg={}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("'counter'"),
+                    "names the captured variable: {}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("as an argument"),
+                    "gives remediation: {}",
+                    e.message
+                );
+                assert!(
+                    !e.message.contains("slot") && !e.message.contains("index"),
+                    "no slot-index jargon: {}",
+                    e.message
+                );
+            }
+            Ok(v) => panic!("expected UnsupportedCapture refusal, got Ok({v:?})"),
+        }
+    }
+
+    #[test]
+    fn remote_closure_missing_kind_track_refused_not_bool_defaulted() {
+        // upvalues present but no upvalue_kinds track ⇒ structured ArgumentError
+        // (T8c). The receiver refuses to fabricate Bool-default kinds
+        // (ADR-006 §2.7.7/§2.7.8 forbidden), never executes.
+        let mut blob = mk_blob("c", mk_hash(1), vec![]);
+        blob.is_closure = true;
+        blob.captures_count = 1;
+        blob.capture_kinds = vec![shape_value::NativeKind::Int64];
+        blob.capture_names = vec!["v".to_string()];
+        blob.finalize();
+        let hash = blob.content_hash;
+        let mut store = HashMap::new();
+        store.insert(hash, blob);
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(mk_ca_program(hash, store));
+
+        let mut request = mk_ca_request(program, hash, "c");
+        request.upvalues = Some(vec![SerializableVMValue::Int(7)]);
+        request.upvalue_kinds = None; // MISSING kind track
+
+        let resp = execute_remote_call(request, &temp_store(), &PermissionSet::pure());
+        match resp.result {
+            Err(e) => {
+                assert_eq!(e.kind, RemoteErrorKind::ArgumentError, "msg={}", e.message);
+                assert!(
+                    e.message.contains("upvalue_kinds"),
+                    "explains the missing kind track: {}",
+                    e.message
+                );
+            }
+            Ok(v) => panic!("expected ArgumentError (no Bool-default), got Ok({v:?})"),
+        }
+    }
+
+    #[test]
+    fn sender_resupply_retries_once_and_succeeds() {
+        // main_fn depends on helper. Ship a STRIPPED request (helper stripped);
+        // the receiver reports MissingModuleFunction; `call_with_resupply` looks
+        // the hash up in the sender's own store, resupplies, and retries exactly
+        // once (distributed §4.3-5), then the call succeeds.
+        let program = compile(
+            "fn helper(x: int) -> int { x + 1 } \
+             fn main_fn(x: int) -> int { helper(x) + helper(x) }",
+        );
+        let main_fid = program
+            .functions
+            .iter()
+            .position(|f| f.name == "main_fn")
+            .expect("main_fn compiled") as u16;
+        let entry_hash = program.function_blob_hashes[main_fid as usize].expect("main_fn hash");
+        let full = build_minimal_blobs_by_hash(&program, entry_hash).expect("minimal blobs");
+        assert!(full.len() >= 2, "closure of main_fn includes helper");
+
+        // Stripped request: keep only the entry blob, drop its dependency.
+        let mut stripped =
+            build_call_request(&program, "main_fn", vec![SerializableVMValue::Int(10)]);
+        let blobs = stripped
+            .function_blobs
+            .as_mut()
+            .expect("content-addressed request carries blobs");
+        blobs.retain(|(h, _)| *h == entry_hash);
+        assert_eq!(blobs.len(), 1, "only the entry blob remains after stripping");
+
+        let store = temp_store();
+        let granted = PermissionSet::pure();
+        let mut call_count = 0u32;
+        let resp = call_with_resupply(&program, stripped, |req| {
+            call_count += 1;
+            execute_remote_call(req.clone(), &store, &granted)
+        });
+
+        assert_eq!(call_count, 2, "exactly one retry after resupply");
+        match resp.result {
+            Ok(SerializableVMValue::Int(v)) => {
+                assert_eq!(v, 22, "helper(10) + helper(10) = 11 + 11")
+            }
+            other => panic!("expected Ok(Int(22)) after resupply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sender_resupply_does_not_retry_on_non_missing_error() {
+        // A non-MissingModuleFunction failure is returned unchanged — no
+        // resupply, no retry (distributed §4.3-5 / OQ-8: only MissingModule-
+        // Function is provably pre-execution and retry-safe).
+        let program = compile("fn add(a: int, b: int) -> int { a + b }");
+        let request = build_call_request(&program, "add", vec![SerializableVMValue::Int(1)]);
+        let mut call_count = 0u32;
+        let resp = call_with_resupply(&program, request, |_req| {
+            call_count += 1;
+            RemoteCallResponse {
+                result: Err(RemoteCallError::new(
+                    RemoteErrorKind::RuntimeError,
+                    "boom",
+                )),
+            }
+        });
+        assert_eq!(call_count, 1, "no retry for a non-missing-blob failure");
+        assert!(matches!(
+            resp.result,
+            Err(ref e) if matches!(e.kind, RemoteErrorKind::RuntimeError)
+        ));
+    }
+
+    #[test]
+    fn build_call_request_by_id_round_trips_named_function() {
+        // The sender dispatcher's named-function path (`fn_ref =
+        // NativeKind::UInt64` id, e.g. `@remote`'s `ctx.target`) resolves
+        // through `build_call_request_by_id` — canonical id keying, no
+        // name-lookup ambiguity (distributed §4.3-1). Round-trip it in-process.
+        let program = compile("fn addup(a: int, b: int) -> int { a + b }");
+        let fid = program
+            .functions
+            .iter()
+            .position(|f| f.name == "addup")
+            .expect("addup compiled") as u16;
+        let request = build_call_request_by_id(
+            &program,
+            fid,
+            vec![SerializableVMValue::Int(2), SerializableVMValue::Int(3)],
+        )
+        .expect("by-id request built");
+        assert_eq!(request.function_id, Some(fid));
+        assert_eq!(request.function_name, "addup");
+        assert!(request.upvalues.is_none(), "named fn carries no upvalues");
+
+        let store = temp_store();
+        let granted = PermissionSet::pure();
+        match execute_remote_call(request, &store, &granted).result {
+            Ok(SerializableVMValue::Int(v)) => assert_eq!(v, 5, "addup(2,3) == 5 remotely"),
+            other => panic!("expected Ok(Int(5)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_call_request_by_id_rejects_out_of_range_id() {
+        let program = compile("fn f() -> int { 1 }");
+        let err = build_call_request_by_id(&program, 9999, vec![])
+            .expect_err("out-of-range id must error, not panic");
+        assert!(err.contains("out of range"), "got: {err}");
+    }
 }

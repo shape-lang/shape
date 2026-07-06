@@ -83,6 +83,9 @@ impl VirtualMachine {
             feedback_vectors: Vec::new(),
             megamorphic_cache: crate::megamorphic_cache::MegamorphicCache::new(),
             shape_table: shape_value::ShapeTableHandle::new(),
+            snapshot_store: None,
+            snapshot_seed: None,
+            code_manifest: None,
         };
 
         // VM-native stdlib modules are always available, independent of
@@ -194,6 +197,44 @@ impl VirtualMachine {
     /// Set the interrupt flag (shared with Ctrl+C handler).
     pub fn set_interrupt(&mut self, flag: Arc<AtomicU8>) {
         self.interrupt = flag;
+    }
+
+    /// Install the snapshot persistence context (design §4.1 / §4.3.4).
+    ///
+    /// The host calls this before `execute` so the in-loop `snapshot()`
+    /// consumer can capture → persist → continue. Also caches the
+    /// program's `CodeManifest` (design §4.3.2 / Q16) so every persisted
+    /// snapshot references exactly the FunctionBlob content hashes a resume
+    /// needs. When this is never called, `snapshot()` refuses with the
+    /// `NoStore` barrier (never traps).
+    pub fn set_snapshot_context(
+        &mut self,
+        store: Arc<shape_runtime::snapshot::SnapshotStore>,
+        seed: shape_runtime::snapshot::SnapshotEnvelopeSeed,
+    ) {
+        self.snapshot_store = Some(store);
+        self.snapshot_seed = Some(seed);
+        self.code_manifest = Some(self.build_code_manifest());
+    }
+
+    /// Build the content-addressed `CodeManifest` for the loaded program
+    /// (design §4.3.2, Q16 blob-graph persistence). Best-effort on the
+    /// produce side: `blobs` is the set of per-function content hashes the
+    /// VM holds (`function_hashes`); `required_permissions` records the
+    /// effective granted-permission names (the run's permission envelope);
+    /// resume-side re-verification / cross-node fetch consume the manifest.
+    pub(crate) fn build_code_manifest(&self) -> shape_runtime::snapshot::CodeManifest {
+        let blobs: Vec<[u8; 32]> = self
+            .function_hashes
+            .iter()
+            .filter_map(|h| h.as_ref().map(|fh| fh.0))
+            .collect();
+        let required_permissions: Vec<String> = self
+            .granted_permissions
+            .as_ref()
+            .map(|set| set.iter().map(|p| p.name().to_string()).collect())
+            .unwrap_or_default();
+        shape_runtime::snapshot::CodeManifest::from_blobs(blobs, None, required_permissions)
     }
 
     /// Enable time-travel debugging with the given capture mode and history limit.
