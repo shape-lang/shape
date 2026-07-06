@@ -898,21 +898,19 @@ impl BytecodeCompiler {
     /// original `schema_id`) still resolves under this cell's program
     /// registry.
     ///
-    /// `ensure_next_id_above` advances the allocator past every seeded
-    /// id so a *new* type declared in this cell cannot collide with a
+    /// WF-3A: `register` preserves each seeded schema's persisted handle and
+    /// indexes its content id; `rebuild_content_index` then re-seats the
+    /// dense counter past the largest seeded handle so a *new* type declared
+    /// in this cell interns to a fresh handle that cannot collide with a
     /// seeded one.
     pub fn seed_persistent_schemas(&mut self, schemas: &[shape_runtime::type_schema::TypeSchema]) {
         let registry = self.type_tracker.schema_registry_mut();
-        let mut max_id = 0u32;
         for schema in schemas {
-            max_id = max_id.max(schema.id);
             if registry.get(&schema.name).is_none() {
                 registry.register(schema.clone());
             }
         }
-        if max_id > 0 {
-            registry.ensure_next_id_above(max_id);
-        }
+        registry.rebuild_content_index();
     }
 
     /// Create a new compiler with a data schema for column resolution.

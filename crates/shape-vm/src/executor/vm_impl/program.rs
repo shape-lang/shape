@@ -67,16 +67,13 @@ impl VirtualMachine {
                 "compiled program is missing builtin schemas (__AnyError, __TraceFrame, ...); \
              schema registry must include static builtin schemas",
             );
-        // Reserve schema IDs above the compiled program registry on the
-        // ambient per-Runtime registry. Since B1.7 the ambient registry
-        // is always available — scopeless callers share a process-wide
-        // default — so no legacy-counter fallback is needed.
-        let max_program_id = self
-            .program
-            .type_schema_registry
-            .max_schema_id()
-            .unwrap_or(0);
-        shape_runtime::type_schema::current_registry().ensure_next_id_above(max_program_id);
+        // WF-3A: schema identity is content-derived and per-registry
+        // interned, so there is no cross-counter reservation to perform here.
+        // Rehydrate the loaded program registry's derived content index (its
+        // `#[serde(skip)]` `by_content` table is empty after decode) so any
+        // schema newly interned into it dedups against, and never collides
+        // with, an already-loaded handle.
+        self.program.type_schema_registry.rebuild_content_index();
         self.rebuild_function_name_index();
         self.populate_content_addressed_metadata();
         self.program_entry_ip = 0;

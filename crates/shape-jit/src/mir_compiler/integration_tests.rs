@@ -2100,7 +2100,6 @@ v instanceof int
 /// (`v0.4-object-spread-typed-inference`). Object spread is v0.4-deferred
 /// / `runnable=false` in the book, so this does not block v0.3.3.
 #[test]
-#[ignore = "regressed at Wave-2 merge (schema-id collision family); root fix in WF-3A / v0.4-object-spread-typed-inference"]
 fn aggregate_object_spread_simple_baseline() {
     jit_expect_int(
         r#"

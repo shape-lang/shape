@@ -81,7 +81,7 @@ pub use enum_support::{EnumInfo, EnumVariantInfo, EnumVariantKind};
 pub use field_types::{FieldAnnotation, FieldDef, FieldType};
 pub use physical_binding::PhysicalSchemaBinding;
 pub use registry::{TypeSchemaBuilder, TypeSchemaRegistry};
-pub use schema::{TypeBinding, TypeBindingError, TypeSchema};
+pub use schema::{SchemaContentId, TypeBinding, TypeBindingError, TypeSchema};
 
 /// Error type for schema operations
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -100,17 +100,6 @@ pub enum SchemaError {
 
 /// Unique identifier for a type schema
 pub type SchemaId = u32;
-
-/// Ensure all future schema IDs from the current ambient registry are
-/// strictly greater than `max_existing_id`.
-///
-/// Used when loading externally compiled/cached bytecode that may contain
-/// schema IDs from previous processes. Since B1.7 the reservation lands
-/// on [`current_registry`] instead of a process-global counter, so each
-/// runtime narrows the reservation to its own domain.
-pub fn ensure_next_schema_id_above(max_existing_id: SchemaId) {
-    current_registry().ensure_next_id_above(max_existing_id);
-}
 
 /// Register a predeclared schema with `FieldType::Any` for the given ordered fields.
 ///
@@ -138,12 +127,18 @@ fn lookup_predeclared_schema_id(fields: &[&str]) -> Option<SchemaId> {
     }
 
     // Ordered match against user-registered / stdlib schemas in the ambient
-    // registry. Reserved contract schemas (§4.3) are skipped — they resolve
-    // by name only, never by field-order inference.
+    // registry.
+    //
+    // WF-3A: the WF-1B `reserved`-skip guard is gone. Nominal identity for
+    // named/branded types (the contract schemas `__ComptimeTarget`, … carry
+    // their name in the content id) plus per-registry content-interning mean
+    // an ad-hoc object binding to a same-field-set named schema resolves the
+    // SAME structure it was registered with — the cross-registry id reuse
+    // that made the old guard necessary is structurally impossible.
     reg.type_names()
         .filter_map(|name| reg.get(name))
         .find(|schema| {
-            if schema.reserved || schema.fields.len() != fields.len() {
+            if schema.fields.len() != fields.len() {
                 return false;
             }
             schema
@@ -196,16 +191,15 @@ fn lookup_schema_for_fields(fields: &[&str]) -> Option<TypeSchema> {
     let reg = current_registry();
     // Order-insensitive match over the current registry's named schemas.
     //
-    // Reserved schemas (the comptime introspection contract — §4.3) are
-    // SKIPPED: they are only ever constructed BY NAME
-    // (`typed_object_for_named_schema`), never inferred from a field set,
-    // so an ad-hoc object whose field-name set happens to coincide with a
-    // contract schema (e.g. `{name, kind}` vs `__ComptimeTypeInfo`) can
-    // never silently bind to it, and vice versa.
+    // WF-3A: the WF-1B `reserved`-skip guard is gone; see
+    // `lookup_predeclared_schema_id` for the rationale (nominal identity for
+    // named schemas + per-registry content-interning make cross-registry id
+    // reuse structurally impossible, so a same-field-set match always
+    // resolves the structure it was registered with).
     if let Some(schema) = reg
         .type_names()
         .filter_map(|name| reg.get(name))
-        .find(|schema| !schema.reserved && schema_matches_field_set(schema, fields))
+        .find(|schema| schema_matches_field_set(schema, fields))
     {
         return Some(schema.clone());
     }

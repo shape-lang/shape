@@ -45,9 +45,8 @@ impl TypeSchema {
             }
         }
 
-        // Build the merged schema via the ambient registry (B1.7: always
-        // available, no legacy-counter fallback).
-        let id = super::current_registry().allocate_id();
+        // Build the merged schema; its content-derived identity is interned
+        // in the ambient registry below (WF-3A).
         let mut fields = Vec::with_capacity(all_fields.len());
         let mut field_map = HashMap::with_capacity(all_fields.len());
         let mut offset = 0;
@@ -64,8 +63,8 @@ impl TypeSchema {
 
         let data_size = (offset + 7) & !7;
 
-        Ok(Self {
-            id,
+        let mut schema = Self {
+            id: 0,
             name,
             fields,
             field_map,
@@ -74,8 +73,9 @@ impl TypeSchema {
             field_sources,
             enum_info: None,
             content_hash: None,
-            reserved: false,
-        })
+        };
+        schema.id = super::current_registry().intern_content(schema.content_id());
+        Ok(schema)
     }
 
     /// Check if this schema is an intersection type

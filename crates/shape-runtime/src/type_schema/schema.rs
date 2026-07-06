@@ -10,15 +10,41 @@ use arrow_schema::{DataType, Schema as ArrowSchema};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// Allocate a fresh schema ID from the current ambient registry.
+/// Canonical, content-derived schema identity (WF-3A / ADR-006 §2.7.31).
 ///
-/// Since B1.7 the registry is always available (scopeless callers share
-/// a process-wide default), so this helper simply delegates to
-/// [`super::current_registry`] — the previous legacy-counter fallback
-/// has been retired.
-#[inline]
-fn allocate_current_id() -> SchemaId {
-    super::current_registry().allocate_id()
+/// A SHA-256 over the schema's *structure*. This is the single source of
+/// truth for schema identity; the runtime `SchemaId(u32)` handle is a
+/// derived, registry-local intern index of this id (the blessed
+/// `StringId`-family interning relationship — a cache/index, never a
+/// second discriminator).
+///
+/// Identity model (user-ratified 2026-07-06):
+/// - **Named / branded** types (`type Foo {…}`, enums) fold the NAME into
+///   the hash → NOMINAL identity (`type A {x,y}` ≠ `type B {x,y}`).
+/// - **Anonymous** types (object-literal / inline / merged / predeclared,
+///   no user name) omit the name → STRUCTURAL identity (two anonymous
+///   `{x:int, y:int}` share one id anywhere).
+/// - Fields are hashed in DECLARATION order (Shape's TypedStruct has
+///   C-compatible fixed field offsets; declaration order == layout).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct SchemaContentId(pub [u8; 32]);
+
+/// Hash-scheme version tag (ADR-006 §2.7.31 / design §M4). Prefixed onto the
+/// canonical bytes so the identity inputs can evolve without silently
+/// changing existing content ids: bump this if the hash inputs ever change.
+pub const SCHEMA_CONTENT_SCHEME_V0: u8 = 0;
+
+/// Synthetic-schema name prefixes: compiler-generated ANONYMOUS schemas
+/// (object literals, spreads/merges, ad-hoc predeclared) that carry no
+/// user-facing type name. Their identity is STRUCTURAL — the name is
+/// excluded from the content hash so two structurally-identical anonymous
+/// objects share one identity anywhere (WF-3A ratified identity model).
+pub(crate) fn schema_name_is_anonymous(name: &str) -> bool {
+    name.starts_with("__inline_obj_")
+        || name.starts_with("__merged_")
+        || name.starts_with("__predecl_")
 }
 
 /// Schema describing the memory layout of a declared type
@@ -45,20 +71,6 @@ pub struct TypeSchema {
     /// Computed lazily and cached. Skipped during serialization since it is derived.
     #[serde(skip)]
     pub content_hash: Option<[u8; 32]>,
-    /// Reserved-schema flag (ADR / comptime-excellence §4.1.4 / §4.3).
-    ///
-    /// `true` for the small set of concrete, named schemas that back the
-    /// comptime introspection contract (`__ComptimeTarget`,
-    /// `__ComptimeFieldDescriptor`, `TypeInfo`, …). Reserved schemas are
-    /// registered deterministically at registry init and are resolved BY
-    /// NAME at construction, so their ids never carry load-bearing meaning
-    /// across a registry boundary. The flag exists so ad-hoc field-set /
-    /// field-order inference (`lookup_schema_for_fields`) can *skip* them:
-    /// an ordinary `{name, kind, …}` object must never silently bind to a
-    /// contract schema, and vice versa (the flag, not a `__` prefix,
-    /// because user-visible names like `TypeInfo` carry no prefix).
-    #[serde(default)]
-    pub reserved: bool,
 }
 
 impl TypeSchema {
@@ -83,7 +95,15 @@ impl TypeSchema {
     /// than the process-global `NEXT_SCHEMA_ID` static. Callers that need
     /// a caller-supplied ID should use [`TypeSchema::with_id`].
     pub fn new(name: impl Into<String>, field_defs: Vec<(String, FieldType)>) -> Self {
-        Self::with_id(allocate_current_id(), name, field_defs)
+        // WF-3A: identity is content-derived. Build with a placeholder id,
+        // then mint the registry-local handle by interning the content id in
+        // the ambient registry (the single mint operation — never a blind
+        // counter). Registration into a specific registry re-derives the
+        // handle from THAT registry's intern table.
+        let mut schema = Self::with_id(0, name, field_defs);
+        let id = super::current_registry().intern_content(schema.content_id());
+        schema.id = id;
+        schema
     }
 
     /// Create a new type schema with a caller-supplied schema ID.
@@ -126,7 +146,6 @@ impl TypeSchema {
             field_sources: HashMap::new(),
             enum_info: None,
             content_hash: None,
-            reserved: false,
         }
     }
 
@@ -190,7 +209,11 @@ impl TypeSchema {
     /// Since B1.4 the ID is drawn from [`super::current_registry`] rather
     /// than the process-global `NEXT_SCHEMA_ID` static.
     pub fn new_enum(name: impl Into<String>, variants: Vec<EnumVariantInfo>) -> Self {
-        Self::new_enum_with_id(allocate_current_id(), name, variants)
+        // WF-3A: content-derived identity, interned in the ambient registry.
+        let mut schema = Self::new_enum_with_id(0, name, variants);
+        let id = super::current_registry().intern_content(schema.content_id());
+        schema.id = id;
+        schema
     }
 
     /// Create an enum schema with a caller-supplied ID.
@@ -231,32 +254,45 @@ impl TypeSchema {
             field_sources: HashMap::new(),
             enum_info: Some(enum_info),
             content_hash: None,
-            reserved: false,
         }
     }
 
-    /// Compute the content hash (SHA-256) from the structural definition.
+    /// Compute the canonical content hash (SHA-256) from the structural
+    /// definition (WF-3A / ADR-006 §2.7.31).
     ///
     /// The hash is derived deterministically from:
-    /// - The type name
-    /// - Fields sorted by name, each contributing field name + field type string
-    /// - Enum variant info (if present), sorted by variant name
+    /// - A 1-byte hash-scheme version tag (`SCHEMA_CONTENT_SCHEME_V0`).
+    /// - The type NAME — **only for named/branded types** (nominal
+    ///   identity). Anonymous synthetic schemas (`schema_name_is_anonymous`)
+    ///   omit the name so identical structure yields identical identity
+    ///   anywhere (structural identity).
+    /// - Fields in **DECLARATION order** (layout-significant: Shape's
+    ///   TypedStruct has C-compatible fixed field offsets, so `{x,y}` and
+    ///   `{y,x}` are distinct layouts and must be distinct identities), each
+    ///   contributing field name + field-type string.
+    /// - Enum variants in declaration order (name + payload arity).
     ///
     /// For recursive type references (`Object("Foo")`), only the type name is
-    /// hashed to avoid infinite recursion.
+    /// hashed (via `FieldType::to_string`) to avoid infinite recursion; any
+    /// layout-affecting difference in the nested type reaches the outer
+    /// offsets through the nested type's own content id.
     pub fn compute_content_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
 
-        // Hash the type name
-        hasher.update(b"name:");
-        hasher.update(self.name.as_bytes());
+        // Hash-scheme version tag (M4).
+        hasher.update([SCHEMA_CONTENT_SCHEME_V0]);
 
-        // Hash fields in deterministic order (sorted by name)
-        let mut sorted_fields: Vec<&FieldDef> = self.fields.iter().collect();
-        sorted_fields.sort_by(|a, b| a.name.cmp(&b.name));
+        // Named -> nominal (name folded in); anonymous -> structural.
+        if schema_name_is_anonymous(&self.name) {
+            hasher.update(b"anon:");
+        } else {
+            hasher.update(b"name:");
+            hasher.update(self.name.as_bytes());
+        }
 
+        // Fields in DECLARATION order (layout order).
         hasher.update(b"|fields:");
-        for field in &sorted_fields {
+        for field in &self.fields {
             hasher.update(b"(");
             hasher.update(field.name.as_bytes());
             hasher.update(b":");
@@ -264,14 +300,10 @@ impl TypeSchema {
             hasher.update(b")");
         }
 
-        // Hash enum variant info if present
+        // Enum variants in declaration order (discriminant order).
         if let Some(enum_info) = &self.enum_info {
-            let mut sorted_variants: Vec<&super::enum_support::EnumVariantInfo> =
-                enum_info.variants.iter().collect();
-            sorted_variants.sort_by(|a, b| a.name.cmp(&b.name));
-
             hasher.update(b"|variants:");
-            for variant in &sorted_variants {
+            for variant in &enum_info.variants {
                 hasher.update(b"(");
                 hasher.update(variant.name.as_bytes());
                 hasher.update(b":");
@@ -284,6 +316,13 @@ impl TypeSchema {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&result);
         hash
+    }
+
+    /// The canonical, content-derived schema identity (WF-3A). This is the
+    /// single source of truth; the `SchemaId(u32)` handle is a derived
+    /// intern index of this id.
+    pub fn content_id(&self) -> SchemaContentId {
+        SchemaContentId(self.compute_content_hash())
     }
 
     /// Return the cached content hash, computing and caching it if needed.
@@ -345,7 +384,6 @@ impl TypeSchema {
     /// This converts the semantic CanonicalType representation into a JIT-ready
     /// TypeSchema with proper field offsets and types.
     pub fn from_canonical(canonical: &crate::type_system::environment::CanonicalType) -> Self {
-        let id = allocate_current_id();
         let name = canonical.name.clone();
 
         let mut fields = Vec::with_capacity(canonical.fields.len());
@@ -360,8 +398,8 @@ impl TypeSchema {
             fields.push(field);
         }
 
-        Self {
-            id,
+        let mut schema = Self {
+            id: 0,
             name,
             fields,
             field_map,
@@ -370,8 +408,10 @@ impl TypeSchema {
             field_sources: HashMap::new(),
             enum_info: None,
             content_hash: None,
-            reserved: false,
-        }
+        };
+        // WF-3A: content-derived identity, interned in the ambient registry.
+        schema.id = super::current_registry().intern_content(schema.content_id());
+        schema
     }
 }
 

@@ -2205,10 +2205,16 @@ impl BytecodeCompiler {
                     .register(schema.clone());
             }
         }
+        // WF-3A: extension `type_schemas` are MIRRORED with their pre-assigned
+        // (cross-registry) handles. Reserve this registry's intern handle
+        // space above the max extension id across ALL modules, so the
+        // synthetic `__mod_*` schema interned below (and any inline-object
+        // schema) can never collide with a mirrored extension handle. This is
+        // external-handle-space reservation, not a two-counter disambiguator.
         if let Some(max_id) = global_max_ext_id {
             self.type_tracker
                 .schema_registry()
-                .ensure_next_id_above(max_id);
+                .reserve_handles_above(max_id);
         }
 
         let schema_name = format!("__mod_{}", module_path);

@@ -418,47 +418,27 @@ fn resolve_json_schema_id(
     ambient.get("Json").map(|schema| schema.id as u64)
 }
 
-/// Resolve the `TypeSchema` for a `TypedObject` node, robust against registry
-/// by-id COLLISIONS.
+/// Resolve the `TypeSchema` for a `TypedObject` node from its numeric handle.
 ///
-/// WF-2E (2026-07-05): a `TypedObject` carries only a numeric `schema_id`, and
-/// the schema registries can map one id to MORE THAN ONE schema — observed:
-/// a predeclared `XmlNode`-shaped schema and the builtin `Json` enum both
-/// answer to id 41, and `get_by_id` / `lookup_schema_by_id_public` return the
-/// `Json` schema (2 fields) for an XmlNode node (3 fields), so the walk emits
-/// "node missing 'name'". The node's own STRUCTURE disambiguates: its actual
-/// slot count is the arity of its true schema. This resolver gathers every
-/// candidate schema registered under `schema_id` (execution registry by-id,
-/// ambient by-id, and the ambient predeclared table — the predeclared entry is
-/// otherwise unreachable because `lookup_schema_by_id` returns the colliding
-/// by-id hit first) and prefers the one whose field count equals `slot_count`.
+/// WF-3A (ADR-006 §2.7.31): schema identity is content-derived and
+/// per-registry interned, so within any single registry a handle resolves to
+/// exactly one structure — the WF-2E id-41 `XmlNode`/`Json` collision (which
+/// required a runtime arity heuristic across three registries to disambiguate)
+/// is structurally impossible. This is a single `get_by_id`: prefer the
+/// caller-supplied execution registry (where the node was constructed), then
+/// fall back to the ambient/predeclared lookup for ad-hoc / const-eval nodes.
 fn resolve_typed_object_schema(
     schema_id: u64,
-    slot_count: usize,
     schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
 ) -> Option<crate::type_schema::TypeSchema> {
     use crate::type_schema::lookup_schema_by_id_public;
     let id = schema_id as u32;
-    let mut candidates: Vec<crate::type_schema::TypeSchema> = Vec::new();
     if let Some(registry) = schemas {
         if let Some(schema) = registry.get_by_id(id) {
-            candidates.push(schema.clone());
+            return Some(schema.clone());
         }
     }
-    if let Some(schema) = lookup_schema_by_id_public(id) {
-        candidates.push(schema);
-    }
-    let ambient = crate::type_schema::current_registry();
-    if let Some(schema) = ambient.lookup_predeclared_by_id(id) {
-        candidates.push(schema);
-    }
-    // Prefer the candidate whose arity matches the node's actual slot count
-    // (the collision-robust choice); fall back to the first candidate.
-    candidates
-        .iter()
-        .find(|s| s.fields.len() == slot_count)
-        .cloned()
-        .or_else(|| candidates.into_iter().next())
+    lookup_schema_by_id_public(id)
 }
 
 /// Attempt to invert a `Json` enum `TypedObject` node back to its logical
@@ -585,7 +565,7 @@ fn typed_object_to_json_value(
         }
     }
 
-    let schema = resolve_typed_object_schema(schema_id, slots.len(), schemas).ok_or_else(|| {
+    let schema = resolve_typed_object_schema(schema_id, schemas).ok_or_else(|| {
         format!(
             "heap_to_json_value: unknown TypedObject schema id {}",
             schema_id
@@ -1356,6 +1336,71 @@ mod tests {
             Arc::strong_count(&value),
             1,
             "dropping the TypedObjectPtr must release the field String share"
+        );
+    }
+
+    /// WF-3A (ADR-006 §2.7.31): the WF-2E id-41 `XmlNode`/`Json` collision is
+    /// structurally impossible under content-derived identity, and the arity
+    /// heuristic in `resolve_typed_object_schema` is deleted. This proves it
+    /// from scratch: a 3-field `XmlNode`-shaped schema and a 2-field `Json`
+    /// enum-shaped schema, registered into ONE registry, intern to DISTINCT
+    /// handles (no shared id), and `typed_object_ptr_to_json_value` resolves
+    /// the 3-field structure by its handle — rendering all three fields, not a
+    /// 2-field colliding schema — with a single `get_by_id` (no slot-count
+    /// disambiguation).
+    #[test]
+    fn wf3a_xmlnode_vs_json_no_id_collision_renders_correct_arity() {
+        let mut registry = TypeSchemaRegistry::new_with_stdlib();
+        // 2-field "Json"-shaped named schema (the WF-2E collision partner).
+        let json_id = TypeSchemaBuilder::new("__WF3AJsonLike")
+            .string_field("tag")
+            .i64_field("payload")
+            .register(&mut registry);
+        // 3-field "XmlNode"-shaped named schema.
+        let xml_id = TypeSchemaBuilder::new("__WF3AXmlNode")
+            .string_field("name")
+            .string_field("text")
+            .i64_field("depth")
+            .register(&mut registry);
+
+        // Distinct structures -> distinct interned handles. No id-41 collision.
+        assert_ne!(
+            json_id, xml_id,
+            "XmlNode and Json-shaped schemas must intern to distinct handles"
+        );
+
+        let _scope = SyncRegistryScope::enter(Arc::new(registry));
+
+        let name = Arc::new("root".to_string());
+        let text = Arc::new("hello".to_string());
+        // fields: name(heap String), text(heap String), depth(inline Int64).
+        let ptr = TypedObjectStorage::_new(
+            xml_id as u64,
+            vec![
+                ValueSlot::from_string_arc(Arc::clone(&name)),
+                ValueSlot::from_string_arc(Arc::clone(&text)),
+                ValueSlot::from_int(2),
+            ]
+            .into_boxed_slice(),
+            0b011,
+            Arc::from(
+                vec![NativeKind::String, NativeKind::String, NativeKind::Int64].into_boxed_slice(),
+            ),
+        );
+        let object = TypedObjectPtr::new(ptr);
+
+        let json = typed_object_ptr_to_json_value(&object).expect("xmlnode object to json");
+        let serde_value = json_value_to_serde_json(&json);
+
+        // All THREE fields resolved via the XmlNode handle — proving the
+        // resolver picked the 3-field structure, not a 2-field colliding one.
+        assert_eq!(serde_value["name"], serde_json::json!("root"));
+        assert_eq!(serde_value["text"], serde_json::json!("hello"));
+        assert_eq!(serde_value["depth"], serde_json::json!(2));
+        assert_eq!(
+            serde_value.as_object().map(|o| o.len()),
+            Some(3),
+            "XmlNode must render with 3 fields, not a colliding 2-field schema"
         );
     }
 }
