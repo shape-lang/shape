@@ -46,6 +46,21 @@ use super::super::*;
 use crate::executor::result_option_carrier;
 use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
+/// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8 code
+/// point (returns the longest valid `&str` prefix that fits). Used by the
+/// output-budget sink (WF-3B) so the final over-cap `print` line lands at the
+/// byte cap instead of past it, while staying valid UTF-8.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 impl VirtualMachine {
     /// Pop the builtin call's args off the typed VM stack into a
     /// `Vec<KindedSlot>` (ADR-006 §2.7.7 / Q9).
@@ -1625,6 +1640,34 @@ impl VirtualMachine {
                 .join(" ")
         };
 
+        // WF-3B: charge this line against the `--max-output-bytes` budget at
+        // THE output sink — the single point every `print` flows through —
+        // BEFORE emitting. `ResourceUsage::record_output` existed but had zero
+        // callers, so the cap (incl. the `sandboxed()` preset's 1 MB) was
+        // silently inert and untrusted code could emit without bound. Charging
+        // the rendered bytes plus the line's trailing newline covers both the
+        // hosted capture/adapter path and the direct-stdout fallback below.
+        // On breach: emit only the bytes still within budget (truncated on a
+        // char boundary so total output lands at the cap, not past it) and
+        // then surface a clean `OutputLimit` error so the run stops gracefully
+        // (exit 1) — never a silent pass, never a panic.
+        let mut rendered = rendered;
+        let mut over_budget: Option<VMError> = None;
+        if let Some(ref mut usage) = self.resource_usage {
+            let before = usage.output_bytes_written;
+            let line_bytes = rendered.len() as u64 + 1; // + trailing newline
+            if let Err(e) = usage.record_output(line_bytes) {
+                if let crate::resource_limits::ResourceLimitExceeded::OutputLimit {
+                    limit, ..
+                } = &e
+                {
+                    let remaining = limit.saturating_sub(before) as usize;
+                    rendered = truncate_on_char_boundary(&rendered, remaining);
+                }
+                over_budget = Some(VMError::RuntimeError(e.to_string()));
+            }
+        }
+
         let result = shape_runtime::print_result::PrintResult {
             rendered,
             spans: Vec::new(),
@@ -1648,6 +1691,10 @@ impl VirtualMachine {
             ctx.output_adapter_mut().print(result);
         } else {
             println!("{}", result.rendered);
+        }
+        // Emit the truncated line first (above), THEN stop the run cleanly.
+        if let Some(err) = over_budget {
+            return Err(err);
         }
         Ok(())
     }

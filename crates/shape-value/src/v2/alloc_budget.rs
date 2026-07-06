@@ -30,13 +30,46 @@ thread_local! {
     /// Maximum bytes any single heap buffer may occupy on the current
     /// thread's VM execution. `None` = unlimited.
     static BUFFER_CEILING: Cell<Option<u64>> = const { Cell::new(None) };
+
+    /// A pending memory-ceiling breach recorded by a low-level growth path
+    /// (`TypedArray::grow`) that has no fallible return channel of its own
+    /// (it is called from `extern "C"` JIT trampolines and dozens of
+    /// infallible `push` sites). Instead of aborting the whole process with a
+    /// `panic!` — which on a serve node would kill every in-flight request —
+    /// the growth path RECORDS the breach here and refuses to grow (so the
+    /// offending buffer is bounded exactly at the ceiling), and the VM
+    /// surfaces it as a clean `VMError` at the next dispatch-loop safepoint /
+    /// the post-run boundary. Cleared at the start of each execution by
+    /// [`set_ceiling`] so a breach never leaks across runs.
+    static PENDING_BREACH: Cell<Option<AllocBudgetExceeded>> = const { Cell::new(None) };
 }
 
 /// Install a finite per-buffer byte ceiling for the current thread. Pass
 /// `None` to clear (unlimited). Returns the previous ceiling so callers can
-/// restore it (nested executions).
+/// restore it (nested executions). Also clears any pending breach so a
+/// prior execution's recorded breach never leaks into this one.
 pub fn set_ceiling(bytes: Option<u64>) -> Option<u64> {
+    PENDING_BREACH.with(|c| c.set(None));
     BUFFER_CEILING.with(|c| c.replace(bytes))
+}
+
+/// Record a memory-ceiling breach detected on an infallible growth path.
+/// Keeps the FIRST breach if one is already pending (that is the one closest
+/// to the cause). Idempotent and cheap.
+pub fn record_breach(e: AllocBudgetExceeded) {
+    PENDING_BREACH.with(|c| {
+        if c.get().is_none() {
+            c.set(Some(e));
+        }
+    });
+}
+
+/// Take (clear + return) any pending memory-ceiling breach recorded on this
+/// thread. The VM calls this at dispatch-loop safepoints and at the post-run
+/// boundary to convert a recorded breach into a clean surfaced `VMError`
+/// (never a panic). `None` = no breach pending.
+pub fn take_breach() -> Option<AllocBudgetExceeded> {
+    PENDING_BREACH.with(|c| c.take())
 }
 
 /// Current per-buffer ceiling (for diagnostics / tests). `None` = unlimited.
@@ -138,5 +171,50 @@ mod tests {
             assert_eq!(ceiling(), Some(10));
         }
         assert_eq!(ceiling(), Some(1000));
+    }
+
+    #[test]
+    fn breach_record_and_take_roundtrip() {
+        let _g = BudgetGuard::new(Some(100));
+        assert!(take_breach().is_none(), "no breach pending initially");
+        record_breach(AllocBudgetExceeded {
+            requested: 200,
+            ceiling: 100,
+        });
+        let taken = take_breach().expect("breach must be pending after record");
+        assert_eq!(taken.requested, 200);
+        assert!(take_breach().is_none(), "take clears the pending breach");
+    }
+
+    #[test]
+    fn record_keeps_first_breach() {
+        let _g = BudgetGuard::new(Some(100));
+        record_breach(AllocBudgetExceeded {
+            requested: 200,
+            ceiling: 100,
+        });
+        record_breach(AllocBudgetExceeded {
+            requested: 999,
+            ceiling: 100,
+        });
+        // The first breach (closest to the cause) is retained.
+        assert_eq!(take_breach().unwrap().requested, 200);
+    }
+
+    #[test]
+    fn set_ceiling_clears_stale_breach() {
+        // Models a serve worker: a breach recorded on request N must not leak
+        // into request N+1. Installing the next run's ceiling clears it.
+        let _g = BudgetGuard::new(Some(100));
+        record_breach(AllocBudgetExceeded {
+            requested: 200,
+            ceiling: 100,
+        });
+        // Next request's guard install (set_ceiling) drops the stale breach.
+        let _next = BudgetGuard::new(Some(100));
+        assert!(
+            take_breach().is_none(),
+            "stale breach must not leak into the next execution"
+        );
     }
 }
