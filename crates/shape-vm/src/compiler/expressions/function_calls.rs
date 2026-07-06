@@ -5660,6 +5660,24 @@ impl BytecodeCompiler {
             }
         }
 
+        // Q33 / distributed §4.1.1: `remote::call(addr, fn_ref, arg0, arg1, …)`
+        // is compiler-recognized — the same special-casing class as
+        // `as`-casts → `__into_*`. Resolve `fn_ref` to a concrete function
+        // type, positionally type-check the call args against its declared
+        // param types (compile error on arity / type mismatch — never a
+        // runtime coercion), lower the args to a TypedObject `_0.._n` pack
+        // carrier (per-field kinds proven from the compiled args), and dispatch
+        // to the internal `__call_raising` sibling with `R` instantiated from
+        // `fn_ref`'s declared return type.
+        if canonical_module == "std::core::remote" && method == "call" {
+            return self.compile_remote_call_elaboration(
+                binding_name,
+                namespace_name,
+                namespace_span,
+                args,
+            );
+        }
+
         // Shape-source module exports (non-native) compile as regular functions.
         // Route namespace calls to direct function dispatch so const-template
         // specialization/comptime handlers run in the same compiler context.
@@ -5839,6 +5857,172 @@ impl BytecodeCompiler {
             .last_expr_type_info
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
+        Ok(())
+    }
+
+    /// Q33 / distributed §4.1.1: elaborate a direct
+    /// `remote::call(addr, fn_ref, args…)` site — the imperative analog of the
+    /// `@remote` annotation path, in the same special-casing class as
+    /// `as`-casts → `__into_*`.
+    ///
+    /// 1. Resolve `fn_ref` to a statically-known function declaration (R1
+    ///    supports a named function; a captured closure *value* is R2).
+    /// 2. Positionally type-check each call arg against the declared param
+    ///    type — a proven mismatch (or an un-provable arg against a concrete
+    ///    declared param) is a COMPILE error, never a runtime coercion.
+    /// 3. Lower the positional call args into a TypedObject `_0.._n` pack
+    ///    carrier whose per-field kinds are the compiled arg kinds (the
+    ///    supervisor-D1 tuple carrier — no new `HeapKind::Tuple`).
+    /// 4. Dispatch to the internal `__call_raising` sibling (§4.1.2), then
+    ///    instantiate the call-site type `R` from `fn_ref`'s declared return
+    ///    type (scalars / strings project through the typed return carrier
+    ///    today; heap-shaped returns are R3).
+    fn compile_remote_call_elaboration(
+        &mut self,
+        binding_name: &str,
+        namespace_name: &str,
+        namespace_span: Span,
+        args: &[Expr],
+    ) -> Result<()> {
+        if args.len() < 2 {
+            return Err(ShapeError::SemanticError {
+                message: "remote::call(addr, fn, args…) requires at least a server address \
+                          and a function reference"
+                    .to_string(),
+                location: Some(self.span_to_source_location(namespace_span)),
+            });
+        }
+        let addr_expr = args[0].clone();
+        let fn_ref_expr = args[1].clone();
+        let call_args = &args[2..];
+
+        // (1) Resolve `fn_ref` to a concrete function declaration. R1 supports
+        // a statically-named function reference (`add`); a captured closure
+        // value is the R2 workstream.
+        let fn_name = match &fn_ref_expr {
+            Expr::Identifier(name, _) => name.clone(),
+            _ => {
+                return Err(ShapeError::SemanticError {
+                    message: "remote::call: the function reference must name a \
+                              statically-known function (closure-value references land in R2)"
+                        .to_string(),
+                    location: Some(self.span_to_source_location(fn_ref_expr.span())),
+                });
+            }
+        };
+        let resolved_name = self
+            .function_aliases
+            .get(&fn_name)
+            .cloned()
+            .unwrap_or_else(|| fn_name.clone());
+        let func_def = self
+            .function_defs
+            .get(&resolved_name)
+            .or_else(|| self.function_defs.get(&fn_name))
+            .cloned()
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!(
+                    "remote::call: '{}' is not a statically-known function reference",
+                    fn_name
+                ),
+                location: Some(self.span_to_source_location(fn_ref_expr.span())),
+            })?;
+
+        // (2) Arity check.
+        if call_args.len() != func_def.params.len() {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "remote::call: '{}' expects {} argument(s), but {} were supplied",
+                    fn_name,
+                    func_def.params.len(),
+                    call_args.len()
+                ),
+                location: Some(self.span_to_source_location(namespace_span)),
+            });
+        }
+
+        // (2 cont.) Positional type-check each arg against the declared param
+        // type. A proven mismatch is a COMPILE error (no runtime coercion); an
+        // arg whose type cannot be proven against a concretely-declared param
+        // is also rejected — strict typing has no `any` escape hatch.
+        for (i, arg) in call_args.iter().enumerate() {
+            let param = &func_def.params[i];
+            let Some(param_ann) = param.type_annotation.as_ref() else {
+                // Unannotated / wildcard param: nothing concrete to prove against.
+                continue;
+            };
+            let Some(param_ct) =
+                crate::compiler::v2_map_emission::concrete_type_from_annotation(param_ann)
+            else {
+                // Param type not concretely resolvable at this layer (user
+                // struct / generic): leave to the receiver-side ABI check.
+                continue;
+            };
+            match concrete_type_for_expr(self, arg) {
+                Some(arg_ct) if arg_ct == param_ct => {}
+                Some(arg_ct) => {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "remote::call: argument #{} to '{}' has type `{}`, but the \
+                             declared parameter type is `{}`",
+                            i + 1,
+                            fn_name,
+                            arg_ct,
+                            param_ct
+                        ),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
+                None => {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "remote::call: cannot statically prove the type of argument #{} \
+                             to '{}' (declared parameter type `{}`) — annotate the value",
+                            i + 1,
+                            fn_name,
+                            param_ct
+                        ),
+                        location: Some(self.span_to_source_location(arg.span())),
+                    });
+                }
+            }
+        }
+
+        // (3) Lower the positional args to a TypedObject `_0.._n` pack. Fields
+        // are emitted in call order, so the object's slot order is the
+        // positional argument order the receiver marshals against.
+        let pack_entries: Vec<ObjectEntry> = call_args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| ObjectEntry::Field {
+                key: format!("_{i}"),
+                value: arg.clone(),
+                type_annotation: None,
+            })
+            .collect();
+        let pack_expr = Expr::Object(pack_entries, namespace_span);
+
+        // Dispatch to the internal `__call_raising` sibling (§4.1.2).
+        let rewritten = vec![addr_expr, fn_ref_expr, pack_expr];
+        self.compile_module_namespace_call_on_binding(
+            binding_name,
+            namespace_name,
+            namespace_span,
+            "__call_raising",
+            &[],
+            &rewritten,
+        )?;
+
+        // (4) Instantiate `R` from `fn_ref`'s declared return type so the call
+        // site is typed at the callee's return type (not the `_` wildcard of
+        // `__call_raising`).
+        if let Some(ret_ann) = func_def.return_type.as_ref() {
+            self.last_expr_type_info = self.type_info_from_annotation(ret_ann);
+            self.last_expr_schema = self
+                .last_expr_type_info
+                .as_ref()
+                .and_then(Self::value_schema_from_type_info);
+        }
         Ok(())
     }
 

@@ -131,14 +131,38 @@ fn serialize_arg_pack(
 ) -> Result<Vec<SerializableVMValue>, String> {
     if args.len() == 1 {
         let pack = &args[0];
-        if let NativeKind::Ptr(HeapKind::TypedArray) = pack.kind() {
-            return serialize_typed_array_pack(pack.raw(), store);
+        match pack.kind() {
+            // `@remote` annotation carrier: the before-hook wraps the
+            // function's positional args in one outer `Array` (§4.1.2).
+            NativeKind::Ptr(HeapKind::TypedArray) => {
+                return serialize_typed_array_pack(pack.raw(), store);
+            }
+            // `remote::call` elaboration carrier (Q33 / §4.1.1): the compiler
+            // lowers the positional call args into a TypedObject `_0.._n` pack
+            // whose per-field kinds are the declared param kinds. Project the
+            // whole carrier through the shared codec — which reads the object's
+            // own §2.7.7-parallel `field_kinds` track (never fabricated) — and
+            // return its `slot_data` as the positional argument list. Field
+            // slots are stored in `_0, _1, …` declaration order, so `slot_data`
+            // IS the positional list the receiver marshals against
+            // `frame_descriptor`.
+            NativeKind::Ptr(HeapKind::TypedObject) => {
+                let sv = slot_to_serializable(pack.raw(), pack.kind(), store)
+                    .map_err(|e| format!("remote::call: failed to serialize arguments: {e}"))?;
+                return match sv {
+                    SerializableVMValue::TypedObject { slot_data, .. } => Ok(slot_data),
+                    other => Ok(vec![other]),
+                };
+            }
+            // A lone non-aggregate carrier is one positional argument.
+            _ => {
+                return Ok(vec![
+                    slot_to_serializable(pack.raw(), pack.kind(), store).map_err(|e| {
+                        format!("remote::call: failed to serialize arguments: {e}")
+                    })?,
+                ]);
+            }
         }
-        // A lone non-array carrier is one positional argument.
-        return Ok(vec![
-            slot_to_serializable(pack.raw(), pack.kind(), store)
-                .map_err(|e| format!("remote::call: failed to serialize arguments: {e}"))?,
-        ]);
     }
     // Defensive: if the pack ever arrives already-flattened, serialize each
     // slot as one positional argument (still kind-driven, never Bool-default).
