@@ -5912,23 +5912,58 @@ impl BytecodeCompiler {
         ));
         self.emit(Instruction::simple(OpCode::CallValue));
 
-        let namespace_call_expr = Expr::QualifiedFunctionCall {
-            namespace: namespace_name.to_string(),
-            function: method.to_string(),
-            const_args: Vec::new(),
-            args: args.to_vec(),
-            named_args: vec![],
-            span: namespace_span,
-        };
-        let inferred = self.infer_expr_type(&namespace_call_expr).ok();
-        self.last_expr_type_info = inferred
-            .as_ref()
-            .and_then(|ty| self.type_info_from_inferred_type(ty));
+        // WF-3A-tail (time::millis inference): the inference tier returns a
+        // fresh type var for a `module::fn()` call (it holds no module-export
+        // signatures — see the QualifiedFunctionCall arm in
+        // `type_system/inference/expressions.rs`), so an unannotated
+        // `let start = time::millis()` used to erase to `unknown` and reject
+        // `now - start` at binop compile time. The native module schema DOES
+        // carry each export's declared scalar return type; recover it here so
+        // the binding is stamped with the proven scalar type. Scoped to native
+        // module scalar returns only — heap/wrapper returns (json::parse ->
+        // Result<Json>, etc.) keep the existing infer/schema path so their own
+        // navigation semantics are untouched. No type is fabricated: the type
+        // is the declared `-> T` from the stdlib source.
+        if let Some(ti) = self.native_module_scalar_return_type_info(&canonical_module, method) {
+            self.last_expr_type_info = Some(ti);
+        } else {
+            let namespace_call_expr = Expr::QualifiedFunctionCall {
+                namespace: namespace_name.to_string(),
+                function: method.to_string(),
+                const_args: Vec::new(),
+                args: args.to_vec(),
+                named_args: vec![],
+                span: namespace_span,
+            };
+            let inferred = self.infer_expr_type(&namespace_call_expr).ok();
+            self.last_expr_type_info = inferred
+                .as_ref()
+                .and_then(|ty| self.type_info_from_inferred_type(ty));
+        }
         self.last_expr_schema = self
             .last_expr_type_info
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
         Ok(())
+    }
+
+    /// WF-3A-tail: recover a native module export's declared SCALAR return type
+    /// from the module schema registry (`ModuleExports.get_schema(..).return_type`,
+    /// a type-name string like `"float"`). Returns `Some` only for scalar
+    /// families (`bool` / `string` / `int` / `number` / `decimal`); heap and
+    /// wrapper returns (`Result<..>`, enums, arrays, objects) return `None` so
+    /// the caller falls back to the existing inference/schema path. The type is
+    /// the declared `-> T` from the stdlib source — nothing is fabricated.
+    fn native_module_scalar_return_type_info(
+        &self,
+        canonical_module: &str,
+        method: &str,
+    ) -> Option<VariableTypeInfo> {
+        let registry = self.extension_registry.as_ref()?;
+        let module = registry.iter().rev().find(|m| m.name == canonical_module)?;
+        let schema = module.get_schema(method)?;
+        let return_type = schema.return_type.as_ref()?;
+        Self::builtin_scalar_type_info(return_type.trim())
     }
 
     /// Q33 / distributed §4.1.1: elaborate a direct

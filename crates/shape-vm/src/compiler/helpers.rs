@@ -4217,6 +4217,18 @@ impl BytecodeCompiler {
                     .as_deref()
                     .map(|s| s.starts_with("Result<") || s.starts_with("Option<"))
                     .unwrap_or(false)
+                // WF-3A-tail (time::millis inference): a `last_expr_type_info`
+                // that already carries a PROVEN concrete storage kind
+                // (numeric / bool / string — e.g. a native module scalar
+                // return like `time::millis() -> number`) must be recorded on
+                // the slot. Without this, a hinted `number`/`int` info fell
+                // through to the block-3 `numeric_type_of(value_expr)` path,
+                // which relies on the inference tier — and the inference tier
+                // returns a fresh var for a `module::fn()` call, so the slot
+                // erased to Unknown and a later `now - start` binop rejected
+                // with "operand types are unknown". A concrete storage hint is
+                // ADR-006 §2.7.5 proof, so honoring it here is strict-safe.
+                || info.storage_hint.is_some()
             {
                 if is_local {
                     self.type_tracker.set_local_type(slot, info.clone());
