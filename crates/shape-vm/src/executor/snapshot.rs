@@ -313,6 +313,25 @@ impl super::VirtualMachine {
                 })?;
             }
 
+            // WF-3F (2026-07-06): drop the `load_program` -> `reset()`
+            // top-level-locals pre-reservation before rebuilding the saved
+            // stack. `reset()` (program.rs:557) advances `sp` to
+            // `top_level_locals_count` to reserve the top-level register
+            // window, and the Pass-2 loop below re-pushes the FULL saved
+            // absolute stack image on top of it — shifting every saved slot
+            // up by `top_level_locals_count`. Top-level code runs frameless
+            // (bp = 0), so `LoadLocal(idx)` then reads the empty reserved
+            // slot [idx] instead of the saved value: an interrupt-resume
+            // reads its loop counter / locals as 0/Bool and silently skips
+            // the loop tail. The saved image already contains the top-level
+            // local slots as its first entries, so restore it verbatim at
+            // offsets 0..len. The reserved slots hold NONE_BITS (kind Bool),
+            // no owning share, so abandoning them by resetting `sp` is a
+            // no-op on drop. Saved `CallFrame` base_pointers are absolute
+            // offsets captured from this same 0-based image, so the framed
+            // case realigns identically.
+            vm.sp = 0;
+
             // Pass 2 — build each slot. Use the REAL per-slot kind when
             // persisted (STAGE-R5 `stack_kinds`/`module_binding_kinds`),
             // else the SV-discriminator heuristic (pre-R5 snapshots).
