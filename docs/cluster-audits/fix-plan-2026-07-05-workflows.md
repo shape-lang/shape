@@ -329,6 +329,23 @@ Both snapshot-projection gaps implemented + gated green + forbidden-clean (commi
 - **NEW distributed bug → cluster `remote-frame-descriptor` (WF-3A / Phase-1 code-fix):** `frame_descriptor has 0 slots but arity is 1` when a *transferred* `@remote` function carries locals (fires in remote frame-setup BEFORE snapshot; a minimal single-arg `@remote` fn transfers+returns fine). Clusters with the recon's `@remote` Array-param compile-error + `@remote` module-global-capture-returns-0 — one remote-frame-reconstruction defect family.
 - **`wf2g-combined-live-reverify`:** the full live 3-node combined harness (@remote transfer → foreign call → snapshot mid-exec → resume on node 2) blocked by the above; re-run to green once `remote-frame-descriptor` is fixed. Combined-cell persistability is substantiated at unit + committed-integration + projection-root-removal; the live 3-node re-run stays open.
 
+## 6terdecies. Fable independent verification (2026-07-06) — composition REFUTED; WF-3E launched
+
+User requested an independent Fable-model adversarial pass on the complex features. It paid off decisively (full report `docs/cluster-audits/fable-verify-results.md`; lesson in memory `feedback_independent_model_verification`).
+
+**Verdict: foundation SOUND, composition layer BROKEN, docs ahead of reality.**
+- **SOUND (Fable-reproduced vm+jit):** local polyglot (real CPython/deno via extension-removal probes, extern C out-params, Q13), plain non-foreign `@remote` transfer (genuinely server-side, no local fallback), snapshot→resume across foreign frames, TLS server-side, and the **entire correctness core + strict-typing enforcement** (string→int / `3+"x"` / `if 5` / bare `Option` / int↔number all compile-error — **no ReliableOnly bypass**).
+- **REFUTED — WF-2F over-claimed its 9-cell matrix; 6/9 cells (transfer + combined) do NOT reproduce on merged main.** `wf2f-close-matrix.md` corrected with a banner. My earlier "composition proven / 6-9 green" relays were over-stated — owned + corrected.
+
+**9 defects → WF-3E `distributed-composition-fix` (launched, branch `wave3/distributed-composition-fix` from `569ad946`) — the user's #1 priority:**
+- **D1 [CRIT]** `@remote`×foreign broken at receiver (`frame_descriptor 0 slots but arity 1` / `(0,Bool)` sentinel = LIVE Bool-default Forbidden-Pattern violation). Root: minimal-blob closure (`remote.rs:583-618`) doesn't carry the foreign stub; receiver `initialize_foreign_stub_bindings` (`executor/mod.rs:943-973`) leaves the sentinel. Likely merge regression (blobs=0 path worked; merged blobs=1 path untested).
+- **D3 [CRIT]** transferred fn calling stdlib (`env`/`file`/`http`) dies `Null` callee (receiver never inits native module bindings).
+- **D4 [HIGH]** `remote::call`'s `Result<R,RemoteError>` contract is fiction (lowers to bare-return; documented `match` crashes).
+- **D5/D6 [HIGH]** permission-over-wire refusal + `ffi_languages` enforcement non-functional e2e.
+- **D7/D8/D9 [MED/LOW]** local bare `snapshot()` Null-binding; ext-version skew design-only; combined cell dies on transfer.
+- Folded in: recon's `@remote` Array-param, module-global-capture-returns-0, `remote::execute` metadata bug; WF-2G's `frame_descriptor`.
+- WF-3E's **refuter runs on Fable** (the model that found the defects re-verifies the fix); finisher re-proves the 9-cell matrix FROM SCRATCH + adds the missing @remote-foreign integration test (the untested regression path) + corrects matrix/book.
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
