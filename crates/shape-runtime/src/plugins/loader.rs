@@ -781,4 +781,117 @@ mod tests {
         let parsed = parse_sections_manifest(&MANIFEST).expect("empty should parse");
         assert!(parsed.is_empty());
     }
+
+    // ------------------------------------------------------------------
+    // WF-2A extension-hardening — extension-load compatibility validation.
+    //
+    // Regression guard for CRIT-A: a `.so` that PASSES the integer
+    // `shape_abi_version` gate but whose structural `#[repr(C)]` boundary
+    // layout differs from the host (modeled here by a mismatched — or
+    // entirely absent — `shape_abi_build_fingerprint` symbol) must be
+    // rejected CLEANLY with a diagnostic `Err`, never dispatched into and
+    // never a SIGSEGV. If the loader regressed to the old integer-only gate,
+    // it would proceed past this fixture toward the vtable and (in the real
+    // skew case) wild-call → crash. Here we prove the clean-refuse contract:
+    // the very fact that `load()` RETURNS (with an `Err`) and the test
+    // process survives is the no-segfault proof.
+    // ------------------------------------------------------------------
+
+    /// Compile a tiny C source to a `.so` in a unique temp dir using the
+    /// system `cc`. Returns `None` (test skips) if no C compiler is available.
+    #[cfg(unix)]
+    fn compile_c_so(tag: &str, c_src: &str) -> Option<(PathBuf, PathBuf)> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        // Probe for a usable compiler; skip cleanly on hosts without one.
+        if Command::new(&cc).arg("--version").output().is_err() {
+            return None;
+        }
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("shape_loader_gate_{}_{}", tag, nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("fixture.c");
+        let so = dir.join("libfixture.so");
+        std::fs::write(&src, c_src).unwrap();
+        let status = Command::new(&cc)
+            .arg("-shared")
+            .arg("-fPIC")
+            .arg("-o")
+            .arg(&so)
+            .arg(&src)
+            .status();
+        match status {
+            Ok(s) if s.success() => Some((dir, so)),
+            _ => {
+                let _ = std::fs::remove_dir_all(&dir);
+                None
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abi_fingerprint_mismatch_so_is_refused_cleanly_not_segfault() {
+        // ABI version matches the host, so the integer gate PASSES; the
+        // structural fingerprint deliberately does NOT match (host_fp + 1),
+        // modeling a `#[repr(C)]` layout skew the version integer can't see.
+        let host_fp = shape_abi_v1::abi_build_fingerprint();
+        let bogus_fp = host_fp.wrapping_add(1);
+        let c_src = format!(
+            "unsigned int shape_abi_version(void) {{ return {ver}u; }}\n\
+             unsigned long long shape_abi_build_fingerprint(void) {{ return {fp}ULL; }}\n",
+            ver = ABI_VERSION,
+            fp = bogus_fp,
+        );
+        let Some((dir, so)) = compile_c_so("mismatch", &c_src) else {
+            eprintln!("skipping: no C compiler available");
+            return;
+        };
+
+        let mut loader = PluginLoader::new();
+        // Must RETURN (no segfault) with a clean, descriptive Err.
+        let result = loader.load(&so);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = result.expect_err("layout-skewed .so must be refused, not loaded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("structural ABI mismatch"),
+            "expected structural-ABI-mismatch diagnostic, got: {msg}"
+        );
+        // The plugin must NOT have been registered.
+        assert!(!loader.is_loaded("fixture"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abi_missing_fingerprint_symbol_is_refused_cleanly() {
+        // Passes the integer gate but omits the required structural
+        // fingerprint symbol entirely (an old / hand-rolled extension). The
+        // loader must refuse it with a clear "missing ... fingerprint" Err
+        // rather than proceed toward the vtable.
+        let c_src = format!(
+            "unsigned int shape_abi_version(void) {{ return {ver}u; }}\n",
+            ver = ABI_VERSION,
+        );
+        let Some((dir, so)) = compile_c_so("missing_fp", &c_src) else {
+            eprintln!("skipping: no C compiler available");
+            return;
+        };
+
+        let mut loader = PluginLoader::new();
+        let result = loader.load(&so);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let err = result.expect_err("extension without fingerprint symbol must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shape_abi_build_fingerprint"),
+            "expected missing-fingerprint diagnostic, got: {msg}"
+        );
+        assert!(!loader.is_loaded("fixture"));
+    }
 }
