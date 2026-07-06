@@ -310,6 +310,25 @@ impl BytecodeExecutor {
             vm.register_extension(ext.clone());
         }
         vm.populate_module_objects();
+
+        // WF-2F axis B (polyglot-distributed §4.5 resume table): a resumed VM
+        // whose remaining code calls a `fn python` / `fn typescript` must be
+        // able to re-link the runtime on the first post-resume foreign call.
+        // The restored `from_snapshot` VM starts with an empty runtime registry
+        // (STATEFUL_OPAQUE runtimes are never serialized — §4.5 non-goal), so
+        // register the resuming host's own runtimes here, exactly as the fresh
+        // execute path (`execution.rs` load) and the remote path (`remote.rs`)
+        // do. `extern C` needs no registry (it dlopens on call). Same typed
+        // threading shape; no value crosses here, only the runtime handles.
+        vm.set_language_runtimes(engine.language_runtimes());
+        // Re-establish the foreign stub module bindings (the `(func_id,
+        // UInt64)` slots that top-level module-init writes on a fresh run) so a
+        // post-resume `LoadModuleBinding` + `CallValue` to a foreign stub
+        // resolves a real callee, not the uninitialised sentinel. Idempotent
+        // with any bindings the snapshot already restored (writes the same
+        // typed value; ADR-006 §2.7.8 kinded write, no Bool-default).
+        vm.initialize_foreign_stub_bindings();
+
         // Chained snapshots: a resumed VM is indistinguishable from a running
         // one and may snapshot again (§4.5.1 step 5).
         vm.set_snapshot_context(store, seed);

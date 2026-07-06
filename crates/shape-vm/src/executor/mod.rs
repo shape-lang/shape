@@ -480,6 +480,24 @@ pub struct VirtualMachine {
     pub(crate) native_library_cache:
         HashMap<String, std::sync::Arc<libloading::Library>>,
 
+    /// Depth of live foreign frames (polyglot-distributed §4.5 barrier rule).
+    /// Incremented by `invoke_foreign_kinded` around the vtable/libffi dispatch
+    /// and by any callback invoker on re-entry, decremented when it returns.
+    /// While `> 0` a foreign runtime activation is live on the stack; its state
+    /// is opaque and can never be serialized, so `snapshot()` refuses with a
+    /// `ForeignFrame` barrier. A plain scalar counter (not a heap/kinded slot):
+    /// it is pure control-flow bookkeeping, never a Shape value, so no
+    /// NativeKind carrier is involved.
+    pub(crate) foreign_reentry_depth: u32,
+
+    /// Best-effort `(function, language)` identity of each live foreign frame,
+    /// pushed/popped in lockstep with `foreign_reentry_depth` at the one shared
+    /// `invoke_foreign_kinded` core. Used only to name the innermost foreign
+    /// frame in the §4.5 barrier message; never a Shape value, never
+    /// serialized. If a future async-lane increment bumps the depth without a
+    /// name, `live_foreign_frame_identity` degrades to a generic label.
+    pub(crate) foreign_frame_stack: Vec<(String, String)>,
+
     /// Content hashes for each function, indexed by function_id.
     /// Populated from `BytecodeProgram.content_addressed` or `LinkedProgram`.
     /// `None` entries mean the function has no content-addressed metadata.
@@ -522,6 +540,19 @@ pub struct VirtualMachine {
     /// Scope constraints (path / host narrowing) for gated stdlib dispatch.
     /// Threaded into the runtime `ModuleContext` alongside `granted_permissions`.
     pub(crate) scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
+
+    /// WF-2F axis C — wire-serve receiver posture (polyglot-distributed §4.6 /
+    /// OQ-6, ratified 2026-07-05). When a foreign-bearing function is executed
+    /// on behalf of a network sender, `ffi_languages` is enforced as a strict
+    /// OPT-IN allow-list: a dynamic foreign language (`fn python` /
+    /// `fn typescript`) is refused at call time unless the receiving operator
+    /// explicitly listed it, so an EMPTY list means "refuse all dynamic
+    /// foreign" (the deliberate asymmetry against local `shape run`'s
+    /// unscoped-empty-means-all posture). A plain control-flow flag, never a
+    /// Shape value; `false` for local execution, set `true` only on the
+    /// receiver path (`remote::run_remote_call`). `extern C` stays governed by
+    /// `Ffi` + `ffi_libraries`/`ffi_symbols`, not by language opt-in.
+    pub(crate) ffi_receiver_strict: bool,
 
     /// Time-travel debugger for recording and navigating VM state history.
     /// `None` when time-travel debugging is not active.
@@ -885,6 +916,60 @@ impl VirtualMachine {
         let (bits, kind) = self.module_binding_read_kinded_raw(index);
         vm_impl::stack::clone_with_kind(bits, kind);
         KindedSlot::new(shape_value::ValueSlot::from_raw(bits), kind)
+    }
+
+    /// Initialize the module bindings that hold foreign-stub function values
+    /// (WF-2F axis A — polyglot × distributed composition).
+    ///
+    /// The per-function remote dispatch path (`remote::run_remote_call`) invokes
+    /// a transferred function directly via `execute_function_by_id` and never
+    /// runs the origin program's top-level module-init. A foreign-bearing
+    /// function references its `extern C` / `fn python` / `fn typescript` stub
+    /// through `LoadModuleBinding` + `CallValue` — and that stub's module
+    /// binding is written ONLY by the top-level `PushConst Function(idx)` +
+    /// `StoreModuleBinding` pair the compiler emits at
+    /// `compiler/functions_foreign.rs:314-326`. Without init, the receiver's
+    /// binding reads as the `(0, NativeKind::Bool)` uninitialised sentinel
+    /// (`module_binding_read_kinded_raw`), so the value-call callee kind is
+    /// `Bool` and `call_value_immediate_nb` refuses it.
+    ///
+    /// This writes each foreign stub's module binding to its function value —
+    /// exactly the `Constant::Function` slot shape `(func_id, NativeKind::UInt64)`
+    /// that `op_push_const` produces (`stack_ops/mod.rs:126-128`), so
+    /// `call_value_immediate_nb`'s `UInt64` callee arm dispatches identically to
+    /// a local run. `UInt64` is a scalar no-op kind (no strong-count share),
+    /// so no retain/release is required. This is a metadata-layer init, not a
+    /// value carrier — no tag/kind bridge, no Bool-default (ADR-006 §2.7.8).
+    pub(crate) fn initialize_foreign_stub_bindings(&mut self) {
+        // Collect (binding_idx, func_id) first so the immutable program borrow
+        // is released before the mutable `module_binding_write_kinded` writes.
+        let mut inits: Vec<(usize, u64)> = Vec::new();
+        for entry in self.program.foreign_functions.iter() {
+            // The stub function carries the SAME name as the foreign entry
+            // (functions_foreign.rs registers `def.name`). An annotation
+            // wrapper is a distinct `{name}___ann_wrapper` function, so an
+            // exact match resolves the stub, never the wrapper.
+            let Some(func_id) = self
+                .program
+                .functions
+                .iter()
+                .position(|f| f.name == entry.name)
+            else {
+                continue;
+            };
+            let Some(binding_idx) = self
+                .program
+                .module_binding_names
+                .iter()
+                .position(|n| *n == entry.name)
+            else {
+                continue;
+            };
+            inits.push((binding_idx, func_id as u64));
+        }
+        for (binding_idx, func_id) in inits {
+            self.module_binding_write_kinded(binding_idx, func_id, NativeKind::UInt64);
+        }
     }
 
     /// Take ownership of `module_bindings[index]`, replacing it with

@@ -740,7 +740,13 @@ pub fn execute_remote_call(
     store: &SnapshotStore,
     granted: &shape_abi_v1::PermissionSet,
 ) -> RemoteCallResponse {
-    match execute_inner(request, store, granted) {
+    // The no-runtimes path serves servers with no dynamic language extensions
+    // loaded (extern C only, or plain Shape). No `ffi_languages` opt-in list
+    // is meaningful here — `extern C` is `is_native` and bypasses the language
+    // gate; a dynamic foreign call on such a server has no runtime to link and
+    // fails cleanly regardless. Pass an empty scope; the receiver-strict flag
+    // (set inside `run_remote_call`) still refuses any dynamic foreign call.
+    match execute_inner(request, store, granted, &shape_abi_v1::ScopeConstraints::none()) {
         Ok(value) => RemoteCallResponse { result: Ok(value) },
         Err(err) => RemoteCallResponse { result: Err(err) },
     }
@@ -760,8 +766,9 @@ pub fn execute_remote_call_with_runtimes(
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
     granted: &shape_abi_v1::PermissionSet,
+    scope: &shape_abi_v1::ScopeConstraints,
 ) -> RemoteCallResponse {
-    match execute_inner_with_runtimes(request, store, language_runtimes, granted) {
+    match execute_inner_with_runtimes(request, store, language_runtimes, granted, scope) {
         Ok(value) => RemoteCallResponse { result: Ok(value) },
         Err(err) => RemoteCallResponse { result: Err(err) },
     }
@@ -771,6 +778,7 @@ fn execute_inner(
     request: RemoteCallRequest,
     store: &SnapshotStore,
     granted: &shape_abi_v1::PermissionSet,
+    scope: &shape_abi_v1::ScopeConstraints,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     // T1-host-tier-marshal-rebuild (ADR-006 §2.7.4, R8 2026-05-23):
     // kind-threaded marshal protocol via
@@ -785,7 +793,7 @@ fn execute_inner(
     // produces a structured `RemoteCallError` (no silent-degrade): a
     // remote call cannot proceed if the callee has no proven param
     // kinds, because the marshal protocol cannot pick an in-arm.
-    run_remote_call(request, store, None, granted)
+    run_remote_call(request, store, None, granted, scope)
 }
 
 fn execute_inner_with_runtimes(
@@ -796,13 +804,14 @@ fn execute_inner_with_runtimes(
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
     granted: &shape_abi_v1::PermissionSet,
+    scope: &shape_abi_v1::ScopeConstraints,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     // Same path as `execute_inner` plus the foreign-function language-
     // runtime hookup. T1-host-tier-marshal-rebuild covers the marshal
     // protocol; the language-runtime registration is forwarded through
     // `run_remote_call` so the VM picks up the runtimes before invoking
     // the callee.
-    run_remote_call(request, store, Some(language_runtimes), granted)
+    run_remote_call(request, store, Some(language_runtimes), granted, scope)
 }
 
 /// Collect every dependency content hash referenced by a blob in the store
@@ -852,18 +861,11 @@ fn run_remote_call(
         >,
     >,
     granted: &shape_abi_v1::PermissionSet,
+    scope: &shape_abi_v1::ScopeConstraints,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     use crate::executor::{VMConfig, VirtualMachine};
     use shape_runtime::snapshot::{serializable_to_slot, slot_to_serializable};
     use shape_value::{KindedSlot, ValueSlot};
-
-    // Forward the language_runtimes registration through the VM hookup
-    // path. The current VM API does not expose a register-language-
-    // runtime entry-point; consumers that need foreign-function support
-    // through the remote-call boundary should pre-load runtimes via the
-    // extension pipeline before dispatch. T1 stages the parameter
-    // surface so downstream W17-foreign-ffi can wire it up.
-    let _ = language_runtimes;
 
     // Step 1: reconstruct the program. If function_blobs are supplied,
     // build a content-addressed Program; otherwise use the full payload.
@@ -906,7 +908,27 @@ fn run_remote_call(
     // permission union from the VERIFIED blobs and gate the load against the
     // receiver's granted set (§4.6) — never the sender's self-declared claim.
     let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.set_permissions(Some(granted.clone()), None);
+    // WF-2F axis C (§4.6 / OQ-6): install the receiver's granted permission
+    // set AND its scope constraints, then flip the wire-serve receiver posture
+    // on. `ffi_languages` is now enforced as a strict OPT-IN allow-list for
+    // dynamic foreign languages (`fn python` / `fn typescript`): an empty list
+    // refuses every dynamic foreign call unless the operator explicitly opted
+    // the language in (`shape serve --ffi-languages python`). The scope is the
+    // RECEIVER's own — never the sender's self-declared claim (zero sender
+    // trust). `extern C` stays gated by `Ffi` + `ffi_libraries`, not language.
+    vm.set_permissions(Some(granted.clone()), Some(scope.clone()));
+    vm.ffi_receiver_strict = true;
+
+    // WF-2F axis A (design F3): register the receiver's language runtimes into
+    // the VM BEFORE load so the dynamic foreign-call link-now path
+    // (`fn python` / `fn typescript`) can resolve its runtime. `extern C`
+    // links via native_abi dlopen and needs no registry. Never-trust-the-
+    // sender is unaffected: these are the RECEIVER's own installed runtimes,
+    // and the `Ffi` permission gate below still governs whether any foreign
+    // call is allowed at all.
+    if let Some(runtimes) = language_runtimes {
+        vm.set_language_runtimes(runtimes.clone());
+    }
     match program.content_addressed.clone() {
         Some(ca) => {
             // (a) §4.3-2: recompute each blob's content hash and reject any
@@ -994,6 +1016,43 @@ fn run_remote_call(
         None => vm.load_program(program),
     }
     vm.populate_module_objects();
+
+    // WF-2F axis A: initialize the module bindings holding foreign-stub
+    // function values. The transferred function reaches its `extern C` /
+    // `fn python` / `fn typescript` stub via `LoadModuleBinding` + `CallValue`,
+    // but per-function dispatch never runs top-level module-init, so those
+    // bindings would otherwise read the `(0, Bool)` uninitialised sentinel and
+    // `call_value_immediate_nb` would refuse the Bool-kinded callee. See
+    // `VirtualMachine::initialize_foreign_stub_bindings`.
+    vm.initialize_foreign_stub_bindings();
+
+    // WF-2F axis C (combined compose A+B): install the snapshot persistence
+    // context on the receiver VM so a `snapshot()` reached mid-transfer
+    // CAPTURES and PERSISTS a complete, resumable content-addressed envelope
+    // into the receiver's store — the same store a subsequent `--resume` on
+    // this node reads. Without this the in-loop consumer (dispatch.rs) still
+    // continues, but only via the `NoStore` barrier marker; with it, a
+    // foreign-bearing function transferred `@remote` that snapshots mid-flight
+    // produces a genuine `Ok(Snapshot::Hash(id))` — this is what makes the
+    // transfer + snapshot + resume composition real rather than a no-op refusal.
+    // The `SemanticSnapshot` is empty (a transferred function exports nothing;
+    // resume re-verifies through the `CodeManifest` blob graph regardless).
+    {
+        use shape_runtime::snapshot::{SemanticSnapshot, SnapshotEnvelopeSeed};
+        let semantic = SemanticSnapshot {
+            exported_symbols: std::collections::HashSet::new(),
+        };
+        if let Ok(semantic_hash) = store.put_struct(&semantic) {
+            let seed = SnapshotEnvelopeSeed {
+                semantic_hash,
+                script_path: None,
+            };
+            vm.set_snapshot_context(std::sync::Arc::new(store.clone()), seed);
+        }
+        // A store write failure is non-fatal: the in-loop consumer falls back
+        // to the clean `NoStore`/`PersistFailed` barrier marker and the run
+        // still continues — never a trap.
+    }
 
     // Step 3: resolve callee. function_hash (canonical) > function_id > name.
     let func_id: u16 = if let Some(hash) = request.function_hash {

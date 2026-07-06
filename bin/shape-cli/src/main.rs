@@ -319,6 +319,7 @@ async fn main() -> Result<()> {
                 auth_token,
                 sandbox,
                 max_concurrent,
+                ffi_languages,
                 opts,
             }),
             _,
@@ -344,6 +345,7 @@ async fn main() -> Result<()> {
                 auth_token,
                 sandbox,
                 max_concurrent,
+                ffi_languages,
             )
             .await?;
         }

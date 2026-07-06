@@ -88,7 +88,11 @@ struct SecurityPosture {
 /// grant `Ffi`; only `off` (explicit total trust) confers it via `full()`. The
 /// returned scope carries empty `ffi_languages`/`ffi_libraries`/`ffi_symbols`
 /// (strict-empty) — WF-2A wires the pre-`dlopen` scope check against them.
-fn derive_serve_security(level: SandboxLevel, is_loopback: bool) -> SecurityPosture {
+fn derive_serve_security(
+    level: SandboxLevel,
+    is_loopback: bool,
+    ffi_languages: &[String],
+) -> SecurityPosture {
     use shape_abi_v1::{Permission, PermissionSet, ScopeConstraints};
     use shape_vm::resource_limits::ResourceLimits;
 
@@ -105,7 +109,23 @@ fn derive_serve_security(level: SandboxLevel, is_loopback: bool) -> SecurityPost
             (set, ResourceLimits::sandboxed())
         }
         // `off` == operator-declared total trust: `full()` includes `Ffi`.
-        SandboxLevel::None => (PermissionSet::full(), ResourceLimits::unlimited()),
+        //
+        // WF-2F axis A: `full()` also includes the `Deterministic` marker, but
+        // per ffi-rebuild §4.8.3 (Q6) that marker is a mode SELECTOR whose sole
+        // effect is refusing foreign code (extern C / fn python / fn typescript)
+        // — the local `shape run` path only inserts it on explicit
+        // `[sandbox] deterministic = true` (script_cmd.rs:73-79), never as an
+        // implication of "total trust". A serve node that grants `Ffi` and then
+        // refuses every foreign call in `check_ffi_permission` would be
+        // self-contradictory, so `off` drops Deterministic to genuinely RUN
+        // foreign-bearing transfers (the ratified `off -> grants ffi.call`
+        // posture). Deterministic serve execution remains reachable through a
+        // dedicated future knob, not by piling it onto the FFI-granting level.
+        SandboxLevel::None => {
+            let mut set = PermissionSet::full();
+            set.remove(&Permission::Deterministic);
+            (set, ResourceLimits::unlimited())
+        }
     };
 
     // Non-loopback binds fail closed to Pure-only until explicitly configured.
@@ -115,9 +135,22 @@ fn derive_serve_security(level: SandboxLevel, is_loopback: bool) -> SecurityPost
         granted.intersection(&PermissionSet::pure())
     };
 
+    // WF-2F axis C (§4.6 / OQ-6, ratified 2026-07-05): `ffi_languages` is the
+    // wire-serve OPT-IN allow-list for dynamic foreign languages. It defaults
+    // EMPTY (strict) — even `--sandbox off`, which grants `Ffi` broadly, will
+    // refuse a transferred `fn python` / `fn typescript` call unless the
+    // operator explicitly opts the language in with `--ffi-languages`. This is
+    // the deliberate asymmetry against local `shape run` (unscoped `Ffi`): the
+    // caller here is the network. `extern C` is NOT gated by this list (it is
+    // governed by `Ffi` + `ffi_libraries`), so a bare `off` still runs
+    // transferred `extern C` code. The list is only consulted when `Ffi` is
+    // granted at all (strict/permissive omit `Ffi`, so it never applies there).
+    let mut scope = ScopeConstraints::none();
+    scope.ffi_languages = ffi_languages.to_vec();
+
     SecurityPosture {
         granted,
-        scope: ScopeConstraints::none(),
+        scope,
         limits,
     }
 }
@@ -150,6 +183,7 @@ pub async fn run_serve(
     auth_token: Option<String>,
     sandbox: String,
     max_concurrent: usize,
+    ffi_languages: Vec<String>,
 ) -> Result<()> {
     let addr: SocketAddr = address.parse()?;
 
@@ -251,7 +285,7 @@ pub async fn run_serve(
     // WF-1D security wiring: derive the real permission + resource envelope
     // from the sandbox level and bind class ONCE at startup. Every execution
     // this server runs is gated by this posture.
-    let security = derive_serve_security(sandbox_level, addr.ip().is_loopback());
+    let security = derive_serve_security(sandbox_level, addr.ip().is_loopback(), &ffi_languages);
 
     let config = Arc::new(ServeConfig {
         auth_token,
@@ -287,6 +321,21 @@ pub async fn run_serve(
             ""
         },
     );
+    // WF-2F axis C: surface the foreign-language opt-in posture so an operator
+    // can see at a glance why a transferred `fn python` might be refused.
+    if config.security.granted.contains(&shape_abi_v1::Permission::Ffi) {
+        if config.security.scope.ffi_languages.is_empty() {
+            eprintln!(
+                "  ffi.call granted; ffi_languages: [] (strict — dynamic foreign \
+                 refused; extern C allowed). Opt in with --ffi-languages python,typescript"
+            );
+        } else {
+            eprintln!(
+                "  ffi.call granted; ffi_languages: [{}] (dynamic foreign opted in)",
+                config.security.scope.ffi_languages.join(", ")
+            );
+        }
+    }
 
     loop {
         let (socket, peer) = listener.accept().await?;
@@ -474,6 +523,7 @@ where
                         &mut state,
                         language_runtimes,
                         &config.security.granted,
+                        &config.security.scope,
                     ))
                 }
             }
@@ -934,7 +984,17 @@ fn handle_call(
     _state: &mut ConnectionState,
     language_runtimes: &LanguageRuntimes,
     granted: &shape_abi_v1::PermissionSet,
+    scope: &shape_abi_v1::ScopeConstraints,
 ) -> WireMessage {
+    // WF-2F acceptance genuineness log: prove a real inbound content-addressed
+    // Call landed on this node (blob count + foreign-entry count), so a passing
+    // matrix cell cannot be a sender-side local fallback.
+    eprintln!(
+        "[serve] inbound Call fn={:?} blobs={} foreign_entries={}",
+        req.function_name,
+        req.function_blobs.as_ref().map(|b| b.len()).unwrap_or(0),
+        req.program.foreign_functions.len(),
+    );
     let tmp_dir = std::env::temp_dir().join("shape-serve-snapshots");
     match shape_runtime::snapshot::SnapshotStore::new(&tmp_dir) {
         Ok(store) => {
@@ -947,6 +1007,7 @@ fn handle_call(
                     &store,
                     language_runtimes,
                     granted,
+                    scope,
                 )
             };
             WireMessage::CallResponse(response)
@@ -1248,7 +1309,7 @@ mod tests {
             auth_token: None,
             max_concurrent: 4,
             sandbox: level,
-            security: derive_serve_security(level, true),
+            security: derive_serve_security(level, true, &[]),
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),
@@ -1390,13 +1451,13 @@ mod tests {
         use shape_abi_v1::Permission;
 
         // Strict on loopback → grant nothing, sandboxed caps.
-        let strict = derive_serve_security(SandboxLevel::Strict, true);
+        let strict = derive_serve_security(SandboxLevel::Strict, true, &[]);
         assert!(strict.granted.is_empty(), "strict must grant nothing");
         assert!(!strict.granted.contains(&Permission::FsWrite));
         assert!(strict.limits.max_instructions.is_some());
 
         // Permissive on loopback → read/env/time/random/connect, but no write.
-        let perm = derive_serve_security(SandboxLevel::Permissive, true);
+        let perm = derive_serve_security(SandboxLevel::Permissive, true, &[]);
         assert!(perm.granted.contains(&Permission::FsRead));
         assert!(perm.granted.contains(&Permission::NetConnect));
         assert!(
@@ -1406,15 +1467,51 @@ mod tests {
         assert!(!perm.granted.contains(&Permission::Process));
 
         // None on loopback → full grant, unlimited.
-        let none = derive_serve_security(SandboxLevel::None, true);
+        let none = derive_serve_security(SandboxLevel::None, true, &[]);
         assert!(none.granted.contains(&Permission::FsWrite));
         assert!(none.limits.max_instructions.is_none());
+        // WF-2F axis A: `off` grants Ffi and must genuinely RUN foreign code —
+        // so it must NOT carry the Deterministic mode-selector, which
+        // `check_ffi_permission` treats as a blanket foreign-call refusal.
+        assert!(
+            none.granted.contains(&Permission::Ffi),
+            "off must grant ffi.call"
+        );
+        assert!(
+            !none.granted.contains(&Permission::Deterministic),
+            "off must NOT imply deterministic mode — it would refuse every foreign call"
+        );
 
         // Non-loopback → Pure-only regardless of level (fail closed).
-        let remote_none = derive_serve_security(SandboxLevel::None, false);
+        let remote_none = derive_serve_security(SandboxLevel::None, false, &[]);
         assert!(
             remote_none.granted.is_empty(),
             "non-loopback must clamp to pure until configured"
+        );
+    }
+
+    #[test]
+    fn derive_serve_security_ffi_languages_strict_opt_in() {
+        // WF-2F axis C (§4.6 / OQ-6): `off` with no --ffi-languages defaults to
+        // the STRICT-EMPTY posture — Ffi is granted (for extern C) but the
+        // dynamic-language allow-list is empty, so a transferred fn python /
+        // fn typescript is refused at the receiver until explicitly opted in.
+        let none_default = derive_serve_security(SandboxLevel::None, true, &[]);
+        assert!(
+            none_default.scope.ffi_languages.is_empty(),
+            "off must default to an EMPTY ffi_languages allow-list (strict opt-in)"
+        );
+
+        // Explicit opt-in populates the allow-list verbatim.
+        let opted = derive_serve_security(
+            SandboxLevel::None,
+            true,
+            &["python".to_string(), "typescript".to_string()],
+        );
+        assert_eq!(
+            opted.scope.ffi_languages,
+            vec!["python".to_string(), "typescript".to_string()],
+            "--ffi-languages must populate the receiver's opt-in allow-list"
         );
     }
 
@@ -1872,7 +1969,7 @@ print(r)
             auth_token: Some("secret".to_string()),
             max_concurrent: 4,
             sandbox: SandboxLevel::None,
-            security: derive_serve_security(SandboxLevel::None, true),
+            security: derive_serve_security(SandboxLevel::None, true, &[]),
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),
