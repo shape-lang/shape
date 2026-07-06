@@ -12,6 +12,14 @@ use std::collections::{HashMap, HashSet};
 
 use super::BytecodeCompiler;
 
+/// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
+/// (`materialize_computed_comptime_extends`) from the root program and the
+/// module graph.
+struct ComptimeAnnotationHandlers {
+    handlers: Vec<shape_ast::ast::AnnotationHandler>,
+    def_param_names: Vec<String>,
+}
+
 impl BytecodeCompiler {
     fn emit_empty_annotation_event_log(&mut self) {
         self.emit(Instruction::new(
@@ -1144,6 +1152,269 @@ impl BytecodeCompiler {
     /// Function signatures are registered in a first pass so generated items may
     /// reference one another, then bodies are compiled — the same two-phase
     /// shape the top-level pipeline uses.
+    /// Comptime-excellence §4.5.1 whole-program pre-pass.
+    ///
+    /// A computed `extend (f"fn ...")` directive inside a comptime annotation
+    /// handler only materializes its generated free function during pass-2,
+    /// when the annotated *type* is compiled — which is *after* the analyzer
+    /// and after user function bodies resolve their call sites. So a program
+    /// with `fn main() { print(User_json_schema()) }` failed with "Undefined
+    /// function", even though the same call at top level worked, because the
+    /// generated `User_json_schema` was invisible to every earlier phase.
+    ///
+    /// This pre-pass runs the type-targeting comptime handlers *before* the
+    /// analyzer, parses the generated source, and returns the generated free
+    /// functions so the driver can insert them as ordinary program items. From
+    /// there they flow through function registration, analysis, inference and
+    /// pass-2 body compilation exactly like hand-written functions — visible to
+    /// `fn main()` and to every user body.
+    ///
+    /// The pre-pass is speculative: any handler that fails here (missing
+    /// helper, `error()` on a non-serializable field, etc.) is silently
+    /// skipped — pass-2 re-runs the same handler authoritatively and surfaces
+    /// the real diagnostic with its proper span. Every free function it does
+    /// materialize is recorded in `materialized_comptime_fns` so pass-2's
+    /// `apply_comptime_extend_items` does not register it a second time.
+    ///
+    /// Only free functions are hoisted; type-extension methods (`extend Type {
+    /// fn ... }`) are left for pass-2, where the method registry is the natural
+    /// home and method dispatch already resolves them without an early pass.
+    pub(super) fn materialize_computed_comptime_extends(
+        &mut self,
+        program: &shape_ast::ast::Program,
+    ) -> Result<Vec<shape_ast::ast::Item>> {
+        use shape_ast::ast::Item;
+
+        // annotation bare-name -> (comptime handlers, annotation-def param names)
+        let handler_map = self.collect_comptime_annotation_handlers(program);
+        if handler_map.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let extensions: Vec<_> = self
+            .extension_registry
+            .as_ref()
+            .map(|r| r.as_ref().clone())
+            .unwrap_or_default();
+        let trait_impls = self.type_inference.env.trait_impl_keys();
+
+        // Known type symbols: local struct/type names plus every type symbol
+        // already registered (imported modules compiled in graph phase 1).
+        let mut known_type_symbols: HashSet<String> = self
+            .struct_types
+            .keys()
+            .chain(self.type_aliases.keys())
+            .cloned()
+            .collect();
+        for item in &program.items {
+            if let Item::StructType(sd, _) = item {
+                known_type_symbols.insert(sd.name.clone());
+            }
+        }
+
+        let ctx_module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+        let ctx_file = self
+            .program
+            .debug_info
+            .source_map
+            .get_file(self.current_file_id)
+            .unwrap_or("")
+            .to_string();
+
+        // Snapshot the struct definitions so we can borrow `self` mutably
+        // while running the mini-VM.
+        let struct_defs: Vec<shape_ast::ast::types::StructTypeDef> = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::StructType(sd, _) => Some(sd.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let mut generated: Vec<Item> = Vec::new();
+
+        for struct_def in &struct_defs {
+            for ann in &struct_def.annotations {
+                let Some(entry) = handler_map.get(ann.name.as_str()) else {
+                    continue;
+                };
+                for handler in &entry.handlers {
+                    let fields: Vec<(
+                        String,
+                        Option<TypeAnnotation>,
+                        Vec<shape_ast::ast::functions::Annotation>,
+                    )> = struct_def
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                Some(f.type_annotation.clone()),
+                                f.annotations.clone(),
+                            )
+                        })
+                        .collect();
+
+                    let target = super::comptime_target::ComptimeTarget::from_type(
+                        &struct_def.name,
+                        &fields,
+                    );
+                    let Ok(target_value) = target.to_nanboxed() else {
+                        continue;
+                    };
+
+                    // Reachable comptime helpers for this handler body. At
+                    // pre-pass time `function_defs` already holds every
+                    // dependency-module function (graph phase 1); root helpers
+                    // that are not yet registered simply fall back to pass-2.
+                    let mut helpers = self.collect_comptime_helpers();
+                    helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
+                    helpers.sort_by(|a, b| a.name.cmp(&b.name));
+                    helpers.dedup_by(|a, b| a.name == b.name);
+
+                    let execution = match super::comptime::execute_comptime_with_annotation_handler(
+                        &handler.body,
+                        &handler.params,
+                        target_value,
+                        &ann.args,
+                        &entry.def_param_names,
+                        &[],
+                        &helpers,
+                        &extensions,
+                        trait_impls.clone(),
+                        known_type_symbols.clone(),
+                        &ctx_module_path,
+                        &ctx_file,
+                    ) {
+                        Ok(execution) => execution,
+                        Err(e) => {
+                            // A genuine user `error()` call in the handler is a
+                            // deterministic compile error — surface it here with
+                            // a clean, spanned, LSDS-routed diagnostic anchored
+                            // at the annotation application site (§4.4). If we
+                            // swallowed it, the analyzer would instead reject the
+                            // never-generated function with a confusing
+                            // "Undefined function" and mask the real cause.
+                            //
+                            // Any other failure is treated as a pre-pass
+                            // limitation (e.g. a helper only registered later)
+                            // and deferred to pass-2, which re-runs the handler
+                            // authoritatively.
+                            if e.to_string().contains("[comptime error]") {
+                                let context =
+                                    format!("the @{} annotation on {}", ann.name, struct_def.name);
+                                return Err(self.build_comptime_failure(&e, ann.span, &context));
+                            }
+                            continue;
+                        }
+                    };
+
+                    for directive in execution.directives {
+                        let super::comptime_builtins::ComptimeDirective::ExtendItems { items } =
+                            directive
+                        else {
+                            continue;
+                        };
+                        for item in items {
+                            if let Item::Function(func_def, span) = item {
+                                if self.materialized_comptime_fns.insert(func_def.name.clone()) {
+                                    // Register the signature NOW so the analyzer,
+                                    // function-registration pass, and every user
+                                    // body (`fn main`) can resolve the call. The
+                                    // BODY is still compiled by pass-2's
+                                    // `apply_comptime_extend_items`
+                                    // (`compile_function_body`) when the annotated
+                                    // type compiles — the identical path as before
+                                    // this pre-pass, so the generated function's
+                                    // runtime/JIT characteristics are unchanged.
+                                    self.register_function(&func_def)?;
+                                    generated.push(Item::Function(func_def, span));
+                                }
+                            }
+                            // Item::Extend (type-extension methods) is left for
+                            // pass-2 method registration.
+                        }
+                    }
+                }
+            }
+        }
+
+        // The generated free functions are returned so the driver can add them
+        // to the ANALYSIS program (the analyzer type-checks their call sites and
+        // their bodies). They are NOT added to the compiled program's items:
+        // their signatures are already registered above, and their bodies are
+        // compiled by pass-2 exactly as before.
+        Ok(generated)
+    }
+
+    /// Collect comptime annotation handlers reachable at pre-pass time, keyed
+    /// by the annotation's bare name. Sources: annotation definitions in the
+    /// root program plus every dependency-module AST in the module graph
+    /// (imported annotations such as `@json_schema` are compiled in graph
+    /// phase 1, so their handler AST is already reachable through the graph).
+    fn collect_comptime_annotation_handlers(
+        &self,
+        program: &shape_ast::ast::Program,
+    ) -> HashMap<String, ComptimeAnnotationHandlers> {
+        use shape_ast::ast::{AnnotationHandlerType, ExportItem, Item};
+
+        let mut map: HashMap<String, ComptimeAnnotationHandlers> = HashMap::new();
+
+        let mut ingest = |ann_def: &shape_ast::ast::AnnotationDef| {
+            let handlers: Vec<shape_ast::ast::AnnotationHandler> = ann_def
+                .handlers
+                .iter()
+                .filter(|h| {
+                    matches!(
+                        h.handler_type,
+                        AnnotationHandlerType::ComptimePre | AnnotationHandlerType::ComptimePost
+                    )
+                })
+                .cloned()
+                .collect();
+            if handlers.is_empty() {
+                return;
+            }
+            let def_param_names: Vec<String> = ann_def
+                .params
+                .iter()
+                .flat_map(|p| p.get_identifiers())
+                .collect();
+            // Vacant-only: root/local definitions are ingested first and win.
+            map.entry(ann_def.name.clone())
+                .or_insert(ComptimeAnnotationHandlers {
+                    handlers,
+                    def_param_names,
+                });
+        };
+
+        let mut ingest_items = |items: &[Item]| {
+            for item in items {
+                match item {
+                    Item::AnnotationDef(ann_def, _) => ingest(ann_def),
+                    Item::Export(export, _) => {
+                        if let ExportItem::Annotation(ann_def) = &export.item {
+                            ingest(ann_def);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        ingest_items(&program.items);
+        if let Some(graph) = &self.module_graph {
+            for node in graph.nodes() {
+                if let Some(ast) = &node.ast {
+                    ingest_items(&ast.items);
+                }
+            }
+        }
+
+        map
+    }
+
     pub(super) fn apply_comptime_extend_items(
         &mut self,
         items: Vec<shape_ast::ast::Item>,
@@ -1171,7 +1442,17 @@ impl BytecodeCompiler {
             }
         }
 
+        // comptime-excellence §4.5.1: if the whole-program pre-pass already
+        // registered this generated free function's SIGNATURE (so it is visible
+        // to `fn main()` and every user body), skip re-registering it here — a
+        // second `register_function` would create a duplicate slot. The body is
+        // still compiled below via `compile_function_body`, which fills the
+        // pre-registered slot, so the generated function is compiled exactly
+        // once through the identical path as before the pre-pass existed.
         for func_def in &functions {
+            if self.materialized_comptime_fns.contains(&func_def.name) {
+                continue;
+            }
             self.register_function(func_def)?;
         }
         for func_def in &functions {

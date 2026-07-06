@@ -144,6 +144,7 @@ impl BytecodeCompiler {
             trait_defs: HashMap::new(),
             comptime_impl_blocks: Vec::new(),
             comptime_context_struct_defs: HashMap::new(),
+            materialized_comptime_fns: std::collections::HashSet::new(),
             extension_registry: None,
             comptime_fields: HashMap::new(),
             type_diagnostic_mode: TypeDiagnosticMode::Strict, // Strict is the default; the suppressing ReliableOnly variant was deleted (WF-0A)
