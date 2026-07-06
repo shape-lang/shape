@@ -540,6 +540,9 @@ fn decode_vmstate_typed_object(
         // promoted-cell slots, so the per-slot kind tracks are empty.
         stack_kinds: Vec::new(),
         module_binding_kinds: Vec::new(),
+        // WF-3F: VmState introspection restore is a snapshot()-origin-style
+        // top-of-program re-entry, not an interrupt landing.
+        interrupt_saved: false,
     })
     // `reader` Drop runs here, retiring the read-window retain share.
     // The slot's original share remains intact for the caller's

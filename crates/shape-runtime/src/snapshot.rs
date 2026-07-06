@@ -513,6 +513,17 @@ pub struct VmSnapshot {
     /// `stack_kinds`).
     #[serde(default)]
     pub module_binding_kinds: Vec<shape_value::NativeKind>,
+    /// WF-3F snapshot origin flag (design §4.4 / §4.5.1 step 4). `true` when
+    /// this snapshot was captured by the Ctrl+C interrupt-save path, whose
+    /// `ip` is a rewound un-executed instruction that expects a PRISTINE
+    /// operand stack. `false` (default, incl. all pre-WF-3F snapshots) marks a
+    /// `snapshot()`-call origin, whose `ip` is the post-call site that
+    /// CONSUMES `snapshot()`'s `Ok(Snapshot::Resumed)` return value. Resume
+    /// pushes the resume marker ONLY when this is `false`; pushing it for an
+    /// interrupt-origin snapshot shifts the operand stack by one slot and
+    /// corrupts the pending call (the release-blocking silent-corruption bug).
+    #[serde(default)]
+    pub interrupt_saved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
