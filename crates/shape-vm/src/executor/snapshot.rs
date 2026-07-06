@@ -238,6 +238,10 @@ impl super::VirtualMachine {
             ip_function_id: None,
             stack_kinds,
             module_binding_kinds,
+            // WF-3F: default to snapshot()-call origin (marker-expecting). The
+            // interrupt-save consumer overrides this to `true` in
+            // `perform_snapshot_capture` after this builder returns.
+            interrupt_saved: false,
         })
     }
 
@@ -308,6 +312,25 @@ impl super::VirtualMachine {
                     ))
                 })?;
             }
+
+            // WF-3F (2026-07-06): drop the `load_program` -> `reset()`
+            // top-level-locals pre-reservation before rebuilding the saved
+            // stack. `reset()` (program.rs:557) advances `sp` to
+            // `top_level_locals_count` to reserve the top-level register
+            // window, and the Pass-2 loop below re-pushes the FULL saved
+            // absolute stack image on top of it — shifting every saved slot
+            // up by `top_level_locals_count`. Top-level code runs frameless
+            // (bp = 0), so `LoadLocal(idx)` then reads the empty reserved
+            // slot [idx] instead of the saved value: an interrupt-resume
+            // reads its loop counter / locals as 0/Bool and silently skips
+            // the loop tail. The saved image already contains the top-level
+            // local slots as its first entries, so restore it verbatim at
+            // offsets 0..len. The reserved slots hold NONE_BITS (kind Bool),
+            // no owning share, so abandoning them by resetting `sp` is a
+            // no-op on drop. Saved `CallFrame` base_pointers are absolute
+            // offsets captured from this same 0-based image, so the framed
+            // case realigns identically.
+            vm.sp = 0;
 
             // Pass 2 — build each slot. Use the REAL per-slot kind when
             // persisted (STAGE-R5 `stack_kinds`/`module_binding_kinds`),
@@ -747,7 +770,7 @@ impl super::VirtualMachine {
         // One capture/persist spine (design §4.0), two consumers. This is the
         // in-loop consumer: every outcome becomes an `Ok(marker)` the program
         // handles through the Result channel, and the run CONTINUES.
-        match self.perform_snapshot_capture(ctx) {
+        match self.perform_snapshot_capture(ctx, false) {
             SnapshotOutcome::Saved(hex) => self.build_snapshot_hash_marker(hex),
             SnapshotOutcome::Barrier(msg) => self.build_snapshot_error_marker("Barrier", msg),
             SnapshotOutcome::PersistFailed(msg) => {
@@ -767,7 +790,7 @@ impl super::VirtualMachine {
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> SnapshotOutcome {
-        self.perform_snapshot_capture(ctx)
+        self.perform_snapshot_capture(ctx, true)
     }
 
     /// The shared capture + persist spine (design §4.1 steps 4–5 / §4.3.4).
@@ -779,6 +802,7 @@ impl super::VirtualMachine {
     pub(crate) fn perform_snapshot_capture(
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+        interrupt_origin: bool,
     ) -> SnapshotOutcome {
         // Barrier: a foreign frame is live on the stack (polyglot-distributed
         // §4.5, ratified refuse-over-run-to-completion). This is only reachable
@@ -825,12 +849,18 @@ impl super::VirtualMachine {
         // barrier (user-handleable), never a garbage snapshot. The internal
         // `SURFACE:`/ADR sentinel carried by the capture VMError is rendered
         // to a plain-language barrier message here (§4.11 rendering rule).
-        let vm_snapshot = match self.snapshot(&store) {
+        let mut vm_snapshot = match self.snapshot(&store) {
             Ok(s) => s,
             Err(e) => {
                 return SnapshotOutcome::Barrier(render_capture_barrier(&e));
             }
         };
+        // WF-3F: stamp the snapshot origin so resume can decide whether to
+        // push the `Ok(Snapshot::Resumed)` marker. Interrupt-origin snapshots
+        // resume at a rewound un-executed instruction with a pristine operand
+        // stack; snapshot()-call origin resumes at the value-consuming post-
+        // call site.
+        vm_snapshot.interrupt_saved = interrupt_origin;
 
         // Persist: monolithic-program twin + manifest + envelope (design
         // §4.3.4 / §4.3.5). Atomic — a persist failure writes no envelope.
@@ -1388,7 +1418,7 @@ mod tests {
         vm.foreign_frame_stack
             .push(("compute".to_string(), "python".to_string()));
 
-        match vm.perform_snapshot_capture(None) {
+        match vm.perform_snapshot_capture(None, false) {
             SnapshotOutcome::Barrier(msg) => {
                 assert!(
                     msg.contains("compute") && msg.contains("python"),
@@ -1412,7 +1442,7 @@ mod tests {
         // caused by the live foreign frame, not something incidental.
         vm.foreign_reentry_depth -= 1;
         vm.foreign_frame_stack.pop();
-        match vm.perform_snapshot_capture(None) {
+        match vm.perform_snapshot_capture(None, false) {
             SnapshotOutcome::Barrier(msg) => assert!(
                 !msg.contains("foreign call 'compute'"),
                 "post-unwind refusal must not be the ForeignFrame barrier; got: {msg}"

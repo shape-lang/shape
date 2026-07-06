@@ -338,19 +338,28 @@ impl BytecodeExecutor {
         // one and may snapshot again (§4.5.1 step 5).
         vm.set_snapshot_context(store, seed);
 
-        // Push `Ok(Snapshot::Resumed)` as the value the instruction at the
-        // resume ip expects for `snapshot()` (§4.1.3 / §4.5.1 step 4).
-        let resumed = vm
-            .build_snapshot_resumed_marker()
-            .map_err(|e| ShapeError::RuntimeError {
-                message: format!("resume: {e}"),
-                location: None,
-            })?;
-        vm.push_kinded_slot(resumed)
-            .map_err(|e| ShapeError::RuntimeError {
-                message: format!("resume: failed to push resume marker: {e}"),
-                location: None,
-            })?;
+        // WF-3F conditional resume-marker push. Push `Ok(Snapshot::Resumed)`
+        // as the value the instruction at the resume ip expects for
+        // `snapshot()` (§4.1.3 / §4.5.1 step 4) ONLY for a snapshot()-call
+        // origin. An interrupt-saved snapshot's ip is a rewound un-executed
+        // instruction (dispatch.rs `self.ip -= 1`) that expects a PRISTINE
+        // operand stack — pushing the marker there shifts the stack by one
+        // slot and makes the pending call pop the marker as an argument and
+        // the slot below the real callee AS the callee (the release-blocking
+        // silent-corruption bug). See VmSnapshot::interrupt_saved.
+        if !vm_snapshot.interrupt_saved {
+            let resumed = vm
+                .build_snapshot_resumed_marker()
+                .map_err(|e| ShapeError::RuntimeError {
+                    message: format!("resume: {e}"),
+                    location: None,
+                })?;
+            vm.push_kinded_slot(resumed)
+                .map_err(|e| ShapeError::RuntimeError {
+                    message: format!("resume: failed to push resume marker: {e}"),
+                    location: None,
+                })?;
+        }
 
         // Run the dispatch loop from `resume_ip` with a live context for
         // stdlib I/O + wire-conversion lookups (§4.5.1 step 5).

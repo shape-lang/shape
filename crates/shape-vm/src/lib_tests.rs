@@ -4,6 +4,8 @@ mod extension_integration_tests;
 mod extension_system_tests;
 #[path = "lib_tests_parts/full_loop_tests.rs"]
 mod full_loop_tests;
+#[path = "lib_tests_parts/interrupt_resume_tests.rs"]
+mod interrupt_resume_tests;
 #[path = "lib_tests_parts/module_qualified_type_tests.rs"]
 mod module_qualified_type_tests;
 #[path = "lib_tests_parts/repl_persistence_tests.rs"]
