@@ -873,6 +873,23 @@ impl VirtualMachine {
                             .call_value_immediate_nb(callee, cb_args, None)
                             .map_err(|e| e.to_string())
                     };
+                    // Sender-side per-function distributed-transfer seam
+                    // (distributed §4.1.1). The dispatcher reads `self.program`
+                    // through the SAME `vm_cell` that backs `invoke_cb` — a
+                    // short-lived `borrow()` taken inside `call_remote`, NOT a
+                    // whole-program clone (the deleted `CURRENT_PROGRAM`
+                    // thread-local's per-dispatch clone is distributed R10).
+                    // The two never overlap: a module body invokes `remote::call`
+                    // OR an `invoke_callable` callback, never both re-entrantly —
+                    // `call_remote` performs a wire round-trip and does not
+                    // re-enter the VM, so its immutable `borrow()` cannot alias
+                    // the callback's `borrow_mut()`. RefCell enforces this at
+                    // runtime (WF-2E RefCell park + WF-2C remote-dispatch, both
+                    // preserved).
+                    let remote_dispatcher =
+                        crate::executor::builtins::remote_builtins::ProgramRemoteDispatcher::new(
+                            &vm_cell,
+                        );
                     let ctx = shape_runtime::module_exports::ModuleContext {
                         schemas: &ambient_registry,
                         invoke_callable: Some(&invoke_cb),
@@ -885,13 +902,15 @@ impl VirtualMachine {
                         scope_constraints,
                         set_pending_resume: None,
                         set_pending_frame_resume: None,
+                        remote_dispatch: Some(&remote_dispatcher),
                     };
                     // The body takes `&[KindedSlot]` carriers directly — the
                     // caller's kinds (VM §2.7.7 parallel kind track) flow
                     // through UNCHANGED. No raw-bits flatten, no re-stamp.
                     (typed.invoke)(args, &ctx).map_err(VMError::RuntimeError)
-                    // `invoke_cb` + `ctx` drop here — `vm_cell` is no longer
-                    // borrowed, so `into_inner` below can reclaim `&mut self`.
+                    // `invoke_cb`, `remote_dispatcher`, and `ctx` all drop here
+                    // — `vm_cell` is no longer borrowed, so `into_inner` below
+                    // can reclaim `&mut self`.
                 };
                 let this = vm_cell.into_inner();
                 let typed_return = body_result?;

@@ -66,6 +66,17 @@ pub struct FunctionBlob {
     #[serde(default)]
     pub capture_kinds: Vec<NativeKind>,
 
+    /// Per-capture source variable names, in declaration order (sibling of
+    /// `param_names`). Distributed §4.4: load-bearing for *legible* capture-
+    /// refusal messages — the receiver names the captured *variable* (e.g.
+    /// `closure captures 'counter' mutably`) rather than a slot index. This is
+    /// **not** hash-identity (deliberately excluded from `FunctionBlobHashInput`,
+    /// exactly like `source_map`/`callee_names`): a renamed capture is the same
+    /// function. Empty when the compiler did not record capture names (the
+    /// refusal message falls back to `capture #i`).
+    #[serde(default)]
+    pub capture_names: Vec<String>,
+
     // -- code --
     /// This function's bytecode instructions.
     pub instructions: Vec<Instruction>,

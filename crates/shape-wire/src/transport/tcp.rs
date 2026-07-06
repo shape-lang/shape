@@ -5,11 +5,40 @@
 
 use super::{Connection, Transport, TransportError};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 /// Maximum payload size: 64 MB.
 pub const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+
+/// Resolve a `host:port` destination string to a concrete `SocketAddr`
+/// (distributed §4.7 / B7 fix). Replaces the previous
+/// `destination.parse::<SocketAddr>()` which rejected hostnames — `localhost`
+/// and DNS names now resolve. First-address semantics (dual-stack safe: the
+/// caller connects to whatever the resolver returns first).
+fn resolve_socket_addr(destination: &str) -> Result<SocketAddr, TransportError> {
+    destination
+        .to_socket_addrs()
+        .map_err(|e| {
+            TransportError::ConnectionFailed(format!("cannot resolve '{}': {}", destination, e))
+        })?
+        .next()
+        .ok_or_else(|| {
+            TransportError::ConnectionFailed(format!("no addresses resolved for '{}'", destination))
+        })
+}
+
+/// Map a socket read error into the correct transport error. A read timeout
+/// (surfaced by the OS as `WouldBlock` or `TimedOut` under a read deadline)
+/// becomes `TransportError::Timeout` — a POST-send failure the sender must
+/// treat as "may have executed" (distributed §4.9), distinct from a pre-send
+/// `ConnectionFailed`. Everything else is a generic receive failure.
+fn map_read_error(context: &str, e: std::io::Error) -> TransportError {
+    match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => TransportError::Timeout,
+        _ => TransportError::ReceiveFailed(format!("{}: {}", context, e)),
+    }
+}
 
 /// TCP-based transport using length-prefixed framing.
 pub struct TcpTransport {
@@ -38,9 +67,7 @@ impl Transport for TcpTransport {
         }
 
         let mut stream = TcpStream::connect_timeout(
-            &destination
-                .parse()
-                .map_err(|e| TransportError::ConnectionFailed(format!("{}", e)))?,
+            &resolve_socket_addr(destination)?,
             self.connect_timeout,
         )
         .map_err(|e| TransportError::ConnectionFailed(format!("{}: {}", destination, e)))?;
@@ -54,9 +81,7 @@ impl Transport for TcpTransport {
 
     fn connect(&self, destination: &str) -> Result<Box<dyn Connection>, TransportError> {
         let stream = TcpStream::connect_timeout(
-            &destination
-                .parse()
-                .map_err(|e| TransportError::ConnectionFailed(format!("{}", e)))?,
+            &resolve_socket_addr(destination)?,
             self.connect_timeout,
         )
         .map_err(|e| TransportError::ConnectionFailed(format!("{}: {}", destination, e)))?;
@@ -134,7 +159,7 @@ pub fn read_length_prefixed(stream: &mut TcpStream) -> Result<Vec<u8>, Transport
     let mut len_buf = [0u8; 4];
     stream
         .read_exact(&mut len_buf)
-        .map_err(|e| TransportError::ReceiveFailed(format!("read frame length: {}", e)))?;
+        .map_err(|e| map_read_error("read frame length", e))?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
     if len > MAX_PAYLOAD_SIZE {
@@ -147,7 +172,7 @@ pub fn read_length_prefixed(stream: &mut TcpStream) -> Result<Vec<u8>, Transport
     let mut buf = vec![0u8; len];
     stream
         .read_exact(&mut buf)
-        .map_err(|e| TransportError::ReceiveFailed(format!("read frame payload: {}", e)))?;
+        .map_err(|e| map_read_error("read frame payload", e))?;
     super::framing::decode_framed(&buf)
 }
 
@@ -244,5 +269,56 @@ mod tests {
         };
         let result = transport.connect("127.0.0.1:1");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_localhost_hostname() {
+        // Distributed §4.7 / B7: hostnames resolve (previously rejected by
+        // `destination.parse::<SocketAddr>()`).
+        let addr = resolve_socket_addr("localhost:9527").expect("localhost must resolve");
+        assert!(
+            addr.ip().is_loopback(),
+            "localhost resolves to a loopback address, got {}",
+            addr.ip()
+        );
+        assert_eq!(addr.port(), 9527);
+    }
+
+    #[test]
+    fn resolve_rejects_unresolvable_host() {
+        let err = resolve_socket_addr("no-such-host.invalid:9527");
+        assert!(
+            matches!(err, Err(TransportError::ConnectionFailed(_))),
+            "unresolvable host is a ConnectionFailed (pre-send), got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn hostname_roundtrip_via_localhost() {
+        // Dual-stack safe: bind on whatever localhost's first resolution
+        // yields, then address the server by hostname (not a SocketAddr
+        // literal) to exercise the B7 resolution path end-to-end.
+        let probe = "localhost:0"
+            .to_socket_addrs()
+            .unwrap()
+            .next()
+            .expect("localhost resolves");
+        let listener = TcpListener::bind((probe.ip(), 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let data = read_length_prefixed(&mut conn).unwrap();
+            write_length_prefixed(&mut conn, &data).unwrap();
+        });
+
+        let transport = TcpTransport::default();
+        let response = transport
+            .send(&format!("localhost:{}", port), b"hi hostname")
+            .expect("localhost:PORT send must work");
+        assert_eq!(&response, b"hi hostname");
+        server.join().unwrap();
     }
 }

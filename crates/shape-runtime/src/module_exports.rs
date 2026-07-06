@@ -97,6 +97,35 @@ pub trait VmStateAccessor: Send + Sync {
     }
 }
 
+/// Sender-side seam for per-function distributed transfer (distributed
+/// §4.1.1). The VM implements this over the **live** `BytecodeProgram` (a
+/// borrow, not a clone — this replaces the deleted `CURRENT_PROGRAM`
+/// thread-local per distributed R10) so the `remote::call` / `@remote`
+/// builtins in `shape-vm` can, from within a `ModuleContext` dispatch:
+///
+/// 1. resolve `fn_ref` (a named-function id `NativeKind::UInt64` slot, or a
+///    `Ptr(HeapKind::Closure)` slot) to its content-addressed hash + minimal
+///    transitive blob closure,
+/// 2. serialize the positional argument pack (per-slot kind from the §2.7.7
+///    stack kind track — never fabricated from bits),
+/// 3. perform the wire round-trip (with the bounded retry-once missing-blob
+///    resupply), and
+/// 4. materialize the reply at the callee's declared return kind.
+///
+/// The `shape-runtime` crate never sees the `shape-vm` program type:
+/// `KindedSlot` (shape-value) is the only shared carrier. `Err(msg)` is a
+/// transport/protocol failure that the caller raises as an ordinary runtime
+/// error (Q26); a recoverable `Result<R, RemoteError>` surface is the public
+/// `remote::call` primitive's own concern above this trait.
+pub trait RemoteDispatcher {
+    fn call_remote(
+        &self,
+        addr: &str,
+        fn_ref: &KindedSlot,
+        args: &[KindedSlot],
+    ) -> Result<crate::typed_module_exports::TypedReturn, String>;
+}
+
 /// Execution context available to module functions during a VM call.
 ///
 /// The VM constructs this before each module function dispatch and passes
@@ -141,6 +170,13 @@ pub struct ModuleContext<'a> {
     /// Stores (ip_offset, locals) so the dispatch loop can override the
     /// call frame set up by invoke_callable.
     pub set_pending_frame_resume: Option<&'a dyn Fn(usize, Vec<KindedSlot>)>,
+
+    /// Sender-side per-function distributed-transfer seam (distributed
+    /// §4.1.1). `Some` only during dispatch of a VM that carries a live
+    /// content-addressed program; the `remote::call` / `@remote` builtins
+    /// use it to resolve a callee to its blob closure and perform the wire
+    /// round-trip. See [`RemoteDispatcher`].
+    pub remote_dispatch: Option<&'a dyn RemoteDispatcher>,
 }
 
 /// Check whether the current execution context has a required permission.

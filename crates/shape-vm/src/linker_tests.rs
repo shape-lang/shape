@@ -24,6 +24,7 @@ fn make_blob(
         mutable_captures: vec![],
         frame_descriptor: None,
         capture_kinds: vec![],
+        capture_names: vec![],
         instructions,
         constants,
         strings,
@@ -220,6 +221,7 @@ fn test_link_circular_dependency_detected() {
         mutable_captures: vec![],
         frame_descriptor: None,
         capture_kinds: vec![],
+        capture_names: vec![],
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -244,6 +246,7 @@ fn test_link_circular_dependency_detected() {
         mutable_captures: vec![],
         frame_descriptor: None,
         capture_kinds: vec![],
+        capture_names: vec![],
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -277,6 +280,7 @@ fn test_link_missing_blob() {
         mutable_captures: vec![],
         frame_descriptor: None,
         capture_kinds: vec![],
+        capture_names: vec![],
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -390,6 +394,7 @@ fn test_source_map_merging() {
             mutable_captures: vec![],
             frame_descriptor: None,
             capture_kinds: vec![],
+            capture_names: vec![],
             instructions: vec![
                 Instruction {
                     opcode: OpCode::Return,
@@ -429,6 +434,7 @@ fn test_source_map_merging() {
             mutable_captures: vec![],
             frame_descriptor: None,
             capture_kinds: vec![],
+            capture_names: vec![],
             instructions: vec![Instruction {
                 opcode: OpCode::Return,
                 operand: None,
@@ -543,6 +549,7 @@ fn blob_with_perms(perms: PermissionSet) -> FunctionBlob {
         mutable_captures: vec![],
         frame_descriptor: None,
         capture_kinds: vec![],
+        capture_names: vec![],
         instructions: vec![Instruction {
             opcode: OpCode::Halt,
             operand: None,

@@ -25,6 +25,7 @@ fn test_ctx() -> ModuleContext<'static> {
         scope_constraints: None,
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     }
 }
 
@@ -128,6 +129,7 @@ fn test_check_permission_denies_when_not_granted() {
         scope_constraints: None,
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     };
     assert!(check_permission(&ctx, shape_abi_v1::Permission::FsRead).is_ok());
     assert!(check_permission(&ctx, shape_abi_v1::Permission::FsWrite).is_err());
@@ -153,6 +155,7 @@ fn test_check_fs_permission_enforces_scope_constraints() {
         scope_constraints: Some(constraints),
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     };
 
     // Allowed paths
@@ -181,6 +184,7 @@ fn test_check_fs_permission_allows_all_when_no_constraints() {
         scope_constraints: None,
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     };
 
     assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/any/path").is_ok());
@@ -205,6 +209,7 @@ fn test_check_net_permission_enforces_scope_constraints() {
         scope_constraints: Some(constraints),
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     };
 
     // Allowed hosts
@@ -254,6 +259,7 @@ fn test_check_net_permission_allows_all_when_no_constraints() {
         scope_constraints: None,
         set_pending_resume: None,
         set_pending_frame_resume: None,
+        remote_dispatch: None,
     };
 
     assert!(

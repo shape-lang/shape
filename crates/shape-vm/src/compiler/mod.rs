@@ -298,6 +298,7 @@ impl FunctionBlobBuilder {
         blob_name_to_hash: &HashMap<String, FunctionHash>,
         instr_end: usize,
         capture_kinds: Vec<NativeKind>,
+        capture_names: Vec<String>,
     ) -> FunctionBlob {
         use crate::bytecode::Operand;
 
@@ -534,6 +535,7 @@ impl FunctionBlobBuilder {
             mutable_captures: func.mutable_captures.clone(),
             frame_descriptor: func.frame_descriptor.clone(),
             capture_kinds,
+            capture_names,
             required_permissions: self.required_permissions.clone(),
             instructions: local_instructions,
             constants: local_constants,
@@ -696,6 +698,14 @@ pub struct BytecodeCompiler {
     /// (closure registered via the legacy path, e.g. test helpers) falls
     /// back to all-`Immutable`, matching the pre-A.1C layout.
     pub(crate) closure_capture_kinds: Vec<(u16, Vec<shape_value::v2::closure_layout::CaptureKind>)>,
+
+    /// Distributed §4.4 — per-closure captured *variable names*, in declaration
+    /// order, keyed by closure function index. Populated alongside
+    /// `closure_capture_kinds` (same `captured_vars` source). Stamped into the
+    /// non-hash `FunctionBlob.capture_names` so the remote-capture-refusal path
+    /// can name the offending variable. A missing entry yields empty names (the
+    /// refusal message falls back to `capture #i`).
+    pub(crate) closure_capture_names: Vec<(u16, Vec<String>)>,
 
     /// Registry of `Function<A, R>` signatures (v2 closure specialization
     /// Phase F). `FunctionTypeId`s assigned here are written into

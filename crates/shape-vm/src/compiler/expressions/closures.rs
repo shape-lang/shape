@@ -3619,6 +3619,10 @@ impl BytecodeCompiler {
         }
         self.closure_capture_kinds
             .push((func_idx as u16, capture_kinds.clone()));
+        // Distributed §4.4: record the captured variable names in the same
+        // declaration order for legible remote-capture-refusal messages.
+        self.closure_capture_names
+            .push((func_idx as u16, captured_vars.clone()));
 
         // Track A.1C.2: if any capture is non-Immutable, re-intern the
         // closure_type_id under the kinds-aware registry key so two
