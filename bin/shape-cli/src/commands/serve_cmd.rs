@@ -901,6 +901,15 @@ fn handle_call(
     granted: &shape_abi_v1::PermissionSet,
     scope: &shape_abi_v1::ScopeConstraints,
 ) -> WireMessage {
+    // WF-2F acceptance genuineness log: prove a real inbound content-addressed
+    // Call landed on this node (blob count + foreign-entry count), so a passing
+    // matrix cell cannot be a sender-side local fallback.
+    eprintln!(
+        "[serve] inbound Call fn={:?} blobs={} foreign_entries={}",
+        req.function_name,
+        req.function_blobs.as_ref().map(|b| b.len()).unwrap_or(0),
+        req.program.foreign_functions.len(),
+    );
     let tmp_dir = std::env::temp_dir().join("shape-serve-snapshots");
     match shape_runtime::snapshot::SnapshotStore::new(&tmp_dir) {
         Ok(store) => {
