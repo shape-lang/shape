@@ -30,10 +30,10 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 11 | stdlib calls uncompilable in async fns | 🟡 claimed (WF-2D), unverified | ⚠ needs Fable |
 | 12 | top-level `await time::sleep` panics | 🟡 claimed (WF-2D), unverified | ⚠ needs Fable |
 | 13 | http segfaults every call | ✅ claimed (WF-2E) | verify in WF-4 |
-| 14 | `xml::stringify` dumps core | 🟡 SIGSEGV gone; empty-children crash remains | recon → WF-3A |
-| 15 | `std::finance` unusable | ⏳ compiler stack-overflow | WF-3A |
-| 16 | json module mostly dead | 🟡 stringify fixed; navigation broken | recon → WF-3A |
-| 17 | msgpack 100% stubbed | 🟡 encode ok; `decode` never decodes | recon → WF-3A |
+| 14 | `xml::stringify` dumps core | 🟡 SIGSEGV+id-41 gone (M1); crash root is `op_new_array(0)` → **V3-S5 empty-array construction stub** (deferred; refuse-on-sight to band-aid) | → V3-S5 lane |
+| 15 | `std::finance` unusable | 🟡 compiler stack-overflow **M1-fixed/no-repro**; survivor = **stale stdlib source** (~85 `let`→`let mut` immutable-reassignment sites + undefined `signal`) → **stdlib-source-modernization** (not a compiler bug) | → source sweep |
+| 16 | json module mostly dead | ✅ **navigation FIXED** (marshalled-Json `Ok(v)=>v.get/is_null` via Result-payload inference) — pending merge (stdlib-tail) · **Opus-indep** | WF-3A-tail |
+| 17 | msgpack 100% stubbed | ✅ **decode+navigate FIXED** (shared json root) — pending merge · **Opus-indep** | WF-3A-tail |
 | 18 | time module broken | ✅ claimed (WF-2E) | verify in WF-4 |
 | 19 | JIT double-execution | ✅ prints once | WF-1A · **Fable** |
 | 20 | Tiered compilation inert | ⏸ deferred | D4 ruling |
@@ -45,7 +45,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 26 | i64 overflow VM/JIT split-brain | ✅ traps under jit | WF-1A · **Fable** |
 | 27 | `serve --sandbox strict` no-op | ✅ blocks file::write server-side | WF-1D · **Fable** |
 | 28 | Load-time permission check dead | ✅ **over-wire enforced** (strict node refuses transferred fs.write at load, permission-union) | WF-3E merged `800fb6b9` · **Fable ×2 (D5)** |
-| 29 | bigint unconstructible | ⏳ | WF-3A / D2 |
+| 29 | bigint unconstructible | 🟡 **feature-scale, not a bug** — no construction path, no arithmetic (`HeapValue::BigInt` is an i64-backed placeholder), no grammar literal/suffix, no numeric-lattice integration. D2 "implement" = a real feature build (like decimal), not a point fix → own feature lane | → bigint feature |
 | 30 | Drop broken at escape boundaries | ✅ no use-after-finalize | WF-1C · **Fable** |
 | 31 | Reference cycles leak unboundedly | ⏳ | WF-3C / D3 |
 | 32 | LSP false error on valid extern C | ✅ merged `c2a34826` (LSP now mirrors the compiler oracle: `dynamic_language = !is_native_abi()`) · **Opus-indep** | WF-3B-LSP |
@@ -82,8 +82,8 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | HIGH | Module-scope closure-capture Drop finalizer leak (§2.7.30.4) | WF-3C | ⏳ (with real GC) |
 | HIGH | `--max-output-bytes` inert; `--max-memory-bytes` `panic!`-exits (serve DoS) | WF-3B | ✅ merged `47c8e031` (record_output wired at print sink; grow refuses+surfaces, exit 1 not 101; serve worker survives) · **Opus-indep** |
 | HIGH | `remote::call` Result fiction + closure args skip compile-check | WF-3E | ✅ merged `800fb6b9` (Ok+Err reachable; integration-tested) |
-| MED | `time::millis()->float` breaks operand-position inference | WF-3A-edges | ⏳ |
-| MED | Two closure-return compile bugs (tail-closure param; parameterized-closure return-kind) | WF-3A-edges | ⏳ |
+| MED | `time::millis()->float` breaks operand-position inference | WF-3A-tail | 🔄 partial (let-binding works; `millis()-start` operand **in repair** `wf_8b4bff6e` — inference-tier propagation). Root corrected: not a float/number alias — the module-call return type doesn't reach the inference tier |
+| MED | Two closure-return compile bugs | → grammar lane | 🟡 **both are `\|`-grammar ambiguities, not type bugs**: (a) tail closure after a stmt (`\|a\| a+base`) consumed as bitwise-or across the newline (needs newline-significant/ASI grammar); (b) unbraced typed-param body (`\|x:int\| x+1`) reads `int \| x` as a union type. The "mis-proves number" symptom did NOT reproduce. → Pest grammar change |
 | DOC | Book teaches retired `__original__(args)` ×5; `json.mdx` non-existent `as?` cast | WF-4 | ⏳ |
 
 ### WF-3E actual state (corrected 2026-07-06)
