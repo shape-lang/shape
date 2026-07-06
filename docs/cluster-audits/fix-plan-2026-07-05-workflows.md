@@ -318,6 +318,17 @@ Full recon in `docs/cluster-audits/wf4-coverage-matrix.md`. **Measured: real boo
 - **Phase 1 — code fixes (fold into WF-3A + a serialization-fix lane):** the shipped-but-broken bugs above that block gate-green examples. Items needing V3-S5/W17 monomorphization → "mark not-implemented in prose", don't block.
 - **Phase 2 — 6 parallel book+test lanes (worktree-per-lane):** L1 distributed cluster (snapshot→remote→polyglot-distributed), L2 polyglot-ffi+extensions, L3 security-permissions, L4 async, L5 comptime (post-WF-3D), L6 serialization + core/strict-typing + drop-raii. Each lane: delete false cautions, flip runnable=false→true with complete examples, add the missing per-sub-feature test suites. **Acceptance: full-748-universe real pass to near-100%** (minus genuinely-intentional error fixtures), every wave-0..3 feature with ≥1 gate-green vm+jit example + a comprehensive test suite.
 
+## 6duodecies. WF-2G close (2026-07-06, branch `wave2/snapshot-completeness`, MERGE PENDING) — yellow
+
+Both snapshot-projection gaps implemented + gated green + forbidden-clean (commits `8fbe82f4` gap A, `b4bfad1c` gap B, `b5bccbe6` finalize). Gates: check-clean / check-no-dynamic / verify-merge 15/15 / diff-vmjit --fresh MATCH=466 unexpected=0; tests green modulo the 4 pinned `jit_closure_capture_*`. Refuted=false.
+- **GAP B (heap-element arrays)** — FULLY LIVE-PROVEN: `Array<string>/Decimal/TypedObject` → `Ok(Snapshot::Hash)` → fresh-process `shape --resume <hash>` → byte-identical, no SIGABRT at drop (snapshot hash `c8c187b0…`).
+- **GAP A (ModuleFn)** — root cause closed via `SV::ModuleFunction(String)` qualified-name carrier (documented deviation from the content-hash suggestion: native stdlib ModuleFns have no content hash — polyglot-distributed §4.10 A3(iii)/OQ7). Proven unit + committed-integration (WF-2F combined cells cell_c 42→99, cell_py/ts 105→120). The 3 WF-2F combined cells' projection barrier is removed → persistable `Ok(Hash)`.
+- **MERGE HELD** until the Fable verification (`w2txfx4ao`) completes (Fable reads main read-only). Merge is a clean fold-main-in — main's code is unchanged since `cc6d876c` (only doc commits since).
+
+**Residuals routed:**
+- **NEW distributed bug → cluster `remote-frame-descriptor` (WF-3A / Phase-1 code-fix):** `frame_descriptor has 0 slots but arity is 1` when a *transferred* `@remote` function carries locals (fires in remote frame-setup BEFORE snapshot; a minimal single-arg `@remote` fn transfers+returns fine). Clusters with the recon's `@remote` Array-param compile-error + `@remote` module-global-capture-returns-0 — one remote-frame-reconstruction defect family.
+- **`wf2g-combined-live-reverify`:** the full live 3-node combined harness (@remote transfer → foreign call → snapshot mid-exec → resume on node 2) blocked by the above; re-run to green once `remote-frame-descriptor` is fixed. Combined-cell persistability is substantiated at unit + committed-integration + projection-root-removal; the live 3-node re-run stays open.
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
