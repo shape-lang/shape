@@ -154,6 +154,17 @@ impl<T: Copy> TypedArray<T> {
                 Self::grow(this);
             }
             let arr = &mut *this;
+            // If `grow` refused because the per-execution memory ceiling was
+            // breached, capacity is unchanged and `len == cap` still holds.
+            // Writing here would be an out-of-bounds store, so we skip the
+            // write and leave `len` unchanged. The breach was recorded in the
+            // thread-local budget (see `grow`) and the VM surfaces it as a
+            // clean `VMError` at the next dispatch safepoint — execution is
+            // being torn down, so the un-stored element is intentionally
+            // dropped rather than corrupting memory. This never panics.
+            if arr.len == arr.cap {
+                return;
+            }
             ptr::write(arr.data.add(arr.len as usize), val);
             arr.len += 1;
         }
@@ -273,8 +284,19 @@ impl<T: Copy> TypedArray<T> {
             // one buffer growing without bound). Over the ceiling => fail
             // in-process here rather than letting RSS climb until the host
             // OOM-killer reaps the process. No ceiling (CLI default) => no-op.
+            // Over the ceiling: record the breach on the thread-local budget
+            // and REFUSE to grow (leave cap/len unchanged) rather than
+            // `panic!`-ing. A panic here aborts the whole process (exit 101)
+            // — on a serve node that kills every in-flight request; on the
+            // CLI it is an uncatchable crash on untrusted input. The VM's
+            // caller (`push`) sees the unchanged capacity and skips its write;
+            // the dispatch loop drains the recorded breach and surfaces a
+            // clean `VMError` (graceful non-101 exit). Because the offending
+            // buffer never grows past this point, its size is bounded exactly
+            // at the ceiling — the memory DoS is contained here.
             if let Err(e) = crate::v2::alloc_budget::check_size(new_layout.size() as u64) {
-                panic!("{e}");
+                crate::v2::alloc_budget::record_breach(e);
+                return;
             }
 
             let new_data = if arr.cap == 0 || arr.data.is_null() {
@@ -815,6 +837,41 @@ mod tests {
 
             TypedArray::drop_array(arr);
         }
+    }
+
+    /// WF-3B Defect B: pushing past the per-execution memory ceiling must NOT
+    /// panic (a panic aborts the whole process / kills a serve node). `grow`
+    /// records the breach and refuses to grow; `push` sees the unchanged
+    /// capacity and skips its write, so the buffer is bounded exactly at the
+    /// ceiling and the caller can surface a clean error. A green result here
+    /// (rather than a test-binary abort) is the "no panic" proof.
+    #[test]
+    fn push_past_ceiling_does_not_panic_and_bounds_buffer() {
+        use crate::v2::alloc_budget::{self, BudgetGuard};
+        // Ceiling = 128 bytes → an i64 buffer may hold at most 16 elements
+        // (128 / 8). The doubling grow trips when the NEW buffer would exceed
+        // the ceiling.
+        let _g = BudgetGuard::new(Some(128));
+        let arr = TypedArray::<i64>::new();
+        unsafe {
+            for i in 0..100_000_i64 {
+                TypedArray::push(arr, i);
+            }
+            // Buffer never grew past the ceiling: cap * 8 bytes <= 128.
+            assert!(
+                TypedArray::capacity(arr) as usize * 8 <= 128,
+                "buffer must be bounded at the ceiling, got cap {}",
+                TypedArray::capacity(arr)
+            );
+            // len is bounded by cap (push skipped once growth was refused).
+            assert!(TypedArray::len(arr) <= TypedArray::capacity(arr));
+            TypedArray::drop_array(arr);
+        }
+        // A breach was recorded for the VM to surface.
+        assert!(
+            alloc_budget::take_breach().is_some(),
+            "grow must record a breach on refusal"
+        );
     }
 
     #[test]

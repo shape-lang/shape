@@ -39,6 +39,10 @@ mod matrix_ops;
 // passed to an array HOF) must dispatch correctly and NEVER SIGSEGV.
 mod named_fn_value;
 mod no_dynamic;
+// WF-3B: resource-limit enforcement regression tests (output cap surfaces +
+// truncates; memory cap surfaces a clean error, never a panic; serve worker
+// survives a breach and the next request succeeds).
+mod resource_limit_enforcement;
 // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
 // source-level smoke tests for `&mut self` method writeback semantics.
 mod mutation_writeback;

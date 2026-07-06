@@ -168,6 +168,17 @@ impl VirtualMachine {
                 usage
                     .tick_instruction()
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                // Drain any per-execution memory-ceiling breach recorded by an
+                // infallible allocation path (`TypedArray::grow`, incl. the
+                // JIT FFI push trampoline). The breach is bounded at the
+                // ceiling (grow refused), so this surfaces it as a clean,
+                // graceful `VMError` instead of the process-killing panic the
+                // growth path used to raise. Gated behind `resource_usage`
+                // (near-zero cost for trusted-local unlimited runs); a ceiling
+                // is only ever installed alongside a `ResourceUsage`.
+                if let Some(breach) = shape_value::v2::alloc_budget::take_breach() {
+                    return Err(VMError::RuntimeError(breach.to_string()));
+                }
             }
 
             // Poll for completed tier promotions every 1024 instructions.
@@ -345,6 +356,17 @@ impl VirtualMachine {
                 usage
                     .tick_instruction()
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                // Drain any per-execution memory-ceiling breach recorded by an
+                // infallible allocation path (`TypedArray::grow`, incl. the
+                // JIT FFI push trampoline). The breach is bounded at the
+                // ceiling (grow refused), so this surfaces it as a clean,
+                // graceful `VMError` instead of the process-killing panic the
+                // growth path used to raise. Gated behind `resource_usage`
+                // (near-zero cost for trusted-local unlimited runs); a ceiling
+                // is only ever installed alongside a `ResourceUsage`.
+                if let Some(breach) = shape_value::v2::alloc_budget::take_breach() {
+                    return Err(VMError::RuntimeError(breach.to_string()));
+                }
             }
 
             let instruction = self.program.instructions[ip];
@@ -490,6 +512,17 @@ impl VirtualMachine {
                 usage
                     .tick_instruction()
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                // Drain any per-execution memory-ceiling breach recorded by an
+                // infallible allocation path (`TypedArray::grow`, incl. the
+                // JIT FFI push trampoline). The breach is bounded at the
+                // ceiling (grow refused), so this surfaces it as a clean,
+                // graceful `VMError` instead of the process-killing panic the
+                // growth path used to raise. Gated behind `resource_usage`
+                // (near-zero cost for trusted-local unlimited runs); a ceiling
+                // is only ever installed alongside a `ResourceUsage`.
+                if let Some(breach) = shape_value::v2::alloc_budget::take_breach() {
+                    return Err(VMError::RuntimeError(breach.to_string()));
+                }
             }
 
             let instruction = self.program.instructions[ip];
@@ -539,6 +572,17 @@ impl VirtualMachine {
                 usage
                     .tick_instruction()
                     .map_err(|e| VMError::RuntimeError(e.to_string()))?;
+                // Drain any per-execution memory-ceiling breach recorded by an
+                // infallible allocation path (`TypedArray::grow`, incl. the
+                // JIT FFI push trampoline). The breach is bounded at the
+                // ceiling (grow refused), so this surfaces it as a clean,
+                // graceful `VMError` instead of the process-killing panic the
+                // growth path used to raise. Gated behind `resource_usage`
+                // (near-zero cost for trusted-local unlimited runs); a ceiling
+                // is only ever installed alongside a `ResourceUsage`.
+                if let Some(breach) = shape_value::v2::alloc_budget::take_breach() {
+                    return Err(VMError::RuntimeError(breach.to_string()));
+                }
             }
 
             match self.execute_instruction(&instruction, ctx.as_deref_mut()) {
