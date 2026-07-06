@@ -1348,6 +1348,57 @@ fn validate_remote_closure_captures(
 /// `VirtualMachine::from_snapshot`'s `restore_call_stack`), marshals the actual
 /// arguments at the callee's post-capture frame slots, and dispatches through
 /// the §2.7.11 value-call ABI (`execute_closure`).
+/// Rebuild an all-`Immutable` [`ClosureLayout`] from a proven per-capture
+/// `NativeKind` track (distributed §4.4 receiver path). Used when the
+/// `#[serde(skip)]` `closure_function_layouts_by_name` conduit did not cross
+/// the wire, so the linker could not populate `closure_function_layouts` for a
+/// remote-streamed closure blob. The kinds are the callee blob's hash-covered
+/// `frame_descriptor` capture slots — never fabricated from bits. Every wire
+/// capture is `Immutable` (the v1 refusal matrix rejected mutable / reference /
+/// resource / nested captures upstream), so this is the complete v1 shape.
+///
+/// The layout's per-capture `FieldKind` (slot width / offset / heap-mask) is
+/// determined by each `NativeKind`; `native_kind` metadata is stored verbatim
+/// so `release_typed_closure`'s refcount dispatch drops each capture at its true
+/// kind. A representative `ConcreteType` per `NativeKind` supplies the field
+/// kind to the tested `ClosureLayout::from_capture_types_with_native_kinds`
+/// constructor — scalar widths map exactly; every heap / string / decimal kind
+/// maps to a pointer-sized field (`FieldKind::Ptr`), which is all the layout
+/// needs from the type.
+fn rebuild_immutable_closure_layout(
+    capture_native_kinds: &[shape_value::NativeKind],
+) -> shape_value::v2::closure_layout::ClosureLayout {
+    use shape_value::NativeKind;
+    use shape_value::v2::ConcreteType as CT;
+    use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+
+    let capture_types: Vec<CT> = capture_native_kinds
+        .iter()
+        .map(|nk| match nk {
+            NativeKind::Float64 => CT::F64,
+            NativeKind::Float32 => CT::F32,
+            NativeKind::Int64 => CT::I64,
+            NativeKind::Int32 => CT::I32,
+            NativeKind::Int16 => CT::I16,
+            NativeKind::Int8 => CT::I8,
+            NativeKind::UInt64 => CT::U64,
+            NativeKind::UInt32 => CT::U32,
+            NativeKind::UInt16 => CT::U16,
+            NativeKind::UInt8 => CT::U8,
+            NativeKind::Bool => CT::Bool,
+            NativeKind::Char => CT::Char,
+            // Every heap / string / decimal / pointer kind is pointer-sized:
+            // `ConcreteType::to_field_kind` maps all non-scalar types to
+            // `FieldKind::Ptr`, which is all the layout reads from the type.
+            // The true `NativeKind` is preserved via `native_kinds` below so
+            // teardown refcount dispatch stays kind-exact.
+            _ => CT::Pointer(Box::new(CT::Void)),
+        })
+        .collect();
+    let kinds = vec![CaptureKind::Immutable; capture_native_kinds.len()];
+    ClosureLayout::from_capture_types_with_native_kinds(&capture_types, &kinds, capture_native_kinds)
+}
+
 fn finish_remote_closure_call(
     vm: &mut crate::executor::VirtualMachine,
     func_id: u16,
@@ -1362,23 +1413,69 @@ fn finish_remote_closure_call(
     };
     use shape_value::{KindedSlot, ValueSlot};
 
-    // Resolve the receiver-side ClosureLayout (rebuilt by the linker from the
-    // propagated `closure_function_layouts_by_name` side-table). Absence ⇒
-    // surface-and-stop — no Bool-default fabrication (ADR-006 §2.7.8 #4).
-    let layout = vm
+    // Callee metadata first (arity, frame_descriptor, name, captures_count).
+    // The frame descriptor lays out slots as [captures.. , params.. , locals..]
+    // (compile_expr_closure builds params = captures ++ params).
+    let (arity, frame_desc, callee_name, captures_count) = {
+        let f = vm.program.functions.get(func_id as usize).ok_or_else(|| {
+            RemoteCallError::new(
+                RemoteErrorKind::FunctionNotFound,
+                format!("function_id {func_id} out of range"),
+            )
+        })?;
+        (
+            f.arity as usize,
+            f.frame_descriptor.clone(),
+            f.name.clone(),
+            f.captures_count as usize,
+        )
+    };
+
+    // Resolve the receiver-side ClosureLayout. The linker rebuilds
+    // `closure_function_layouts` from the `closure_function_layouts_by_name`
+    // conduit — but that conduit is `#[serde(skip)]` (content_addressed.rs), so
+    // it does NOT cross the wire: a remote-streamed program never carries it.
+    // When it is absent, rebuild an all-Immutable layout from the callee's
+    // hash-covered per-capture `NativeKind` track — the leading `captures_count`
+    // slots of the callee blob's `frame_descriptor` (ADR-006 §2.7.5.1: every
+    // slot kind is proven at blob construction, hash-covered per §4.8). v1 only
+    // transfers immutable by-value captures (the refusal matrix in
+    // `validate_remote_closure_captures` rejected mutable / reference / resource
+    // / nested captures before reaching here), so every wire capture is
+    // `Immutable` by construction. No Bool-default, no kind-from-bits: the kinds
+    // are the proven frame-descriptor kinds.
+    let layout = if let Some(l) = vm
         .program
         .closure_function_layouts
         .get(func_id as usize)
         .and_then(|o| o.clone())
-        .ok_or_else(|| {
+    {
+        l
+    } else {
+        let fd = frame_desc.as_ref().ok_or_else(|| {
             RemoteCallError::new(
                 RemoteErrorKind::ArgumentError,
                 format!(
-                    "closure function {func_id} has no registered ClosureLayout on \
-                     the receiver — cannot materialize captures (ADR-006 §2.7.8)"
+                    "closure function {func_id} ('{callee_name}') has neither a \
+                     registered ClosureLayout nor a frame_descriptor on the \
+                     receiver — cannot recover the capture kind track (ADR-006 §2.7.8)"
                 ),
             )
         })?;
+        if fd.slots.len() < captures_count {
+            return Err(RemoteCallError::new(
+                RemoteErrorKind::ArgumentError,
+                format!(
+                    "closure '{callee_name}' frame_descriptor has {} slots but \
+                     declares {} capture(s) — cannot recover the capture kind track",
+                    fd.slots.len(),
+                    captures_count,
+                ),
+            ));
+        }
+        let capture_native_kinds = &fd.slots[..captures_count];
+        std::sync::Arc::new(rebuild_immutable_closure_layout(capture_native_kinds))
+    };
 
     let capture_count = layout.capture_count();
     if capture_count != upvalues.len() {
@@ -1408,18 +1505,6 @@ fn finish_remote_closure_call(
         }
     }
 
-    // Callee arity: a closure's `Function.arity` counts the leading capture
-    // slots (compile_expr_closure builds params = captures ++ params), so the
-    // actual argument count is `arity - capture_count`.
-    let (arity, frame_desc, callee_name) = {
-        let f = vm.program.functions.get(func_id as usize).ok_or_else(|| {
-            RemoteCallError::new(
-                RemoteErrorKind::FunctionNotFound,
-                format!("function_id {func_id} out of range"),
-            )
-        })?;
-        (f.arity as usize, f.frame_descriptor.clone(), f.name.clone())
-    };
     let actual_arity = arity.saturating_sub(capture_count);
     if arguments.len() != actual_arity {
         return Err(RemoteCallError::new(

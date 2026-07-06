@@ -1438,6 +1438,145 @@ mod tests {
         }
     }
 
+    /// Distributed design T8 — closure-over-wire USER end-to-end (WF-2C-fu R2).
+    ///
+    /// Drives a real user program through `remote::call` on a **capturing**
+    /// closure: the whole pipeline — the `remote::call` compiler elaboration
+    /// (`function_calls.rs::compile_remote_call_elaboration`, closure-value arm),
+    /// the sender closure arm (`remote_builtins.rs::call_remote` →
+    /// `extract_closure_captures` → `build_closure_call_request`), the wire
+    /// round-trip over loopback TCP, and the receiver closure path
+    /// (`remote.rs::validate_remote_closure_captures` + `finish_remote_closure_call`
+    /// materializing the capture at its proven `NativeKind`) — executes on the
+    /// in-process `shape serve` node. The captured `base = 100` crosses the wire
+    /// via the §2.7.8 per-capture kind track and is added to the argument `5` on
+    /// the receiver: `add_base(5) == 105`.
+    ///
+    /// The client program runs on `spawn_blocking` (the remote transport is
+    /// synchronous) so the multi-thread runtime keeps servicing the server tasks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_capturing_closure_over_tcp() {
+        let addr = start_test_server().await;
+        // Client grants: loopback + None → full permission set (incl. NetConnect)
+        // and unlimited limits — the SENDER side of the call.
+        let security = derive_serve_security(SandboxLevel::None, true);
+
+        // `base` and the argument are `number` (Float64): an UNANNOTATED closure
+        // param `|x| x + base` is inferred `number` in the blob's
+        // `frame_descriptor`, and the strict wire marshal checks the argument
+        // against that proven param kind. Keeping the capture kind, the param
+        // kind, and the argument kind all `number` exercises the transfer itself
+        // rather than the separate unannotated-int-param inference quirk
+        // (single-param `|x: int|` does not parse today — an orthogonal parser
+        // limitation).
+        let code = format!(
+            r#"
+use std::core::remote
+
+let base = 100.0
+let add_base = |x| x + base
+let r = remote::call("{addr}", add_base, 5.0)
+print(r)
+"#
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(
+                &code,
+                &[],
+                &ProviderOptions::default(),
+                &security,
+            )
+        })
+        .await
+        .expect("client thread panicked");
+
+        let out = result.expect("capturing-closure remote call failed");
+        let stdout = out.stdout.unwrap_or_default();
+        assert!(
+            stdout.contains("105"),
+            "capturing closure add_base(5) with base=100 should return 105, got stdout {stdout:?} value {:?}",
+            out.value
+        );
+    }
+
+    /// Distributed design T8 — a NON-capturing closure transfers + executes over
+    /// the wire (the capture-count-0 arm of the same closure path). `inc(41)`
+    /// runs on the remote node and returns `42`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_noncapturing_closure_over_tcp() {
+        let addr = start_test_server().await;
+        let security = derive_serve_security(SandboxLevel::None, true);
+
+        let code = format!(
+            r#"
+use std::core::remote
+
+let inc = |x| x + 1
+let r = remote::call("{addr}", inc, 41)
+print(r)
+"#
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
+        })
+        .await
+        .expect("client thread panicked");
+
+        let out = result.expect("non-capturing-closure remote call failed");
+        let stdout = out.stdout.unwrap_or_default();
+        assert!(
+            stdout.contains("42"),
+            "non-capturing closure inc(41) should return 42, got stdout {stdout:?} value {:?}",
+            out.value
+        );
+    }
+
+    /// Distributed design T8b — a MUTABLE capture is refused with a clean,
+    /// user-legible message (the §4.4 refusal matrix), not a Bool-default
+    /// execution. `counter` is captured `let mut` and reassigned in the body, so
+    /// the closure-over-wire path must reject it rather than ship a mutable cell.
+    /// The whole request drives through the real `remote::call` elaboration and
+    /// wire round-trip; only the outcome is a structured refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_mutable_capture_refused_over_tcp() {
+        let addr = start_test_server().await;
+        let security = derive_serve_security(SandboxLevel::None, true);
+
+        let code = format!(
+            r#"
+use std::core::remote
+
+let mut counter = 0.0
+let bump = |x| {{ counter = counter + x; counter }}
+let r = remote::call("{addr}", bump, 5.0)
+print(r)
+"#
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
+        })
+        .await
+        .expect("client thread panicked");
+
+        // A mutable capture must NOT execute remotely — the call surfaces a
+        // clean refusal (the `_raising` sibling maps it to a runtime error).
+        // `InProcessResult` is not `Debug`, so match rather than `expect_err`.
+        let msg = match result {
+            Ok(out) => panic!(
+                "mutable-capture closure must be refused, not executed; got stdout {:?}",
+                out.stdout
+            ),
+            Err(e) => format!("{e}"),
+        };
+        assert!(
+            msg.contains("capture") || msg.contains("immutable") || msg.contains("mutable"),
+            "refusal should name the capture problem in user-legible words, got: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn test_auth_required_rejects_unauthenticated() {
         // Start server WITH auth token
