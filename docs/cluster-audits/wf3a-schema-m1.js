@@ -1,6 +1,6 @@
 export const meta = {
   name: 'wf3a-schema-identity-m1',
-  description: 'M1 (user-ratified 2026-07-06): replace counter-allocated schema identity with content-derived structural identity, in-process. SchemaContentId = hash over {name-for-NAMED-types, ordered (field_name,field_type), enum variants}; SchemaId:u32 becomes a per-Runtime intern(content_id) handle (the blessed StringId relationship, NOT a parallel discriminator). Delete BOTH counters + all 4 point-patches; un-ignore object-spread. Identity model: NAMED/branded types are NOMINAL (name in hash -> type A{x,y} != type B{x,y}); ANONYMOUS types are STRUCTURAL (no name -> {x,y} dedups by structure); fields are declaration-ordered (fixed-offset layout). Draft the ADR amendment. Fable independently re-proves. M2 (cross-node wire/snapshot determinism) is a separate follow-up.',
+  description: 'M1 (user-ratified 2026-07-06): replace counter-allocated schema identity with content-derived structural identity, in-process. CONTINUES from committed WIP cd3e3d32 (~400 lines, UNVERIFIED, may not compile). SchemaContentId = hash over {name-for-NAMED-types, ordered (field_name,field_type), enum variants}; SchemaId:u32 becomes a per-Runtime intern(content_id) handle (the blessed StringId relationship, NOT a parallel discriminator). Delete BOTH counters + all 4 point-patches; un-ignore object-spread. Identity model: NAMED/branded types are NOMINAL (name in hash -> type A{x,y} != type B{x,y}); ANONYMOUS types are STRUCTURAL (no name -> {x,y} dedups by structure); fields are declaration-ordered (fixed-offset layout). Draft the ADR amendment. All agents Opus; an independent fresh-context adversarial Opus reviewer re-proves (Fable budget exhausted; cross-model re-proof deferred). M2 (cross-node wire/snapshot determinism) is a separate follow-up.',
   phases: [
     { title: 'Implement', detail: 'content-id + intern handle at the ~50 mint sites; delete the 4 patches + 2 dedup caches; ADR draft' },
     { title: 'Fable-verify', detail: 'independent: object-spread + json/xml id-41 + cross-registry equality fixed; NO collision-suppressor reborn' },
@@ -15,6 +15,8 @@ const DX = 'direnv exec /home/dev/dev/shape-lang'
 
 const CTX = `
 Work IN ${WT} (branch wave3/schema-identity-design, which has the ratified design doc at docs/design/schema-identity-structural.md — READ it first). Build/test via: ${DX} <cmd>.
+
+WIP STATE: a prior implement pass committed ~400 lines of M1 work at HEAD (commit cd3e3d32, "WF-3A M1 WIP — UNVERIFIED") before being cut off — it touches type_schema/{registry,schema,mod,builtin_schemas,intersection}.rs (content-id + intern), json_value.rs (arity-heuristic deletion), compiler_impl_initialization/collections/statements/type_tracking/program.rs (mint-site routing), and un-ignores the object-spread tests. It is NOT compiled/verified and may be incomplete or wrong. FIRST: '${DX} cargo build' it; ASSESS whether it is a sound foundation to COMPLETE, or fundamentally confused and better REDONE cleanly from the design doc (git reset --hard 013dfdf7 to drop the WIP if so — your judgment). Then drive to a correct, building, acceptance-passing state.
 
 RATIFIED DESIGN (M1, in-process only):
 - Introduce SchemaContentId([u8;32]) = a stable SHA-256 over the schema's structure. Identity model (user-ratified 2026-07-06):
@@ -55,7 +57,7 @@ const IMPL_SCHEMA = {
     adr_drafted: { type: 'boolean', description: 'ADR amendment written' },
   },
 }
-const impl = await agent(`${CTX}\n\nIMPLEMENT M1. Read the design doc first. Add SchemaContentId + per-Runtime intern; route both mint paths through it; delete the 2 counters + 4 point-patches + 2 dedup caches; un-ignore the object-spread repros; draft the ADR. Build release. Prove object-spread + json/xml id-41 + named-vs-anonymous identity. ${DX} just check-no-dynamic EXIT 0. Commit WIP (git add -A && git commit --no-verify -m 'WF-3A M1 content-derived schema identity wip').`,
+const impl = await agent(`${CTX}\n\nCOMPLETE M1. Read the design doc + assess the WIP at cd3e3d32 (build it first). Ensure: SchemaContentId + per-Runtime intern; both mint paths routed through it; the 2 counters + 4 point-patches + 2 dedup caches DELETED; object-spread repros un-ignored; ADR drafted. Build release to a CLEAN compile. Prove object-spread + json/xml id-41 + named-vs-anonymous identity from scratch. ${DX} just check-no-dynamic EXIT 0. Commit (git add -A && git commit --no-verify -m 'WF-3A M1 content-derived schema identity').`,
   { label: 'implement', phase: 'Implement', effort: 'high', schema: IMPL_SCHEMA })
 
 phase('Fable-verify')
@@ -70,8 +72,8 @@ const VERIFY_SCHEMA = {
     evidence: { type: 'string', description: 'your own from-scratch tests: object-spread, named-vs-anonymous identity, json/xml render, a registration-order-shuffle collision probe; concise' },
   },
 }
-const verify = await agent(`${CTX}\n\nIMPL: ${JSON.stringify(impl)}\n\nYou are Fable, INDEPENDENT adversarial verifier. Assume INSUFFICIENT until your own runs prove otherwise. Build your OWN tests: (1) object-spread extended.z; (2) named-vs-anonymous identity (type A{x,y} != type B{x,y}; two anon {x:int,y:int} equal); (3) json/xml id-41 render correct WITHOUT the arity heuristic; (4) a REGISTRATION-ORDER-SHUFFLE probe — register schemas in different orders and confirm NO wrong-arity lookup (the old counter would collide). Grep the diff: any surviving counter / ensure_next_id_above / resolve_typed_object_schema arity fallback = REFUTED. check-no-dynamic EXIT 0.`,
-  { label: 'fable-verify', phase: 'Fable-verify', model: 'fable', effort: 'high', schema: VERIFY_SCHEMA })
+const verify = await agent(`${CTX}\n\nIMPL: ${JSON.stringify(impl)}\n\nYou are an INDEPENDENT adversarial reviewer with a FRESH context (you did NOT write this code). Assume it is INSUFFICIENT until your own runs prove otherwise. Build your OWN tests: (1) object-spread extended.z; (2) named-vs-anonymous identity (type A{x,y} != type B{x,y}; two anon {x:int,y:int} equal); (3) json/xml id-41 render correct WITHOUT the arity heuristic; (4) a REGISTRATION-ORDER-SHUFFLE probe — register schemas in different orders and confirm NO wrong-arity lookup (the old counter would collide). Grep the diff: any surviving counter / ensure_next_id_above / resolve_typed_object_schema arity fallback = REFUTED. check-no-dynamic EXIT 0.`,
+  { label: 'independent-verify', phase: 'Fable-verify', effort: 'high', schema: VERIFY_SCHEMA })
 
 phase('Repair')
 let repair = null, verify2 = null
@@ -79,8 +81,8 @@ if (verify && verify.verdict === 'REFUTED') {
   repair = await agent(`${CTX}\n\nIMPL: ${JSON.stringify(impl)}\nFABLE REFUTED: ${JSON.stringify(verify)}\n\nREPAIR every surviving issue Fable found. Keep the clean cutover (no fallback reborn). Re-run the affected probe yourself. Commit WIP (git commit --no-verify -m 'WF-3A M1 repair wip').`,
     { label: 'repair', phase: 'Repair', effort: 'high', schema: IMPL_SCHEMA })
   phase('Fable-verify-2')
-  verify2 = await agent(`${CTX}\n\nREPAIR: ${JSON.stringify(repair)}\n\nYou are Fable, INDEPENDENT verifier ROUND 2. Re-prove object-spread + named/anonymous identity + json/xml render + order-shuffle from scratch. Any collision or surviving fallback = REFUTED.`,
-    { label: 'fable-verify-2', phase: 'Fable-verify-2', model: 'fable', effort: 'high', schema: VERIFY_SCHEMA })
+  verify2 = await agent(`${CTX}\n\nREPAIR: ${JSON.stringify(repair)}\n\nYou are an INDEPENDENT adversarial reviewer, FRESH context, ROUND 2. Re-prove object-spread + named/anonymous identity + json/xml render + order-shuffle from scratch. Any collision or surviving fallback = REFUTED.`,
+    { label: 'independent-verify-2', phase: 'Fable-verify-2', effort: 'high', schema: VERIFY_SCHEMA })
 }
 
 phase('Finish')
