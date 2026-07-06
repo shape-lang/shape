@@ -417,7 +417,12 @@ impl ProgramExecutor for BytecodeExecutor {
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
         // Phase 1 — compile (does not depend on the deleted ValueWord).
-        let _schema_scope = engine.runtime.enter_schema_scope();
+        // `compile_program_impl` installs the runtime's schema scope for the
+        // duration of the compile; `execute_compiled` re-installs it for
+        // execution. No ambient schema-registry scope spans the two phases,
+        // so a caller that already holds a compiled `BytecodeProgram` can run
+        // it via `execute_compiled` without a second compile advancing the
+        // shared `schema_registry.next_id` counter.
 
         // REPL cross-cell persistence (WS-11): re-prepend `fn` / `type` /
         // `enum` / `trait` / `impl` / type-alias / annotation definitions
@@ -443,6 +448,54 @@ impl ProgramExecutor for BytecodeExecutor {
         };
 
         let bytecode = self.compile_program_impl(engine, compile_target)?;
+
+        // Phase 2 — execute the just-built bytecode on the interpreter.
+        // Extracted into `execute_compiled` so the JIT `[jit-fallback]` path
+        // (`crates/shape-jit/src/executor.rs`) can run the ALREADY-COMPILED
+        // inspection bytecode WITHOUT a second `compile_program_impl`. The
+        // double-compile was the definitional cause of the object-merge
+        // schema-id collision (WF-1A-followup / fix-plan §6quinquies): the
+        // inspection compile advances `engine.runtime.schema_registry.next_id`
+        // (ambient-domain merged/named-type id allocation), and a second
+        // compile on the same counter-advanced registry shifts those ambient
+        // ids UP while the compiler-LOCAL inline-object ids reset to their
+        // per-compile base — colliding in the shared `SchemaId` namespace and
+        // resolving a wide merged object against a narrow inline schema
+        // (`MakeFieldRef field_idx N out of bounds`). Running the pre-built
+        // bytecode removes the second compile, so the fallback observes no
+        // schema-registry state mutated by the inspection compile.
+        self.execute_compiled(engine, bytecode, program)
+    }
+}
+
+impl BytecodeExecutor {
+    /// Execute an ALREADY-COMPILED `bytecode` under the bytecode interpreter
+    /// and project its completion value across the host boundary.
+    ///
+    /// This is the post-compile half of [`ProgramExecutor::execute_program`],
+    /// extracted so a caller that already holds a compiled `BytecodeProgram`
+    /// can run it WITHOUT recompiling. `program` is the ORIGINAL
+    /// (un-augmented) source program; it is consumed only for REPL cross-cell
+    /// bookkeeping and completion-shape terminal rendering — it is never
+    /// recompiled here.
+    ///
+    /// The JIT `[jit-fallback]` path calls this with the bytecode built by
+    /// `compile_program_for_inspection`, so the fallback interpreter run
+    /// never observes schema-registry state (the `next_id` counter on
+    /// `engine.runtime.schema_registry`) mutated by a second compile
+    /// (WF-1A-followup / fix-plan §6quinquies). Because it runs the exact
+    /// same bytecode `--mode vm` would compile, it is provably
+    /// semantics-identical to the VM oracle.
+    pub fn execute_compiled(
+        &mut self,
+        engine: &mut ShapeEngine,
+        bytecode: BytecodeProgram,
+        program: &Program,
+    ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
+        // Install this engine's runtime-scoped schema registry as the ambient
+        // handle for the duration of execution — wire-conversion / completion
+        // projection consult `current_registry()`.
+        let _schema_scope = engine.runtime.enter_schema_scope();
 
         // Build a VM and prime extensions / foreign-function links.
         // These steps don't reach into the deleted ValueWord carrier

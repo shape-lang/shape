@@ -29,6 +29,27 @@ pub enum LinkError {
     ConstantPoolOverflow(usize),
     #[error("String pool overflow: {0} strings exceeds u32 max")]
     StringPoolOverflow(usize),
+    /// integration A6 (§4.2.0-3): a blob's `foreign_dependencies` names a
+    /// content hash with no matching entry in the assembled `foreign_functions`
+    /// table. Hash verification on receipt proves the bytes match the claimed
+    /// key, not that the sender's compiler was honest, so a self-consistent
+    /// malformed/malicious blob must hit this structured error, never an
+    /// out-of-bounds index panic.
+    #[error("blob {blob}: foreign dependency hash has no assembled entry")]
+    MissingForeignEntry { blob: FunctionHash, hash: [u8; 32] },
+    /// integration A6 (§4.2.0-3): a `CallForeign` blob-local ordinal is out of
+    /// range of the blob's `foreign_dependencies` table (received blob whose
+    /// operand and dependency table disagree). Structured error, never an index
+    /// panic — same WF-2C de-panic class as `MissingForeignEntry`.
+    #[error(
+        "blob {blob}: CallForeign ordinal {ordinal} out of range \
+         (foreign_dependencies len {table_len})"
+    )]
+    ForeignOrdinalOutOfRange {
+        blob: FunctionHash,
+        ordinal: u16,
+        table_len: usize,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +161,12 @@ fn remap_fid(
 
 /// Remap a single operand given the per-blob base offsets and function
 /// hash-to-id mapping.
+///
+/// Fallible because the `ForeignFunction` blob-local ordinal remap
+/// (integration A6 §4.2.0-3) surfaces structured `LinkError`s on a
+/// self-consistent-but-malformed received blob instead of panicking on an
+/// out-of-bounds index.
+#[allow(clippy::too_many_arguments)]
 fn remap_operand(
     operand: Operand,
     const_base: usize,
@@ -148,8 +175,9 @@ fn remap_operand(
     current_function_id: usize,
     hash_to_id: &HashMap<FunctionHash, usize>,
     name_to_id: &HashMap<&str, usize>,
-) -> Operand {
-    match operand {
+    foreign_hash_to_idx: &HashMap<[u8; 32], usize>,
+) -> Result<Operand, LinkError> {
+    let remapped = match operand {
         Operand::Const(i) => Operand::Const((const_base + i as usize) as u16),
         Operand::Property(i) => Operand::Property((string_base + i as usize) as u16),
         Operand::Name(StringId(i)) => Operand::Name(StringId((string_base + i as usize) as u32)),
@@ -184,6 +212,28 @@ fn remap_operand(
             string_id: (string_base + string_id as usize) as u16,
             receiver_type_tag,
         },
+        // integration A6 (§4.2.0-3): `ForeignFunction` carries a blob-local
+        // ordinal (the position of the entry's content hash in this blob's
+        // ordered `foreign_dependencies`). Invert it here: ordinal → hash →
+        // assembled `foreign_functions` table index. Parallel to the
+        // function-reference remap above; structured errors on a malformed
+        // received blob, never an index panic.
+        Operand::ForeignFunction(ordinal) => {
+            let hash = blob.foreign_dependencies.get(ordinal as usize).ok_or(
+                LinkError::ForeignOrdinalOutOfRange {
+                    blob: blob.content_hash,
+                    ordinal,
+                    table_len: blob.foreign_dependencies.len(),
+                },
+            )?;
+            let idx = foreign_hash_to_idx
+                .get(hash)
+                .ok_or(LinkError::MissingForeignEntry {
+                    blob: blob.content_hash,
+                    hash: *hash,
+                })?;
+            Operand::ForeignFunction(*idx as u16)
+        }
         // Unchanged operands:
         Operand::Offset(_)
         | Operand::Local(_)
@@ -195,13 +245,13 @@ fn remap_operand(
         | Operand::TypedObjectAlloc { .. }
         | Operand::TypedMerge { .. }
         | Operand::ColumnAccess { .. }
-        | Operand::ForeignFunction(_)
         | Operand::MatrixDims { .. }
         | Operand::Width(_)
         | Operand::TypedLocal(_, _)
         | Operand::TypedModuleBinding(_, _)
         | Operand::FieldOffset(_) => operand,
-    }
+    };
+    Ok(remapped)
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +366,20 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         total_strings += blob.strings.len();
     }
 
+    // integration A6 (§4.2.0-3): content-hash → assembled `foreign_functions`
+    // table index, for inverting each blob's `CallForeign` blob-local ordinals.
+    // First-occurrence wins (identical foreign fns collapse to one canonical
+    // index; execution reads an entry with the matching content, so a
+    // duplicate-hash program is correct). Entries without a content hash are
+    // skipped here — no blob ordinal can reference them (the compiler's
+    // hash-presence build invariant, `compiler/mod.rs`).
+    let mut foreign_hash_to_idx: HashMap<[u8; 32], usize> = HashMap::new();
+    for (idx, entry) in program.foreign_functions.iter().enumerate() {
+        if let Some(hash) = entry.content_hash {
+            foreign_hash_to_idx.entry(hash).or_insert(idx);
+        }
+    }
+
     // Overflow checks on totals.
     if total_constants > u16::MAX as usize + 1 {
         return Err(LinkError::ConstantPoolOverflow(total_constants));
@@ -369,23 +433,27 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
                     .instructions
                     .iter()
                     .map(|instr| {
-                        let remapped_operand = instr.operand.map(|op| {
-                            remap_operand(
-                                op,
-                                off.const_base,
-                                off.string_base,
-                                blob,
-                                function_id,
-                                &hash_to_id,
-                                &name_to_id,
-                            )
-                        });
-                        Instruction {
+                        let remapped_operand = instr
+                            .operand
+                            .map(|op| {
+                                remap_operand(
+                                    op,
+                                    off.const_base,
+                                    off.string_base,
+                                    blob,
+                                    function_id,
+                                    &hash_to_id,
+                                    &name_to_id,
+                                    &foreign_hash_to_idx,
+                                )
+                            })
+                            .transpose()?;
+                        Ok(Instruction {
                             opcode: instr.opcode,
                             operand: remapped_operand,
-                        }
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<Instruction>, LinkError>>()?;
 
                 let remapped_consts: Vec<Constant> = blob
                     .constants
@@ -403,14 +471,14 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
                     })
                     .collect();
 
-                BlobResult {
+                Ok(BlobResult {
                     instructions: remapped_instrs,
                     constants: remapped_consts,
                     strings: cloned_strings,
                     source_map: source_entries,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<BlobResult>, LinkError>>()?;
 
         // Now write results into the pre-allocated arrays (sequential, but
         // this is just memcpy/move of contiguous data -- very fast).
@@ -507,17 +575,21 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
     for (function_id, (blob, off)) in blobs.iter().zip(offsets.iter()).enumerate() {
         // Remap and copy instructions.
         for instr in &blob.instructions {
-            let remapped_operand = instr.operand.map(|op| {
-                remap_operand(
-                    op,
-                    off.const_base,
-                    off.string_base,
-                    blob,
-                    function_id,
-                    &hash_to_id,
-                    &name_to_id,
-                )
-            });
+            let remapped_operand = instr
+                .operand
+                .map(|op| {
+                    remap_operand(
+                        op,
+                        off.const_base,
+                        off.string_base,
+                        blob,
+                        function_id,
+                        &hash_to_id,
+                        &name_to_id,
+                        &foreign_hash_to_idx,
+                    )
+                })
+                .transpose()?;
             instructions.push(Instruction {
                 opcode: instr.opcode,
                 operand: remapped_operand,

@@ -88,7 +88,7 @@ use crate::{
     executor::vm_impl::stack::drop_with_kind,
 };
 use shape_value::{
-    NativeKind, VMError,
+    KindedSlot, NativeKind, VMError,
     heap_value::{HeapKind, TaskGroupData},
 };
 use std::sync::Arc;
@@ -304,7 +304,19 @@ impl VirtualMachine {
                 // entry remains `Pending` until a future snapshot-tier
                 // rebuild lands. This is explicitly out-of-scope here.
                 let task_id = bits;
-                let result = self.resolve_spawned_task(task_id)?;
+                // WF-2D real concurrency: if this future names an in-flight
+                // async module task (spawned onto the shared runtime by
+                // `spawn_async_module_future`), block on its completion
+                // channel. Because the task started when the async call was
+                // evaluated — not here — a sibling launched earlier has been
+                // running concurrently, so awaiting an already-elapsed sibling
+                // returns promptly. Otherwise fall back to inline synchronous
+                // resolution of a registered closure / cached value.
+                let result = if self.task_scheduler.has_pending_async(task_id) {
+                    self.resolve_pending_async_task(task_id)?
+                } else {
+                    self.resolve_spawned_task(task_id)?
+                };
 
                 // Transfer the result share onto the stack via the
                 // canonical `push_kinded(raw, kind)` + `mem::forget`
@@ -396,6 +408,33 @@ impl VirtualMachine {
         // through `register` for later inline execution; non-callable
         // values route through `complete` as pre-resolved results.
         match slot_kind {
+            NativeKind::Ptr(HeapKind::Future) => {
+                // WF-2D real concurrency: the RHS was an async module call
+                // (e.g. `async let a = time::sleep(1000)`). The call already
+                // spawned a real background task onto the shared runtime and
+                // produced this `Future(id)` handle — it is running NOW. Do
+                // NOT allocate a new task id or re-register: pass the existing
+                // future id straight through so `async let a = time::sleep(..)`
+                // and `async let b = time::sleep(..)` overlap. `bits` IS the
+                // in-flight task id. Discard the freshly-minted `task_id`; the
+                // scope tracks the real one below.
+                //
+                // Track the real future id in the active async scope so scope
+                // exit / cancel can abort it (structured concurrency).
+                if let Some(scope) = self.async_scope_stack.last_mut() {
+                    scope.push(slot_bits);
+                }
+                // Future is an inline-scalar payload (bits IS the id, no Arc
+                // share); re-push unchanged.
+                self.push_kinded(slot_bits, NativeKind::Ptr(HeapKind::Future))?;
+                debug_assert_eq!(
+                    self.sp, sp_before,
+                    "op_spawn_task (Future passthrough): stack depth changed \
+                     (before={}, after={})",
+                    sp_before, self.sp
+                );
+                return Ok(AsyncExecutionResult::Continue);
+            }
             NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => {
                 // Callable — register for later execution.
                 self.task_scheduler.register(task_id, slot_bits, slot_kind);
@@ -543,14 +582,16 @@ impl VirtualMachine {
                 // of in-flight join groups stays out of scope per
                 // §2.7.11 out-of-scope clause.
                 match join_kind {
-                    // All: resolve every task, drop each per-task share
-                    // (the aggregate carrier is a `TaskGroupData` of
-                    // ids only, mirroring `TaskScheduler::resolve_task_group`'s
-                    // All-mode shape). Push a fresh `Arc<TaskGroupData>`
-                    // result carrier kinded `Ptr(HeapKind::TaskGroup)`.
+                    // All: block on every task and drop each per-task share.
+                    // WF-2D: async module tasks in the group are already
+                    // running concurrently on the shared runtime (each was
+                    // spawned when its branch expression was evaluated), so
+                    // blocking on them in sequence costs ~max(branch), not
+                    // sum(branch). The aggregate carrier is a `TaskGroupData`
+                    // of ids only. Push a fresh `Ptr(HeapKind::TaskGroup)`.
                     0 => {
                         for &id in &task_ids {
-                            let result = self.resolve_spawned_task(id)?;
+                            let result = self.resolve_join_task_blocking(id)?;
                             drop_with_kind(result.raw(), result.kind());
                             std::mem::forget(result);
                         }
@@ -561,69 +602,60 @@ impl VirtualMachine {
                         let result_bits = Arc::into_raw(aggregate) as u64;
                         self.push_kinded(result_bits, NativeKind::Ptr(HeapKind::TaskGroup))?;
                     }
-                    // Race: resolve all tasks; return the first result.
-                    // Matches `TaskScheduler::resolve_task_group`'s
-                    // race-mode semantics. Empty list → RuntimeError.
+                    // Race: return the FIRST branch to settle (success or
+                    // error); genuinely cancel the losers (WF-2D). Empty
+                    // list → RuntimeError.
                     1 => {
-                        let mut pushed = false;
-                        for (idx, &id) in task_ids.iter().enumerate() {
-                            let result = self.resolve_spawned_task(id)?;
-                            if idx == 0 {
-                                self.push_kinded(result.raw(), result.kind())?;
-                                std::mem::forget(result);
-                                pushed = true;
-                            } else {
-                                // Subsequent results: their shares aren't
-                                // returned to the user; release each.
-                                drop_with_kind(result.raw(), result.kind());
-                                std::mem::forget(result);
-                            }
-                        }
-                        if !pushed {
+                        if task_ids.is_empty() {
                             return Err(VMError::RuntimeError(
                                 "Race join with empty task list".to_string(),
                             ));
                         }
-                    }
-                    // Any: return first success; on errors, keep the
-                    // last for the empty-success fallback. Matches
-                    // `TaskScheduler::resolve_task_group`'s any-mode.
-                    2 => {
-                        let mut last_err: Option<VMError> = None;
-                        let mut pushed = false;
-                        for &id in &task_ids {
-                            match self.resolve_spawned_task(id) {
-                                Ok(result) => {
-                                    self.push_kinded(result.raw(), result.kind())?;
-                                    std::mem::forget(result);
-                                    pushed = true;
-                                    break;
-                                }
-                                Err(e) => last_err = Some(e),
+                        let (winner_id, result) = self.join_race_first_settled(&task_ids)?;
+                        // Cancel/abort every non-winner: in-flight async tasks
+                        // are aborted on the shared runtime; registered
+                        // callables release their share.
+                        for &other in &task_ids {
+                            if other != winner_id {
+                                self.task_scheduler.cancel(other);
                             }
                         }
-                        if !pushed {
-                            return Err(last_err.unwrap_or_else(|| {
-                                VMError::RuntimeError("Any join with empty task list".to_string())
-                            }));
-                        }
+                        self.push_kinded(result.raw(), result.kind())?;
+                        std::mem::forget(result);
                     }
-                    // AllSettled: drive every task; per-task errors are
-                    // preserved in the scheduler's result map (caller
-                    // can inspect via `get_result`). Aggregate carrier
-                    // kind=3 mirrors `TaskScheduler::resolve_task_group`.
-                    // The {status, value/error} array view depends on
-                    // a kinded VMArray helper that's Phase-2c per
-                    // ADR-006 §2.7.4 — the TaskGroup carrier is the
-                    // minimum shape the await-time decoder can re-walk.
+                    // Any: return the first branch to SUCCEED, skipping
+                    // failures; cancel the losers once a winner is found.
+                    // All failed → surface the last error (WF-2D).
+                    2 => {
+                        if task_ids.is_empty() {
+                            return Err(VMError::RuntimeError(
+                                "Any join with empty task list".to_string(),
+                            ));
+                        }
+                        let (winner_id, result) = self.join_any_first_success(&task_ids)?;
+                        for &other in &task_ids {
+                            if other != winner_id {
+                                self.task_scheduler.cancel(other);
+                            }
+                        }
+                        self.push_kinded(result.raw(), result.kind())?;
+                        std::mem::forget(result);
+                    }
+                    // AllSettled: block on every task; successes drop their
+                    // share, errors are preserved in the scheduler result
+                    // map (caller can inspect via `get_result`). Aggregate
+                    // carrier kind=3. The {status, value/error} array view
+                    // depends on a kinded VMArray helper that's Phase-2c per
+                    // ADR-006 §2.7.4 — the TaskGroup carrier is the minimum
+                    // shape the await-time decoder can re-walk.
                     3 => {
                         for &id in &task_ids {
-                            if let Ok(result) = self.resolve_spawned_task(id) {
+                            if let Ok(result) = self.resolve_join_task_blocking(id) {
                                 drop_with_kind(result.raw(), result.kind());
                                 std::mem::forget(result);
                             }
-                            // Errors per-task are preserved in the
-                            // scheduler's result map.
+                            // Errors per-task are preserved in the scheduler's
+                            // result map.
                         }
                         let aggregate: Arc<TaskGroupData> = Arc::new(TaskGroupData {
                             kind: 3,
@@ -657,10 +689,98 @@ impl VirtualMachine {
         }
     }
 
+    /// Resolve one join-group member to completion, blocking (WF-2D).
+    ///
+    /// Routes to the in-flight async resolver when the id names a real
+    /// background task (`time::sleep`-style), otherwise to the synchronous
+    /// closure / cached-value resolver. The returned `KindedSlot` owns one
+    /// share (the caller drops or transfers it).
+    fn resolve_join_task_blocking(&mut self, id: u64) -> Result<KindedSlot, VMError> {
+        if self.task_scheduler.has_pending_async(id) {
+            self.resolve_pending_async_task(id)
+        } else {
+            self.resolve_spawned_task(id)
+        }
+    }
+
+    /// `join race`: return the id + result of the first branch to SETTLE
+    /// (success or error) (WF-2D real race).
+    ///
+    /// A non-async branch (immediate value / cached / synchronous closure)
+    /// settles the instant it is resolved, so the first such in source order
+    /// wins. If every branch is an in-flight async task, poll their
+    /// completion channels until one settles — because they are all running
+    /// concurrently on the shared runtime, this returns at roughly the
+    /// shortest branch's duration, not their sum.
+    fn join_race_first_settled(
+        &mut self,
+        task_ids: &[u64],
+    ) -> Result<(u64, KindedSlot), VMError> {
+        for &id in task_ids {
+            if !self.task_scheduler.has_pending_async(id) {
+                let result = self.resolve_spawned_task(id)?;
+                return Ok((id, result));
+            }
+        }
+        // All in-flight async — poll for the first to settle. First error
+        // also counts as "settled" for race and is surfaced.
+        loop {
+            for &id in task_ids {
+                if let Some(result) = self.try_resolve_pending_async_task(id)? {
+                    return Ok((id, result));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// `join any`: return the id + result of the first branch to SUCCEED,
+    /// skipping failures; if every branch fails, surface the last error
+    /// (WF-2D real any).
+    fn join_any_first_success(
+        &mut self,
+        task_ids: &[u64],
+    ) -> Result<(u64, KindedSlot), VMError> {
+        let mut last_err: Option<VMError> = None;
+        // Synchronous branches settle immediately — try them in order first.
+        for &id in task_ids {
+            if !self.task_scheduler.has_pending_async(id) {
+                match self.resolve_spawned_task(id) {
+                    Ok(result) => return Ok((id, result)),
+                    Err(e) => last_err = Some(e),
+                }
+            }
+        }
+        // Poll the in-flight async branches; a branch that errors drops out
+        // of the running set, a branch that succeeds wins.
+        let mut remaining: Vec<u64> = task_ids
+            .iter()
+            .copied()
+            .filter(|&id| self.task_scheduler.has_pending_async(id))
+            .collect();
+        while !remaining.is_empty() {
+            let mut still_pending: Vec<u64> = Vec::with_capacity(remaining.len());
+            for &id in &remaining {
+                match self.try_resolve_pending_async_task(id) {
+                    Ok(Some(result)) => return Ok((id, result)),
+                    Ok(None) => still_pending.push(id),
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            remaining = still_pending;
+            if !remaining.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| VMError::RuntimeError("Any join with empty task list".to_string())))
+    }
+
     /// Cancel a task by its future ID
     ///
     /// Pops a Future(task_id) from the stack and signals cancellation.
-    /// The host runtime is responsible for actually cancelling the task.
+    /// `task_scheduler.cancel` aborts an in-flight async task on the shared
+    /// runtime (WF-2D real cancellation) or releases a registered callable.
     fn op_cancel_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let (bits, slot_kind) = self.pop_kinded()?;
         match slot_kind {
