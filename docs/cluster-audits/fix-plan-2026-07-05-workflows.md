@@ -301,6 +301,23 @@ Both remaining Wave-2 workflows completed and merged serially (fold-main-in-firs
 
 **Executed now (non-conflicting):** WF-4-recon — a READ-ONLY coverage recon fanning out over the wave-0→wave-3 feature areas (polyglot-ffi, snapshot-resume, remote-distributed, polyglot×distributed, async, comptime, security-permissions, drop-raii, serialization-stdlib, strict-typing, core-language) plus a full-book-truth-gate measurement over the ~738-fence universe (per `project_book_gate_denominator_trap`). Produces the authoritative feature→book-status→test-status work-list at `docs/cluster-audits/wf4-coverage-matrix.md`, which the WF-4 close then fills to 100%.
 
+## 6undecies. WF-4-recon results (2026-07-06) — real book truth measured + WF-4 close structure
+
+Full recon in `docs/cluster-audits/wf4-coverage-matrix.md`. **Measured: real book truth = 368/748 (49.2%) VM-pass vs the gate's reported 246/247 (99.6%) — the gate overstates 2×** (the denominator trap, confirmed at scale: it measures only the 247 `runnable=true` fences; 379 of the 501 skipped `runnable=false` fences actually fail). Worst chapters: stdlib/native 16%, stdlib/math 25%, stdlib/core 32%, advanced 44%. Of 380 fails: ~278 doc-fragment excerpts (feature works but NO complete runnable example), **10 real runtime stubs**, ~88 parse/semantic residual, 4 infra-dependent.
+
+**Cross-cutting pattern:** features largely WORK in the VM, but (a) nearly every example is `runnable=false` (≈0% gate coverage of the new features), (b) several chapters actively MISINFORM — declare shipped features "v0.4 / not available in v0.3.3" when they work today (snapshot-resume, remote, security-permissions, most comptime/annotations), and (c) real functional bugs hide behind `runnable=false`.
+
+**NEW functional bugs surfaced (shipped-but-broken; documented as working) → expand WF-3A / Phase-1 code-fix lane:**
+- `remote::execute` returns a constant `{bindings, schemas}` metadata map, NOT the computed value (independently caught; corrects my earlier smoke over-read).
+- `@remote` Array-typed param = compile error (heap-param carrier); `@remote` module-global capture returns 0 e2e.
+- `msgpack::decode` never actually decodes (7 `_encode_decode_*` fns never call decode); `toml`/`yaml::parse` results non-navigable; `xml::stringify` empty-children crash (`op_new_array(0)` SURFACE); `json` `.get/.at/.len/.keys/.is_null` navigation.
+- strict-typing generic-field-position enforcement leak; comptime `ct_45` `set param`.
+
+**WF-4 close structure (recon-recommended, binding):**
+- **Phase 0 — pre-req merges:** land WF-2G + WF-3D (+ WF-3A if it touches the checker) FIRST; 6 areas depend on them. Re-run the 748-fence probe after to refresh the WF-2G/WF-3D subsets.
+- **Phase 1 — code fixes (fold into WF-3A + a serialization-fix lane):** the shipped-but-broken bugs above that block gate-green examples. Items needing V3-S5/W17 monomorphization → "mark not-implemented in prose", don't block.
+- **Phase 2 — 6 parallel book+test lanes (worktree-per-lane):** L1 distributed cluster (snapshot→remote→polyglot-distributed), L2 polyglot-ffi+extensions, L3 security-permissions, L4 async, L5 comptime (post-WF-3D), L6 serialization + core/strict-typing + drop-raii. Each lane: delete false cautions, flip runnable=false→true with complete examples, add the missing per-sub-feature test suites. **Acceptance: full-748-universe real pass to near-100%** (minus genuinely-intentional error fixtures), every wave-0..3 feature with ≥1 gate-green vm+jit example + a comprehensive test suite.
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
