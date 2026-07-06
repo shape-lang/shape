@@ -465,6 +465,16 @@ fn project_concrete_return(
     }
 }
 
+/// Type alias for a boxed async module-function body future
+/// (`Send + 'static` — see `marshal.rs::VariadicTypedAsyncBody`).
+type ModuleAsyncFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<shape_runtime::typed_module_exports::TypedReturn, String>,
+            > + Send,
+    >,
+>;
+
 /// Project a `TypedReturn` value into a `KindedSlot` ready for stack
 /// placement.
 ///
@@ -582,6 +592,133 @@ fn project_typed_return(
 }
 
 impl VirtualMachine {
+    /// Spawn an async module-function future onto the shared background
+    /// runtime and return a `Future(id)` handle (WF-2D real concurrency).
+    ///
+    /// The future (`time::sleep`-style, `Send + 'static`, borrows nothing
+    /// from the VM) begins running on a worker thread immediately. The
+    /// interpreter thread does NOT block here — it receives a `Future(id)`
+    /// value and continues, so subsequent async module calls launch
+    /// concurrently. `op_await` / `op_join_await` later collect the result
+    /// through [`resolve_pending_async_task`] / [`try_resolve_pending_async_task`].
+    ///
+    /// Completion crosses back over a plain `std::sync::mpsc` channel (not a
+    /// tokio primitive) so the interpreter thread's blocking `recv` never
+    /// nests inside the ambient current-thread runtime.
+    pub(crate) fn spawn_async_module_future(
+        &mut self,
+        fut: ModuleAsyncFuture,
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        let task_id = self.next_future_id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = crate::executor::async_runtime::shared_runtime().spawn(async move {
+            let result = fut.await;
+            // Receiver may already be gone (task aborted / VM torn down);
+            // ignore the send error.
+            let _ = tx.send(result);
+        });
+        self.task_scheduler.store_pending_async(
+            task_id,
+            crate::executor::task_scheduler::PendingAsyncTask {
+                completion: rx,
+                abort: handle.abort_handle(),
+            },
+        );
+        Ok(shape_value::KindedSlot::new(
+            shape_value::ValueSlot::from_raw(task_id),
+            shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Future),
+        ))
+    }
+
+    /// Block until an in-flight async module task completes, then project its
+    /// result and cache it (WF-2D). Used by `op_await` on a `Future(id)` that
+    /// names a `pending_async` task.
+    ///
+    /// The blocking `recv` waits on the worker thread that owns the future —
+    /// because the future was spawned when the async call was *evaluated*
+    /// (not here), sibling async tasks launched earlier are already making
+    /// progress, so a second `await` on an already-elapsed sibling returns
+    /// promptly. That is the source of the overlap.
+    pub(crate) fn resolve_pending_async_task(
+        &mut self,
+        task_id: u64,
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        let task = self
+            .task_scheduler
+            .take_pending_async(task_id)
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!("No pending async task registered for {}", task_id))
+            })?;
+        let body_result = task.completion.recv().map_err(|_| {
+            VMError::RuntimeError(format!(
+                "async task {} channel closed before completion",
+                task_id
+            ))
+        })?;
+        self.project_and_cache_pending_async(task_id, body_result)
+    }
+
+    /// Non-blocking poll of an in-flight async module task (WF-2D). Used by
+    /// the `race` / `any` first-completion loop in `op_join_await`.
+    ///
+    /// - `Ok(Some(slot))` — the task completed; result projected + cached.
+    /// - `Ok(None)` — still running (nothing to collect yet).
+    /// - `Err(_)` — the task's body returned an error (propagated so `race`
+    ///   surfaces it and `any` skips to the next branch).
+    pub(crate) fn try_resolve_pending_async_task(
+        &mut self,
+        task_id: u64,
+    ) -> Result<Option<shape_value::KindedSlot>, VMError> {
+        use std::sync::mpsc::TryRecvError;
+        // Peek without removing so a not-ready task stays registered.
+        let poll = match self.task_scheduler.peek_pending_async_try_recv(task_id) {
+            Some(p) => p,
+            None => {
+                return Err(VMError::RuntimeError(format!(
+                    "No pending async task registered for {}",
+                    task_id
+                )));
+            }
+        };
+        match poll {
+            Ok(body_result) => {
+                // Ready — remove the entry and project.
+                let _ = self.task_scheduler.take_pending_async(task_id);
+                Ok(Some(self.project_and_cache_pending_async(task_id, body_result)?))
+            }
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                let _ = self.task_scheduler.take_pending_async(task_id);
+                Err(VMError::RuntimeError(format!(
+                    "async task {} channel closed before completion",
+                    task_id
+                )))
+            }
+        }
+    }
+
+    /// Project a completed async body result into a `KindedSlot` and cache it
+    /// on the scheduler (so a second `await` / `join` of the same id returns
+    /// the cached value). Shared by the blocking and non-blocking resolvers.
+    fn project_and_cache_pending_async(
+        &mut self,
+        task_id: u64,
+        body_result: Result<shape_runtime::typed_module_exports::TypedReturn, String>,
+    ) -> Result<shape_value::KindedSlot, VMError> {
+        let typed_return = body_result.map_err(VMError::RuntimeError)?;
+        let slot = project_typed_return(
+            &self.builtin_schemas,
+            &self.program.type_schema_registry,
+            typed_return,
+        )?;
+        // Cache a clone so the scheduler entry and the returned slot each own
+        // an independent share (same discipline as `resolve_spawned_task`).
+        crate::executor::vm_impl::stack::clone_with_kind(slot.raw(), slot.kind());
+        self.task_scheduler
+            .complete(task_id, slot.raw(), slot.kind());
+        Ok(slot)
+    }
+
     /// Register a built-in stdlib module into the VM's module registry.
     /// Delegates to `register_extension` — this is a semantic alias to
     /// distinguish VM-native stdlib modules from user-installed extension plugins.
@@ -731,30 +868,16 @@ impl VirtualMachine {
                 // — kinds preserved, no raw-bits flatten.
                 let kinded_args: Vec<shape_value::KindedSlot> = args.to_vec();
                 let fut = (async_entry.invoke)(kinded_args);
-                // Drive the future on the ambient tokio runtime. If no
-                // runtime is available we surface — async dispatch
-                // requires an explicit host runtime per the §2.7.4 task-
-                // scheduler boundary.
-                let typed_return = match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => tokio::task::block_in_place(|| {
-                        handle.block_on(fut).map_err(VMError::RuntimeError)
-                    })?,
-                    Err(_) => {
-                        return Err(VMError::NotImplemented(
-                            "invoke_module_fn_id: async dispatch requires an \
-                             ambient tokio runtime — wrap the call in \
-                             tokio::runtime::Builder::new_current_thread().build() \
-                             or use a worker thread. ADR-006 §2.7.4 \
-                             task-scheduler boundary."
-                                .to_string(),
-                        ));
-                    }
-                };
-                project_typed_return(
-                    &self.builtin_schemas,
-                    &self.program.type_schema_registry,
-                    typed_return,
-                )
+                // WF-2D real concurrency (Decision D1): do NOT drive the
+                // future to completion inline. Spawn it onto the shared
+                // background runtime and return a `Future(id)` handle
+                // immediately, so two independent `time::sleep`s launched
+                // back-to-back overlap on the worker pool (~1s wall for two
+                // 1s sleeps, not ~2s). `await`/`join` later collect the
+                // result. This also keeps bug (b) fixed: nothing blocks the
+                // ambient current-thread runtime here. ADR-006 §2.7.4
+                // task-scheduler boundary.
+                self.spawn_async_module_future(fut)
             }
         }
     }
