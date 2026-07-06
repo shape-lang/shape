@@ -79,8 +79,6 @@ impl VirtualMachine {
             time_travel: None,
             #[cfg(feature = "jit")]
             jit_compiled: false,
-            #[cfg(feature = "jit")]
-            jit_dispatch_table: std::collections::HashMap::new(),
             tier_manager: None,
             pending_resume: None,
             pending_frame_resume: None,
@@ -294,46 +292,6 @@ impl VirtualMachine {
     #[cfg(feature = "jit")]
     pub fn is_jit_compiled(&self) -> bool {
         self.jit_compiled
-    }
-
-    /// Register a JIT-compiled function in the dispatch table.
-    ///
-    /// After registration, calls to this function_id will attempt JIT dispatch
-    /// before falling back to bytecode interpretation.
-    #[cfg(feature = "jit")]
-    pub fn register_jit_function(&mut self, function_id: u16, ptr: JitFnPtr) {
-        self.jit_dispatch_table.insert(function_id, ptr);
-        self.jit_compiled = true;
-    }
-
-    /// Get the JIT dispatch table for inspection or external use.
-    #[cfg(feature = "jit")]
-    pub fn jit_dispatch_table(&self) -> &std::collections::HashMap<u16, JitFnPtr> {
-        &self.jit_dispatch_table
-    }
-
-    /// Enable tiered compilation for this VM.
-    ///
-    /// Must be called after `load_program()` so the function count is known.
-    /// The caller is responsible for spawning a background compilation thread
-    /// that reads from the request channel and sends results back.
-    ///
-    /// Returns `(request_rx, result_tx)` that the background thread should use.
-    pub fn enable_tiered_compilation(
-        &mut self,
-    ) -> (
-        std::sync::mpsc::Receiver<crate::tier::CompilationRequest>,
-        std::sync::mpsc::Sender<crate::tier::CompilationResult>,
-    ) {
-        let function_count = self.program.functions.len();
-        let mut mgr = crate::tier::TierManager::new(function_count, true);
-
-        let (req_tx, req_rx) = std::sync::mpsc::channel();
-        let (res_tx, res_rx) = std::sync::mpsc::channel();
-        mgr.set_channels(req_tx, res_rx);
-
-        self.tier_manager = Some(mgr);
-        (req_rx, res_tx)
     }
 
     /// Get a reference to the tier manager, if tiered compilation is enabled.

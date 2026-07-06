@@ -256,13 +256,6 @@ pub struct CallFrame {
     pub closure_heap_kind: Option<shape_value::NativeKind>,
 }
 
-/// Function pointer type for JIT-compiled functions.
-/// `ctx` is a mutable pointer to VM execution context (e.g., stack base).
-/// `args` is a pointer to the argument buffer.
-/// Returns a NaN-boxed result as raw u64 bits.
-#[cfg(feature = "jit")]
-pub type JitFnPtr = unsafe extern "C" fn(*mut u8, *const u8) -> u64;
-
 /// Linked foreign-function handles.
 ///
 /// Dynamic language runtimes are compiled/invoked through extension plugins.
@@ -578,11 +571,6 @@ pub struct VirtualMachine {
     /// Whether selective JIT compilation has been applied to the loaded program.
     #[cfg(feature = "jit")]
     jit_compiled: bool,
-
-    /// JIT dispatch table: function_id → extern "C" function pointer.
-    /// Populated by external JIT compilers (e.g., shape-jit) via `register_jit_function`.
-    #[cfg(feature = "jit")]
-    jit_dispatch_table: std::collections::HashMap<u16, JitFnPtr>,
 
     /// Tiered compilation manager. Tracks per-function call counts and
     /// coordinates background JIT compilation via channels.
