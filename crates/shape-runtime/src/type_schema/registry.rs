@@ -1234,6 +1234,113 @@ mod tests {
         assert_ne!(named_a, a);
     }
 
+    /// WF-3A ratified identity model: NAMED/branded types are NOMINAL (name in
+    /// the hash) while ANONYMOUS object literals/merges are STRUCTURAL (name
+    /// excluded). Field order is layout-significant in both.
+    #[test]
+    fn wf3a_named_nominal_vs_anonymous_structural_identity() {
+        let mut r = TypeSchemaRegistry::new();
+        let xy = vec![
+            ("x".to_string(), FieldType::I64),
+            ("y".to_string(), FieldType::I64),
+        ];
+        let yx = vec![
+            ("y".to_string(), FieldType::I64),
+            ("x".to_string(), FieldType::I64),
+        ];
+
+        // NAMED nominal: same fields, different user name -> DISTINCT handles.
+        let named_a = r.register_type_scoped("A", xy.clone());
+        let named_b = r.register_type_scoped("B", xy.clone());
+        assert_ne!(named_a, named_b, "type A {{x,y}} != type B {{x,y}} (nominal)");
+
+        // ANONYMOUS structural: two distinct anon names, same fields -> SAME handle.
+        let anon_1 = r.register_type_scoped("__inline_obj_10", xy.clone());
+        let anon_2 = r.register_type_scoped("__inline_obj_11", xy.clone());
+        assert_eq!(anon_1, anon_2, "two anonymous {{x,y}} intern equal (structural)");
+        // ...and distinct from either named handle (name in the branded hash).
+        assert_ne!(anon_1, named_a);
+        assert_ne!(anon_1, named_b);
+
+        // Field ORDER is layout-significant: {x,y} != {y,x} for anonymous too.
+        let anon_yx = r.register_type_scoped("__inline_obj_12", yx);
+        assert_ne!(anon_1, anon_yx, "{{x,y}} != {{y,x}} (declaration-order layout)");
+
+        // The u32 handle resolves back to the correct arity via get_by_id.
+        assert_eq!(r.get_by_id(anon_1).unwrap().field_count(), 2);
+        assert_eq!(r.get_by_id(anon_yx).unwrap().field_count(), 2);
+    }
+
+    /// WF-3A registration-order-shuffle regression: the exact Wave-2 trigger.
+    /// Registering an unrelated `Snapshot` enum first (advancing the counter)
+    /// used to shift the merged/inline object-spread ids onto a colliding
+    /// 1-field handle. Under content-derived identity the inline `[z]` and the
+    /// merged `[x,y,z]` schemas stay DISTINCT handles in BOTH orders, arity is
+    /// correct in both, and the anonymous `[x,y,z]` content id is identical
+    /// across registries despite differing handle values.
+    #[test]
+    fn wf3a_registration_order_shuffle_no_collision() {
+        let xy = vec![
+            ("x".to_string(), FieldType::I64),
+            ("y".to_string(), FieldType::I64),
+        ];
+        let z = vec![("z".to_string(), FieldType::I64)];
+        let xyz = vec![
+            ("x".to_string(), FieldType::I64),
+            ("y".to_string(), FieldType::I64),
+            ("z".to_string(), FieldType::I64),
+        ];
+
+        // Register the object-spread schema set (mirrors compile_dynamic_object:
+        // base [x,y], empty [], merged [x,y], inline [z], merged [x,y,z]).
+        fn register_spread_set(
+            r: &mut TypeSchemaRegistry,
+            xy: &[(String, FieldType)],
+            z: &[(String, FieldType)],
+            xyz: &[(String, FieldType)],
+        ) -> (SchemaId, SchemaId, SchemaId) {
+            let base = r.register_type_scoped("__inline_obj_1", xy.to_vec());
+            let _empty = r.register_type_scoped("__inline_obj_2", vec![]);
+            let _merged_xy = r.register_type_scoped("__merged_1_2", xy.to_vec());
+            let inline_z = r.register_type_scoped("__inline_obj_3", z.to_vec());
+            let merged_xyz = r.register_type_scoped("__merged_3_4", xyz.to_vec());
+            (base, inline_z, merged_xyz)
+        }
+
+        // Order 1: object-spread set alone.
+        let mut r1 = TypeSchemaRegistry::new();
+        let (_b1, inline_z_1, merged_xyz_1) = register_spread_set(&mut r1, &xy, &z, &xyz);
+
+        // Order 2: register an unrelated Snapshot enum FIRST (the Wave-2
+        // regression trigger — advances the shared counter), then the same set.
+        let mut r2 = TypeSchemaRegistry::new();
+        r2.register_enum_scoped(
+            "Snapshot",
+            vec![
+                EnumVariantInfo::new("Pending", 0, 0),
+                EnumVariantInfo::new("Ready", 1, 1),
+                EnumVariantInfo::new("Failed", 2, 1),
+            ],
+        );
+        let (_b2, inline_z_2, merged_xyz_2) = register_spread_set(&mut r2, &xy, &z, &xyz);
+
+        // Core: inline [z] and merged [x,y,z] are DISTINCT handles in both orders.
+        assert_ne!(inline_z_1, merged_xyz_1, "order 1: [z] != [x,y,z]");
+        assert_ne!(inline_z_2, merged_xyz_2, "order 2 (Snapshot-seeded): [z] != [x,y,z]");
+
+        // Arity is correct in both — get_by_id resolves the right structure.
+        assert_eq!(r1.get_by_id(inline_z_1).unwrap().field_count(), 1);
+        assert_eq!(r1.get_by_id(merged_xyz_1).unwrap().field_count(), 3);
+        assert_eq!(r2.get_by_id(inline_z_2).unwrap().field_count(), 1);
+        assert_eq!(r2.get_by_id(merged_xyz_2).unwrap().field_count(), 3);
+
+        // Handle VALUES differ across registries (Snapshot shifted the counter)...
+        // ...but the anonymous [x,y,z] CONTENT ID is identical regardless of order.
+        let cid_1 = r1.get_by_id(merged_xyz_1).unwrap().content_id();
+        let cid_2 = r2.get_by_id(merged_xyz_2).unwrap().content_id();
+        assert_eq!(cid_1, cid_2, "anon [x,y,z] content id is order-independent");
+    }
+
     #[test]
     fn wf3a_rebuild_content_index_reseats_counter() {
         let r = TypeSchemaRegistry::new();
