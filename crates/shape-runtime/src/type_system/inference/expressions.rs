@@ -800,6 +800,31 @@ impl TypeInferenceEngine {
                 span,
                 ..
             } => {
+                // WF-3A-tail: a native module export with a DECLARED SCALAR
+                // return type (`time::millis() -> number`) carries that type in
+                // ANY position. Consult the compiler-supplied module-schema map
+                // BEFORE the enum-constructor / synthetic-MethodCall / fresh-var
+                // fallbacks — a module namespace is bound to a fresh var by
+                // `register_known_bindings`, so without this the call routed
+                // through the synthetic `MethodCall` arm and erased to a fresh
+                // result var, silently unifying with whatever the surrounding
+                // context demanded (a `string` param, an array index) and
+                // defeating strict typing. Scalar-only: `Result<..>`/`Option<..>`
+                // /heap returns are omitted from the map and keep the existing
+                // path (json/msgpack navigation untouched). The type is the
+                // declared `-> T` from the stdlib source; `int`/`number` stay
+                // separate; nothing is fabricated.
+                let qualified = format!("{}::{}", namespace, function);
+                if let Some(scalar) = self.module_qualified_scalar_returns.get(&qualified) {
+                    let scalar = scalar.clone();
+                    // Still infer each argument so any error INSIDE an argument
+                    // expression surfaces (arity is validated at the bytecode
+                    // compiler's module-schema tier).
+                    for arg in args {
+                        self.infer_expr(arg)?;
+                    }
+                    return Ok(Type::Concrete(TypeAnnotation::Basic(scalar)));
+                }
                 // Check if this is an enum constructor (e.g. Signal::Market(1, 2)).
                 // The parser can't distinguish enum tuple constructors from qualified
                 // function calls, so we resolve it here using type information.

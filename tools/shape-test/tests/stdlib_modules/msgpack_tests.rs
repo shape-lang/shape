@@ -96,3 +96,36 @@ fn msgpack_encode_produces_hex_string() {
     .with_stdlib()
     .expect_run_ok();
 }
+
+// --- WF-3A-tail regression: msgpack decode navigation (#17) ---
+// Shares the json #16 root: decode returns Result<Json>, and before the fix the
+// matched Ok payload stayed untyped so navigating the decoded Json enum
+// (is_null / match Json::Int) failed. Assert encode -> decode -> navigate round-trips.
+#[test]
+fn msgpack_decode_navigates_int() {
+    ShapeTest::new(
+        r#"
+        use std::core::msgpack
+        let enc = msgpack::encode(42)
+        match enc {
+            Ok(hex) => {
+                let dec = msgpack::decode(hex)
+                match dec {
+                    Ok(v) => {
+                        print(v.is_null())
+                        match v {
+                            Json::Int(i) => print(i),
+                            _ => print("not int"),
+                        }
+                    },
+                    Err(e) => print(e),
+                }
+            },
+            Err(e) => print(e),
+        }
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("false")
+    .expect_output_contains("42");
+}

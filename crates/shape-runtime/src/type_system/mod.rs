@@ -46,7 +46,8 @@ pub use types::{
 // Re-export other public types
 pub use checker::{
     TypeAnalysisMode, TypeCheckResult, TypeChecker, TypeWarning, analyze_program,
-    analyze_program_with_mode, analyze_program_with_mode_and_comptime_context,
+    analyze_program_full, analyze_program_with_mode,
+    analyze_program_with_mode_and_comptime_context,
 };
 pub use environment::TypeEnvironment;
 pub use errors::{TypeError, TypeErrorWithLocation, TypeResult};

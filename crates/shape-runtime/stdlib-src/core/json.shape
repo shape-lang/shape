@@ -41,7 +41,7 @@ use std::core::json_value
 /// ```shape
 /// let result = json.parse("[1, 2, 3]")
 /// ```
-pub builtin fn parse(text: string) -> Result<_, string>;
+pub builtin fn parse(text: string) -> Result<Json, string>;
 
 /// Parse a JSON string into a typed struct using a schema.
 ///

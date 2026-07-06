@@ -2361,6 +2361,22 @@ impl BytecodeCompiler {
                     return Ok(Type::Concrete(ann));
                 }
             }
+
+            // WF-3A-tail: a native module builtin (`time::millis()`) is not a
+            // monomorphized `function_defs` entry and has no tracker return
+            // ConcreteType, so both candidate lookups above miss and inference
+            // would fall through to the engine's fresh-var QualifiedFunctionCall
+            // arm — erasing a bare `time::millis()` operand to `unknown`. Recover
+            // the DECLARED scalar return type from the native module schema so
+            // the call infers its true type in operand position. Scalar-only:
+            // `Result<..>`/`Option<..>`/heap returns miss here and keep the
+            // existing path (json::parse navigation unaffected). No fabrication.
+            let canonical = self
+                .resolve_canonical_module_path(namespace)
+                .unwrap_or_else(|| namespace.clone());
+            if let Some(ty) = self.native_module_declared_scalar_return_type(&canonical, function) {
+                return Ok(ty);
+            }
         }
 
         // D-β string-join receiver-kind fix (v0.3 KC #6(d), 2026-05-22):

@@ -69,6 +69,19 @@ impl TypeChecker {
         self
     }
 
+    /// WF-3A-tail: register native module exports' declared SCALAR return types
+    /// (`"time::millis" -> "number"`) so a module-qualified call infers its true
+    /// type in operand / argument / index position. See
+    /// `TypeInferenceEngine::module_qualified_scalar_returns`.
+    pub fn with_module_qualified_scalar_returns(
+        mut self,
+        map: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.inference_engine
+            .register_module_qualified_scalar_returns(map);
+        self
+    }
+
     pub fn with_analysis_mode(mut self, mode: TypeAnalysisMode) -> Self {
         self.analysis_mode = mode;
         self
@@ -668,6 +681,33 @@ pub fn analyze_program_with_mode_and_comptime_context(
     analysis_mode: TypeAnalysisMode,
     root_comptime_context: bool,
 ) -> Result<TypeCheckResult, Vec<TypeErrorWithLocation>> {
+    analyze_program_full(
+        program,
+        source,
+        filename,
+        known_bindings,
+        analysis_mode,
+        root_comptime_context,
+        None,
+    )
+}
+
+/// WF-3A-tail: full analysis entry that additionally accepts the native
+/// module-export SCALAR return-type map (`"time::millis" -> "number"`) so a
+/// module-qualified call carries its declared type in operand / argument /
+/// index position (not only when bound to a `let`). The map is scalar-only;
+/// `Result<..>`/`Option<..>`/heap returns are omitted by the compiler so the
+/// existing json/msgpack navigation path is untouched.
+#[allow(clippy::too_many_arguments)]
+pub fn analyze_program_full(
+    program: &Program,
+    source: Option<&str>,
+    filename: Option<&str>,
+    known_bindings: Option<&[String]>,
+    analysis_mode: TypeAnalysisMode,
+    root_comptime_context: bool,
+    module_qualified_scalar_returns: Option<HashMap<String, String>>,
+) -> Result<TypeCheckResult, Vec<TypeErrorWithLocation>> {
     let mut checker = TypeChecker::new();
     if let Some(src) = source {
         checker = checker.with_source(src.to_string());
@@ -677,6 +717,9 @@ pub fn analyze_program_with_mode_and_comptime_context(
     }
     if let Some(names) = known_bindings {
         checker = checker.with_known_bindings(names);
+    }
+    if let Some(map) = module_qualified_scalar_returns {
+        checker = checker.with_module_qualified_scalar_returns(map);
     }
     checker = checker.with_root_comptime_context(root_comptime_context);
     checker = checker.with_analysis_mode(analysis_mode);

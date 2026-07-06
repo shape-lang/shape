@@ -5912,23 +5912,183 @@ impl BytecodeCompiler {
         ));
         self.emit(Instruction::simple(OpCode::CallValue));
 
-        let namespace_call_expr = Expr::QualifiedFunctionCall {
-            namespace: namespace_name.to_string(),
-            function: method.to_string(),
-            const_args: Vec::new(),
-            args: args.to_vec(),
-            named_args: vec![],
-            span: namespace_span,
-        };
-        let inferred = self.infer_expr_type(&namespace_call_expr).ok();
-        self.last_expr_type_info = inferred
-            .as_ref()
-            .and_then(|ty| self.type_info_from_inferred_type(ty));
+        // WF-3A-tail (time::millis inference): the inference tier returns a
+        // fresh type var for a `module::fn()` call (it holds no module-export
+        // signatures — see the QualifiedFunctionCall arm in
+        // `type_system/inference/expressions.rs`), so an unannotated
+        // `let start = time::millis()` used to erase to `unknown` and reject
+        // `now - start` at binop compile time. The native module schema DOES
+        // carry each export's declared scalar return type; recover it here so
+        // the binding is stamped with the proven scalar type. Scoped to native
+        // module scalar returns only — heap/wrapper returns (json::parse ->
+        // Result<Json>, etc.) keep the existing infer/schema path so their own
+        // navigation semantics are untouched. No type is fabricated: the type
+        // is the declared `-> T` from the stdlib source.
+        if let Some(ti) = self.native_module_declared_return_type_info(&canonical_module, method) {
+            self.last_expr_type_info = Some(ti);
+        } else {
+            let namespace_call_expr = Expr::QualifiedFunctionCall {
+                namespace: namespace_name.to_string(),
+                function: method.to_string(),
+                const_args: Vec::new(),
+                args: args.to_vec(),
+                named_args: vec![],
+                span: namespace_span,
+            };
+            let inferred = self.infer_expr_type(&namespace_call_expr).ok();
+            self.last_expr_type_info = inferred
+                .as_ref()
+                .and_then(|ty| self.type_info_from_inferred_type(ty));
+        }
         self.last_expr_schema = self
             .last_expr_type_info
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
         Ok(())
+    }
+
+    /// WF-3A-tail: recover a native module export's declared return type from
+    /// the module schema registry (`ModuleExports.get_schema(..).return_type`,
+    /// a type-name string like `"number"` or `"Result<Json, string>"`). The
+    /// inference tier holds no module-export signatures, so an unannotated
+    /// `let r = json::parse(..)` used to erase to unknown and force dynamic
+    /// method dispatch on the marshalled `Json` enum (which does not resolve
+    /// `extend Json` methods) — the json/msgpack navigation bug (#16/#17).
+    ///
+    /// Returns `Some` for:
+    /// - scalar families (`bool` / `string` / `int` / `number` / `decimal`) —
+    ///   fixes `time::millis()` operand-position inference;
+    /// - fallible/optional wrappers (`Result<..>` / `Option<..>`) — carries the
+    ///   Ok/Some payload type name so `match r { Ok(v) => v.method() }` binds
+    ///   `v` with a proven type and resolves `extend` methods statically.
+    ///
+    /// Other heap returns (bare enums / arrays / objects) return `None` so the
+    /// caller keeps the existing inference/schema path. The type is the declared
+    /// `-> T` from the stdlib source — nothing is fabricated.
+    fn native_module_declared_return_type_info(
+        &self,
+        canonical_module: &str,
+        method: &str,
+    ) -> Option<VariableTypeInfo> {
+        let registry = self.extension_registry.as_ref()?;
+        let module = registry.iter().rev().find(|m| m.name == canonical_module)?;
+        let schema = module.get_schema(method)?;
+        let return_type = schema.return_type.as_ref()?.trim();
+        if let Some(scalar) = Self::builtin_scalar_type_info(return_type) {
+            return Some(scalar);
+        }
+        // Fallible/optional wrappers: propagate the baked wrapper-type-name so
+        // `propagate_assignment_type_to_slot`'s `Result<`/`Option<` guard
+        // records it and the downstream `Ok(v)`/`Some(v)` binding recovers the
+        // payload type (mirrors `type_info_from_annotation`'s Generic arm).
+        if return_type.starts_with("Result<") || return_type.starts_with("Option<") {
+            return Some(VariableTypeInfo::named(return_type.to_string()));
+        }
+        None
+    }
+
+    /// WF-3A-tail (operand-position inference): recover a native module export's
+    /// declared SCALAR return type as an inference-tier `Type`. This is the
+    /// inference-tier sibling of `native_module_declared_return_type_info`'s
+    /// emit-tier let-binding stamp. The runtime inference engine holds no
+    /// module-export signatures, so its `QualifiedFunctionCall` arm returns a
+    /// fresh type var — which made a BARE `time::millis()` used directly as a
+    /// binary operand (`time::millis() - start`) erase to `unknown` and reject
+    /// the `Sub`. Consult the native module schema's declared `-> T` and return
+    /// the proven scalar `ConcreteType` so the call carries its true declared
+    /// type in ANY position (binary operand, argument, return, index), not only
+    /// when bound to a `let`.
+    ///
+    /// Scoped to SCALAR returns (`bool`/`string`/`int`/`number`/`decimal`) via
+    /// `canonical_script_alias`, which returns `None` for `Result<..>` /
+    /// `Option<..>` / bare enums / arrays / objects — those keep the existing
+    /// inference/schema path so their navigation semantics (json::parse ->
+    /// Result<Json>, etc.) are untouched. `int` and `number` stay separate; the
+    /// type is the declared `-> T` from the stdlib source — nothing is
+    /// fabricated.
+    pub(super) fn native_module_declared_scalar_return_type(
+        &self,
+        canonical_module: &str,
+        method: &str,
+    ) -> Option<Type> {
+        use shape_ast::ast::TypeAnnotation;
+        let registry = self.extension_registry.as_ref()?;
+        let module = registry.iter().rev().find(|m| m.name == canonical_module)?;
+        let schema = module.get_schema(method)?;
+        let return_type = schema.return_type.as_ref()?.trim();
+        let canonical = shape_runtime::type_system::BuiltinTypes::canonical_script_alias(
+            return_type,
+        )?;
+        Some(Type::Concrete(TypeAnnotation::Basic(canonical.to_string())))
+    }
+
+    /// WF-3A-tail: build the `"namespace::function" -> canonical-scalar-type`
+    /// map handed to the semantic analyzer so a module-qualified builtin call
+    /// (`time::millis()`) infers its declared scalar return type in ANY position
+    /// (binary operand, call argument, index), not only when bound to a `let`.
+    ///
+    /// Scoped to native module SCALAR exports (`bool`/`int`/`number`/`string`/
+    /// `decimal`) via `canonical_script_alias`. `Result<..>`/`Option<..>`/heap
+    /// returns are omitted, so the semantic analyzer keeps its existing fresh-var
+    /// path for those and json/msgpack navigation is untouched. Nothing is
+    /// fabricated — each value is the declared `-> T` from the module schema;
+    /// `int` and `number` stay distinct.
+    pub(crate) fn build_module_qualified_scalar_returns(
+        &self,
+    ) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let Some(registry) = self.extension_registry.as_ref() else {
+            return map;
+        };
+        // A module-qualified call in source uses a LOCAL namespace name — the
+        // trailing segment of an unaliased `use std::core::time` ("time") or an
+        // explicit `use .. as t` alias ("t"). The extension registry keys
+        // modules by their FULL canonical path ("std::core::time"). Collect,
+        // per registry module, every local namespace the inference engine might
+        // observe: the full path, its trailing segment, and any alias in the
+        // graph/scope namespace maps that resolves to that path.
+        let mut aliases_for: std::collections::HashMap<&str, Vec<String>> =
+            std::collections::HashMap::new();
+        for (local, canonical) in self
+            .graph_namespace_map
+            .iter()
+            .chain(self.module_scope_sources.iter())
+        {
+            aliases_for
+                .entry(canonical.as_str())
+                .or_default()
+                .push(local.clone());
+        }
+        for module in registry.iter() {
+            let mut namespaces: Vec<String> = vec![module.name.clone()];
+            if let Some(last) = module.name.rsplit("::").next() {
+                if last != module.name {
+                    namespaces.push(last.to_string());
+                }
+            }
+            if let Some(aliases) = aliases_for.get(module.name.as_str()) {
+                namespaces.extend(aliases.iter().cloned());
+            }
+            for export in module.export_names_available(self.comptime_mode) {
+                let Some(schema) = module.get_schema(export) else {
+                    continue;
+                };
+                let Some(return_type) = schema.return_type.as_ref() else {
+                    continue;
+                };
+                let Some(scalar) =
+                    shape_runtime::type_system::BuiltinTypes::canonical_script_alias(
+                        return_type.trim(),
+                    )
+                else {
+                    continue;
+                };
+                for ns in &namespaces {
+                    map.insert(format!("{}::{}", ns, export), scalar.to_string());
+                }
+            }
+        }
+        map
     }
 
     /// Q33 / distributed §4.1.1: elaborate a direct

@@ -210,3 +210,110 @@ fn bug15_let_copies_in_ref_fn() {
     )
     .expect_number(21.0);
 }
+
+// BUG-16 (WF-3A-tail): a bare module-qualified scalar builtin call used
+// DIRECTLY in operand position must infer its declared return type. Before
+// the inference-tier module-schema return-type propagation, `time::millis()`
+// (declared `-> number`) inferred to `unknown` in operand position, so
+// `time::millis() - start` rejected with "operand types are unknown and
+// number". The let-binding form already worked (emit-tier stamp); this is the
+// bare-operand form. `number - number` -> number.
+#[test]
+fn bug16_module_call_number_operand_position() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        let start = time::millis()
+        let dt = time::millis() - start
+        print(dt >= 0)
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("true");
+}
+
+// BUG-16b: both operands bare module calls — `millis() - millis()` infers
+// number on each side and subtracts to number.
+#[test]
+fn bug16b_module_call_both_bare_operands() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        let d = time::millis() - time::millis()
+        print(d <= 0)
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("true");
+}
+
+// BUG-16c: the recovered type is the ACTUAL declared type, not a fabricated
+// pass-anything. A `number`-returning module call used where a `string` is
+// required (string concatenation) is still a strict compile error.
+#[test]
+fn bug16c_module_call_number_in_string_context_errors() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        let x = "elapsed: " + time::millis()
+        print(x)
+    "#,
+    )
+    .with_stdlib()
+    .expect_run_err_contains("string");
+}
+
+// BUG-16d (WF-3A-tail INFERENCE-tier): the emit-tier let-stamp only fixed the
+// binop-operand case. A bare module-qualified scalar call in ARGUMENT position
+// was inferred by the semantic analyzer (the constraint solver), which held no
+// module-export signatures and erased the call to a fresh var — silently
+// unifying with the callee's declared param type. `time::millis()` (number)
+// passed to a `string` parameter therefore compiled and ran with a heap/number
+// mismatch. It must now be a strict compile error: the analyzer recovers the
+// declared `number` from the compiler-supplied module-schema map.
+#[test]
+fn bug16d_module_call_arg_position_wrong_type_errors() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        fn needs_string(s: string) { print(s) }
+        needs_string(time::millis())
+    "#,
+    )
+    .with_stdlib()
+    .expect_run_err_contains("string");
+}
+
+// BUG-16e: the analyzer must accept a module-qualified `number` call in a
+// `number` argument position (positive control — the recovered type is the
+// real `number`, not a reject-everything). Proves the fix did not merely start
+// rejecting all module calls.
+#[test]
+fn bug16e_module_call_arg_position_correct_type_accepts() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        fn takes_number(n: number) { print(n >= 0.0) }
+        takes_number(time::millis())
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("true");
+}
+
+// BUG-16f: strict int/number separation for a module-call operand. `number -
+// int` must reject in the analyzer just as `number_var - int_var` does — the
+// operand-type recovery must not open a silent int<->number coercion path.
+#[test]
+fn bug16f_module_call_number_minus_int_errors() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        let i = 5
+        let d = time::millis() - i
+        print(d)
+    "#,
+    )
+    .with_stdlib()
+    .expect_run_err_contains("int");
+}

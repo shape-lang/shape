@@ -18,6 +18,11 @@
 /// }
 /// ```
 
+// `decode` / `decode_bytes` return the typed `Json` enum (the marshal layer
+// builds a `Json` value from the decoded MessagePack tree), so pull the ADT
+// into scope for the declared return types.
+use std::core::json_value
+
 /// Encode a value to MessagePack (hex-encoded string).
 ///
 /// # Arguments
@@ -38,7 +43,7 @@ pub builtin fn encode(value: _) -> Result<string, string>;
 /// # Returns
 ///
 /// `Ok(value)` on success, `Err(message)` on failure.
-pub builtin fn decode(data: string) -> Result<_, string>;
+pub builtin fn decode(data: string) -> Result<Json, string>;
 
 /// Encode a value to MessagePack as a byte array.
 ///
@@ -60,4 +65,4 @@ pub builtin fn encode_bytes(value: _) -> Result<Array<int>, string>;
 /// # Returns
 ///
 /// `Ok(value)` on success, `Err(message)` on failure.
-pub builtin fn decode_bytes(data: Array<int>) -> Result<_, string>;
+pub builtin fn decode_bytes(data: Array<int>) -> Result<Json, string>;
