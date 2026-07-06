@@ -291,6 +291,16 @@ Both remaining Wave-2 workflows completed and merged serially (fold-main-in-firs
 
 **Wave-3 remaining after WF-3D:** WF-3A type-system edges (incl. the schema-id-collision **root** fix unifying comptime §4.3 named-schemas + the object-spread regression + the routed WF-2E inference residuals), WF-3B UX-polish/split-brains (+ comptime S10 LSP lens, jargon string cleanup), WF-3C cycle-leak (D3 weak-refs+docs). Then Wave-4 WF-4 book-truth-gate close against the full ~738-fence universe.
 
+## 6decies. Book + test completeness mandate (user 2026-07-06) — BINDING, expands WF-4
+
+**User directive (verbatim):** "keep the shape book up to date with the implemented features (all features changed or introduced in wave 0 - last wave specified) including examples. also all features need a comprehensive test suite."
+
+**Binding interpretation (HARD GATE, extends `feedback_book_gate_every_feature`):** every feature changed or introduced across Waves 0–3 must be (a) documented in the book (`../shape-web/book/book-site/src/content/docs/`) with a **runnable, gate-green (vm+jit) example**, and (b) covered by a **comprehensive test suite**. This is the expanded WF-4 close.
+
+**Sequencing (why not now):** the book is a single shared directory (`../shape-web/book/`, its own git repo) across all worktrees; WF-2G (snapshot) and WF-3D (comptime, incl. its book-flip) are mid-flight editing book + tests for their own features. A book-*writing* close workflow must run AFTER the feature workflows land, to document the FINAL state and avoid shared-dir races. Each remaining feature workflow (WF-3A/3B/3C) already carries its own book+test deliverable in its finisher.
+
+**Executed now (non-conflicting):** WF-4-recon — a READ-ONLY coverage recon fanning out over the wave-0→wave-3 feature areas (polyglot-ffi, snapshot-resume, remote-distributed, polyglot×distributed, async, comptime, security-permissions, drop-raii, serialization-stdlib, strict-typing, core-language) plus a full-book-truth-gate measurement over the ~738-fence universe (per `project_book_gate_denominator_trap`). Produces the authoritative feature→book-status→test-status work-list at `docs/cluster-audits/wf4-coverage-matrix.md`, which the WF-4 close then fills to 100%.
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
