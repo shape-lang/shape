@@ -6024,27 +6024,43 @@ impl BytecodeCompiler {
             .collect();
         let pack_expr = Expr::Object(pack_entries, namespace_span);
 
-        // Dispatch to the internal `__call_raising` sibling (§4.1.2).
+        // Dispatch to the internal `__call_result` sibling (§4.9 / FIX C):
+        // the recoverable primitive whose native body returns a real
+        // `Result<R, RemoteError>` value (success → `Ok(R)`, transport /
+        // protocol / remote failure → `Err(RemoteError::…)`). The raising
+        // sibling `__call_raising` is left for the `@remote` before-hook (Q26).
         let rewritten = vec![addr_expr, fn_ref_expr, pack_expr];
         self.compile_module_namespace_call_on_binding(
             binding_name,
             namespace_name,
             namespace_span,
-            "__call_raising",
+            "__call_result",
             &[],
             &rewritten,
         )?;
 
-        // (4) Instantiate `R` from `fn_ref`'s declared return type so the call
-        // site is typed at the callee's return type (not the `_` wildcard of
-        // `__call_raising`).
-        if let Some(ret_ann) = return_type.as_ref() {
-            self.last_expr_type_info = self.type_info_from_annotation(ret_ann);
-            self.last_expr_schema = self
-                .last_expr_type_info
-                .as_ref()
-                .and_then(Self::value_schema_from_type_info);
-        }
+        // (4) Type the call site at `Result<R, RemoteError>` (NOT the bare `R`
+        // of the raising sibling), so the documented
+        // `match remote::call(…) { Ok(v) => …, Err(e) => … }` type-checks and
+        // the runtime `Result` value it produces matches. `R` is `fn_ref`'s
+        // declared return type; an unannotated/unit return becomes `Void`.
+        let r_ann = return_type
+            .clone()
+            .unwrap_or(shape_ast::ast::TypeAnnotation::Void);
+        let result_ann = shape_ast::ast::TypeAnnotation::Generic {
+            name: shape_ast::ast::TypePath::simple("Result"),
+            args: vec![
+                r_ann,
+                shape_ast::ast::TypeAnnotation::Reference(
+                    shape_ast::ast::TypePath::simple("RemoteError"),
+                ),
+            ],
+        };
+        self.last_expr_type_info = self.type_info_from_annotation(&result_ann);
+        self.last_expr_schema = self
+            .last_expr_type_info
+            .as_ref()
+            .and_then(Self::value_schema_from_type_info);
         Ok(())
     }
 

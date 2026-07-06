@@ -124,6 +124,28 @@ pub trait RemoteDispatcher {
         fn_ref: &KindedSlot,
         args: &[KindedSlot],
     ) -> Result<crate::typed_module_exports::TypedReturn, String>;
+
+    /// Recoverable sibling of [`call_remote`](Self::call_remote) backing the
+    /// public `remote::call` primitive (distributed §4.1.1 / §4.9, Q26).
+    ///
+    /// Unlike `call_remote` (which raises transport/remote failures as an
+    /// ordinary runtime error), this returns a value that is ALWAYS a
+    /// `Result<R, RemoteError>`:
+    /// - success → `TypedReturn::Ok`/`OkObjectPairs` wrapping the callee's
+    ///   value `R`,
+    /// - transport / protocol / remote failure → `TypedReturn::Err` whose
+    ///   payload is the matching `RemoteError` enum variant (§4.9 mapping),
+    ///   projected as an `Arc<HeapValue::TypedObject>`.
+    ///
+    /// The outer `Err(String)` is reserved for genuine machinery failures
+    /// (missing dispatcher, arg-pack serialization) that the caller raises —
+    /// those are internal bugs, never a recoverable remote condition.
+    fn call_remote_result(
+        &self,
+        addr: &str,
+        fn_ref: &KindedSlot,
+        args: &[KindedSlot],
+    ) -> Result<crate::typed_module_exports::TypedReturn, String>;
 }
 
 /// Execution context available to module functions during a VM call.

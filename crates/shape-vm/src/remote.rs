@@ -169,6 +169,14 @@ pub enum RemoteErrorKind {
     /// `ResourceLimitExceeded`; the sender-side read timeout is sender-LOCAL
     /// and never crosses the wire (distributed §4.9).
     Timeout,
+    /// Sender-LOCAL transport failure (connect refused / DNS / send / receive)
+    /// observed before a structured `CallResponse` was decoded. Never crosses
+    /// the wire — synthesized sender-side so the recoverable `remote::call`
+    /// surface can map it onto `RemoteError::Transport` (pre-send, retry-safe)
+    /// distinctly from a callee's own `RuntimeError` (which maps to
+    /// `RemoteError::Remote`). Appended last: named-msgpack variant order is
+    /// non-semantic, so this is wire-compatible for existing kinds.
+    Transport,
 }
 
 impl RemoteCallError {

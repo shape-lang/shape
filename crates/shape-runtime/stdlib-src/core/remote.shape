@@ -88,6 +88,19 @@ pub builtin fn ping(addr: string) -> Result<HashMap<string, _>, string>;
 /// recoverable structured surface is the public `remote::call` primitive.
 builtin fn __call_raising(addr: string, fn_ref: _, args: Array<_>) -> _;
 
+/// Internal compiler-elaborated sibling backing the public, recoverable
+/// `remote::call` primitive (Q26 / distributed §4.9 / FIX C). Like
+/// `__call_raising` it performs the per-function transfer + wire round-trip,
+/// but instead of raising on failure it returns a real `Result<R, RemoteError>`
+/// value: success is `Ok(R)` (typed at the callee's declared return type via
+/// the compiler's `remote::call` elaboration), and every transport / protocol
+/// / remote failure is `Err(RemoteError::…)` per the §4.9 normative mapping.
+///
+/// User code never names this dunder directly — it writes
+/// `remote::call(addr, fn, args…)`, which the compiler lowers to this builtin
+/// and types at `Result<R, RemoteError>`.
+builtin fn __call_result(addr: string, fn_ref: _, args: Array<_>) -> _;
+
 /// Structured error returned by the recoverable `remote::call` primitive
 /// (Q26 / distributed §4.2). Every transport, protocol, permission, and remote
 /// failure maps onto exactly one variant (the normative §4.9 mapping), so
