@@ -24,6 +24,7 @@
 
 use crate::bytecode::{NativeAbiSpec, NativeStructLayoutEntry};
 use libffi::middle::{Arg, Cif, CodePtr, Type};
+use shape_runtime::native_resolution::NativeResolutionSet;
 use libloading::Library;
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::collections::HashMap;
@@ -600,11 +601,41 @@ unsafe impl Sync for NativeLinkedFunction {}
 ///   extension) → passthrough; `dlopen` handles it.
 ///
 /// Package-local frontmatter / `shape.toml` `[native-dependencies]` aliases
-/// need the compiler's native-resolution context threaded to the executing
-/// host — that receiver-side resolution chain (ffi-rebuild §4.11 / integration
-/// A7) is a follow-up; such an alias falls through as-is and surfaces a
-/// structured "cannot open" error at `dlopen` if unresolved.
-pub(crate) fn resolve_library_target(alias: &str) -> String {
+/// are resolved via `resolutions` (the host's `NativeResolutionSet`, keyed by
+/// `(package_key, alias)`). This is the receiver-side resolution chain
+/// (ffi-rebuild §4.11 / integration A7) that the WF-2A stage-1 follow-up wires
+/// in: the alias is looked up under the declaring package's key (or, when the
+/// declaration carried no package provenance, the root project key) and mapped
+/// to its resolved `load_target` (the vendored/staged/path `dlopen` target).
+/// An unresolved alias falls through to the well-known system table and finally
+/// to verbatim passthrough, surfacing a structured "cannot open" error at
+/// `dlopen` if it names nothing loadable.
+pub(crate) fn resolve_library_target(
+    spec: &NativeAbiSpec,
+    resolutions: Option<&NativeResolutionSet>,
+    root_package_key: Option<&str>,
+) -> String {
+    let alias = spec.library.as_str();
+
+    // 1. Package-scoped `[native-dependencies]` alias resolution. Prefer the
+    //    declaring package's key; fall back to the root project key when the
+    //    declaration carried no explicit package provenance (root-project
+    //    `extern C fn` — both keys are usually equal after annotation).
+    if let Some(resolutions) = resolutions {
+        for candidate in [spec.package_key.as_deref(), root_package_key]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(resolved) = resolutions
+                .by_package_alias
+                .get(&(candidate.to_string(), alias.to_string()))
+            {
+                return resolved.load_target.clone();
+            }
+        }
+    }
+
+    // 2. Well-known system aliases → platform soname.
     match alias {
         "c" | "libc" => {
             #[cfg(target_os = "linux")]
@@ -622,6 +653,8 @@ pub(crate) fn resolve_library_target(alias: &str) -> String {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return "msvcrt.dll".to_string();
         }
+        // 3. A direct path or an explicit soname → passthrough; `dlopen`
+        //    handles it (and surfaces a structured "cannot open" on failure).
         other => other.to_string(),
     }
 }
@@ -630,6 +663,8 @@ pub fn link_native_function(
     spec: &NativeAbiSpec,
     _native_layouts: &[NativeStructLayoutEntry],
     library_cache: &mut HashMap<String, Arc<Library>>,
+    resolutions: Option<&NativeResolutionSet>,
+    root_package_key: Option<&str>,
 ) -> Result<NativeLinkedFunction, String> {
     if spec.abi != "C" {
         return Err(format!(
@@ -640,9 +675,10 @@ pub fn link_native_function(
 
     let signature = parse_signature(&spec.signature)?;
 
-    // Resolve the declared alias to a `dlopen` target (§4.2). Cache keyed by
-    // the resolved target so two aliases for one library share a `dlopen`.
-    let load_target = resolve_library_target(&spec.library);
+    // Resolve the declared alias to a `dlopen` target (§4.2 / §4.11). Cache
+    // keyed by the resolved target so two aliases for one library share a
+    // `dlopen`.
+    let load_target = resolve_library_target(spec, resolutions, root_package_key);
     let library = if let Some(existing) = library_cache.get(&load_target) {
         existing.clone()
     } else {
@@ -820,6 +856,71 @@ pub fn invoke_linked_function(
 mod tests {
     use super::*;
 
+    /// ffi-rebuild §4.11 / WF-2A: `resolve_library_target` consults the
+    /// resolved `[native-dependencies]` map. An alias declared under a package
+    /// key resolves to that dependency's real `load_target`, not the bare alias.
+    #[test]
+    fn resolve_library_target_uses_native_resolution_set() {
+        use shape_runtime::native_resolution::{NativeResolutionSet, ResolvedNativeDependency};
+        use shape_runtime::project::{NativeDependencyProvider, NativeTarget};
+
+        let mut set = NativeResolutionSet::default();
+        set.insert(ResolvedNativeDependency {
+            package_name: "nativetest".into(),
+            package_version: "0.1.0".into(),
+            package_key: "nativetest@0.1.0".into(),
+            alias: "mylib".into(),
+            target: NativeTarget::current(),
+            provider: NativeDependencyProvider::Path,
+            resolved_value: "./libmylib.so".into(),
+            load_target: "/abs/path/libmylib.so".into(),
+            fingerprint: "sha256:test".into(),
+            declared_version: None,
+            cache_key: None,
+            provenance: shape_runtime::native_resolution::NativeProvenance::UpdateResolved,
+        });
+
+        // Alias carrying its declaring package key resolves via the set.
+        let spec = NativeAbiSpec {
+            abi: "C".into(),
+            library: "mylib".into(),
+            symbol: "shape_add42".into(),
+            signature: "fn(i32) -> i32".into(),
+            package_key: Some("nativetest@0.1.0".into()),
+        };
+        assert_eq!(
+            resolve_library_target(&spec, Some(&set), None),
+            "/abs/path/libmylib.so"
+        );
+
+        // Root-project alias (no spec package key) falls back to the root key.
+        let spec_root = NativeAbiSpec {
+            package_key: None,
+            ..spec.clone()
+        };
+        assert_eq!(
+            resolve_library_target(&spec_root, Some(&set), Some("nativetest@0.1.0")),
+            "/abs/path/libmylib.so"
+        );
+
+        // Unknown alias with no resolution falls through to verbatim passthrough.
+        let spec_unknown = NativeAbiSpec {
+            library: "nope".into(),
+            package_key: None,
+            ..spec.clone()
+        };
+        assert_eq!(resolve_library_target(&spec_unknown, Some(&set), None), "nope");
+
+        // Well-known system aliases still map to the platform soname.
+        let spec_libc = NativeAbiSpec {
+            library: "c".into(),
+            package_key: None,
+            ..spec
+        };
+        let libc = resolve_library_target(&spec_libc, Some(&set), None);
+        assert!(libc.starts_with("libc") || libc.contains("System") || libc.contains("msvcrt"));
+    }
+
     #[test]
     fn parse_signature_scalar_roundtrip() {
         let sig = parse_signature("fn(i64, i64) -> i64").unwrap();
@@ -931,8 +1032,9 @@ mod tests {
             library: libname.into(),
             symbol: "abs".into(),
             signature: "fn(i32) -> i32".into(),
+            package_key: None,
         };
-        let abs = link_native_function(&abs_spec, &[], &mut cache).unwrap();
+        let abs = link_native_function(&abs_spec, &[], &mut cache, None, None).unwrap();
         let r = invoke_linked_function(&abs, &[KindedSlot::from_int(-7)]).unwrap();
         assert_eq!(r.kind(), NativeKind::Int32);
         assert_eq!(r.raw() as u32 as i32, 7);
@@ -942,8 +1044,9 @@ mod tests {
             library: libname.into(),
             symbol: "labs".into(),
             signature: "fn(i64) -> i64".into(),
+            package_key: None,
         };
-        let labs = link_native_function(&labs_spec, &[], &mut cache).unwrap();
+        let labs = link_native_function(&labs_spec, &[], &mut cache, None, None).unwrap();
         let r = invoke_linked_function(&labs, &[KindedSlot::from_int(-9_000_000_000)]).unwrap();
         assert_eq!(r.kind(), NativeKind::Int64);
         assert_eq!(r.as_i64(), Some(9_000_000_000));
@@ -964,8 +1067,9 @@ mod tests {
                 library: libname.into(),
                 symbol: "sqrt".into(),
                 signature: "fn(f64) -> f64".into(),
+                package_key: None,
             };
-            let sqrt = link_native_function(&spec, &[], &mut cache).unwrap();
+            let sqrt = link_native_function(&spec, &[], &mut cache, None, None).unwrap();
             let r = invoke_linked_function(&sqrt, &[KindedSlot::from_number(144.0)]).unwrap();
             assert_eq!(r.kind(), NativeKind::Float64);
             assert_eq!(r.as_f64(), Some(12.0));
@@ -988,8 +1092,9 @@ mod tests {
                 library: libname.into(),
                 symbol: "labs".into(),
                 signature: "fn(ptr) -> ptr".into(),
+                package_key: None,
             };
-            let f = link_native_function(&spec, &[], &mut cache).unwrap();
+            let f = link_native_function(&spec, &[], &mut cache, None, None).unwrap();
             let arg = KindedSlot::new(ValueSlot::from_raw(0x1000), NativeKind::UIntSize);
             let r = invoke_linked_function(&f, &[arg]).unwrap();
             assert_eq!(r.kind(), NativeKind::UIntSize);
@@ -1013,8 +1118,9 @@ mod tests {
                 library: libname.into(),
                 symbol: "strlen".into(),
                 signature: "fn(cstring) -> usize".into(),
+                package_key: None,
             };
-            let f = link_native_function(&spec, &[], &mut cache).unwrap();
+            let f = link_native_function(&spec, &[], &mut cache, None, None).unwrap();
             let r = invoke_linked_function(&f, &[KindedSlot::from_string("hello")]).unwrap();
             assert_eq!(r.kind(), NativeKind::UIntSize);
             assert_eq!(r.raw(), 5);
@@ -1062,8 +1168,9 @@ mod tests {
                 library: libname.into(),
                 symbol: "frexp".into(),
                 signature: "fn(f64, ptr) -> f64".into(),
+                package_key: None,
             };
-            let f = link_native_function(&spec, &[], &mut cache).unwrap();
+            let f = link_native_function(&spec, &[], &mut cache, None, None).unwrap();
 
             let cell = native_cell_new().unwrap();
             let cell_slot = KindedSlot::new(ValueSlot::from_raw(cell as u64), NativeKind::UIntSize);

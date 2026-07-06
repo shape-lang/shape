@@ -157,6 +157,66 @@ impl PluginLoader {
             });
         }
 
+        // Structural ABI build-fingerprint check — REQUIRED (WF-2A
+        // extension-hardening).
+        //
+        // The `shape_abi_version` integer above is hand-maintained and cannot
+        // detect a `#[repr(C)]` layout skew (a reordered / added / retyped
+        // vtable field) while the integer stays `4`. Such a `.so` PASSES the
+        // integer gate, then the host dispatches through the vtable at
+        // host-expected byte offsets that do not match the extension's actual
+        // layout — a wild call → SIGSEGV in release (or a misaligned-pointer
+        // abort in debug). This fingerprint folds the actual compiled layout
+        // (struct sizes + every field offset) of `LanguageRuntimeVTable` /
+        // `PluginInfo` plus the ABI version. Host and extension each compute it
+        // from their own `shape-abi-v1`; a mismatch means the extension's
+        // boundary layout differs from the host's, so we REFUSE it cleanly
+        // here rather than dispatch into a structurally-incompatible vtable.
+        //
+        // It is profile-independent (captures `#[repr(C)]` layout only, which is
+        // identical in debug and release), so a matched-source debug-built
+        // extension still loads into a release host.
+        let get_fingerprint = unsafe {
+            lib.get::<shape_abi_v1::GetAbiBuildFingerprintFn>(b"shape_abi_build_fingerprint")
+        }
+        .map_err(|e| ShapeError::RuntimeError {
+            message: format!(
+                "Plugin '{}' missing required 'shape_abi_build_fingerprint' \
+                 export (WF-2A extension-hardening structural-ABI gate). The \
+                 host cannot verify the extension's #[repr(C)] boundary layout \
+                 matches its own, so it refuses to load rather than risk a \
+                 wild-call SIGSEGV through a skewed vtable. Rebuild the \
+                 extension against the current Shape ABI — the \
+                 `shape_abi_v1::language_runtime_plugin!` macro generates this \
+                 symbol automatically. Underlying loader error: {}",
+                path.display(),
+                e
+            ),
+            location: None,
+        })?;
+        let plugin_fingerprint = unsafe { get_fingerprint() };
+        let host_fingerprint = shape_abi_v1::abi_build_fingerprint();
+        if plugin_fingerprint != host_fingerprint {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "Plugin '{}' structural ABI mismatch: host build \
+                     fingerprint is {:#018x}, plugin reports {:#018x} (ABI \
+                     version {} matched, but the compiled #[repr(C)] vtable / \
+                     PluginInfo layout differs — a reordered/added/retyped \
+                     boundary field the version integer cannot catch). \
+                     Dispatching through this vtable would call host-expected \
+                     offsets that do not match the extension's layout (wild \
+                     call → SIGSEGV), so it is refused. Rebuild the extension \
+                     against this exact Shape ABI revision.",
+                    path.display(),
+                    host_fingerprint,
+                    plugin_fingerprint,
+                    ABI_VERSION,
+                ),
+                location: None,
+            });
+        }
+
         // Get plugin info
         let get_info: Symbol<GetPluginInfoFn> = unsafe {
             lib.get(b"shape_plugin_info")

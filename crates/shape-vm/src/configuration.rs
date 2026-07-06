@@ -217,6 +217,22 @@ impl BytecodeExecutor {
         self.root_package_key = root_package_key;
     }
 
+    /// Borrow the resolved package-scoped native library map, if any. Used by
+    /// the JIT executor to thread the SAME resolution into its foreign bridge
+    /// so `--mode jit` resolves a `[native-dependencies]` alias identically to
+    /// `--mode vm` (ffi-rebuild §4.11 / WF-2A).
+    pub fn native_resolution_context(
+        &self,
+    ) -> Option<&shape_runtime::native_resolution::NativeResolutionSet> {
+        self.native_resolution_context.as_ref()
+    }
+
+    /// Borrow the root project package key (`name@version`) for the current
+    /// execution context, if any.
+    pub fn root_package_key(&self) -> Option<&str> {
+        self.root_package_key.as_deref()
+    }
+
     /// Clear any previously configured native resolution context.
     pub fn clear_native_resolution_context(&mut self) {
         self.native_resolution_context = None;
