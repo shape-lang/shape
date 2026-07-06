@@ -48,7 +48,7 @@ use crate::bytecode::{
     BuiltinFunction, BytecodeProgram, Constant, FunctionBlob, FunctionHash, Instruction, OpCode,
     Operand, Program as ContentAddressedProgram,
 };
-use crate::type_tracking::{TypeTracker, VariableTypeInfo};
+use crate::type_tracking::{NativeKind, TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
@@ -297,6 +297,7 @@ impl FunctionBlobBuilder {
         func: &crate::bytecode::Function,
         blob_name_to_hash: &HashMap<String, FunctionHash>,
         instr_end: usize,
+        capture_kinds: Vec<NativeKind>,
     ) -> FunctionBlob {
         use crate::bytecode::Operand;
 
@@ -400,7 +401,7 @@ impl FunctionBlobBuilder {
         }
 
         // Remap instructions to use local indices.
-        let local_instructions: Vec<Instruction> = global_instructions
+        let mut local_instructions: Vec<Instruction> = global_instructions
             .iter()
             .map(|instr| {
                 let mut remapped = instr.clone();
@@ -465,22 +466,59 @@ impl FunctionBlobBuilder {
             .map(|(idx, fid, line)| (idx - self.instr_start, *fid as u32, *line))
             .collect();
 
-        // Scan instructions for CallForeign operands and collect content hashes
-        // from the program's foreign_functions table.
+        // integration A6 (§4.2.0): `foreign_dependencies` is ordered,
+        // first-use-deduped (was sorted+deduped), and every `CallForeign`
+        // operand in the blob's instruction stream is rewritten from the
+        // program-level foreign index to the blob-local ordinal — the position
+        // of that entry's content hash in this blob's `foreign_dependencies`.
+        // This mirrors how `Call` / `Constant::Function` references are
+        // hash-normalized at blob build: after the rewrite the hashed
+        // instruction stream contains only blob-local ordinals that are a
+        // deterministic function of the blob's own instruction sequence, so a
+        // blob's content hash no longer depends on the origin program's
+        // foreign-table ordering (cross-program blob dedup, C10 fix). The
+        // linker's `ForeignFunction` remap (`linker.rs`) inverts this ordinal →
+        // hash → assembled-table index at every consuming node.
+        //
+        // Build invariant (§4.2.0-1): an entry whose `content_hash` is `None`
+        // was silently skipped here pre-WF-2A. Under the ordinal rewrite a skip
+        // would shift every subsequent ordinal, so a missing hash is now an
+        // internal compile error, never a skip — the compiler always calls
+        // `compute_content_hash()` before blob assembly
+        // (`functions_foreign.rs`).
         let mut foreign_deps: Vec<[u8; 32]> = Vec::new();
-        for instr in &local_instructions {
+        let mut foreign_hash_to_ordinal: HashMap<[u8; 32], u16> = HashMap::new();
+        for instr in &mut local_instructions {
             if instr.opcode == crate::bytecode::OpCode::CallForeign {
-                if let Some(Operand::ForeignFunction(idx)) = instr.operand {
-                    if let Some(entry) = program.foreign_functions.get(idx as usize) {
-                        if let Some(hash) = entry.content_hash {
-                            foreign_deps.push(hash);
-                        }
-                    }
+                if let Some(Operand::ForeignFunction(prog_idx)) = instr.operand {
+                    let entry = program
+                        .foreign_functions
+                        .get(prog_idx as usize)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "CallForeign operand {prog_idx} in blob '{}' does not index a \
+                                 valid foreign function (table len {})",
+                                self.name,
+                                program.foreign_functions.len(),
+                            )
+                        });
+                    let hash = entry.content_hash.unwrap_or_else(|| {
+                        panic!(
+                            "foreign function '{}' referenced by CallForeign in blob '{}' has no \
+                             content_hash at blob assembly — hash presence is a build invariant \
+                             (integration A6 §4.2.0-1); compute_content_hash() must run first",
+                            entry.name, self.name,
+                        )
+                    });
+                    let ordinal = *foreign_hash_to_ordinal.entry(hash).or_insert_with(|| {
+                        let ord = foreign_deps.len() as u16;
+                        foreign_deps.push(hash);
+                        ord
+                    });
+                    instr.operand = Some(Operand::ForeignFunction(ordinal));
                 }
             }
         }
-        foreign_deps.sort();
-        foreign_deps.dedup();
 
         let mut blob = FunctionBlob {
             content_hash: FunctionHash::ZERO,
@@ -495,6 +533,7 @@ impl FunctionBlobBuilder {
             ref_mutates: func.ref_mutates.clone(),
             mutable_captures: func.mutable_captures.clone(),
             frame_descriptor: func.frame_descriptor.clone(),
+            capture_kinds,
             required_permissions: self.required_permissions.clone(),
             instructions: local_instructions,
             constants: local_constants,

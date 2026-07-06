@@ -23,6 +23,7 @@ fn make_blob(
         ref_mutates: vec![],
         mutable_captures: vec![],
         frame_descriptor: None,
+        capture_kinds: vec![],
         instructions,
         constants,
         strings,
@@ -218,6 +219,7 @@ fn test_link_circular_dependency_detected() {
         ref_mutates: vec![],
         mutable_captures: vec![],
         frame_descriptor: None,
+        capture_kinds: vec![],
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -241,6 +243,7 @@ fn test_link_circular_dependency_detected() {
         ref_mutates: vec![],
         mutable_captures: vec![],
         frame_descriptor: None,
+        capture_kinds: vec![],
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -273,6 +276,7 @@ fn test_link_missing_blob() {
         ref_mutates: vec![],
         mutable_captures: vec![],
         frame_descriptor: None,
+        capture_kinds: vec![],
         instructions: vec![],
         constants: vec![],
         strings: vec![],
@@ -385,6 +389,7 @@ fn test_source_map_merging() {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: None,
+            capture_kinds: vec![],
             instructions: vec![
                 Instruction {
                     opcode: OpCode::Return,
@@ -423,6 +428,7 @@ fn test_source_map_merging() {
             ref_mutates: vec![],
             mutable_captures: vec![],
             frame_descriptor: None,
+            capture_kinds: vec![],
             instructions: vec![Instruction {
                 opcode: OpCode::Return,
                 operand: None,
@@ -536,6 +542,7 @@ fn blob_with_perms(perms: PermissionSet) -> FunctionBlob {
         ref_mutates: vec![false],
         mutable_captures: vec![],
         frame_descriptor: None,
+        capture_kinds: vec![],
         instructions: vec![Instruction {
             opcode: OpCode::Halt,
             operand: None,
@@ -560,6 +567,13 @@ fn blob_with_perms(perms: PermissionSet) -> FunctionBlob {
 /// string `["fs.read", "fs.write"]` — identical before and after the enum grew
 /// a 17th variant. This pins that value; any accidental enum reorder, `name()`
 /// change, or hash-input change trips it.
+///
+/// WF-2A stage-0 rebaseline (2026-07-05): the pinned value changed ONCE, from
+/// `2eb6e818…` to `971ebf5f…`, because `FunctionBlobHashInput` grew two hash
+/// fields — `frame_descriptor` and `capture_kinds` (distributed §4.8 / OQ-6).
+/// The msgpack struct-as-array went 17 → 19 elements, so even this blob's
+/// `None` / empty values shift the digest. This is the single ratified
+/// one-time invalidation event; the value is FINAL after stage 0.
 #[test]
 fn ffi_reservation_leaves_existing_content_hash_unchanged() {
     use shape_abi_v1::Permission;
@@ -569,7 +583,7 @@ fn ffi_reservation_leaves_existing_content_hash_unchanged() {
     ]));
     assert_eq!(
         blob.content_hash.to_string(),
-        "2eb6e818552bfaf68df6ba02b43a6e29a2ab20e3601a2fc8bdd4fd800a5313e9",
+        "971ebf5f849c5a28a16a40a25d2b94e77f816fc70f4ed8bb9baccad60d15b56c",
         "content hash of a non-FFI blob must stay stable across the Ffi reservation"
     );
 
