@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
+use tokio_rustls::TlsAcceptor;
 
 use shape_runtime::engine::ShapeEngine;
 use shape_vm::BytecodeExecutor;
@@ -180,21 +181,34 @@ pub async fn run_serve(
 
     let sandbox_level: SandboxLevel = sandbox.parse().map_err(|e: String| anyhow::anyhow!(e))?;
 
-    // Transport security honesty (distributed §4.7 / Q29 / OQ-4): TLS-on-TCP
-    // termination (tokio-rustls) is NOT yet wired into the serve accept loop.
-    // The `--tls-cert`/`--tls-key` gate above proves the operator INTENDED
-    // TLS, but the accept loop still speaks plaintext framing today. Rather
-    // than silently pretending the connection is encrypted (the previous
-    // `let _ = (tls_cert, tls_key); // future enhancement` lie), surface it
-    // loudly so no operator mistakes cert presence for active encryption.
-    if !addr.ip().is_loopback() && (tls_cert.is_some() || tls_key.is_some()) {
-        eprintln!(
-            "  WARNING: TLS termination is not yet active — traffic on {} is \
-             NOT encrypted at the transport layer (auth token still enforced).",
-            addr
-        );
-    }
-    let _ = (tls_cert, tls_key);
+    // Transport security (distributed §4.7 / Q29 / OQ-4): TLS-on-TCP
+    // termination (tokio-rustls) is now ACTIVE in the accept loop. When the
+    // operator supplies `--tls-cert`/`--tls-key`, we build a `TlsAcceptor` from
+    // a rustls `ServerConfig` and wrap every accepted socket in a TLS session
+    // before framing — the server presents its cert and the client verifies it.
+    // Presence-driven: the non-loopback gate above guarantees cert+key for
+    // non-loopback binds; a loopback bind with an explicit cert also gets TLS
+    // (encryption is only ever additive). No cert → plain framing (dev
+    // loopback), the honest no-encryption path.
+    let tls_acceptor: Option<TlsAcceptor> = match (&tls_cert, &tls_key) {
+        (Some(cert), Some(key)) => {
+            let acceptor = build_tls_acceptor(cert, key)
+                .map_err(|e| anyhow::anyhow!("failed to configure TLS termination: {}", e))?;
+            eprintln!(
+                "  TLS: termination ACTIVE — presenting cert {} (traffic on {} is encrypted)",
+                cert.display(),
+                addr
+            );
+            Some(acceptor)
+        }
+        (None, None) => None,
+        // Half-configured TLS: the non-loopback gate already rejects this for
+        // remote binds; on loopback we fail closed rather than silently serve
+        // plaintext when the operator clearly intended TLS.
+        _ => bail!(
+            "TLS is half-configured: pass BOTH --tls-cert and --tls-key, or neither."
+        ),
+    };
 
     // Load language runtimes at startup for polyglot remote execution.
     // Extensions are loaded once via the full discovery + load path;
@@ -281,22 +295,93 @@ pub async fn run_serve(
         let config = config.clone();
         let semaphore = semaphore.clone();
         let language_runtimes = language_runtimes.clone();
+        let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, &config, &semaphore, &language_runtimes).await
-            {
-                eprintln!("Connection error from {}: {}", peer, e);
+            match tls_acceptor {
+                // TLS-terminating path: complete the handshake, then run the
+                // framing protocol over the encrypted `TlsStream`.
+                Some(acceptor) => match acceptor.accept(socket).await {
+                    Ok(tls_stream) => {
+                        if let Err(e) =
+                            handle_connection(tls_stream, &config, &semaphore, &language_runtimes)
+                                .await
+                        {
+                            eprintln!("Connection error from {}: {}", peer, e);
+                        }
+                    }
+                    Err(e) => {
+                        // A plaintext client (or a bad cert) fails the handshake
+                        // here — the connection is dropped without ever running
+                        // the framing protocol. This is the plaintext-rejection
+                        // path.
+                        eprintln!("TLS handshake failed from {}: {}", peer, e);
+                    }
+                },
+                // Plain path (loopback dev, no cert): unencrypted framing.
+                None => {
+                    if let Err(e) =
+                        handle_connection(socket, &config, &semaphore, &language_runtimes).await
+                    {
+                        eprintln!("Connection error from {}: {}", peer, e);
+                    }
+                }
             }
         });
     }
 }
 
-async fn handle_connection(
-    mut socket: tokio::net::TcpStream,
+/// Build a `tokio_rustls::TlsAcceptor` from the operator's PEM cert + key
+/// (WF-2C-fu R4). Uses the already-linked rustls `ring` provider explicitly so
+/// the config never depends on a process-global default provider being
+/// installed. Not a new TLS stack — rustls 0.23 / tokio-rustls 0.26 are already
+/// in the workspace lockfile.
+fn build_tls_acceptor(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<TlsAcceptor> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+    let cert_bytes = std::fs::read(cert_path)
+        .map_err(|e| anyhow::anyhow!("read TLS cert '{}': {}", cert_path.display(), e))?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_bytes[..])
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("parse TLS cert '{}': {}", cert_path.display(), e))?;
+    if certs.is_empty() {
+        bail!("TLS cert '{}' contained no certificates", cert_path.display());
+    }
+
+    let key_bytes = std::fs::read(key_path)
+        .map_err(|e| anyhow::anyhow!("read TLS key '{}': {}", key_path.display(), e))?;
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut &key_bytes[..])
+        .map_err(|e| anyhow::anyhow!("parse TLS key '{}': {}", key_path.display(), e))?
+        .ok_or_else(|| anyhow::anyhow!("TLS key '{}' contained no private key", key_path.display()))?;
+
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| anyhow::anyhow!("TLS protocol versions: {}", e))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| anyhow::anyhow!("TLS server config: {}", e))?;
+
+    Ok(TlsAcceptor::from(std::sync::Arc::new(config)))
+}
+
+/// Handle one client connection's framing protocol. Generic over the stream so
+/// it runs unchanged over a plain `tokio::net::TcpStream` (loopback dev) OR a
+/// `tokio_rustls::server::TlsStream<TcpStream>` (TLS-terminated) — it only uses
+/// the `AsyncRead`/`AsyncWrite` Ext-trait methods (read_exact / write_all /
+/// flush), which both concrete stream types satisfy (WF-2C-fu R4).
+async fn handle_connection<S>(
+    mut socket: S,
     config: &ServeConfig,
     semaphore: &Semaphore,
     language_runtimes: &LanguageRuntimes,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut state = ConnectionState::new();
 
     loop {
@@ -1189,6 +1274,15 @@ mod tests {
 
     /// Send a WireMessage and read the response back.
     async fn roundtrip(stream: &mut TcpStream, msg: &WireMessage) -> WireMessage {
+        roundtrip_stream(stream, msg).await
+    }
+
+    /// Generic roundtrip over any async stream — used for both the plain
+    /// `TcpStream` tests and the TLS client stream (WF-2C-fu R4).
+    async fn roundtrip_stream<S>(stream: &mut S, msg: &WireMessage) -> WireMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         let mp = shape_wire::encode_message(msg).unwrap();
         let framed = encode_framed(&mp);
         let len = framed.len() as u32;
@@ -1203,6 +1297,92 @@ mod tests {
         stream.read_exact(&mut resp_buf).await.unwrap();
         let decompressed = decode_framed(&resp_buf).unwrap();
         shape_wire::decode_message(&decompressed).unwrap()
+    }
+
+    /// Generate a throwaway self-signed cert for `localhost`, write it to a
+    /// tempdir, and start a real TLS-terminating serve node on a random loopback
+    /// port. Returns the bound address, the server cert DER (so a client can
+    /// trust it), and the `TempDir` guard (kept alive by the caller so the PEM
+    /// files survive for `build_tls_acceptor`). No secrets are committed — the
+    /// cert + key live only in the process tempdir for the test's lifetime.
+    async fn start_tls_test_server() -> (
+        SocketAddr,
+        rustls::pki_types::CertificateDer<'static>,
+        tempfile::TempDir,
+    ) {
+        // 1. Throwaway self-signed cert + key (SAN=localhost).
+        let generated =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_der = generated.cert.der().clone();
+
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, generated.cert.pem()).unwrap();
+        std::fs::write(&key_path, generated.key_pair.serialize_pem()).unwrap();
+
+        // 2. Build the acceptor via the PRODUCTION PEM path.
+        let acceptor = build_tls_acceptor(&cert_path, &key_path).expect("build TLS acceptor");
+
+        // 3. Bind + run the TLS-terminating accept loop.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let config = Arc::new(ServeConfig {
+            auth_token: None,
+            max_concurrent: 4,
+            sandbox: SandboxLevel::None,
+            security: derive_serve_security(SandboxLevel::None, true),
+            _mode: ExecutionModeArg::Vm,
+            extensions: vec![],
+            provider_opts: ProviderOptions::default(),
+        });
+        let semaphore = Arc::new(Semaphore::new(4));
+        let language_runtimes: Arc<LanguageRuntimes> = Arc::new(HashMap::new());
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let config = config.clone();
+                let semaphore = semaphore.clone();
+                let language_runtimes = language_runtimes.clone();
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    // Terminate TLS, then run the framing protocol over the
+                    // encrypted stream. A plaintext client fails the handshake
+                    // here and the connection is dropped (rejection path).
+                    match acceptor.accept(socket).await {
+                        Ok(tls_stream) => {
+                            let _ = handle_connection(
+                                tls_stream,
+                                &config,
+                                &semaphore,
+                                &language_runtimes,
+                            )
+                            .await;
+                        }
+                        Err(_) => { /* handshake failed — drop */ }
+                    }
+                });
+            }
+        });
+
+        (addr, cert_der, dir)
+    }
+
+    /// Build a tokio-rustls client that trusts exactly the given server cert.
+    fn tls_client_connector(
+        cert_der: rustls::pki_types::CertificateDer<'static>,
+    ) -> tokio_rustls::TlsConnector {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert_der).unwrap();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
     }
 
     #[test]
@@ -1575,6 +1755,111 @@ print(r)
             msg.contains("capture") || msg.contains("immutable") || msg.contains("mutable"),
             "refusal should name the capture problem in user-legible words, got: {msg}"
         );
+    }
+
+    /// WF-2C-fu R4 — active TLS termination end-to-end. A serve node presents a
+    /// throwaway self-signed cert; a tokio-rustls client verifies it, completes
+    /// the TLS 1.3 handshake, and a foreign-free remote function call
+    /// (`multiply(6, 7) == 42`) succeeds over the ENCRYPTED channel. The
+    /// assertions prove (a) the handshake happened (client observed the server's
+    /// peer cert + a negotiated TLS protocol version) and (b) the wire transfer
+    /// carrying the real `WireMessage::Call` rode that encrypted session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_tls_termination_encrypts_remote_call() {
+        use tokio_rustls::rustls::pki_types::ServerName;
+
+        let (addr, cert_der, _dir) = start_tls_test_server().await;
+        let connector = tls_client_connector(cert_der);
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let server_name = ServerName::try_from("localhost").unwrap();
+        let mut tls = connector.connect(server_name, tcp).await.expect("TLS handshake");
+
+        // Prove the transport is actually TLS: the client saw the server's cert
+        // and negotiated a concrete TLS protocol version.
+        {
+            let (_io, session) = tls.get_ref();
+            let peer_certs = session.peer_certificates();
+            assert!(
+                peer_certs.map(|c| !c.is_empty()).unwrap_or(false),
+                "client must have received the server's TLS certificate"
+            );
+            assert!(
+                session.protocol_version().is_some(),
+                "a TLS protocol version must have been negotiated"
+            );
+        }
+
+        // A real remote function call over the encrypted channel.
+        let bytecode = {
+            let program =
+                shape_ast::parser::parse_program("function multiply(a, b) { a * b }")
+                    .expect("parse");
+            let compiler = shape_vm::compiler::BytecodeCompiler::new();
+            compiler.compile(&program).expect("compile")
+        };
+        let request = build_call_request(
+            &bytecode,
+            "multiply",
+            vec![
+                SerializableVMValue::Number(6.0),
+                SerializableVMValue::Number(7.0),
+            ],
+        );
+
+        let resp = roundtrip_stream(&mut tls, &WireMessage::Call(request)).await;
+        match resp {
+            WireMessage::CallResponse(r) => match r.result {
+                Ok(SerializableVMValue::Number(n)) => {
+                    assert_eq!(n, 42.0, "6 * 7 over TLS should be 42");
+                }
+                Ok(other) => panic!("Expected Number(42.0) over TLS, got {:?}", other),
+                Err(e) => panic!("Remote call over TLS failed: {:?}", e),
+            },
+            other => panic!("Expected CallResponse over TLS, got {:?}", other),
+        }
+    }
+
+    /// WF-2C-fu R4 — a PLAINTEXT client talking to a TLS-terminating node is
+    /// rejected. The server's `acceptor.accept()` fails the handshake on the
+    /// non-TLS bytes and drops the connection, so the plaintext client never
+    /// receives a valid framed response (its read hits EOF / connection reset).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_plaintext_client_rejected_by_tls_node() {
+        let (addr, _cert_der, _dir) = start_tls_test_server().await;
+
+        // Connect in PLAINTEXT and send a normally-valid framed Ping.
+        let mut plain = TcpStream::connect(addr).await.unwrap();
+        let msg = WireMessage::Ping(shape_vm::remote::PingRequest {});
+        let mp = shape_wire::encode_message(&msg).unwrap();
+        let framed = encode_framed(&mp);
+        let len = framed.len() as u32;
+        // The write may succeed (bytes buffered) — the rejection surfaces on read.
+        let _ = plain.write_all(&len.to_be_bytes()).await;
+        let _ = plain.write_all(&framed).await;
+        let _ = plain.flush().await;
+
+        // The TLS server interprets our plaintext as a (malformed) TLS record,
+        // sends a fatal TLS alert, and drops the socket. We must NOT get a valid
+        // length-prefixed wire response back. Two shapes both count as rejection:
+        //   (a) the read errors (connection reset / EOF), or
+        //   (b) the bytes we DO read are a TLS alert record (content-type 0x15),
+        //       whose big-endian interpretation as a wire-frame length is absurd
+        //       (a real framed Pong is only tens of bytes; this is > 64 MiB).
+        let mut len_buf = [0u8; 4];
+        match plain.read_exact(&mut len_buf).await {
+            Err(_) => { /* rejected via connection drop — good */ }
+            Ok(_) => {
+                let framed_len = u32::from_be_bytes(len_buf);
+                assert!(
+                    len_buf[0] == 0x15 || framed_len > 64 * 1024 * 1024,
+                    "plaintext client must NOT receive a valid framed wire response from a TLS \
+                     node (handshake rejection); got bytes {:?} (len={})",
+                    len_buf,
+                    framed_len
+                );
+            }
+        }
     }
 
     #[tokio::test]
