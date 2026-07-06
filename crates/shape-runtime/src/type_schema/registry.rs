@@ -32,7 +32,7 @@ const INITIAL_SCHEMA_ID: SchemaId = 1;
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TypeSchemaRegistry {
     /// Dense per-registry counter that hands out the intern INDEX for each
-    /// distinct [`SchemaContentId`] (WF-3A / ADR-006 §2.7.30). It advances
+    /// distinct [`SchemaContentId`] (WF-3A / ADR-006 §2.7.31). It advances
     /// only inside [`Self::intern_content`] (one step per NEW structure) and
     /// via predeclared allocation — never as a blind, order-dependent
     /// identity source.
@@ -129,7 +129,7 @@ impl TypeSchemaRegistry {
     }
 
     /// Mint the registry-local `SchemaId` handle for a canonical
-    /// [`SchemaContentId`] (WF-3A / ADR-006 §2.7.30) — the SINGLE mint
+    /// [`SchemaContentId`] (WF-3A / ADR-006 §2.7.31) — the SINGLE mint
     /// operation.
     ///
     /// Identical content ids return the SAME handle (structural dedup);

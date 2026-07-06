@@ -10,7 +10,7 @@ use arrow_schema::{DataType, Schema as ArrowSchema};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// Canonical, content-derived schema identity (WF-3A / ADR-006 §2.7.30).
+/// Canonical, content-derived schema identity (WF-3A / ADR-006 §2.7.31).
 ///
 /// A SHA-256 over the schema's *structure*. This is the single source of
 /// truth for schema identity; the runtime `SchemaId(u32)` handle is a
@@ -31,7 +31,7 @@ use std::collections::HashMap;
 )]
 pub struct SchemaContentId(pub [u8; 32]);
 
-/// Hash-scheme version tag (ADR-006 §2.7.30 / design §M4). Prefixed onto the
+/// Hash-scheme version tag (ADR-006 §2.7.31 / design §M4). Prefixed onto the
 /// canonical bytes so the identity inputs can evolve without silently
 /// changing existing content ids: bump this if the hash inputs ever change.
 pub const SCHEMA_CONTENT_SCHEME_V0: u8 = 0;
@@ -258,7 +258,7 @@ impl TypeSchema {
     }
 
     /// Compute the canonical content hash (SHA-256) from the structural
-    /// definition (WF-3A / ADR-006 §2.7.30).
+    /// definition (WF-3A / ADR-006 §2.7.31).
     ///
     /// The hash is derived deterministically from:
     /// - A 1-byte hash-scheme version tag (`SCHEMA_CONTENT_SCHEME_V0`).

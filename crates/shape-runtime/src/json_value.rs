@@ -420,7 +420,7 @@ fn resolve_json_schema_id(
 
 /// Resolve the `TypeSchema` for a `TypedObject` node from its numeric handle.
 ///
-/// WF-3A (ADR-006 §2.7.30): schema identity is content-derived and
+/// WF-3A (ADR-006 §2.7.31): schema identity is content-derived and
 /// per-registry interned, so within any single registry a handle resolves to
 /// exactly one structure — the WF-2E id-41 `XmlNode`/`Json` collision (which
 /// required a runtime arity heuristic across three registries to disambiguate)
@@ -1336,6 +1336,71 @@ mod tests {
             Arc::strong_count(&value),
             1,
             "dropping the TypedObjectPtr must release the field String share"
+        );
+    }
+
+    /// WF-3A (ADR-006 §2.7.31): the WF-2E id-41 `XmlNode`/`Json` collision is
+    /// structurally impossible under content-derived identity, and the arity
+    /// heuristic in `resolve_typed_object_schema` is deleted. This proves it
+    /// from scratch: a 3-field `XmlNode`-shaped schema and a 2-field `Json`
+    /// enum-shaped schema, registered into ONE registry, intern to DISTINCT
+    /// handles (no shared id), and `typed_object_ptr_to_json_value` resolves
+    /// the 3-field structure by its handle — rendering all three fields, not a
+    /// 2-field colliding schema — with a single `get_by_id` (no slot-count
+    /// disambiguation).
+    #[test]
+    fn wf3a_xmlnode_vs_json_no_id_collision_renders_correct_arity() {
+        let mut registry = TypeSchemaRegistry::new_with_stdlib();
+        // 2-field "Json"-shaped named schema (the WF-2E collision partner).
+        let json_id = TypeSchemaBuilder::new("__WF3AJsonLike")
+            .string_field("tag")
+            .i64_field("payload")
+            .register(&mut registry);
+        // 3-field "XmlNode"-shaped named schema.
+        let xml_id = TypeSchemaBuilder::new("__WF3AXmlNode")
+            .string_field("name")
+            .string_field("text")
+            .i64_field("depth")
+            .register(&mut registry);
+
+        // Distinct structures -> distinct interned handles. No id-41 collision.
+        assert_ne!(
+            json_id, xml_id,
+            "XmlNode and Json-shaped schemas must intern to distinct handles"
+        );
+
+        let _scope = SyncRegistryScope::enter(Arc::new(registry));
+
+        let name = Arc::new("root".to_string());
+        let text = Arc::new("hello".to_string());
+        // fields: name(heap String), text(heap String), depth(inline Int64).
+        let ptr = TypedObjectStorage::_new(
+            xml_id as u64,
+            vec![
+                ValueSlot::from_string_arc(Arc::clone(&name)),
+                ValueSlot::from_string_arc(Arc::clone(&text)),
+                ValueSlot::from_int(2),
+            ]
+            .into_boxed_slice(),
+            0b011,
+            Arc::from(
+                vec![NativeKind::String, NativeKind::String, NativeKind::Int64].into_boxed_slice(),
+            ),
+        );
+        let object = TypedObjectPtr::new(ptr);
+
+        let json = typed_object_ptr_to_json_value(&object).expect("xmlnode object to json");
+        let serde_value = json_value_to_serde_json(&json);
+
+        // All THREE fields resolved via the XmlNode handle — proving the
+        // resolver picked the 3-field structure, not a 2-field colliding one.
+        assert_eq!(serde_value["name"], serde_json::json!("root"));
+        assert_eq!(serde_value["text"], serde_json::json!("hello"));
+        assert_eq!(serde_value["depth"], serde_json::json!(2));
+        assert_eq!(
+            serde_value.as_object().map(|o| o.len()),
+            Some(3),
+            "XmlNode must render with 3 fields, not a colliding 2-field schema"
         );
     }
 }

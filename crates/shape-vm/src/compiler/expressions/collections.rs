@@ -1466,9 +1466,18 @@ impl BytecodeCompiler {
                                 (f.name.clone(), ft)
                             })
                             .collect::<Vec<_>>();
-                        let schema_id = self.type_tracker.schema_registry().allocate_id();
-                        let schema =
-                            TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
+                        // WF-3A: mint the NAMED schema handle via the single
+                        // content-intern table so two identical monomorphized /
+                        // aliased struct literals dedup to one handle
+                        // (EqTypedObject correctness) instead of each drawing a
+                        // fresh counter id.
+                        let mut schema =
+                            TypeSchema::with_id(0, runtime_type_name.clone(), fields);
+                        let schema_id = self
+                            .type_tracker
+                            .schema_registry()
+                            .intern_content(schema.content_id());
+                        schema.id = schema_id;
                         self.type_tracker.schema_registry_mut().register(schema);
                         schema_id
                     } else if let Some(alias_base) = alias_target.as_deref()
@@ -1483,9 +1492,18 @@ impl BytecodeCompiler {
                             .iter()
                             .map(|f| (f.name.clone(), f.field_type.clone()))
                             .collect::<Vec<_>>();
-                        let schema_id = self.type_tracker.schema_registry().allocate_id();
-                        let schema =
-                            TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
+                        // WF-3A: mint the NAMED schema handle via the single
+                        // content-intern table so two identical monomorphized /
+                        // aliased struct literals dedup to one handle
+                        // (EqTypedObject correctness) instead of each drawing a
+                        // fresh counter id.
+                        let mut schema =
+                            TypeSchema::with_id(0, runtime_type_name.clone(), fields);
+                        let schema_id = self
+                            .type_tracker
+                            .schema_registry()
+                            .intern_content(schema.content_id());
+                        schema.id = schema_id;
                         self.type_tracker.schema_registry_mut().register(schema);
                         schema_id
                     } else {
@@ -1534,8 +1552,15 @@ impl BytecodeCompiler {
                         .iter()
                         .map(|f| (f.name.clone(), f.field_type.clone()))
                         .collect::<Vec<_>>();
-                    let schema_id = self.type_tracker.schema_registry().allocate_id();
-                    let schema = TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
+                    // WF-3A: mint via the single content-intern table (nominal
+                    // dedup for the aliased named schema).
+                    let mut schema =
+                        TypeSchema::with_id(0, runtime_type_name.clone(), fields);
+                    let schema_id = self
+                        .type_tracker
+                        .schema_registry()
+                        .intern_content(schema.content_id());
+                    schema.id = schema_id;
                     self.type_tracker.schema_registry_mut().register(schema);
                     schema_id
                 } else {
