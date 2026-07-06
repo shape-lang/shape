@@ -5924,7 +5924,7 @@ impl BytecodeCompiler {
         // Result<Json>, etc.) keep the existing infer/schema path so their own
         // navigation semantics are untouched. No type is fabricated: the type
         // is the declared `-> T` from the stdlib source.
-        if let Some(ti) = self.native_module_scalar_return_type_info(&canonical_module, method) {
+        if let Some(ti) = self.native_module_declared_return_type_info(&canonical_module, method) {
             self.last_expr_type_info = Some(ti);
         } else {
             let namespace_call_expr = Expr::QualifiedFunctionCall {
@@ -5947,14 +5947,25 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// WF-3A-tail: recover a native module export's declared SCALAR return type
-    /// from the module schema registry (`ModuleExports.get_schema(..).return_type`,
-    /// a type-name string like `"float"`). Returns `Some` only for scalar
-    /// families (`bool` / `string` / `int` / `number` / `decimal`); heap and
-    /// wrapper returns (`Result<..>`, enums, arrays, objects) return `None` so
-    /// the caller falls back to the existing inference/schema path. The type is
-    /// the declared `-> T` from the stdlib source — nothing is fabricated.
-    fn native_module_scalar_return_type_info(
+    /// WF-3A-tail: recover a native module export's declared return type from
+    /// the module schema registry (`ModuleExports.get_schema(..).return_type`,
+    /// a type-name string like `"number"` or `"Result<Json, string>"`). The
+    /// inference tier holds no module-export signatures, so an unannotated
+    /// `let r = json::parse(..)` used to erase to unknown and force dynamic
+    /// method dispatch on the marshalled `Json` enum (which does not resolve
+    /// `extend Json` methods) — the json/msgpack navigation bug (#16/#17).
+    ///
+    /// Returns `Some` for:
+    /// - scalar families (`bool` / `string` / `int` / `number` / `decimal`) —
+    ///   fixes `time::millis()` operand-position inference;
+    /// - fallible/optional wrappers (`Result<..>` / `Option<..>`) — carries the
+    ///   Ok/Some payload type name so `match r { Ok(v) => v.method() }` binds
+    ///   `v` with a proven type and resolves `extend` methods statically.
+    ///
+    /// Other heap returns (bare enums / arrays / objects) return `None` so the
+    /// caller keeps the existing inference/schema path. The type is the declared
+    /// `-> T` from the stdlib source — nothing is fabricated.
+    fn native_module_declared_return_type_info(
         &self,
         canonical_module: &str,
         method: &str,
@@ -5962,8 +5973,18 @@ impl BytecodeCompiler {
         let registry = self.extension_registry.as_ref()?;
         let module = registry.iter().rev().find(|m| m.name == canonical_module)?;
         let schema = module.get_schema(method)?;
-        let return_type = schema.return_type.as_ref()?;
-        Self::builtin_scalar_type_info(return_type.trim())
+        let return_type = schema.return_type.as_ref()?.trim();
+        if let Some(scalar) = Self::builtin_scalar_type_info(return_type) {
+            return Some(scalar);
+        }
+        // Fallible/optional wrappers: propagate the baked wrapper-type-name so
+        // `propagate_assignment_type_to_slot`'s `Result<`/`Option<` guard
+        // records it and the downstream `Ok(v)`/`Some(v)` binding recovers the
+        // payload type (mirrors `type_info_from_annotation`'s Generic arm).
+        if return_type.starts_with("Result<") || return_type.starts_with("Option<") {
+            return Some(VariableTypeInfo::named(return_type.to_string()));
+        }
+        None
     }
 
     /// Q33 / distributed §4.1.1: elaborate a direct

@@ -3640,7 +3640,72 @@ fn concrete_type_from_tracker_info(
 ) -> Option<ConcreteType> {
     let type_name = info.type_name.as_deref()?;
     concrete_type_from_type_name(Some(type_name))
+        .or_else(|| wrapper_concrete_type_from_tracker_name(compiler, type_name))
         .or_else(|| struct_or_enum_concrete_type(compiler, type_name))
+}
+
+/// WF-3A-tail (json/msgpack navigation): resolve a `Result<..>` / `Option<..>`
+/// tracker type-name string (as recorded from a native module export's
+/// declared return type, e.g. `"Result<Json>"`) into a
+/// [`ConcreteType::Result`] / [`ConcreteType::Option`]. Without this, a module
+/// call bound to a `let` (`let r = json::parse(..)`) recorded the wrapper name
+/// on the tracker but `concrete_type_from_type_name` (scalar-only) returned
+/// `None`, so `match r { Ok(v) => v.method() }` peeled no payload type and `v`
+/// erased to dynamic dispatch (which cannot resolve `extend` methods on the
+/// marshalled enum). Mirrors `declared_annotation_concrete_type`'s Result/Option
+/// arms, including the `Result<T>` single-arg → `Void` err placeholder.
+fn wrapper_concrete_type_from_tracker_name(
+    compiler: &BytecodeCompiler,
+    name: &str,
+) -> Option<ConcreteType> {
+    let name = name.trim();
+    if let Some(inner) = name
+        .strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        let inner_ct = concrete_type_from_wrapper_inner(compiler, inner.trim())?;
+        return Some(ConcreteType::Option(Box::new(inner_ct)));
+    }
+    if let Some(body) = name
+        .strip_prefix("Result<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        let (ok_s, err_s) = split_top_level_comma(body);
+        let ok_ct = concrete_type_from_wrapper_inner(compiler, ok_s.trim())?;
+        let err_ct = err_s
+            .and_then(|e| concrete_type_from_wrapper_inner(compiler, e.trim()))
+            .unwrap_or(ConcreteType::Void);
+        return Some(ConcreteType::Result(Box::new(ok_ct), Box::new(err_ct)));
+    }
+    None
+}
+
+/// Resolve one type-name component (scalar, nested wrapper, or named
+/// struct/enum) inside a wrapper tracker name. `None` when the component is not
+/// a recognizable concrete type.
+fn concrete_type_from_wrapper_inner(
+    compiler: &BytecodeCompiler,
+    inner: &str,
+) -> Option<ConcreteType> {
+    concrete_type_from_type_name(Some(inner))
+        .or_else(|| wrapper_concrete_type_from_tracker_name(compiler, inner))
+        .or_else(|| struct_or_enum_concrete_type(compiler, inner))
+}
+
+/// Split a generic-args body on its FIRST top-level comma (depth 0 w.r.t.
+/// nested `<>`). Returns `(first, Some(rest))` or `(whole, None)` when there is
+/// no top-level comma.
+fn split_top_level_comma(body: &str) -> (&str, Option<&str>) {
+    let mut depth = 0i32;
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => return (&body[..i], Some(&body[i + 1..])),
+            _ => {}
+        }
+    }
+    (body, None)
 }
 
 fn current_function_param_concrete_type_from_facts(
