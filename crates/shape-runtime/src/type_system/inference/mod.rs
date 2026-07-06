@@ -430,6 +430,21 @@ pub struct TypeInferenceEngine {
     /// the original binder var unfinalized.
     pub(crate) param_destructure_array_element_links: Vec<(Type, TypeVar)>,
     pub(crate) param_destructure_field_links: Vec<(Type, String, TypeVar)>,
+    /// WF-3A-tail (module-qualified scalar return propagation): declared SCALAR
+    /// return types for native module exports, keyed `"namespace::function"`
+    /// (e.g. `"time::millis" -> number`). The inference tier holds no
+    /// module-export signatures, so a bare `time::millis()` used in operand /
+    /// argument / index position erased to a fresh var — silently unifying with
+    /// whatever the context demanded (a `string` param, an array index),
+    /// defeating strict typing. The bytecode compiler populates this map from
+    /// its extension-registry module schemas (scalar returns ONLY — via
+    /// `canonical_script_alias`; `Result<..>`/`Option<..>`/heap returns are
+    /// omitted and keep the existing fresh-var path so json/msgpack navigation
+    /// is untouched). Consulted at the top of the `QualifiedFunctionCall` arm.
+    /// Values are canonical scalar type names (`bool`/`int`/`number`/`string`/
+    /// `decimal`); the type is the declared `-> T` from the stdlib source —
+    /// nothing is fabricated, and `int`/`number` stay separate.
+    pub(crate) module_qualified_scalar_returns: HashMap<String, String>,
 }
 
 impl Default for TypeInferenceEngine {
@@ -497,7 +512,16 @@ impl TypeInferenceEngine {
             binding_fact_table: HashMap::new(),
             param_destructure_array_element_links: Vec::new(),
             param_destructure_field_links: Vec::new(),
+            module_qualified_scalar_returns: HashMap::new(),
         }
+    }
+
+    /// WF-3A-tail: register native module exports' declared SCALAR return types
+    /// so a module-qualified call (`time::millis()`) infers its true type in
+    /// ANY position, not just when bound to a `let`. Keys are `"ns::fn"`; values
+    /// are canonical scalar type names. See `module_qualified_scalar_returns`.
+    pub fn register_module_qualified_scalar_returns(&mut self, map: HashMap<String, String>) {
+        self.module_qualified_scalar_returns = map;
     }
 
     /// T1 keystone: the POST-SOLVE resolved type recorded for the expression at

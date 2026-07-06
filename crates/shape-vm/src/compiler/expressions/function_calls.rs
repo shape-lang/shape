@@ -6022,6 +6022,75 @@ impl BytecodeCompiler {
         Some(Type::Concrete(TypeAnnotation::Basic(canonical.to_string())))
     }
 
+    /// WF-3A-tail: build the `"namespace::function" -> canonical-scalar-type`
+    /// map handed to the semantic analyzer so a module-qualified builtin call
+    /// (`time::millis()`) infers its declared scalar return type in ANY position
+    /// (binary operand, call argument, index), not only when bound to a `let`.
+    ///
+    /// Scoped to native module SCALAR exports (`bool`/`int`/`number`/`string`/
+    /// `decimal`) via `canonical_script_alias`. `Result<..>`/`Option<..>`/heap
+    /// returns are omitted, so the semantic analyzer keeps its existing fresh-var
+    /// path for those and json/msgpack navigation is untouched. Nothing is
+    /// fabricated — each value is the declared `-> T` from the module schema;
+    /// `int` and `number` stay distinct.
+    pub(crate) fn build_module_qualified_scalar_returns(
+        &self,
+    ) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        let Some(registry) = self.extension_registry.as_ref() else {
+            return map;
+        };
+        // A module-qualified call in source uses a LOCAL namespace name — the
+        // trailing segment of an unaliased `use std::core::time` ("time") or an
+        // explicit `use .. as t` alias ("t"). The extension registry keys
+        // modules by their FULL canonical path ("std::core::time"). Collect,
+        // per registry module, every local namespace the inference engine might
+        // observe: the full path, its trailing segment, and any alias in the
+        // graph/scope namespace maps that resolves to that path.
+        let mut aliases_for: std::collections::HashMap<&str, Vec<String>> =
+            std::collections::HashMap::new();
+        for (local, canonical) in self
+            .graph_namespace_map
+            .iter()
+            .chain(self.module_scope_sources.iter())
+        {
+            aliases_for
+                .entry(canonical.as_str())
+                .or_default()
+                .push(local.clone());
+        }
+        for module in registry.iter() {
+            let mut namespaces: Vec<String> = vec![module.name.clone()];
+            if let Some(last) = module.name.rsplit("::").next() {
+                if last != module.name {
+                    namespaces.push(last.to_string());
+                }
+            }
+            if let Some(aliases) = aliases_for.get(module.name.as_str()) {
+                namespaces.extend(aliases.iter().cloned());
+            }
+            for export in module.export_names_available(self.comptime_mode) {
+                let Some(schema) = module.get_schema(export) else {
+                    continue;
+                };
+                let Some(return_type) = schema.return_type.as_ref() else {
+                    continue;
+                };
+                let Some(scalar) =
+                    shape_runtime::type_system::BuiltinTypes::canonical_script_alias(
+                        return_type.trim(),
+                    )
+                else {
+                    continue;
+                };
+                for ns in &namespaces {
+                    map.insert(format!("{}::{}", ns, export), scalar.to_string());
+                }
+            }
+        }
+        map
+    }
+
     /// Q33 / distributed §4.1.1: elaborate a direct
     /// `remote::call(addr, fn_ref, args…)` site — the imperative analog of the
     /// `@remote` annotation path, in the same special-casing class as

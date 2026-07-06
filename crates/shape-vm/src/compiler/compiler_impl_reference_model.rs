@@ -2127,13 +2127,21 @@ impl BytecodeCompiler {
         // annotation path, not a new checker).
         self.directive_reanalysis_program = Some(analysis_program.clone());
         self.directive_reanalysis_known_bindings = known_bindings.clone();
-        if let Err(errors) = analyze_program_with_mode_and_comptime_context(
+        // WF-3A-tail: hand the semantic analyzer the native module-export
+        // SCALAR return-type map so a module-qualified call (`time::millis()`)
+        // infers its declared type in operand / argument / index position — not
+        // only when bound to a `let` (the emit-tier stamp). Without this the
+        // analyzer erased the call to a fresh var that silently unified with
+        // whatever the context demanded, defeating strict typing.
+        let module_scalar_returns = self.build_module_qualified_scalar_returns();
+        if let Err(errors) = analyze_program_full(
             &analysis_program,
             self.source_text.as_deref(),
             None,
             Some(&known_bindings),
             analysis_mode,
             self.comptime_mode,
+            Some(module_scalar_returns),
         ) {
             match self.type_diagnostic_mode {
                 TypeDiagnosticMode::Strict => {
