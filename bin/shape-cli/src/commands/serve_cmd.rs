@@ -2082,4 +2082,177 @@ print(r)
             other => panic!("Expected ExecuteResponse, got {:?}", other),
         }
     }
+
+    /// D1 (WF-3E) — `@remote` FOREIGN composition end-to-end. A regular `@remote`
+    /// fn whose BODY calls an `extern C` foreign stub transfers over the wire and
+    /// executes ON the serve node. Both the wrapper blob AND the foreign-stub blob
+    /// travel: the sender's minimal-blob closure now follows the
+    /// `LoadModuleBinding` + `CallValue` edge to the foreign stub (pre-fix it
+    /// shipped `blobs=1` with the stub missing, and the receiver died
+    /// "frame_descriptor has 0 slots but arity is 1"). The `extern C labs` runs
+    /// server-side via libffi — no language runtime needed — so
+    /// `remote_abs(-42) == 42` proves the foreign body executed on the receiver,
+    /// not a client-side fallback. This is the exact `blobs>=2` /
+    /// foreign-functions-non-empty regression path the audit found untested.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_foreign_extern_c_transfer_over_tcp() {
+        // `none` on loopback grants `Ffi`; `extern C` is not gated by the
+        // (empty) `ffi_languages` allow-list, so the foreign call is admitted.
+        let addr = start_test_server().await;
+        let security = derive_serve_security(SandboxLevel::None, true, &[]);
+
+        let code = format!(
+            r#"
+use std::core::remote
+
+extern "C" fn labs(x: int) -> int from "c"
+
+@remote("{addr}")
+fn remote_abs(x: int) -> int {{
+    labs(x)
+}}
+
+print(remote_abs(-42))
+"#
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
+        })
+        .await
+        .expect("client thread panicked");
+
+        let out = result.expect("@remote extern C composition transfer failed");
+        let stdout = out.stdout.unwrap_or_default();
+        assert!(
+            stdout.contains("42"),
+            "@remote fn calling extern C labs(-42) must return 42 server-side, \
+             got stdout {stdout:?} value {:?}",
+            out.value
+        );
+    }
+
+    /// D4 (WF-3E, design §4.1.1 / Q26) — `remote::call` yields a REAL
+    /// `Result<R, RemoteError>`. Pre-fix the compiler lowered `remote::call` at
+    /// the bare callee return type, so the documented
+    /// `match { Ok(v) => .., Err(e) => .. }` type-checked then crashed at runtime
+    /// ("No match arm matched"). Here BOTH arms are reachable from the same
+    /// program shape: a live node returns `Ok(42)`, and a dead port returns
+    /// `Err(RemoteError::Transport)` (pre-send connect-refused) — a recoverable
+    /// value, never an abort.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_call_result_ok_and_err_over_tcp() {
+        let addr = start_test_server().await;
+
+        // Ok arm — live node.
+        let security_ok = derive_serve_security(SandboxLevel::None, true, &[]);
+        let code_ok = format!(
+            r#"
+use std::core::remote
+fn mul(a: int, b: int) -> int {{ a * b }}
+let r = remote::call("{addr}", mul, 6, 7)
+match r {{
+    Ok(v) => print(f"OK={{v}}")
+    Err(e) => print(f"ERR={{e}}")
+}}
+"#
+        );
+        let ok = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code_ok, &[], &ProviderOptions::default(), &security_ok)
+        })
+        .await
+        .expect("client thread panicked")
+        .expect("remote::call Ok path failed");
+        assert!(
+            ok.stdout.unwrap_or_default().contains("OK=42"),
+            "live remote::call mul(6,7) must take the Ok arm with value 42"
+        );
+
+        // Err arm — nothing listening on 127.0.0.1:2 → a pre-send Transport
+        // failure surfaces as a recoverable `Err`, and the program runs to
+        // completion printing it (no "No match arm matched" abort).
+        let security_err = derive_serve_security(SandboxLevel::None, true, &[]);
+        let code_err = r#"
+use std::core::remote
+fn mul(a: int, b: int) -> int { a * b }
+let r = remote::call("127.0.0.1:2", mul, 6, 7)
+match r {
+    Ok(v) => print(f"OK={v}")
+    Err(e) => print("ERR_FIRED")
+}
+"#
+        .to_string();
+        let err = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code_err, &[], &ProviderOptions::default(), &security_err)
+        })
+        .await
+        .expect("client thread panicked")
+        .expect("remote::call Err path must run cleanly (recoverable), not abort");
+        assert!(
+            err.stdout.unwrap_or_default().contains("ERR_FIRED"),
+            "dead-port remote::call must take the Err arm as a recoverable Result, not crash"
+        );
+    }
+
+    /// D5 (WF-3E, §4.6) — receiver permission-over-wire refusal on REAL derived
+    /// permissions. A transferred per-function blob now carries its own body's
+    /// required permissions (pre-fix `record_blob_permissions` fired only for
+    /// NAMED top-level imports, so a namespace import + the callee body recorded
+    /// nothing and the §4.6 load-refusal had empty data). A strict node (grants
+    /// nothing) receives a fn that calls `file::write_text` and refuses it at LOAD
+    /// with `Err(RemoteError::PermissionDenied { missing: [..fs.write..] })`; the
+    /// write never runs (no file on disk).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_remote_permission_refusal_over_wire() {
+        // Strict receiver grants nothing; the sender is fully trusted.
+        let addr = start_test_server_with_sandbox(SandboxLevel::Strict).await;
+        let security = derive_serve_security(SandboxLevel::None, true, &[]);
+
+        let target = std::env::temp_dir().join(format!(
+            "wf3e_d5_wire_refuse_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&target);
+
+        let code = format!(
+            r#"
+use std::core::remote
+use std::core::file
+fn writer(x: int) -> int {{ file::write_text("{}", "escaped over wire"); x }}
+let r = remote::call("{addr}", writer, 1)
+match r {{
+    Ok(v) => print(f"OK={{v}}")
+    Err(e) => print(f"REFUSED={{e}}")
+}}
+"#,
+            target.display()
+        );
+
+        let result = tokio::task::spawn_blocking(move || {
+            execute_code_in_process(&code, &[], &ProviderOptions::default(), &security)
+        })
+        .await
+        .expect("client thread panicked");
+
+        let stdout = result
+            .expect("D5 client program must run cleanly (recoverable refusal)")
+            .stdout
+            .unwrap_or_default();
+        assert!(
+            stdout.contains("REFUSED")
+                && (stdout.contains("fs.write") || stdout.to_lowercase().contains("permission")),
+            "strict node must refuse the transferred fs.write fn at load with a \
+             PermissionDenied Err naming fs.write, got stdout: {stdout:?}"
+        );
+        assert!(
+            !target.exists(),
+            "the refused write must NOT have hit disk on the strict receiver: {}",
+            target.display()
+        );
+        let _ = std::fs::remove_file(&target);
+    }
 }
