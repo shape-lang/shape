@@ -38,9 +38,29 @@ pub fn parse_import_stmt(pair: Pair<Rule>) -> Result<ImportStmt> {
                         from: module_path,
                     })
                 }
-                Some(pair) if pair.as_rule() == Rule::ident => {
+                Some(pair)
+                    if pair.as_rule() == Rule::as_keyword || pair.as_rule() == Rule::ident =>
+                {
                     // "use <module_path> as <alias>"
-                    let alias = pair.as_str().to_string();
+                    //
+                    // The `as` keyword is matched by the atomic `as_keyword`
+                    // rule (word-boundary enforced so `async` etc. don't
+                    // greedily consume the `as` prefix). Being a named atomic
+                    // rule, it emits its own token pair, so skip it to reach
+                    // the alias ident (mirrors the cast parser in
+                    // `expressions/primary.rs`). The `Rule::ident` arm is a
+                    // defensive fallback for any grammar path that yields the
+                    // ident directly.
+                    let alias_pair = if pair.as_rule() == Rule::as_keyword {
+                        inner.next().ok_or_else(|| ShapeError::ParseError {
+                            message: "expected alias identifier after `as` in use statement"
+                                .to_string(),
+                            location: Some(pair_loc.clone()),
+                        })?
+                    } else {
+                        pair
+                    };
+                    let alias = alias_pair.as_str().to_string();
                     let local_name = module_path
                         .rsplit("::")
                         .next()
@@ -129,9 +149,20 @@ fn parse_import_item(pair: Pair<Rule>) -> Result<ImportSpec> {
                 message: "expected import item name".to_string(),
                 location: Some(pair_loc.clone()),
             })?;
+            // `ident (as_keyword ident)?` — the `as` keyword is the atomic
+            // `as_keyword` rule (word-boundary enforced), which emits its own
+            // token pair. Skip it so the alias resolves to the following ident
+            // rather than the literal text "as".
+            let alias = match regular_inner.next() {
+                Some(p) if p.as_rule() == Rule::as_keyword => {
+                    regular_inner.next().map(|p| p.as_str().to_string())
+                }
+                Some(p) => Some(p.as_str().to_string()),
+                None => None,
+            };
             Ok(ImportSpec {
                 name: name_pair.as_str().to_string(),
-                alias: regular_inner.next().map(|p| p.as_str().to_string()),
+                alias,
                 is_annotation: false,
             })
         }

@@ -12,7 +12,7 @@
 //!   `arrow.metadata` precedent at `arrow_module.rs:127`).
 //! - Inner `headers` field carries `HashMap<string, string>` payload via
 //!   `ConcreteReturn::HashMapStringString` (insertion-order preserved).
-//! - Options arg parsing uses `Vec<(Arc<String>, Arc<HeapValue>)>`
+//! - Options arg parsing uses `JsonValue`
 //!   FromSlot impl from Step 1 P1(b) infrastructure
 //!   (`crates/shape-runtime/src/marshal.rs`, Stage C commit `36519f6`).
 //!
@@ -34,7 +34,7 @@
 //!   remain DEFERRED pending architectural sub-decision **N7 —
 //!   HeapValue→JSON serializer for HTTP / object-output marshal
 //!   contexts.** The `body: object` shape requires walking the
-//!   polymorphic `Vec<(Arc<String>, Arc<HeapValue>)>` tree and producing
+//!   polymorphic `JsonValue` tree and producing
 //!   a JSON string; per-variant serialization choices for Decimal,
 //!   DataTable, Content, Temporal, TableView each represent a
 //!   user-visible behavioral commitment that needs supervisor sign-off
@@ -51,7 +51,7 @@ use crate::marshal::register_typed_async_fn_3_full;
 use crate::marshal::register_typed_fn_3_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
-use shape_value::heap_value::HeapValue;
+use crate::json_value::JsonValue;
 use std::sync::Arc;
 
 /// Build the schemaful HttpResponse pair-list returned by every http.*
@@ -77,65 +77,62 @@ fn build_response_pairs(
     ]
 }
 
-/// Extract optional headers from an `options: HashMap<string, *>` arg.
-/// The options HashMap may contain a `"headers"` key whose value is itself
-/// a `HashMap<string, string>` (`HeapValue::HashMap` variant). Walks the
-/// outer pair list linearly looking for `"headers"`, then reads the
-/// nested HashMap's keys/values buffers.
-fn extract_headers(options: &[(Arc<String>, Arc<HeapValue>)]) -> Vec<(String, String)> {
-    for (k, v) in options.iter() {
-        if k.as_str() == "headers" {
-            if let HeapValue::HashMap(kref) = &**v {
-                // Wave 2 Round 3b C2-joint ckpt-4 (2026-05-14): per-V walk
-                // for HashMap<string, string> (the canonical headers shape).
-                // Other V variants return empty (caller's contract is
-                // string headers; non-string Vs are a producer-side bug).
-                use shape_value::heap_value::HashMapKindedRef;
-                if let HashMapKindedRef::String(arc) = kref {
-                    let n = arc.len();
-                    let mut out = Vec::with_capacity(n);
-                    for i in 0..n {
-                        let key: String = unsafe {
-                            let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
-                                arc.keys, i as u32,
-                            );
-                            shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
-                        };
-                        let val: String = unsafe {
-                            let v_ptr: *const shape_value::v2::string_obj::StringObj =
-                                *(*arc.values).data.add(i);
-                            shape_value::v2::string_obj::StringObj::as_str(v_ptr).to_owned()
-                        };
-                        out.push((key, val));
-                    }
-                    return out;
+/// Extract optional headers from the `options` object.
+///
+/// WF-2E (2026-07-05): `options` is walked into a `JsonValue` tree at the
+/// marshal boundary (typed, kind-directed — no pointer reinterpretation).
+/// A `"headers"` field whose value is an object contributes one HTTP
+/// header per key; scalar values render to their string form. A non-object
+/// or absent `headers` field yields no headers.
+fn extract_headers(options: &JsonValue) -> Vec<(String, String)> {
+    let JsonValue::Object(fields) = options else {
+        return Vec::new();
+    };
+    for (k, v) in fields.iter() {
+        if k == "headers" {
+            if let JsonValue::Object(hdrs) = v {
+                let mut out = Vec::with_capacity(hdrs.len());
+                for (hk, hv) in hdrs.iter() {
+                    let val = match hv {
+                        JsonValue::String(s) => s.clone(),
+                        JsonValue::Int(i) => i.to_string(),
+                        JsonValue::Number(n) => n.to_string(),
+                        JsonValue::Bool(b) => b.to_string(),
+                        // null / nested containers are not valid header
+                        // values — skip.
+                        _ => continue,
+                    };
+                    out.push((hk.clone(), val));
                 }
-                return Vec::new();
+                return out;
             }
+            return Vec::new();
         }
     }
     Vec::new()
 }
 
-/// Extract optional `timeout` (milliseconds) from the options HashMap.
-/// Walks linearly for `"timeout"`; if present and integer, converts to a
-/// `Duration`.
+/// Extract optional `timeout` (milliseconds) from the `options` object.
 ///
-/// Currently accepts `HeapValue::BigInt` (i64-typed integer) values only.
-/// `number`-typed (f64) timeout values surface as raw scalar slots in
-/// post-bulldozer Shape and don't reach `HeapValue` — supporting them
-/// would require either Shape user code passing an int (`5000` not
-/// `5000.0`) OR a future `HeapValue::NativeScalar`-aware branch here.
-/// Documented for follow-on if a consumer surfaces.
-fn extract_timeout(options: &[(Arc<String>, Arc<HeapValue>)]) -> Option<std::time::Duration> {
-    for (k, v) in options.iter() {
-        if k.as_str() == "timeout" {
-            if let HeapValue::BigInt(ms) = &**v {
-                let n = **ms;
-                if n > 0 {
-                    return Some(std::time::Duration::from_millis(n as u64));
-                }
+/// Accepts both `int` and `number` timeout values (both are ordinary scalar
+/// leaves in the `JsonValue` tree — the pre-WF-2E `HeapValue::BigInt`
+/// int-only restriction is gone). Non-positive / non-numeric values yield
+/// no timeout.
+fn extract_timeout(options: &JsonValue) -> Option<std::time::Duration> {
+    let JsonValue::Object(fields) = options else {
+        return None;
+    };
+    for (k, v) in fields.iter() {
+        if k == "timeout" {
+            let ms: i64 = match v {
+                JsonValue::Int(i) => *i,
+                JsonValue::Number(n) => *n as i64,
+                _ => return None,
+            };
+            if ms > 0 {
+                return Some(std::time::Duration::from_millis(ms as u64));
             }
+            return None;
         }
     }
     None
@@ -167,13 +164,13 @@ pub fn create_http_module() -> ModuleExports {
         ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
 
     // http.get(url: string, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_2_full::<_, _, Arc<String>, Vec<(Arc<String>, Arc<HeapValue>)>>(
+    register_typed_async_fn_2_full::<_, _, Arc<String>, JsonValue>(
         &mut module,
         "get",
         "Perform an HTTP GET request",
         [url_param.clone(), options_param.clone()],
         response_ty.clone(),
-        |url: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, options: JsonValue| async move {
             let mut builder = reqwest::Client::new().get(url.as_str());
 
             for (k, v) in extract_headers(&options) {
@@ -206,13 +203,13 @@ pub fn create_http_module() -> ModuleExports {
     );
 
     // http.delete(url: string, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_2_full::<_, _, Arc<String>, Vec<(Arc<String>, Arc<HeapValue>)>>(
+    register_typed_async_fn_2_full::<_, _, Arc<String>, JsonValue>(
         &mut module,
         "delete",
         "Perform an HTTP DELETE request",
         [url_param, options_param],
         response_ty,
-        |url: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, options: JsonValue| async move {
             let mut builder = reqwest::Client::new().delete(url.as_str());
 
             for (k, v) in extract_headers(&options) {
@@ -288,7 +285,7 @@ pub fn create_http_module() -> ModuleExports {
         _,
         Arc<String>,
         Arc<String>,
-        Vec<(Arc<String>, Arc<HeapValue>)>,
+        JsonValue,
     >(
         &mut module,
         "post_text",
@@ -299,7 +296,7 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>, body: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Arc<String>, options: JsonValue| async move {
             let mut builder = reqwest::Client::new()
                 .post(url.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -335,7 +332,12 @@ pub fn create_http_module() -> ModuleExports {
     );
 
     // http.post_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_3_full::<_, _, Arc<String>, Vec<u8>, Vec<(Arc<String>, Arc<HeapValue>)>>(
+    //
+    // WF-2E (2026-07-05): `Array<int>` is a `TypedArray<i64>` (8-byte
+    // elements), so the body reads `Vec<i64>` and narrows each element to a
+    // byte. Reading it as `Vec<u8>` (a `TypedArray<u8>` reader) mis-strided
+    // the i64 buffer at 1 byte and corrupted the body (`[72,105]` → `[72,0]`).
+    register_typed_async_fn_3_full::<_, _, Arc<String>, Vec<i64>, JsonValue>(
         &mut module,
         "post_bytes",
         "Perform an HTTP POST request with a binary body",
@@ -345,7 +347,8 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>, body: Vec<u8>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Vec<i64>, options: JsonValue| async move {
+            let body: Vec<u8> = body.into_iter().map(|b| b as u8).collect();
             let mut builder = reqwest::Client::new()
                 .post(url.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
@@ -386,7 +389,7 @@ pub fn create_http_module() -> ModuleExports {
         _,
         Arc<String>,
         Arc<String>,
-        Vec<(Arc<String>, Arc<HeapValue>)>,
+        JsonValue,
     >(
         &mut module,
         "put_text",
@@ -397,7 +400,7 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>, body: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Arc<String>, options: JsonValue| async move {
             let mut builder = reqwest::Client::new()
                 .put(url.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -433,13 +436,17 @@ pub fn create_http_module() -> ModuleExports {
     );
 
     // http.put_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_3_full::<_, _, Arc<String>, Vec<u8>, Vec<(Arc<String>, Arc<HeapValue>)>>(
+    //
+    // WF-2E (2026-07-05): see post_bytes — `Array<int>` is `TypedArray<i64>`;
+    // read `Vec<i64>` and narrow to bytes rather than mis-striding as `Vec<u8>`.
+    register_typed_async_fn_3_full::<_, _, Arc<String>, Vec<i64>, JsonValue>(
         &mut module,
         "put_bytes",
         "Perform an HTTP PUT request with a binary body",
         [url_param_3, body_bytes_param, options_param_3],
         response_ty_3,
-        |url: Arc<String>, body: Vec<u8>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Vec<i64>, options: JsonValue| async move {
+            let body: Vec<u8> = body.into_iter().map(|b| b as u8).collect();
             let mut builder = reqwest::Client::new()
                 .put(url.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
@@ -517,7 +524,7 @@ pub fn create_http_module() -> ModuleExports {
         _,
         Arc<String>,
         shape_value::heap_value::TypedObjectPtr,
-        Vec<(Arc<String>, Arc<HeapValue>)>,
+        JsonValue,
     >(
         &mut module,
         "post_json",
@@ -530,7 +537,7 @@ pub fn create_http_module() -> ModuleExports {
         response_ty_post_json.clone(),
         |url: Arc<String>,
          body: shape_value::heap_value::TypedObjectPtr,
-         options: Vec<(Arc<String>, Arc<HeapValue>)>,
+         options: JsonValue,
          ctx| {
             let json_value = crate::json_value::typed_object_ptr_to_json_value_with_registry(
                 &body,
@@ -589,7 +596,7 @@ pub fn create_http_module() -> ModuleExports {
         _,
         Arc<String>,
         shape_value::heap_value::TypedObjectPtr,
-        Vec<(Arc<String>, Arc<HeapValue>)>,
+        JsonValue,
     >(
         &mut module,
         "put_json",
@@ -602,7 +609,7 @@ pub fn create_http_module() -> ModuleExports {
         response_ty_post_json,
         |url: Arc<String>,
          body: shape_value::heap_value::TypedObjectPtr,
-         options: Vec<(Arc<String>, Arc<HeapValue>)>,
+         options: JsonValue,
          ctx| {
             let json_value = crate::json_value::typed_object_ptr_to_json_value_with_registry(
                 &body,

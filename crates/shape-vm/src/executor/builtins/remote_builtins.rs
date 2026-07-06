@@ -98,15 +98,21 @@ fn ephemeral_store() -> Result<SnapshotStore, String> {
 /// content hash + minimal transitive blob closure, serialize the positional
 /// argument pack, perform the wire round-trip (with the bounded retry-once
 /// missing-blob resupply, `crate::remote::call_with_resupply`), and materialize
-/// the reply. Borrows the program — no clone, no `CURRENT_PROGRAM` thread-local
-/// (distributed R10).
-pub struct ProgramRemoteDispatcher<'a> {
-    program: &'a crate::bytecode::BytecodeProgram,
+/// the reply. Reads `self.program` through the VM's re-entrancy `RefCell` (WF-2E
+/// invoke_callable park) via a short-lived `borrow()` taken inside
+/// `call_remote` — no clone, no `CURRENT_PROGRAM` thread-local (distributed
+/// R10). The borrow cannot alias the callback's `borrow_mut()`: a module body
+/// invokes `remote::call` OR an `invoke_callable` callback, never both, and
+/// `call_remote` performs a wire round-trip without re-entering the VM.
+pub struct ProgramRemoteDispatcher<'a, 'vm> {
+    vm_cell: &'a std::cell::RefCell<&'vm mut crate::executor::VirtualMachine>,
 }
 
-impl<'a> ProgramRemoteDispatcher<'a> {
-    pub fn new(program: &'a crate::bytecode::BytecodeProgram) -> Self {
-        Self { program }
+impl<'a, 'vm> ProgramRemoteDispatcher<'a, 'vm> {
+    pub fn new(
+        vm_cell: &'a std::cell::RefCell<&'vm mut crate::executor::VirtualMachine>,
+    ) -> Self {
+        Self { vm_cell }
     }
 }
 
@@ -277,13 +283,20 @@ fn send_call(addr: &str, req: &RemoteCallRequest) -> RemoteCallResponse {
     }
 }
 
-impl RemoteDispatcher for ProgramRemoteDispatcher<'_> {
+impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
     fn call_remote(
         &self,
         addr: &str,
         fn_ref: &KindedSlot,
         args: &[KindedSlot],
     ) -> Result<TypedReturn, String> {
+        // Short-lived immutable borrow of the re-entrancy-parked VM; `program`
+        // is read directly off it. Held for the whole round-trip (which never
+        // re-enters the VM), so it cannot alias the `invoke_callable`
+        // `borrow_mut()` (distributed R10 / WF-2E park coexistence).
+        let vm = self.vm_cell.borrow();
+        let program = &vm.program;
+
         let store = ephemeral_store()?;
         let arguments = serialize_arg_pack(args, &store)?;
 
@@ -293,7 +306,7 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_> {
         let request = match fn_ref.kind() {
             NativeKind::UInt64 => {
                 let function_id = fn_ref.raw() as u16;
-                build_call_request_by_id(self.program, function_id, arguments).map_err(|e| {
+                build_call_request_by_id(program, function_id, arguments).map_err(|e| {
                     format!("remote::call: could not resolve the target function: {e}")
                 })?
             }
@@ -301,7 +314,7 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_> {
                 let (function_id, upvalues, upvalue_kinds) =
                     extract_closure_captures(fn_ref, &store)?;
                 build_closure_call_request(
-                    self.program,
+                    program,
                     function_id,
                     arguments,
                     upvalues,
@@ -317,7 +330,7 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_> {
         };
 
         // Wire round-trip with the bounded retry-once missing-blob resupply.
-        let response = call_with_resupply(self.program, request, |req| send_call(addr, req));
+        let response = call_with_resupply(program, request, |req| send_call(addr, req));
 
         match response.result {
             Ok(value) => reply_to_typed_return(value),
