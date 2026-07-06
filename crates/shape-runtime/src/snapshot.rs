@@ -22,6 +22,63 @@ use shape_ast::data::Timeframe;
 
 use shape_value::datatable::DataTable;
 
+// ── WF-2G GAP A: native/stdlib ModuleFn qualified-name resolver ──
+//
+// A `Ptr(HeapKind::ModuleFn)` slot's bits are a module-fn id — a
+// process-local index into `VirtualMachine::module_fn_table`, whose entries
+// are native Rust `Arc<dyn Fn>` bodies (there is NO content hash and the
+// bodies are NOT wire-transferred; every node re-registers the identical
+// stdlib deterministically). The sound cross-process identity is therefore
+// the qualified export name `module::export` (e.g. `std::core::json::stringify`),
+// carried by `SerializableVMValue::ModuleFunction(String)`.
+//
+// The projection (`slot_heap_to_serializable`) and its restore inverse
+// (`serializable_to_heap_slot`) are shape-runtime free functions that cannot
+// reach the VM's `module_fn_table`. The id↔name mapping is threaded to them
+// through a thread-local install-once table — the same ambient-resolver shape
+// as `type_schema::current_registry()`. `VirtualMachine::populate_module_objects`
+// installs it after registering every module-fn (id order == registration
+// order == deterministic across nodes). This is NOT a tag/kind bridge and
+// carries no ValueWord shape — it is a plain `id → "module::export"` map.
+thread_local! {
+    /// `module_fn_id` (Vec index) → qualified export name `module::export`.
+    static MODULE_FN_NAME_BY_ID: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// qualified export name `module::export` → `module_fn_id`.
+    static MODULE_FN_ID_BY_NAME: std::cell::RefCell<HashMap<String, u64>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Install the module-fn qualified-name table for snapshot projection +
+/// restore on the current thread. `names[id]` is the qualified name of the
+/// module-fn registered with `module_fn_id == id`. Called by
+/// `VirtualMachine::populate_module_objects` on both the snapshotting host
+/// (projection: id → name) and the resuming host (restore: name → id).
+pub fn install_module_fn_name_table(names: Vec<String>) {
+    let mut by_name: HashMap<String, u64> = HashMap::with_capacity(names.len());
+    for (id, name) in names.iter().enumerate() {
+        // Duplicate names would be a stdlib-registration bug; last-writer
+        // wins deterministically (registration order is fixed).
+        by_name.insert(name.clone(), id as u64);
+    }
+    MODULE_FN_ID_BY_NAME.with(|m| *m.borrow_mut() = by_name);
+    MODULE_FN_NAME_BY_ID.with(|m| *m.borrow_mut() = names);
+}
+
+/// Projection: resolve a module-fn id to its qualified export name.
+/// `None` when the name table was never installed or the id is out of range
+/// (surface-and-stop — never fabricate a name).
+fn resolve_module_fn_name(id: u64) -> Option<String> {
+    MODULE_FN_NAME_BY_ID.with(|m| m.borrow().get(id as usize).cloned())
+}
+
+/// Restore: resolve a qualified export name back to its module-fn id on the
+/// resuming host. `None` when the module is absent here (clean-refuse — never
+/// fabricate an id).
+fn resolve_module_fn_id(name: &str) -> Option<u64> {
+    MODULE_FN_ID_BY_NAME.with(|m| m.borrow().get(name).copied())
+}
+
 /// Schema version for the snapshot binary format.
 ///
 /// This version is embedded in every [`ExecutionSnapshot`] via the `version`
@@ -1371,6 +1428,35 @@ pub fn slot_to_serializable(
 /// type recovery and segfaults. Each arm reconstructs the typed
 /// `Arc<T>`, clones it (bumping the strong count for our read),
 /// rebuilds the original share, and reads through the cloned Arc.
+/// Project a live `TypedObjectStorage` (read through a borrow — no share
+/// taken) into `SV::TypedObject`. Shared by the direct `HeapKind::TypedObject`
+/// slot arm and the `ELEM_TYPE_TYPED_OBJECT` heap-element-array element walk
+/// (WF-2G GAP B). Each field recurses through `slot_to_serializable_ctx` on the
+/// per-field parallel `field_kinds` track (ADR-006 §2.5 / §2.3 / §2.7.7 — no
+/// kind fabricated from bits, no Bool-default).
+fn typed_object_storage_to_serializable(
+    storage: &shape_value::heap_value::TypedObjectStorage,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    let schema_id = storage.schema_id;
+    let heap_mask = storage.heap_mask;
+    let slots = storage.slots();
+    let n = slots.len();
+    let mut slot_data: Vec<SerializableVMValue> = Vec::with_capacity(n);
+    for i in 0..n {
+        let field_bits = slots[i].raw();
+        let field_kind = storage.field_kinds[i];
+        let sv = slot_to_serializable_ctx(field_bits, field_kind, store, ctx)?;
+        slot_data.push(sv);
+    }
+    Ok(SerializableVMValue::TypedObject {
+        schema_id,
+        slot_data,
+        heap_mask,
+    })
+}
+
 fn slot_heap_to_serializable(
     bits: u64,
     expected_kind: HeapKind,
@@ -1382,7 +1468,11 @@ fn slot_heap_to_serializable(
         AtomicData, ChannelData, DequeData, HashSetData, LazyData, MutexData, OptionData,
         PriorityQueueData, ResultData,
     };
-    if bits == 0 {
+    // WF-2G GAP A: `Ptr(HeapKind::ModuleFn)` bits are an inline-scalar
+    // module-fn id (NOT a pointer), and id 0 is the first-registered fn —
+    // a valid value, not a null pointer. Exempt it from the null-pointer
+    // guard so it reaches the ModuleFn projection arm below.
+    if bits == 0 && !matches!(expected_kind, HeapKind::ModuleFn) {
         return Err(format!(
             "slot_to_serializable: Ptr({expected_kind:?}) slot with null bits",
         ));
@@ -1567,22 +1657,7 @@ fn slot_heap_to_serializable(
             // duration of the field reads (the slot keeps its share).
             let storage: &shape_value::heap_value::TypedObjectStorage =
                 unsafe { &*(bits as *const shape_value::heap_value::TypedObjectStorage) };
-            let schema_id = storage.schema_id;
-            let heap_mask = storage.heap_mask;
-            let slots = storage.slots();
-            let n = slots.len();
-            let mut slot_data: Vec<SerializableVMValue> = Vec::with_capacity(n);
-            for i in 0..n {
-                let field_bits = slots[i].raw();
-                let field_kind = storage.field_kinds[i];
-                let sv = slot_to_serializable_ctx(field_bits, field_kind, store, ctx)?;
-                slot_data.push(sv);
-            }
-            Ok(SV::TypedObject {
-                schema_id,
-                slot_data,
-                heap_mask,
-            })
+            typed_object_storage_to_serializable(storage, store, ctx)
         }
         HeapKind::TypedArray => {
             // v2-raw flat-struct monomorphic carrier (`docs/runtime-v2-spec.md`):
@@ -1595,9 +1670,10 @@ fn slot_heap_to_serializable(
             // through the bespoke decode walk in `executor/resume.rs`, not
             // through this scalar projection).
             use shape_value::v2::typed_array::{
-                ELEM_TYPE_BOOL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16,
-                ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32,
-                TypedArray, read_elem_type,
+                ELEM_TYPE_BOOL, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8,
+                ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+                ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, TypedArray,
+                read_elem_type,
             };
             let ptr = bits as *const u8;
             // SAFETY: the slot construction contract guarantees a live,
@@ -1649,13 +1725,61 @@ fn slot_heap_to_serializable(
                         .iter()
                         .map(|v| SV::Number(f64::from(*v)))
                         .collect(),
+                    // ── WF-2G GAP B: heap-element arrays ───────────────────
+                    // The element buffer holds owning heap pointers
+                    // (`*const StringObj` / `*const DecimalObj` /
+                    // `*const TypedObjectStorage` per typed_array.rs drop
+                    // dispatch). We read each element THROUGH the buffer
+                    // borrow (the slot keeps its share; no per-element
+                    // ownership taken) and project via the same typed
+                    // carriers as `marshal.rs` / `json_value.rs`. No
+                    // Bool-default, no raw-bits reinterpretation — the
+                    // element type is the producer-side `_pad` stamp.
+                    ELEM_TYPE_STRING => {
+                        use shape_value::v2::string_obj::StringObj;
+                        TypedArray::<*const StringObj>::as_slice(
+                            ptr as *const TypedArray<*const StringObj>,
+                        )
+                        .iter()
+                        .map(|&p| SV::String(StringObj::as_str(p).to_owned()))
+                        .collect()
+                    }
+                    ELEM_TYPE_DECIMAL => {
+                        use shape_value::v2::decimal_obj::DecimalObj;
+                        TypedArray::<*const DecimalObj>::as_slice(
+                            ptr as *const TypedArray<*const DecimalObj>,
+                        )
+                        .iter()
+                        .map(|&p| SV::Decimal(DecimalObj::value(p)))
+                        .collect()
+                    }
+                    ELEM_TYPE_TYPED_OBJECT => {
+                        let slice = TypedArray::<
+                            *const shape_value::heap_value::TypedObjectStorage,
+                        >::as_slice(
+                            ptr as *const TypedArray<
+                                *const shape_value::heap_value::TypedObjectStorage,
+                            >,
+                        );
+                        let mut out: Vec<SerializableVMValue> = Vec::with_capacity(slice.len());
+                        for &p in slice.iter() {
+                            // Read the element storage through a borrow (the
+                            // array owns the share; we take none). The nested
+                            // projection recurses on each field's own kind
+                            // track — ADR-006 §2.5.
+                            let storage: &shape_value::heap_value::TypedObjectStorage = &*p;
+                            out.push(typed_object_storage_to_serializable(storage, store, ctx)?);
+                        }
+                        out
+                    }
                     other_elem => {
                         return Err(format!(
                             "slot_to_serializable: W17-snapshot-roundtrip surface — \
                              TypedArray element-type discriminant {other_elem} is \
-                             not in the scalar round-trip set (heap-element arrays \
-                             — String / Decimal / TypedObject — land in follow-up). \
-                             ADR-006 §2.7.5.1."
+                             not in the round-trip set (scalar kinds + heap-element \
+                             String / Decimal / TypedObject). Nested-array / \
+                             trait-object / callable element carriers land in \
+                             follow-up. ADR-006 §2.7.5.1."
                         ));
                     }
                 }
@@ -1712,6 +1836,25 @@ fn slot_heap_to_serializable(
             }
         }
 
+        // WF-2G GAP A: native/stdlib module-function value. The slot bits
+        // are the module-fn id (an inline scalar index into the VM's
+        // `module_fn_table` — NOT an `Arc<T>` pointer; clone/drop are
+        // no-ops per kinded_slot.rs:1148). Project to the qualified export
+        // name so the snapshot is self-contained across processes: native
+        // stdlib fns have no content hash and are re-registered identically
+        // on every node, so `module::export` is the sound identity carried
+        // by `SerializableVMValue::ModuleFunction(String)`. Surface-and-stop
+        // (never fabricate) if the id has no registered name.
+        HeapKind::ModuleFn => match resolve_module_fn_name(bits) {
+            Some(name) => Ok(SV::ModuleFunction(name)),
+            None => Err(format!(
+                "slot_to_serializable: ModuleFn slot id {bits} has no registered \
+                 qualified name (module-fn name table not installed on this \
+                 thread, or id out of range). Surface-and-stop — never \
+                 fabricate a name. ADR-006 §2.7.5.1."
+            )),
+        },
+
         // Pre-existing complex shapes: surface-and-stop per §2.7.5.1.
         // These have rich pre-bulldozer SerializableVMValue arms whose
         // construction requires more than typed-Arc recovery (DataTable /
@@ -1729,7 +1872,6 @@ fn slot_heap_to_serializable(
         | HeapKind::NativeScalar
         | HeapKind::NativeView
         | HeapKind::TraitObject
-        | HeapKind::ModuleFn
         | HeapKind::Matrix
         | HeapKind::MatrixSlice) => Err(format!(
             "slot_to_serializable: W17-snapshot-roundtrip surface — \
@@ -2158,6 +2300,7 @@ pub fn expected_kind_from_serializable(sv: &SerializableVMValue) -> NativeKind {
         SV::Range { .. } => NativeKind::Ptr(HeapKind::Range),
         SV::HashMap { .. } => NativeKind::Ptr(HeapKind::HashMap),
         SV::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
+        SV::ModuleFunction(_) => NativeKind::Ptr(HeapKind::ModuleFn),
         _ => NativeKind::Bool,
     }
 }
@@ -2235,6 +2378,8 @@ fn expected_heap_field_kind(sv: &SerializableVMValue) -> NativeKind {
         // Nested typed-object fields must not silently restore old
         // Arc<ResultData> / Arc<OptionData> carriers.
         SV::ResultData { .. } | SV::OptionData { .. } => NativeKind::Ptr(HeapKind::TypedObject),
+        // WF-2G GAP A: a module-fn field inside a module-binding TypedObject.
+        SV::ModuleFunction(_) => NativeKind::Ptr(HeapKind::ModuleFn),
         // Pre-existing complex arms — surface clean rather than guess.
         _ => NativeKind::Bool,
     }
@@ -2244,6 +2389,47 @@ fn expected_heap_field_kind(sv: &SerializableVMValue) -> NativeKind {
 /// slot from its serialized arm. Returns `(bits, NativeKind)` ready
 /// to push to a slot. The reconstructed slot owns one strong-count
 /// share on the typed `Arc<T>` carrier.
+/// Rebuild a `TypedObjectStorage` from a serialized `SV::TypedObject`, returning
+/// the v2-raw carrier pointer as `u64` (refcount = 1 on the HeapHeader). Shared
+/// by the direct `HeapKind::TypedObject` restore arm and the
+/// `ELEM_TYPE_TYPED_OBJECT` heap-element-array rebuild (WF-2G GAP B).
+///
+/// Each field restores through `serializable_to_slot` (recursion); the returned
+/// `(bits, kind)` populate the slot array and the parallel `field_kinds` track.
+/// Allocation goes through the v2-raw `_new` carrier so the slot's release path
+/// (`drop_with_kind` → `TypedObjectStorage::release_elem` → carrier-side `_drop`
+/// + `std::alloc::dealloc`) matches the allocation — the legacy
+/// `Arc::new(...)` + `Arc::into_raw` carrier would mismatch the allocator at
+/// drop time (the `length_typed_object_empty` allocator-pair SIGABRT class per
+/// the v2-raw-heap-audit). ADR-006 §2.3 / §2.5 amendment (Wave 2 Agent D1/D2).
+fn sv_typed_object_to_ptr(
+    schema_id: u64,
+    slot_data: &[SerializableVMValue],
+    heap_mask: u64,
+    store: &SnapshotStore,
+) -> std::result::Result<u64, String> {
+    use shape_value::ValueSlot;
+    let n = slot_data.len();
+    let mut slots: Vec<ValueSlot> = Vec::with_capacity(n);
+    let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(n);
+    for (i, fsv) in slot_data.iter().enumerate() {
+        let expected = expected_heap_field_kind(fsv);
+        let (fbits, fkind) = serializable_to_slot(fsv, expected, store).map_err(|msg| {
+            format!("serializable_to_slot: TypedObject restore field[{i}] (schema_id={schema_id}): {msg}")
+        })?;
+        slots.push(ValueSlot::from_raw(fbits));
+        field_kinds.push(fkind);
+    }
+    let field_kinds_arc: Arc<[NativeKind]> = field_kinds.into();
+    let ptr = shape_value::heap_value::TypedObjectStorage::_new(
+        schema_id,
+        slots.into_boxed_slice(),
+        heap_mask,
+        field_kinds_arc,
+    );
+    Ok(ptr as u64)
+}
+
 fn serializable_to_heap_slot(
     sv: &SerializableVMValue,
     heap_kind: HeapKind,
@@ -2270,6 +2456,23 @@ fn serializable_to_heap_slot(
             let arc = Arc::new(*n);
             let raw = Arc::into_raw(arc) as u64;
             Ok((raw, NativeKind::Ptr(HeapKind::BigInt)))
+        }
+        (SV::ModuleFunction(name), HeapKind::ModuleFn) => {
+            // WF-2G GAP A restore. Re-resolve the qualified export name back
+            // to a module-fn id against the resuming host's registration
+            // (installed by `populate_module_objects`; deterministic order ⇒
+            // id parity with the origin). The id is an inline scalar (clone/
+            // drop no-op), so no share is minted. Clean-refuse if the module
+            // is absent on the resumer — never fabricate an id.
+            match resolve_module_fn_id(name) {
+                Some(id) => Ok((id, NativeKind::Ptr(HeapKind::ModuleFn))),
+                None => Err(format!(
+                    "serializable_to_slot: ModuleFunction '{name}' is not \
+                     registered on the resuming host (module absent, or the \
+                     module-fn name table was not installed before restore). \
+                     Clean-refuse — never fabricate an id. ADR-006 §2.7.5.1."
+                )),
+            }
         }
         (SV::Decimal(d), HeapKind::Decimal) => {
             let arc = Arc::new(*d);
@@ -2398,44 +2601,8 @@ fn serializable_to_heap_slot(
             },
             HeapKind::TypedObject,
         ) => {
-            // Rebuild a `TypedObjectStorage` from the per-field restored
-            // slots. Each field restores through `serializable_to_slot`
-            // (recursion); the returned `(bits, kind)` populate the slot
-            // array and the parallel `field_kinds` track. The
-            // `from_typed_object` (Arc carrier) constructor moves one
-            // strong-count share into the slot. ADR-006 §2.3 / §2.5.
-            use shape_value::ValueSlot;
-            let n = slot_data.len();
-            let mut slots: Vec<ValueSlot> = Vec::with_capacity(n);
-            let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(n);
-            for (i, fsv) in slot_data.iter().enumerate() {
-                let expected = expected_heap_field_kind(fsv);
-                let (fbits, fkind) = serializable_to_slot(fsv, expected, store).map_err(|msg| {
-                    format!(
-                        "serializable_to_slot: TypedObject restore field[{i}] \
-                             (schema_id={schema_id}): {msg}"
-                    )
-                })?;
-                slots.push(ValueSlot::from_raw(fbits));
-                field_kinds.push(fkind);
-            }
-            let field_kinds_arc: Arc<[NativeKind]> = field_kinds.into();
-            // Allocate via the v2-raw `_new` carrier (refcount=1 on the
-            // HeapHeader at offset 0) so the slot's release path
-            // (`drop_with_kind` → `TypedObjectStorage::release_elem` →
-            // carrier-side `_drop` + `std::alloc::dealloc`) matches the
-            // allocation. The legacy `Arc::new(...)` + `Arc::into_raw`
-            // carrier would mismatch the allocator at drop time (the
-            // `length_typed_object_empty` allocator-pair SIGABRT class
-            // per the v2-raw-heap-audit). ADR-006 §2.3 amendment (Wave 2
-            // Agent D1/D2).
-            let ptr = shape_value::heap_value::TypedObjectStorage::_new(
-                *schema_id,
-                slots.into_boxed_slice(),
-                *heap_mask,
-                field_kinds_arc,
-            );
-            Ok((ptr as u64, NativeKind::Ptr(HeapKind::TypedObject)))
+            let ptr = sv_typed_object_to_ptr(*schema_id, slot_data, *heap_mask, store)?;
+            Ok((ptr, NativeKind::Ptr(HeapKind::TypedObject)))
         }
         (SV::HashMap { keys, values }, HeapKind::HashMap) => {
             // K1 string→string restore only — mirror of the K1
@@ -2544,11 +2711,117 @@ fn serializable_to_heap_slot(
                     unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_BOOL) };
                     arr as usize as u64
                 }
+                // ── WF-2G GAP B: heap-element array restore ────────────────
+                // Build the monomorphized heap-element carrier (mirror of
+                // `marshal.rs::ToSlot for Vec<Arc<HeapValue>>`). Each element
+                // constructor mints a fresh owning heap pointer (refcount = 1)
+                // and `push` transfers that single share into the array — no
+                // extra retain, no double-count. Homogeneity is pre-validated
+                // BEFORE allocation so the error path never leaks a partial
+                // array. ADR-006 §2.3 / §2.7.5.1.
+                Some(SV::String(_)) => {
+                    use shape_value::v2::string_obj::StringObj;
+                    use shape_value::v2::typed_array::ELEM_TYPE_STRING;
+                    // Pre-validate homogeneity (no allocation yet).
+                    let mut strs: Vec<&str> = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            SV::String(s) => strs.push(s.as_str()),
+                            _ => {
+                                return Err("serializable_to_slot: TypedArray restore — \
+                                 heterogeneous element (expected all String). \
+                                 ADR-006 §2.7.5.1."
+                                    .to_string());
+                            }
+                        }
+                    }
+                    let out = TypedArray::<*const StringObj>::with_capacity(elems.len() as u32);
+                    unsafe {
+                        stamp_elem_type(out as *mut u8, ELEM_TYPE_STRING);
+                        for s in strs {
+                            // Fresh StringObj (refcount = 1); the array owns it.
+                            let p = StringObj::new(s) as *const StringObj;
+                            TypedArray::<*const StringObj>::push(out, p);
+                        }
+                    }
+                    out as usize as u64
+                }
+                Some(SV::Decimal(_)) => {
+                    use shape_value::v2::decimal_obj::DecimalObj;
+                    use shape_value::v2::typed_array::ELEM_TYPE_DECIMAL;
+                    let mut decs: Vec<rust_decimal::Decimal> = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            SV::Decimal(d) => decs.push(*d),
+                            _ => {
+                                return Err("serializable_to_slot: TypedArray restore — \
+                                 heterogeneous element (expected all Decimal). \
+                                 ADR-006 §2.7.5.1."
+                                    .to_string());
+                            }
+                        }
+                    }
+                    let out = TypedArray::<*const DecimalObj>::with_capacity(elems.len() as u32);
+                    unsafe {
+                        stamp_elem_type(out as *mut u8, ELEM_TYPE_DECIMAL);
+                        for d in decs {
+                            // Fresh DecimalObj (refcount = 1); the array owns it.
+                            let p = DecimalObj::new(d) as *const DecimalObj;
+                            TypedArray::<*const DecimalObj>::push(out, p);
+                        }
+                    }
+                    out as usize as u64
+                }
+                Some(SV::TypedObject { .. }) => {
+                    use shape_value::heap_value::TypedObjectStorage;
+                    use shape_value::v2::typed_array::{
+                        ELEM_TYPE_TYPED_OBJECT, release_v2_typed_array,
+                    };
+                    // Build the carrier up-front, stamped, then push each
+                    // element storage (refcount = 1 from `sv_typed_object_to_ptr`
+                    // — the array takes that single share; no retain, no
+                    // double-count). If any field restore fails mid-way, drop
+                    // the whole partially-built array via `release_v2_typed_array`
+                    // (walks + retires every pushed element share) before
+                    // surfacing — balanced accounting, no leak. ADR-006 §2.3.
+                    let out =
+                        TypedArray::<*const TypedObjectStorage>::with_capacity(elems.len() as u32);
+                    unsafe { stamp_elem_type(out as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
+                    for e in elems {
+                        let build = match e {
+                            SV::TypedObject {
+                                schema_id,
+                                slot_data,
+                                heap_mask,
+                            } => sv_typed_object_to_ptr(*schema_id, slot_data, *heap_mask, store),
+                            _ => Err("serializable_to_slot: TypedArray restore — \
+                                 heterogeneous element (expected all TypedObject). \
+                                 ADR-006 §2.7.5.1."
+                                .to_string()),
+                        };
+                        match build {
+                            Ok(bits) => unsafe {
+                                TypedArray::<*const TypedObjectStorage>::push(
+                                    out,
+                                    bits as *const TypedObjectStorage,
+                                );
+                            },
+                            Err(msg) => {
+                                unsafe { release_v2_typed_array(out as *mut u8) };
+                                return Err(format!(
+                                    "serializable_to_slot: TypedArray<TypedObject> \
+                                     restore element: {msg}"
+                                ));
+                            }
+                        }
+                    }
+                    out as usize as u64
+                }
                 Some(other) => {
                     return Err(format!(
                         "serializable_to_slot: TypedArray restore — element arm \
-                         {} is not in the scalar round-trip set (Int / Number / \
-                         Bool). Heap-element arrays land in follow-up. \
+                         {} is not in the round-trip set (scalar Int / Number / \
+                         Bool + heap-element String / Decimal / TypedObject). \
                          ADR-006 §2.7.5.1.",
                         serializable_arm_name(other),
                     ));
@@ -2942,6 +3215,45 @@ mod l5_typed_object_result_option_snapshot_tests {
     }
 
     #[test]
+    fn wf2g_module_fn_projection_and_restore_round_trip() {
+        // WF-2G GAP A: a `Ptr(HeapKind::ModuleFn)` slot (inline-scalar
+        // module-fn id) projects to `SV::ModuleFunction(qualified_name)` and
+        // restores back to the SAME id via the installed name table. Id 0 is
+        // exercised explicitly (it was formerly swallowed by the null-pointer
+        // guard). No SIGABRT at drop (ModuleFn clone/drop are no-ops).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        super::install_module_fn_name_table(vec![
+            "std::core::json::stringify".to_string(),
+            "std::core::math::sqrt".to_string(),
+        ]);
+
+        for (id, name) in [(0u64, "std::core::json::stringify"), (1, "std::core::math::sqrt")] {
+            // Project.
+            let sv = slot_to_serializable(id, NativeKind::Ptr(HeapKind::ModuleFn), &store)
+                .expect("project module fn");
+            match &sv {
+                SV::ModuleFunction(n) => assert_eq!(n, name, "projected qualified name"),
+                other => panic!("expected ModuleFunction, got {other:?}"),
+            }
+            // Restore.
+            let (bits, kind) =
+                serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::ModuleFn), &store)
+                    .expect("restore module fn");
+            assert_eq!(bits, id, "restored id parity");
+            assert_eq!(kind, NativeKind::Ptr(HeapKind::ModuleFn));
+        }
+
+        // An unresolvable name on a resumer missing the module — clean refuse.
+        let missing = SV::ModuleFunction("absent::module::fn".to_string());
+        assert!(
+            serializable_to_slot(&missing, NativeKind::Ptr(HeapKind::ModuleFn), &store).is_err(),
+            "unresolvable module fn name must clean-refuse, never fabricate an id"
+        );
+    }
+
+    #[test]
     fn legacy_result_data_snapshot_restores_to_schema_backed_typed_object() {
         let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3065,6 +3377,221 @@ mod l5_typed_object_result_option_snapshot_tests {
                 ..
             } if schema_id == schemas.option as u64
         ));
+    }
+}
+
+#[cfg(test)]
+mod wf2g_gap_b_heap_element_array_tests {
+    //! WF-2G GAP B (2026-07-06): heap-element TypedArray snapshot round-trip.
+    //! A runtime `TypedArray` whose elements are heap pointers
+    //! (`Array<string>` / `Array<Decimal>` / `Array<TypedObject>`) must
+    //! project into `SV::Array(Vec<SV>)` via typed carriers and restore into
+    //! an element-equal carrier. Each test drives BOTH the projection and the
+    //! restore, asserts element equality, and releases BOTH the origin and the
+    //! restored carrier so the share-accounting is proven balanced (a
+    //! double-free would SIGABRT under the test harness; a leak would trip
+    //! miri / the leak sanitizer in the deep-test lane).
+
+    use super::{
+        SerializableVMValue as SV, SnapshotStore, serializable_to_slot, slot_to_serializable,
+    };
+    use shape_value::v2::decimal_obj::DecimalObj;
+    use shape_value::v2::string_obj::StringObj;
+    use shape_value::v2::typed_array::{
+        ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT, TypedArray, read_elem_type,
+        release_v2_typed_array, stamp_elem_type,
+    };
+    use shape_value::{HeapKind, NativeKind, TypedObjectStorage, ValueSlot};
+    use std::sync::Arc;
+
+    #[test]
+    fn string_array_snapshot_round_trips() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        // Build a runtime Array<string> = ["alice", "bob", "carol"].
+        let arr = TypedArray::<*const StringObj>::with_capacity(3);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+            for s in ["alice", "bob", "carol"] {
+                TypedArray::<*const StringObj>::push(arr, StringObj::new(s) as *const StringObj);
+            }
+        }
+        let bits = arr as usize as u64;
+
+        // Project.
+        let sv = slot_to_serializable(bits, NativeKind::Ptr(HeapKind::TypedArray), &store)
+            .expect("project Array<string>");
+        match &sv {
+            SV::Array(elems) => {
+                let got: Vec<&str> = elems
+                    .iter()
+                    .map(|e| match e {
+                        SV::String(s) => s.as_str(),
+                        other => panic!("expected SV::String, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, vec!["alice", "bob", "carol"]);
+            }
+            other => panic!("expected SV::Array, got {other:?}"),
+        }
+
+        // Restore into a fresh carrier (fresh-process resume shape).
+        let (rbits, rkind) =
+            serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::TypedArray), &store)
+                .expect("restore Array<string>");
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedArray));
+        unsafe {
+            let rptr = rbits as *const u8;
+            assert_eq!(read_elem_type(rptr), ELEM_TYPE_STRING);
+            let slice = TypedArray::<*const StringObj>::as_slice(
+                rptr as *const TypedArray<*const StringObj>,
+            );
+            let got: Vec<&str> = slice.iter().map(|&p| StringObj::as_str(p)).collect();
+            assert_eq!(got, vec!["alice", "bob", "carol"], "restored element-equal");
+        }
+
+        // Balanced drop — neither carrier double-frees.
+        unsafe {
+            release_v2_typed_array(arr as *mut u8);
+            release_v2_typed_array(rbits as *mut u8);
+        }
+    }
+
+    #[test]
+    fn decimal_array_snapshot_round_trips() {
+        use rust_decimal::Decimal;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        let vals = [
+            Decimal::new(15, 1),   // 1.5
+            Decimal::new(2500, 2), // 25.00
+            Decimal::new(-7, 0),   // -7
+        ];
+        let arr = TypedArray::<*const DecimalObj>::with_capacity(vals.len() as u32);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_DECIMAL);
+            for d in vals {
+                TypedArray::<*const DecimalObj>::push(arr, DecimalObj::new(d) as *const DecimalObj);
+            }
+        }
+        let bits = arr as usize as u64;
+
+        let sv = slot_to_serializable(bits, NativeKind::Ptr(HeapKind::TypedArray), &store)
+            .expect("project Array<Decimal>");
+        match &sv {
+            SV::Array(elems) => {
+                let got: Vec<Decimal> = elems
+                    .iter()
+                    .map(|e| match e {
+                        SV::Decimal(d) => *d,
+                        other => panic!("expected SV::Decimal, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, vals.to_vec());
+            }
+            other => panic!("expected SV::Array, got {other:?}"),
+        }
+
+        let (rbits, rkind) =
+            serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::TypedArray), &store)
+                .expect("restore Array<Decimal>");
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedArray));
+        unsafe {
+            let rptr = rbits as *const u8;
+            assert_eq!(read_elem_type(rptr), ELEM_TYPE_DECIMAL);
+            let slice = TypedArray::<*const DecimalObj>::as_slice(
+                rptr as *const TypedArray<*const DecimalObj>,
+            );
+            let got: Vec<Decimal> = slice.iter().map(|&p| DecimalObj::value(p)).collect();
+            assert_eq!(got, vals.to_vec(), "restored element-equal");
+        }
+
+        unsafe {
+            release_v2_typed_array(arr as *mut u8);
+            release_v2_typed_array(rbits as *mut u8);
+        }
+    }
+
+    /// Build a single-i64-field TypedObjectStorage (heap_mask = 0, no heap
+    /// fields) with a fresh refcount = 1. Caller owns the single share.
+    fn make_int_object(schema_id: u64, val: i64) -> *const TypedObjectStorage {
+        let field_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64].into_boxed_slice());
+        TypedObjectStorage::_new(
+            schema_id,
+            vec![ValueSlot::from_int(val)].into_boxed_slice(),
+            0,
+            field_kinds,
+        )
+    }
+
+    #[test]
+    fn typed_object_array_snapshot_round_trips() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        // Array<TypedObject> with two single-int-field rows.
+        let arr = TypedArray::<*const TypedObjectStorage>::with_capacity(2);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+            // Each `_new` gives refcount = 1; push transfers that share.
+            TypedArray::<*const TypedObjectStorage>::push(arr, make_int_object(4242, 10));
+            TypedArray::<*const TypedObjectStorage>::push(arr, make_int_object(4242, 20));
+        }
+        let bits = arr as usize as u64;
+
+        let sv = slot_to_serializable(bits, NativeKind::Ptr(HeapKind::TypedArray), &store)
+            .expect("project Array<TypedObject>");
+        match &sv {
+            SV::Array(elems) => {
+                assert_eq!(elems.len(), 2);
+                let got: Vec<(u64, i64)> = elems
+                    .iter()
+                    .map(|e| match e {
+                        SV::TypedObject {
+                            schema_id,
+                            slot_data,
+                            ..
+                        } => {
+                            let v = match &slot_data[0] {
+                                SV::Int(i) => *i,
+                                other => panic!("expected SV::Int field, got {other:?}"),
+                            };
+                            (*schema_id, v)
+                        }
+                        other => panic!("expected SV::TypedObject, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(got, vec![(4242, 10), (4242, 20)]);
+            }
+            other => panic!("expected SV::Array, got {other:?}"),
+        }
+
+        let (rbits, rkind) =
+            serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::TypedArray), &store)
+                .expect("restore Array<TypedObject>");
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedArray));
+        unsafe {
+            let rptr = rbits as *const u8;
+            assert_eq!(read_elem_type(rptr), ELEM_TYPE_TYPED_OBJECT);
+            let slice = TypedArray::<*const TypedObjectStorage>::as_slice(
+                rptr as *const TypedArray<*const TypedObjectStorage>,
+            );
+            let got: Vec<(u64, i64)> = slice
+                .iter()
+                .map(|&p| {
+                    let storage: &TypedObjectStorage = &*p;
+                    (storage.schema_id, storage.slots()[0].as_i64())
+                })
+                .collect();
+            assert_eq!(got, vec![(4242, 10), (4242, 20)], "restored element-equal");
+        }
+
+        unsafe {
+            release_v2_typed_array(arr as *mut u8);
+            release_v2_typed_array(rbits as *mut u8);
+        }
     }
 }
 

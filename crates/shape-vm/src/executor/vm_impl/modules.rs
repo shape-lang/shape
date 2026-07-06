@@ -1024,6 +1024,19 @@ impl VirtualMachine {
         use shape_value::{HeapKind, NativeKind, ValueSlot};
         use std::sync::Arc;
 
+        // WF-2G GAP A idempotency guard. `register_module_fn_entry` (the
+        // only writer of `module_fn_table`) runs exclusively here, and each
+        // VM calls `populate_module_objects` at most once per lifetime EXCEPT
+        // on the resume path, where `from_snapshot` calls it before the
+        // restore two-pass (so the ModuleFn restore arm can resolve
+        // name → id) and `resume_from_snapshot_impl` calls it again. A second
+        // full run would re-register every entry (doubling `module_fn_table`
+        // and shifting ids), so short-circuit once the table is populated.
+        // The thread-local name table installed on the first run stays valid.
+        if !self.module_fn_table.is_empty() {
+            return;
+        }
+
         // Phase 1 — collect: gather per-module data without taking a
         // mutable borrow on `self` while iterating the registry. The
         // `register_module_fn_entry` call mutates `self.module_fn_table`,
@@ -1034,6 +1047,11 @@ impl VirtualMachine {
             .iter()
             .map(|s| s.to_string())
             .collect();
+
+        // WF-2G GAP A: accumulate `module_fn_id → "module::export"` in
+        // registration order (id == index; table starts empty per the guard
+        // above) for the snapshot projection / restore name table.
+        let mut module_fn_names: Vec<String> = Vec::new();
 
         for module_name in module_names {
             // Resolve the module's typed exports. The `module_registry.get`
@@ -1103,6 +1121,11 @@ impl VirtualMachine {
                 std::collections::HashMap::with_capacity(typed_entries.len());
             for (export_name, entry) in typed_entries {
                 let fn_id = self.register_module_fn_entry(entry);
+                // WF-2G GAP A: record the qualified export name at index
+                // `fn_id` (dense, registration order). `module_fn_names.len()`
+                // equals the pre-registration table length == fn_id.
+                debug_assert_eq!(fn_id, module_fn_names.len());
+                module_fn_names.push(format!("{module_name}::{export_name}"));
                 fn_id_by_name.insert(export_name, fn_id as u64);
             }
 
@@ -1166,6 +1189,14 @@ impl VirtualMachine {
                 NativeKind::Ptr(HeapKind::TypedObject),
             );
         }
+
+        // WF-2G GAP A: install the `module_fn_id → "module::export"` table on
+        // this thread so snapshot projection (`slot_to_serializable`) and
+        // restore (`serializable_to_slot`) can carry native module-fn values
+        // by their sound cross-process identity (the qualified name). Native
+        // stdlib fns have no content hash and re-register deterministically,
+        // so the id order here matches every node's.
+        shape_runtime::snapshot::install_module_fn_name_table(module_fn_names);
     }
 }
 
