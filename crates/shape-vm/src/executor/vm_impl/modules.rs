@@ -1077,29 +1077,47 @@ impl VirtualMachine {
                 entries
             };
 
-            // Locate the binding index for this module — prefer the
+            // Locate the binding index/indices for this module — prefer the
             // hidden native binding (`__imported_module__::<name>`,
             // injected by the compiler's
             // `ensure_hidden_native_module_binding`), fall back to the
-            // plain binding name. The hidden form is used when a Shape
-            // artifact module with the same name would otherwise
-            // shadow the native object.
+            // plain fully-qualified binding name. The hidden form is used
+            // when a Shape artifact module with the same name would
+            // otherwise shadow the native object.
+            //
+            // WF-3E fixAB (D3/D7): a `use std::core::env` namespace import
+            // resolves foreign call sites to the SHORT-alias binding (`env`),
+            // not the fully-qualified `std::core::env` binding. On a local
+            // run the short binding is set by top-level module-init; the
+            // per-function remote-dispatch path never runs top-level, so the
+            // transferred body reads the short binding as the uninitialised
+            // sentinel and `call_value_immediate_nb` refuses the Null/Bool
+            // callee. We therefore ALSO populate the last-segment short-alias
+            // binding — but only when it is still uninitialised, so a real
+            // top-level value (or a value written for another module) is never
+            // clobbered (ADR-006 §2.7.8: no fabricated kind; a fresh typed
+            // `Ptr(HeapKind::TypedObject)` module object per binding).
             let hidden_name = format!("__imported_module__::{}", module_name);
-            let binding_idx = self
-                .program
-                .module_binding_names
-                .iter()
-                .position(|n| n == &hidden_name)
-                .or_else(|| {
-                    self.program
-                        .module_binding_names
-                        .iter()
-                        .position(|n| n == &module_name)
-                });
-            let binding_idx = match binding_idx {
-                Some(i) => i,
-                None => continue, // No binding name — nothing to populate.
-            };
+            let short_name = module_name.rsplit("::").next().unwrap_or(module_name.as_str());
+            let mut target_binding_idxs: Vec<usize> = Vec::new();
+            for (i, n) in self.program.module_binding_names.iter().enumerate() {
+                let is_canonical = n == &hidden_name || n == &module_name;
+                let is_short_uninit = n.as_str() == short_name
+                    && short_name != module_name.as_str()
+                    && {
+                        // Only claim the short alias if it is still the
+                        // uninitialised sentinel — never overwrite a live
+                        // value.
+                        let (bits, kind) = self.module_binding_read_kinded_raw(i);
+                        bits == 0 && matches!(kind, NativeKind::Bool | NativeKind::Null)
+                    };
+                if is_canonical || is_short_uninit {
+                    target_binding_idxs.push(i);
+                }
+            }
+            if target_binding_idxs.is_empty() {
+                continue; // No binding name — nothing to populate.
+            }
 
             // Resolve the predeclared module-object schema. The schema
             // is registered before compilation by
@@ -1165,29 +1183,41 @@ impl VirtualMachine {
                 }
             }
 
+            // Share the immutable per-slot kind track across every target
+            // binding's module object (Arc is refcounted, immutable).
+            let field_kinds_arc: Arc<[NativeKind]> = Arc::from(field_kinds.into_boxed_slice());
+
             // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` per D1
             // API surface. The raw pointer is directly the carrier bits;
             // `module_binding_write_kinded` consumes a u64 + NativeKind
             // pair so this site cleanly migrates without depending on
             // the `HeapValue::TypedObject` variant signature flip.
-            let ptr = TypedObjectStorage::_new(
-                schema.id as u64,
-                slots.into_boxed_slice(),
-                heap_mask,
-                Arc::from(field_kinds.into_boxed_slice()),
-            );
-
-            // Hand off one share to the binding slot. The v2-raw pointer
-            // bits are the carrier directly (per ADR-006 §2.4 / D1's
-            // `from_typed_object_raw` constructor contract). One strong
-            // count owned by us is transferred into the binding via
-            // `module_binding_write_kinded`.
-            let bits = ptr as u64;
-            self.module_binding_write_kinded(
-                binding_idx,
-                bits,
-                NativeKind::Ptr(HeapKind::TypedObject),
-            );
+            //
+            // WF-3E fixAB (D3/D7): allocate a FRESH module object per target
+            // binding so each binding owns its own strong count (canonical
+            // `std::core::env` binding AND the short `env` alias the
+            // transferred body actually loads). The ModuleFn-id slots are
+            // inline scalars, so cloning the slot array is a plain copy — no
+            // per-slot share accounting.
+            for binding_idx in &target_binding_idxs {
+                let ptr = TypedObjectStorage::_new(
+                    schema.id as u64,
+                    slots.clone().into_boxed_slice(),
+                    heap_mask,
+                    field_kinds_arc.clone(),
+                );
+                // Hand off one share to the binding slot. The v2-raw pointer
+                // bits are the carrier directly (per ADR-006 §2.4 / D1's
+                // `from_typed_object_raw` constructor contract). One strong
+                // count owned by us is transferred into the binding via
+                // `module_binding_write_kinded`.
+                let bits = ptr as u64;
+                self.module_binding_write_kinded(
+                    *binding_idx,
+                    bits,
+                    NativeKind::Ptr(HeapKind::TypedObject),
+                );
+            }
         }
 
         // WF-2G GAP A: install the `module_fn_id → "module::export"` table on
