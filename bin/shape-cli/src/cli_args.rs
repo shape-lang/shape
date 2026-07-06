@@ -100,6 +100,39 @@ impl std::fmt::Display for ExecutionModeArg {
     }
 }
 
+/// Format the compiler emits diagnostics (errors, warnings) in.
+///
+/// `human` (the default) is the caret-and-source terminal rendering. `json`
+/// emits one LSDS diagnostic object per line to stderr — severity, a real
+/// file/line/col location, and any comptime trace (as `notes`) — for LSP /
+/// MCP / tooling consumers. The program's own stdout output is unaffected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum DiagnosticsFormat {
+    /// Human-readable terminal text with source context (default).
+    #[default]
+    Human,
+    /// One machine-readable LSDS JSON object per diagnostic, on stderr.
+    Json,
+}
+
+impl std::fmt::Display for DiagnosticsFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Human => write!(f, "human"),
+            Self::Json => write!(f, "json"),
+        }
+    }
+}
+
+impl From<DiagnosticsFormat> for shape_diagnostics::OutputFormat {
+    fn from(value: DiagnosticsFormat) -> Self {
+        match value {
+            DiagnosticsFormat::Human => shape_diagnostics::OutputFormat::Human,
+            DiagnosticsFormat::Json => shape_diagnostics::OutputFormat::Json,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Execute a Shape script (preferred explicit form of `shape <file>`)
@@ -363,6 +396,12 @@ pub struct RunCommandOptions {
     /// (shorthand for `shape expand-comptime <FILE>`)
     #[arg(long)]
     pub expand: bool,
+
+    /// Diagnostic output format: `human` (default, terminal text) or `json`
+    /// (one LSDS diagnostic object per line on stderr — severity, location,
+    /// and any comptime trace). Does not change the program's stdout output.
+    #[arg(long, value_enum, default_value_t)]
+    pub diagnostics: DiagnosticsFormat,
 
     /// Resume execution from a snapshot hash
     #[arg(long, value_name = "HASH")]
