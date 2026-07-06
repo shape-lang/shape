@@ -9,7 +9,7 @@ pub mod native_abi;
 use crate::executor::builtins::kind_coerce::int_operand;
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
-    executor::VirtualMachine,
+    executor::{ForeignFunctionHandle, VirtualMachine},
 };
 use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
@@ -24,6 +24,22 @@ use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 /// are deferred to phase-2c per §2.7.4.
 const PHASE_2C_CALL_REBUILD_SURFACE: &str =
     "phase-2c — closure / call / extern-FFI rebuild (ADR-006 §2.7.4 / §2.7.5)";
+
+/// Glob match for `ffi_libraries` / `ffi_symbols` scope patterns
+/// (ffi-rebuild §4.8.2). Mirrors the `allowed_paths` prefix-glob style used by
+/// `module_exports::check_fs_permission`: a pattern ending in `*` / `**`
+/// matches any value with that prefix; otherwise the match is exact. A bare
+/// `*` / `**` matches anything.
+fn ffi_glob_match(pattern: &str, value: &str) -> bool {
+    if let Some(prefix) = pattern
+        .strip_suffix("**")
+        .or_else(|| pattern.strip_suffix('*'))
+    {
+        value.starts_with(prefix)
+    } else {
+        pattern == value
+    }
+}
 
 /// Exhaustive HeapKind sink for pointer-truthiness checks.
 #[inline]
@@ -855,51 +871,319 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        let _foreign_idx = match instruction.operand {
+        let foreign_idx = match instruction.operand {
             Some(Operand::ForeignFunction(idx)) => idx as usize,
             _ => return Err(VMError::InvalidOperand),
         };
 
-        // ADR-006 §2.7.7 / playbook §2: arg-count slot is post-proof
-        // integer; pop kinded and dispatch via `int_operand`. The
-        // remaining body — argument marshalling for foreign / native
-        // ABI calls — crosses the §2.7.5 cross-crate ABI boundary into
-        // `foreign_marshal::*` and `native_abi::invoke_linked_function`,
-        // both of which are forbidden-pattern carriers (raw `&[ValueWord]`
-        // / `vmarray_from_vec` / `tag_bits`). Per the prompt those
-        // companion files are stubbed to `NotImplemented(SURFACE: phase-2c
-        // — extern C FFI rebuild)` and this consumer follows the same
-        // surface; the rebuild needs to thread `&[KindedSlot]` into the
-        // marshal call sites with the extension contract still raw u64
-        // on the §2.7.5 FFI side.
+        // ADR-006 §2.7.7 / playbook §2: the arg-count slot is a post-proof
+        // integer; pop kinded and dispatch via `int_operand`.
         let (arg_count_bits, arg_count_kind) = self.pop_kinded()?;
         let arg_count_slot = KindedSlot::new(ValueSlot::from_raw(arg_count_bits), arg_count_kind);
-        let _arg_count = int_operand(&arg_count_slot)
+        let arg_count = int_operand(&arg_count_slot)
             .map_err(|_| VMError::RuntimeError("Expected integer for arg count".to_string()))?
             as usize;
         crate::executor::vm_impl::stack::drop_with_kind(arg_count_bits, arg_count_kind);
 
-        // Drop the arg slots so the stack is balanced even on the
-        // surface path. Each argument was pushed by the calling
-        // sequence and must be released to keep the parallel kind
-        // track in lockstep.
-        for _ in 0.._arg_count {
+        // Pop the args into declaration order. Each `pop_kinded` transfers one
+        // share (heap-bearing kinds) from the stack into the owning
+        // `KindedSlot`; the args vector is the sole owner for the duration of
+        // the call (§3.5 pop-not-peek). Kinds come from the §2.7.7 parallel
+        // NativeKind stack track — never fabricated from bits, never
+        // Bool-defaulted. `KindedSlot` is never stored ON the stack (the
+        // §2.7.7-forbidden `Vec<KindedSlot>`-for-stack shape); this owned args
+        // vector is a call-local frame-setup carrier, the same shape
+        // §2.7.10/§2.7.11 already use.
+        let mut args: Vec<KindedSlot> = Vec::with_capacity(arg_count);
+        for _ in 0..arg_count {
             let (bits, kind) = self.pop_kinded()?;
-            crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+            args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+        }
+        args.reverse();
+
+        // The SHARED foreign-call core (ffi-rebuild §4.9): the one
+        // implementation both the interpreter and (later) the JIT call.
+        // Divergence between vm and jit modes is impossible for foreign-call
+        // semantics by construction.
+        let result = self.invoke_foreign_kinded(foreign_idx, &args)?;
+
+        // Transfer the result share to the kinded stack; `mem::forget`
+        // prevents the carrier's Drop from double-releasing it.
+        self.push_kinded(result.raw(), result.kind())?;
+        std::mem::forget(result);
+        // `args` drops here — each `KindedSlot` releases its share.
+        Ok(())
+    }
+
+    /// SHARED foreign-call core (ffi-rebuild §4.9). Called by BOTH tiers (the
+    /// interpreter here; the JIT out-of-line call in stage J2). There is
+    /// exactly ONE foreign-call implementation in the system, so `--mode vm`
+    /// and `--mode jit` cannot diverge on foreign-call semantics.
+    ///
+    /// Pinned order (§4.2 / §4.8.2): read entry metadata → `Ffi` permission +
+    /// `ffi_languages` scope (phase 1, pre-link) → link-now if the handle is
+    /// absent (native: `ffi_libraries`/`ffi_symbols` scope BEFORE `dlopen`;
+    /// dynamic: runtime lookup) → dispatch. No foreign code (including
+    /// `dlopen` ELF constructors) ever runs before its scope check.
+    pub(crate) fn invoke_foreign_kinded(
+        &mut self,
+        foreign_idx: usize,
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
+        // Read the entry metadata (clone the small bits so the `&self` borrow
+        // is released before the link-now `&mut self` calls below).
+        let entry = self
+            .program
+            .foreign_functions
+            .get(foreign_idx)
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "Foreign function index {} out of bounds",
+                    foreign_idx
+                ))
+            })?;
+        let name = entry.name.clone();
+        let language = entry.language.clone();
+        let native_spec = entry.native_abi.clone();
+        let is_native = native_spec.is_some();
+
+        // §4.8.2 phase 1: coarse `Ffi` presence + `ffi_languages` scope
+        // (computable from the entry alone — no handle, no resolution).
+        self.check_ffi_permission(&name, &language, is_native)?;
+
+        // Link-now if the handle is absent (§4.2). A failed link is NOT
+        // cached — retry on next call (environment may change).
+        let already_linked = self
+            .foreign_fn_handles
+            .get(foreign_idx)
+            .map(|h| h.is_some())
+            .unwrap_or(false);
+        if !already_linked {
+            match &native_spec {
+                // extern C native ABI: resolve → scope-check → dlopen.
+                Some(spec) => {
+                    // §4.8.2 phase 2: library / symbol scope BEFORE `dlopen`
+                    // (ELF constructors must never run pre-refusal).
+                    self.check_ffi_native_scope(&name, spec)?;
+                    let layouts = self.program.native_struct_layouts.clone();
+                    let linked = native_abi::link_native_function(
+                        spec,
+                        &layouts,
+                        &mut self.native_library_cache,
+                    )
+                    .map_err(|e| {
+                        VMError::RuntimeError(format!(
+                            "Failed to link native function '{}' (library '{}', symbol '{}'): {}",
+                            name, spec.library, spec.symbol, e
+                        ))
+                    })?;
+                    if foreign_idx >= self.foreign_fn_handles.len() {
+                        self.foreign_fn_handles.resize_with(foreign_idx + 1, || None);
+                    }
+                    self.foreign_fn_handles[foreign_idx] =
+                        Some(ForeignFunctionHandle::Native(std::sync::Arc::new(linked)));
+                }
+                // Dynamic-language (`fn python` / `fn typescript`): look up
+                // the runtime in the VM registry (lookup only — no compile),
+                // then compile-now via the modular extension vtable (§4.2).
+                // The `ffi_languages` scope check already ran in phase 1
+                // (`check_ffi_permission`) before this link-now.
+                None => {
+                    let Some(runtime) = self.language_runtimes.get(&language).cloned() else {
+                        return Err(VMError::RuntimeError(format!(
+                            "foreign function '{}': no extension provides language '{}'; install \
+                             it with `shape ext install {}` or check your frontmatter / shape.toml",
+                            name, language, language
+                        )));
+                    };
+                    // Clone the compile inputs so the `&self.program` borrow is
+                    // released before the `&mut self.foreign_fn_handles` write.
+                    let (body_text, param_names, param_types, return_type, is_async) = {
+                        let entry = &self.program.foreign_functions[foreign_idx];
+                        (
+                            entry.body_text.clone(),
+                            entry.param_names.clone(),
+                            entry.param_types.clone(),
+                            entry.return_type.clone(),
+                            entry.is_async,
+                        )
+                    };
+                    // `runtime.compile` carries the extension's compile-error
+                    // text verbatim (it contains the foreign-language syntax
+                    // error). Note: Python defers syntax checking to invoke, so
+                    // a syntax error surfaces at first call, not here.
+                    let compiled = runtime
+                        .compile(
+                            &name,
+                            &body_text,
+                            &param_names,
+                            &param_types,
+                            return_type.as_deref(),
+                            is_async,
+                        )
+                        .map_err(|e| {
+                            VMError::RuntimeError(format!(
+                                "foreign function '{}' ({}): {}",
+                                name, language, e
+                            ))
+                        })?;
+                    if foreign_idx >= self.foreign_fn_handles.len() {
+                        self.foreign_fn_handles.resize_with(foreign_idx + 1, || None);
+                    }
+                    self.foreign_fn_handles[foreign_idx] =
+                        Some(ForeignFunctionHandle::Runtime { runtime, compiled });
+                }
+            }
         }
 
-        // Phase-2c rebuild notes: the deleted body called
-        // `foreign_marshal::marshal_args(&args, ...)` /
-        // `foreign_marshal::unmarshal_result(...)` for the dynamic-language
-        // runtime path, and `native_abi::invoke_linked_function(&linked,
-        // &args, Some(raw_invoker), Some(vw_slice))` for the extern-C
-        // path. The latter built a `vm_callable_invoker(callable:
-        // &ValueWord, args: &[ValueWord])` on the §2.7.5 stable extension
-        // contract. Rebuild needs `&[KindedSlot]` on the runtime side
-        // with raw u64 retained on the FFI extension side.
-        Err(VMError::NotImplemented(format!(
-            "op_call_foreign: phase-2c — extern C FFI rebuild (ADR-006 §2.7.4 / §2.7.5)"
-        )))
+        // Dispatch on the (now-present) handle.
+        let handle = self.foreign_fn_handles.get(foreign_idx).cloned().flatten();
+        match handle {
+            // extern-C native ABI path — the libffi marshal + C call over the
+            // shared `&[KindedSlot]` carrier.
+            Some(ForeignFunctionHandle::Native(linked)) => {
+                native_abi::invoke_linked_function(&linked, args).map_err(VMError::RuntimeError)
+            }
+            // Dynamic-language runtime path (WF-2A stage 3): marshal args
+            // (typed, §4.4 container oracle) → invoke the modular extension
+            // over the stable msgpack ABI → wrap the outcome into the user's
+            // `Result<T,string>` per the Q13/OQ10 error channel (§4.5).
+            Some(ForeignFunctionHandle::Runtime { runtime, compiled }) => {
+                let (param_types, return_type, schema_id) = {
+                    let entry = &self.program.foreign_functions[foreign_idx];
+                    (
+                        entry.param_types.clone(),
+                        entry.return_type.clone().unwrap_or_default(),
+                        entry.return_type_schema_id,
+                    )
+                };
+                let schemas = &self.program.type_schema_registry;
+                let builtin = &self.builtin_schemas;
+
+                // Host-side panic guard (§4.5): a shape-vm marshalling bug
+                // becomes a class-2 `VMError`, never a VM abort. Extension-side
+                // panics are contained by the stage-0 `language_runtime_plugin!`
+                // `catch_unwind`; `runtime.invoke` returns them as `Err`.
+                let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let args_bytes =
+                        foreign_marshal::marshal_args_typed(args, &param_types, schemas)?;
+                    let outcome = runtime.invoke(&compiled, &args_bytes).map_err(|e| e.to_string());
+                    foreign_marshal::wrap_dynamic_result(
+                        outcome,
+                        &name,
+                        &language,
+                        &return_type,
+                        schema_id,
+                        schemas,
+                        builtin,
+                    )
+                }));
+                match guarded {
+                    Ok(r) => r,
+                    Err(_) => Err(VMError::RuntimeError(format!(
+                        "foreign function '{}' ({}): host-side marshalling panicked",
+                        name, language
+                    ))),
+                }
+            }
+            None => Err(VMError::RuntimeError(format!(
+                "foreign function '{}': link produced no handle (internal error)",
+                name
+            ))),
+        }
+    }
+
+    /// §4.8.2 phase 1: `Ffi` permission presence + `ffi_languages` scope.
+    /// Both are computable from the entry alone (no handle, no resolution),
+    /// so they run on every call BEFORE link-now. When no permission envelope
+    /// is installed (`granted_permissions == None`, trusted-local `shape run`),
+    /// `Ffi` is granted unscoped (ratified posture, OQ13).
+    fn check_ffi_permission(
+        &self,
+        name: &str,
+        language: &str,
+        is_native: bool,
+    ) -> Result<(), VMError> {
+        if let Some(granted) = &self.granted_permissions {
+            // Defense-in-depth backstop (§4.8.3): the Deterministic-mode refusal
+            // is primarily a LOAD-time gate (`deterministic_foreign_gate`,
+            // keyed on the compile-time-derived `required_permissions ∋ Ffi`).
+            // This call-time check catches the residual cases the load gate
+            // cannot see — a non-content-addressed program, or a blob whose
+            // permission derivation predates the derivation rule — refusing the
+            // foreign call before any link/dlopen even when `Ffi` is granted.
+            if granted.contains(&shape_abi_v1::Permission::Deterministic) {
+                return Err(VMError::RuntimeError(format!(
+                    "foreign call '{}' refused: deterministic execution cannot run foreign code \
+                     (extern C / embedded {}); foreign bodies are not attestable deterministic",
+                    name, language
+                )));
+            }
+            if !granted.contains(&shape_abi_v1::Permission::Ffi) {
+                return Err(VMError::RuntimeError(format!(
+                    "foreign call '{}' requires permission Ffi; grant it in shape.toml: \
+                     [permissions] ffi = true (optionally scoped: ffi_languages = [\"{}\"])",
+                    name, language
+                )));
+            }
+        }
+        // `ffi_languages` scopes the dynamic-language verticals; native
+        // (`extern C`) entries are scoped by `ffi_libraries`/`ffi_symbols`
+        // at link-now instead (§4.8.2).
+        if !is_native {
+            if let Some(sc) = &self.scope_constraints {
+                if !sc.ffi_languages.is_empty()
+                    && !sc.ffi_languages.iter().any(|l| l == language)
+                {
+                    return Err(VMError::RuntimeError(format!(
+                        "foreign call '{}': language '{}' is not in the allowed ffi_languages \
+                         scope {:?}",
+                        name, language, sc.ffi_languages
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// §4.8.2 phase 2: `ffi_libraries` (glob over the declared library) +
+    /// `ffi_symbols` (glob over the symbol) for `extern C`. Runs at link-now,
+    /// BEFORE `dlopen`, so an unauthorized library is refused before any ELF
+    /// constructor can execute. An empty list means "all allowed" (parity with
+    /// unscoped `FsRead`); no scope envelope installed also means all allowed.
+    fn check_ffi_native_scope(
+        &self,
+        name: &str,
+        spec: &crate::bytecode::NativeAbiSpec,
+    ) -> Result<(), VMError> {
+        let Some(sc) = &self.scope_constraints else {
+            return Ok(());
+        };
+        if !sc.ffi_libraries.is_empty()
+            && !sc
+                .ffi_libraries
+                .iter()
+                .any(|pat| ffi_glob_match(pat, &spec.library))
+        {
+            return Err(VMError::RuntimeError(format!(
+                "foreign call '{}': native library '{}' is not in the allowed ffi_libraries \
+                 scope {:?}",
+                name, spec.library, sc.ffi_libraries
+            )));
+        }
+        if !sc.ffi_symbols.is_empty()
+            && !sc
+                .ffi_symbols
+                .iter()
+                .any(|pat| ffi_glob_match(pat, &spec.symbol))
+        {
+            return Err(VMError::RuntimeError(format!(
+                "foreign call '{}': native symbol '{}' is not in the allowed ffi_symbols \
+                 scope {:?}",
+                name, spec.symbol, sc.ffi_symbols
+            )));
+        }
+        Ok(())
     }
 
     // Return operations

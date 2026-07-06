@@ -120,6 +120,7 @@ async fn main() -> Result<()> {
             let cli_args::RunCommandOptions {
                 expand,
                 resume,
+                eager_link,
                 runtime,
                 expand_filter,
                 limits,
@@ -149,6 +150,7 @@ async fn main() -> Result<()> {
                     &run_provider_opts,
                     resume,
                     cli_limits,
+                    eager_link,
                 )
                 .await?;
             }
@@ -181,8 +183,8 @@ async fn main() -> Result<()> {
             };
             run_tui(mode, extensions, &provider_opts).await?;
         }
-        (Some(Commands::Check { path }), _) => {
-            run_check(path).await?;
+        (Some(Commands::Check { path, link }), _) => {
+            run_check(path, link).await?;
         }
         (Some(Commands::Doctest { path, verbose }), _) => {
             run_doctest(path, verbose).await?;
@@ -358,6 +360,7 @@ async fn main() -> Result<()> {
                     &provider_opts,
                     resume,
                     shape_vm::resource_limits::ResourceLimits::unlimited(),
+                    false,
                 )
                 .await?;
             }
@@ -372,6 +375,7 @@ async fn main() -> Result<()> {
                 &provider_opts,
                 resume,
                 shape_vm::resource_limits::ResourceLimits::unlimited(),
+                    false,
             )
             .await?;
         }
@@ -392,6 +396,7 @@ async fn main() -> Result<()> {
                             &provider_opts,
                             resume,
                             shape_vm::resource_limits::ResourceLimits::unlimited(),
+                    false,
                         )
                         .await?;
                     } else {

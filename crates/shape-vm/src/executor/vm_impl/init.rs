@@ -61,6 +61,8 @@ impl VirtualMachine {
             async_scope_stack: Vec::new(),
             task_scheduler: task_scheduler::TaskScheduler::new(),
             foreign_fn_handles: Vec::new(),
+            language_runtimes: HashMap::new(),
+            native_library_cache: HashMap::new(),
             function_hashes: Vec::new(),
             function_hash_raw: Vec::new(),
             function_id_by_hash: HashMap::new(),
@@ -122,6 +124,71 @@ impl VirtualMachine {
     ) {
         self.granted_permissions = granted;
         self.scope_constraints = constraints;
+    }
+
+    /// Install the VM-level language-runtime registry (ffi-rebuild §4.2).
+    ///
+    /// The engine calls this after building the VM so the dynamic foreign-call
+    /// link-now path (`fn python` / `fn typescript`) can resolve its runtime.
+    /// Threaded the same way `remote.rs` threads runtimes into a remote VM.
+    pub fn set_language_runtimes(
+        &mut self,
+        runtimes: HashMap<
+            String,
+            Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
+        >,
+    ) {
+        self.language_runtimes = runtimes;
+    }
+
+    /// Opt-in eager link (ffi-rebuild §4.2 / stage 1): walk EVERY foreign
+    /// function and link/compile it up front, reporting ALL failures (not
+    /// first-fail). This is the CI/deploy validation mode (`shape run
+    /// --eager-link` / `shape check --link`); the default stays lazy.
+    ///
+    /// Returns `Ok(())` when every entry links, or `Err(list)` with one
+    /// human-readable line per failing entry. `extern C` entries are actually
+    /// dlopen+resolved; dynamic-language entries are validated only as far as
+    /// runtime availability (full compile is stage 3).
+    pub fn eager_link_all(&mut self) -> Result<(), Vec<String>> {
+        let count = self.program.foreign_functions.len();
+        let mut errors: Vec<String> = Vec::new();
+        for idx in 0..count {
+            let entry = &self.program.foreign_functions[idx];
+            let name = entry.name.clone();
+            let language = entry.language.clone();
+            if let Some(spec) = entry.native_abi.clone() {
+                let layouts = self.program.native_struct_layouts.clone();
+                match crate::executor::control_flow::native_abi::link_native_function(
+                    &spec,
+                    &layouts,
+                    &mut self.native_library_cache,
+                ) {
+                    Ok(linked) => {
+                        if idx >= self.foreign_fn_handles.len() {
+                            self.foreign_fn_handles.resize_with(idx + 1, || None);
+                        }
+                        self.foreign_fn_handles[idx] =
+                            Some(ForeignFunctionHandle::Native(Arc::new(linked)));
+                    }
+                    Err(e) => errors.push(format!(
+                        "extern C fn '{}' (library '{}', symbol '{}'): {}",
+                        name, spec.library, spec.symbol, e
+                    )),
+                }
+            } else if !self.language_runtimes.contains_key(&language) {
+                errors.push(format!(
+                    "fn {} '{}': no extension provides language '{}'; install it with \
+                     `shape ext install {}`",
+                    language, name, language, language
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Set the interrupt flag (shared with Ctrl+C handler).

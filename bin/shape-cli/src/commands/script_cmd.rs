@@ -47,7 +47,7 @@ fn derive_run_security(
     // 2026-07-05). An explicit `[permissions]` section instead fails closed on
     // `Ffi` (`PermissionsSection::to_permission_set` opts it in only on
     // `ffi = true`), the deliberate asymmetry vs. the unscoped local grant.
-    let (granted, scope) = match config {
+    let (mut granted, scope) = match config {
         Some(cfg) if cfg.permissions.is_some() => {
             let section = cfg.permissions.as_ref().unwrap();
             (
@@ -60,6 +60,24 @@ fn derive_run_security(
 
     // Resource limits: CLI flags override, else fall back to [sandbox] caps.
     let sandbox = config.and_then(|c| c.sandbox.as_ref());
+
+    // ffi-rebuild §4.8.3 (Q6, ratified 2026-07-05): `[sandbox] deterministic =
+    // true` requests a deterministic runtime, and foreign code (extern C /
+    // embedded python/typescript) cannot be attested deterministic through the
+    // extension boundary — so a deterministic run must refuse foreign-bearing
+    // programs at LOAD time. Surface `Permission::Deterministic` into the
+    // granted set so the load-time gate (`deterministic_foreign_gate`) and the
+    // per-call backstop fire. This is ADDITIVE: with no `[permissions]`
+    // envelope the deterministic run starts from full trust and only gains the
+    // Deterministic marker, whose sole new effect is the foreign-code refusal —
+    // non-foreign deterministic programs behave exactly as before.
+    if sandbox.map_or(false, |s| s.deterministic) {
+        let mut set = granted
+            .take()
+            .unwrap_or_else(shape_abi_v1::PermissionSet::full);
+        set.insert(shape_abi_v1::Permission::Deterministic);
+        granted = Some(set);
+    }
     let limits = shape_vm::resource_limits::ResourceLimits {
         max_instructions: cli_limits.max_instructions,
         max_memory_bytes: cli_limits
@@ -127,6 +145,7 @@ pub async fn run_script(
     provider_opts: &ProviderOptions,
     resume: Option<String>,
     cli_limits: shape_vm::resource_limits::ResourceLimits,
+    eager_link: bool,
 ) -> Result<()> {
     if let Some(script_path) = file.as_deref() {
         fs::metadata(script_path)
@@ -152,6 +171,8 @@ pub async fn run_script(
 
     // Create engine (data providers are loaded via extensions)
     let mut engine = ShapeEngine::new().context("failed to create Shape engine")?;
+    // WF-2A stage 1: opt-in eager foreign linking (`--eager-link`).
+    engine.set_eager_link_foreign(eager_link);
 
     // Skip source stdlib loading for script execution — precompiled bytecode provides everything.
     // Force source loading with SHAPE_FORCE_SOURCE_STDLIB=1 for development/debugging.

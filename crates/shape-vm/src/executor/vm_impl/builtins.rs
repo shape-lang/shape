@@ -110,6 +110,94 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
+    /// Native-interop out-param cell builtins (WF-2A stage 2 — backing the
+    /// `extern C` `out`-param stub). The compiler-generated stub
+    /// (`compiler/functions_foreign.rs::emit_out_param_stub`) allocates one
+    /// cell per `out` param via `NativePtrNewCell`, initializes / reads it via
+    /// `NativePtrWritePtr` / `NativePtrReadPtr`, passes its ADDRESS to the C
+    /// function as a `ptr` arg, and frees it via `NativePtrFreeCell`.
+    ///
+    /// Anti-UB invariant: a foreign / cell address is never
+    /// `NativeKind::Ptr(HeapKind::…)`; it is a raw `UIntSize` scalar so
+    /// `KindedSlot::Drop` never touches it (no `Arc::decrement_strong_count`
+    /// on a raw heap address).
+    pub(crate) fn dispatch_native_interop_builtin(
+        &mut self,
+        builtin: crate::bytecode::BuiltinFunction,
+        args: Vec<KindedSlot>,
+    ) -> Result<KindedSlot, VMError> {
+        use crate::bytecode::BuiltinFunction;
+        use crate::executor::control_flow::native_abi;
+
+        // Read a UIntSize/integer-kinded cell address argument as `usize`.
+        fn cell_addr(slot: &KindedSlot, ctx: &str) -> Result<usize, VMError> {
+            match slot.kind() {
+                NativeKind::UIntSize
+                | NativeKind::IntSize
+                | NativeKind::UInt64
+                | NativeKind::Int64 => Ok(slot.raw() as usize),
+                other => Err(VMError::RuntimeError(format!(
+                    "{ctx}: expected a pointer-sized (UIntSize) cell address, got kind {other:?}"
+                ))),
+            }
+        }
+
+        match builtin {
+            BuiltinFunction::NativePtrSize => Ok(KindedSlot::new(
+                ValueSlot::from_raw(8),
+                NativeKind::UIntSize,
+            )),
+            BuiltinFunction::NativePtrNewCell => {
+                let addr = native_abi::native_cell_new().ok_or_else(|| {
+                    VMError::RuntimeError(
+                        "NativePtrNewCell: out of memory allocating out-param cell".to_string(),
+                    )
+                })?;
+                Ok(KindedSlot::new(
+                    ValueSlot::from_raw(addr as u64),
+                    NativeKind::UIntSize,
+                ))
+            }
+            BuiltinFunction::NativePtrWritePtr => {
+                let cell = args.first().ok_or_else(|| {
+                    VMError::RuntimeError("NativePtrWritePtr: missing cell".into())
+                })?;
+                let value = args.get(1).ok_or_else(|| {
+                    VMError::RuntimeError("NativePtrWritePtr: missing value".into())
+                })?;
+                let addr = cell_addr(cell, "NativePtrWritePtr")?;
+                // SAFETY: `addr` is a live cell from NativePtrNewCell.
+                unsafe { native_abi::native_cell_write(addr, value.raw()) };
+                Ok(KindedSlot::none())
+            }
+            BuiltinFunction::NativePtrReadPtr => {
+                let cell = args.first().ok_or_else(|| {
+                    VMError::RuntimeError("NativePtrReadPtr: missing cell".into())
+                })?;
+                let addr = cell_addr(cell, "NativePtrReadPtr")?;
+                // SAFETY: `addr` is a live cell from NativePtrNewCell.
+                let bits = unsafe { native_abi::native_cell_read(addr) };
+                Ok(KindedSlot::new(
+                    ValueSlot::from_raw(bits),
+                    NativeKind::UIntSize,
+                ))
+            }
+            BuiltinFunction::NativePtrFreeCell => {
+                let cell = args.first().ok_or_else(|| {
+                    VMError::RuntimeError("NativePtrFreeCell: missing cell".into())
+                })?;
+                let addr = cell_addr(cell, "NativePtrFreeCell")?;
+                // SAFETY: `addr` was returned by NativePtrNewCell and is freed
+                // exactly once (the stub frees each cell once).
+                unsafe { native_abi::native_cell_free(addr) };
+                Ok(KindedSlot::none())
+            }
+            other => Err(VMError::RuntimeError(format!(
+                "dispatch_native_interop_builtin: unexpected builtin {other:?}"
+            ))),
+        }
+    }
+
     // ========================================================================
     // Builtin Dispatch
     //
@@ -419,19 +507,24 @@ impl VirtualMachine {
                 | BuiltinFunction::NativePtrNewCell
                 | BuiltinFunction::NativePtrFreeCell
                 | BuiltinFunction::NativePtrReadPtr
-                | BuiltinFunction::NativePtrWritePtr
-                | BuiltinFunction::NativeTableFromArrowC
+                | BuiltinFunction::NativePtrWritePtr => {
+                    // WF-2A stage 2: out-param cell primitives backing the
+                    // `extern C` `out`-param stub. Kinded end to end.
+                    let args = self.pop_builtin_args()?;
+                    let r = self.dispatch_native_interop_builtin(builtin, args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::NativeTableFromArrowC
                 | BuiltinFunction::NativeTableFromArrowCTyped
                 | BuiltinFunction::NativeTableBindType => {
-                    // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
-                    // native-interop body migration
-                    // (`dispatch_native_interop_builtin`) deferred. Drain
-                    // args to balance the §2.7.7 parallel-kind track.
+                    // SURFACE per ADR-006 §2.7.14: the Arrow-C table bridge
+                    // (`arrow_bridge.rs`) is out of the FFI-rebuild gate (§2
+                    // non-goals). Drain args to balance the §2.7.7 parallel-
+                    // kind track.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     return Err(VMError::NotImplemented(format!(
-                        "phase-1b-vm-wave-5c-native-interop: {:?} body \
-                         migration to kinded carrier (dispatch_native_interop_builtin) \
-                         pending (v0.4 / planned)",
+                        "native Arrow-C table bridge ({:?}) is out of the WF-2A FFI-rebuild \
+                         scope (arrow_bridge.rs; ffi-rebuild §2 non-goals)",
                         builtin
                     )));
                 }
