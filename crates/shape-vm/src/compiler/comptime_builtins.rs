@@ -168,6 +168,29 @@ pub(crate) struct ComptimeDiagnostic {
 thread_local! {
     static COMPTIME_DIRECTIVES: RefCell<Vec<ComptimeDirective>> = const { RefCell::new(Vec::new()) };
     static COMPTIME_DIAGNOSTICS: RefCell<Vec<ComptimeDiagnostic>> = const { RefCell::new(Vec::new()) };
+    /// True while the §4.5.1 whole-program pre-pass speculatively runs a
+    /// type-target comptime handler to materialize generated function
+    /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
+    /// the same handler while compiling the annotated type. So any raw
+    /// side-effecting output (`print`) the handler produces during the pre-pass
+    /// must be discarded, exactly as `warning()`/`error()` diagnostics drained
+    /// here are discarded by the pre-pass; otherwise a handler that prints
+    /// would emit its output twice. Set only around the pre-pass handler
+    /// invocation; the authoritative pass-2 run leaves it clear so the handler
+    /// prints exactly once.
+    static COMPTIME_OUTPUT_SUPPRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set the comptime speculative-output suppression flag (§4.5.1 pre-pass).
+/// Returns the previous value so the caller can restore it.
+pub(crate) fn set_comptime_output_suppressed(suppressed: bool) -> bool {
+    COMPTIME_OUTPUT_SUPPRESSED.with(|c| c.replace(suppressed))
+}
+
+/// True while the §4.5.1 pre-pass is speculatively running a comptime handler;
+/// consulted by `builtin_print` to discard speculative output.
+pub fn is_comptime_output_suppressed() -> bool {
+    COMPTIME_OUTPUT_SUPPRESSED.with(|c| c.get())
 }
 
 /// Clear the thread-local comptime-diagnostics buffer before a comptime run.

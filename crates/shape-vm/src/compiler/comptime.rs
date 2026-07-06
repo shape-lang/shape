@@ -91,6 +91,67 @@ fn comptime_ctx_param_type() -> TypeAnnotation {
     ])
 }
 
+/// The `FieldDescriptor` row shape (comptime-excellence §4.1.1) as a concrete
+/// object annotation, so `target.fields[i]` / `type_info(T).fields[i]`
+/// subscript access resolves to a real object type with `.name` / `.type` /
+/// `.optional` / `.annotations` fields. An `unknown`-element array is iterable
+/// but not indexable, which regressed the flagship `fields[0].name` form.
+fn comptime_field_descriptor_annotation() -> TypeAnnotation {
+    TypeAnnotation::Object(vec![
+        ObjectTypeField {
+            name: "name".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "type".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "annotations".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "string".to_string(),
+            ))),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "optional".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("bool".to_string()),
+            annotations: vec![],
+        },
+    ])
+}
+
+/// The `ParamDescriptor` row shape (comptime-excellence §4.1.1) as a concrete
+/// object annotation, so `target.params[i]` subscript access resolves.
+fn comptime_param_descriptor_annotation() -> TypeAnnotation {
+    TypeAnnotation::Object(vec![
+        ObjectTypeField {
+            name: "name".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "type".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "const".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("bool".to_string()),
+            annotations: vec![],
+        },
+    ])
+}
+
 fn comptime_target_param_type() -> TypeAnnotation {
     TypeAnnotation::Object(vec![
         ObjectTypeField {
@@ -108,17 +169,17 @@ fn comptime_target_param_type() -> TypeAnnotation {
         ObjectTypeField {
             name: "fields".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                "unknown".to_string(),
-            ))),
+            type_annotation: TypeAnnotation::Array(Box::new(
+                comptime_field_descriptor_annotation(),
+            )),
             annotations: vec![],
         },
         ObjectTypeField {
             name: "params".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                "unknown".to_string(),
-            ))),
+            type_annotation: TypeAnnotation::Array(Box::new(
+                comptime_param_descriptor_annotation(),
+            )),
             annotations: vec![],
         },
         ObjectTypeField {
@@ -188,7 +249,21 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                         .map(|f| ObjectTypeField {
                             name: f.to_string(),
                             optional: false,
-                            type_annotation: TypeAnnotation::Basic("unknown".to_string()),
+                            // `type_info(T)` result fields carry their real
+                            // types (comptime-excellence §4.1.2), not `unknown`:
+                            // `.name` / `.kind` are `string` (so `ti.name ==
+                            // "User"` type-checks), and `.fields` is a concrete
+                            // `Array<FieldDescriptor>` so `fields[i].name`
+                            // subscript access resolves — an `unknown` field is
+                            // iterable but neither comparable nor indexable,
+                            // which regressed the flagship `fields[0].name` form.
+                            type_annotation: match *f {
+                                "fields" => TypeAnnotation::Array(Box::new(
+                                    comptime_field_descriptor_annotation(),
+                                )),
+                                "name" | "kind" => TypeAnnotation::Basic("string".to_string()),
+                                _ => TypeAnnotation::Basic("unknown".to_string()),
+                            },
                             annotations: vec![],
                         })
                         .collect(),

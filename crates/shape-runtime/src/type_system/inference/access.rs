@@ -767,6 +767,24 @@ impl TypeInferenceEngine {
         ))
     }
 
+    /// The `FieldDescriptor` row shape (comptime-excellence §4.1.1) as a
+    /// concrete object annotation, so `type_info(T).fields[i]` /
+    /// `target.fields[i]` subscript access resolves to a real object type with
+    /// `.name` / `.type` / `.optional` / `.annotations` fields (an
+    /// `unknown`-element array is iterable but not indexable, which regressed
+    /// the flagship `fields[0].name` form).
+    fn comptime_field_descriptor_annotation() -> TypeAnnotation {
+        TypeAnnotation::Object(vec![
+            Self::typed_object_field("name", TypeAnnotation::Basic("string".to_string())),
+            Self::typed_object_field("type", TypeAnnotation::Basic("string".to_string())),
+            Self::typed_object_field(
+                "annotations",
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("string".to_string()))),
+            ),
+            Self::typed_object_field("optional", TypeAnnotation::Basic("bool".to_string())),
+        ])
+    }
+
     fn infer_comptime_builtin_call(
         &mut self,
         name: &str,
@@ -822,14 +840,14 @@ impl TypeInferenceEngine {
                     ("kind", TypeAnnotation::Basic("string".to_string())),
                     ("name", TypeAnnotation::Basic("string".to_string())),
                     // `fields` is the declared-field descriptor array
-                    // (comptime-excellence §4.1.2); the same `unknown`-element
-                    // array shape as `target.fields`, so per-row `.name` /
-                    // `.type` / `.optional` access resolves identically.
+                    // (comptime-excellence §4.1.2). A concrete `FieldDescriptor`
+                    // element (not `unknown`) so `type_info(T).fields[i].name`
+                    // subscript access resolves identically to `target.fields`.
                     (
                         "fields",
-                        TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                            "unknown".to_string(),
-                        ))),
+                        TypeAnnotation::Array(Box::new(
+                            Self::comptime_field_descriptor_annotation(),
+                        )),
                     ),
                 ])
             }

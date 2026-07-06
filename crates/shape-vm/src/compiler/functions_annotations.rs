@@ -1284,20 +1284,30 @@ impl BytecodeCompiler {
                     helpers.sort_by(|a, b| a.name.cmp(&b.name));
                     helpers.dedup_by(|a, b| a.name == b.name);
 
-                    let execution = match super::comptime::execute_comptime_with_annotation_handler(
-                        &handler.body,
-                        &handler.params,
-                        target_value,
-                        &ann.args,
-                        &entry.def_param_names,
-                        &[],
-                        &helpers,
-                        &extensions,
-                        trait_impls.clone(),
-                        known_type_symbols.clone(),
-                        &ctx_module_path,
-                        &ctx_file,
-                    ) {
+                    // §4.5.1: this pre-pass run is speculative (it only
+                    // materializes generated function signatures); pass-2
+                    // re-runs the same handler authoritatively. Suppress raw
+                    // handler output during the speculative run so a handler
+                    // that prints does not emit twice.
+                    let prev_suppressed =
+                        super::comptime_builtins::set_comptime_output_suppressed(true);
+                    let execution_result =
+                        super::comptime::execute_comptime_with_annotation_handler(
+                            &handler.body,
+                            &handler.params,
+                            target_value,
+                            &ann.args,
+                            &entry.def_param_names,
+                            &[],
+                            &helpers,
+                            &extensions,
+                            trait_impls.clone(),
+                            known_type_symbols.clone(),
+                            &ctx_module_path,
+                            &ctx_file,
+                        );
+                    super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
+                    let execution = match execution_result {
                         Ok(execution) => execution,
                         Err(e) => {
                             // A genuine user `error()` call in the handler is a
