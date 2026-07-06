@@ -51,14 +51,22 @@ loopback nodes with `--ffi-languages python,typescript`; extensions loaded from
 - All marshal is on typed `KindedSlot`/`NativeKind` carriers (ADR-006). No
   ValueWord/tag-decode/bridge/Bool-default. `check-no-dynamic` EXIT 0.
 
-## Residual (routed to lane `wf2f-combined-remote-snapshot-persist`)
+## Residual (routed to lane `wf2f-combined-remote-snapshot-persist`) — RESOLVED at projection layer by WF-2G
 
-The combined cells report `snapstate=0`: a `snapshot()` taken **inside a
-remote-transferred function** currently returns a **clean barrier `Err`**
-(surfaced, never silent corruption — design §4.5) instead of a persistable
+The combined cells reported `snapstate=0`: a `snapshot()` taken **inside a
+remote-transferred function** returned a **clean barrier `Err`** (surfaced,
+never silent corruption — design §4.5) instead of a persistable
 `Snapshot::Hash`. Root cause: receiver-populated `HeapKind::ModuleFn` module
-bindings have no `SerializableVMValue` arm (pre-existing W17-snapshot-ModuleFn
-follow-up, phase-2d-playbook §3). Consequence: the full three-node X4 compose
-(snapshot mid-remote on node A → resume on node B) is not yet persistable; the
-program still composes and executes correctly. This is the single gap keeping
-WF-2F acceptance at **yellow** rather than green.
+bindings had no `SerializableVMValue` arm (pre-existing W17-snapshot-ModuleFn
+follow-up, phase-2d-playbook §3).
+
+**Closed by WF-2G GAP A** (`8fbe82f4`, branch `wave2/snapshot-completeness`):
+`SerializableVMValue::ModuleFunction(String)` now projects/restores a
+`Ptr(HeapKind::ModuleFn)` binding by its qualified export name, so the barrier
+root-cause is removed and the snapshot yields a persistable `Ok(Snapshot::Hash)`.
+See `docs/cluster-audits/wf2g-close-matrix.md` for the authoritative WF-2G
+persist+resume evidence. The full **live 3-node combined re-run** remains an open
+verification lane (`wf2g-combined-live-reverify`) — a from-scratch harness
+reconstruction hit an orthogonal remote-frame-descriptor issue that fires before
+`snapshot()`; the combined persistability is substantiated at the unit +
+committed-integration level. GAP B (heap-element arrays) is fully live-proven.
