@@ -1856,6 +1856,13 @@ print(r)
     /// the closure-over-wire path must reject it rather than ship a mutable cell.
     /// The whole request drives through the real `remote::call` elaboration and
     /// wire round-trip; only the outcome is a structured refusal.
+    ///
+    /// Post-D4 (WF-3E fixC, design §4.1.1 / Q26): `remote::call` now yields a
+    /// real `Result<R, RemoteError>` value — a mutable-capture refusal surfaces
+    /// as `Err(RemoteError::UnsupportedCapture { .. })` the program can handle,
+    /// NOT an uncatchable runtime abort. The closure is still refused (never
+    /// executed remotely, never a Bool-default); the delivery mechanism is the
+    /// recoverable Result surface. Assert on the printed Err value's message.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_remote_mutable_capture_refused_over_tcp() {
         let addr = start_test_server().await;
@@ -1878,19 +1885,23 @@ print(r)
         .await
         .expect("client thread panicked");
 
-        // A mutable capture must NOT execute remotely — the call surfaces a
-        // clean refusal (the `_raising` sibling maps it to a runtime error).
-        // `InProcessResult` is not `Debug`, so match rather than `expect_err`.
-        let msg = match result {
-            Ok(out) => panic!(
-                "mutable-capture closure must be refused, not executed; got stdout {:?}",
-                out.stdout
+        // A mutable capture must NOT execute remotely. Post-D4 the refusal is a
+        // recoverable `Err(RemoteError::UnsupportedCapture)` VALUE (the program
+        // runs cleanly and prints it), not a program-level runtime error.
+        let stdout = match result {
+            Ok(out) => out.stdout.unwrap_or_default(),
+            Err(e) => panic!(
+                "post-D4 `remote::call` must yield a recoverable Result, not a \
+                 program abort; got error {e}"
             ),
-            Err(e) => format!("{e}"),
         };
         assert!(
-            msg.contains("capture") || msg.contains("immutable") || msg.contains("mutable"),
-            "refusal should name the capture problem in user-legible words, got: {msg}"
+            stdout.contains("Err") && stdout.contains("Capture"),
+            "refusal should print an Err(RemoteError::...Capture...) value, got stdout: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("capture") || stdout.contains("immutable") || stdout.contains("mutable"),
+            "refusal should name the capture problem in user-legible words, got stdout: {stdout:?}"
         );
     }
 

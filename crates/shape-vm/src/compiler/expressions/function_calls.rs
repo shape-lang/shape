@@ -1720,6 +1720,39 @@ impl BytecodeCompiler {
             });
         }
 
+        // WF-3E (D7): a bare call `snapshot()` under `use std::core::snapshot`
+        // where the module's last segment collides with a same-named export.
+        // The bare name resolves to the module NAMESPACE binding (a
+        // predeclared module object that a pure Shape-source stdlib module
+        // like `snapshot` never populates on a local run), so the callable
+        // path below would emit `LoadModuleBinding + CallValue` and consume an
+        // uninitialised Bool sentinel at runtime
+        // (`call_value_immediate_nb: ... got Bool`). When `name` is a
+        // namespace-import alias (from `module_scope_sources`), is not shadowed
+        // by a local/closure-capture, and the imported module exports a
+        // function of the SAME name, rewrite to the qualified form
+        // `name::name(..)` — the exact path the documented
+        // `snapshot::snapshot()` takes (resolves to the real function via the
+        // module schema registry / `find_function`). No Bool-default
+        // consumption; a genuine resolution. The `{name}::{name}` existence
+        // gate keeps unrelated shadowing (`use std::core::math` + a user
+        // `fn math()`, where `math` has no `math` export) on the normal path.
+        if self.resolve_local(name).is_none()
+            && !self.mutable_closure_captures.contains_key(name)
+            && self.is_module_namespace_name(name)
+        {
+            let canonical = self
+                .resolve_canonical_module_path(name)
+                .unwrap_or_else(|| name.to_string());
+            let canonical_scoped = format!("{}::{}", canonical, name);
+            let exports_same_named = self.module_member_is_exported(&canonical, name)
+                == Some(true)
+                || self.find_function(&canonical_scoped).is_some();
+            if exports_same_named {
+                return self.compile_module_namespace_call(name, span, name, const_args, args);
+            }
+        }
+
         // Check locals FIRST — function parameters (and other local variables holding
         // callable values) must take priority over global function lookup.  Without this,
         // `fn apply(f, x) { f(x) }` would fail because `find_function("f")` returns None

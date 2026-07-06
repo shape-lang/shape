@@ -294,13 +294,35 @@ fn merge_specs_by_precedence(groups: Vec<Vec<ExtensionSpec>>) -> Vec<ExtensionSp
     let mut selected = Vec::new();
     let mut seen_names = HashSet::new();
     let mut seen_paths = HashSet::new();
+    let mut seen_filenames = HashSet::new();
 
     for group in groups {
         for spec in group {
             let path_key = canonical_path_key(&spec.path);
+            // Shared-library basename (`libshape_ext_python.so`). Directory-
+            // scanned specs (`--extension-dir` and the global
+            // `~/.shape/extensions` auto-scan) carry `name: None`, so the
+            // name dedup below never fires for them. Two DIFFERENT paths that
+            // point at the same-named `.so` (e.g. an operator passes
+            // `--extension-dir <copy>` on a machine that ALSO has the
+            // extension installed globally) would each be loaded — and a
+            // double `dlopen` of a runtime that globally initialises a
+            // singleton (CPython: a second `Py_Initialize` on an already-live
+            // interpreter) crashes the process at startup. Dedup name-less
+            // specs by basename so the higher-precedence copy wins and the
+            // duplicate is skipped. (Named specs still dedup by name, which is
+            // strictly narrower.)
+            let file_key = spec
+                .path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string());
 
             if let Some(name) = spec.name.as_ref().filter(|name| !name.is_empty()) {
                 if seen_names.contains(name) {
+                    continue;
+                }
+            } else if let Some(fname) = file_key.as_ref() {
+                if seen_filenames.contains(fname) {
                     continue;
                 }
             }
@@ -310,6 +332,8 @@ fn merge_specs_by_precedence(groups: Vec<Vec<ExtensionSpec>>) -> Vec<ExtensionSp
 
             if let Some(name) = spec.name.as_ref().filter(|name| !name.is_empty()) {
                 seen_names.insert(name.clone());
+            } else if let Some(fname) = file_key {
+                seen_filenames.insert(fname);
             }
             seen_paths.insert(path_key);
             selected.push(spec);
