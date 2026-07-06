@@ -2203,6 +2203,98 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // WF-4 index-type (reliableonly_strict_bypass class): an array index MUST
+    // be proven `int` at compile time. `int` and `number` are SEPARATE families
+    // and do NOT unify; a `number`/float/decimal index silently reinterpreted as
+    // an `i64` index is the top strict-typing hole. These regressions lock the
+    // strict behavior in at the inference layer.
+
+    fn int_array() -> Type {
+        Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+            "int".to_string(),
+        ))))
+    }
+
+    #[test]
+    fn test_array_number_index_is_compile_error() {
+        let mut engine = make_engine();
+        let arr = int_array();
+        let result = engine.infer_index_access(&arr, &BuiltinTypes::number());
+        assert!(
+            result.is_err(),
+            "arr[n: number] must be a compile error (no implicit number->int coercion), got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_array_decimal_index_is_compile_error() {
+        let mut engine = make_engine();
+        let arr = int_array();
+        let decimal = Type::Concrete(TypeAnnotation::Basic("decimal".to_string()));
+        let result = engine.infer_index_access(&arr, &decimal);
+        assert!(
+            result.is_err(),
+            "arr[d: decimal] must be a compile error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_array_int_index_type_checks() {
+        let mut engine = make_engine();
+        let arr = int_array();
+        let result = engine.infer_index_access(&arr, &BuiltinTypes::integer());
+        assert!(
+            result.is_ok(),
+            "arr[i: int] must type-check, got {:?}",
+            result
+        );
+        // and it yields the element type
+        assert!(matches!(
+            result.unwrap(),
+            Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "int"
+        ));
+    }
+
+    #[test]
+    fn test_array_literal_carrier_number_index_is_compile_error() {
+        // The array-literal / empty-array path uses the `Type::Generic` carrier
+        // (`BuiltinTypes::array`), which is resolved by the engine-level index
+        // arm — that arm must be strict too.
+        let mut engine = make_engine();
+        let arr = BuiltinTypes::array(BuiltinTypes::integer());
+        let result = engine.infer_index_access(&arr, &BuiltinTypes::number());
+        assert!(
+            result.is_err(),
+            "generic-carrier array number index must be a compile error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_array_literal_carrier_int_index_type_checks() {
+        let mut engine = make_engine();
+        let arr = BuiltinTypes::array(BuiltinTypes::integer());
+        let result = engine.infer_index_access(&arr, &BuiltinTypes::integer());
+        assert!(
+            result.is_ok(),
+            "generic-carrier array int index must type-check, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_string_number_index_is_compile_error() {
+        let mut engine = make_engine();
+        let result = engine.infer_index_access(&BuiltinTypes::string(), &BuiltinTypes::number());
+        assert!(
+            result.is_err(),
+            "s[n: number] must be a compile error, got {:?}",
+            result
+        );
+    }
+
     #[test]
     fn test_intersection_property_access_resolves_member_field() {
         let mut engine = make_engine();
