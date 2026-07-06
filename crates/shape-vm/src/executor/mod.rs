@@ -480,6 +480,24 @@ pub struct VirtualMachine {
     pub(crate) native_library_cache:
         HashMap<String, std::sync::Arc<libloading::Library>>,
 
+    /// Depth of live foreign frames (polyglot-distributed §4.5 barrier rule).
+    /// Incremented by `invoke_foreign_kinded` around the vtable/libffi dispatch
+    /// and by any callback invoker on re-entry, decremented when it returns.
+    /// While `> 0` a foreign runtime activation is live on the stack; its state
+    /// is opaque and can never be serialized, so `snapshot()` refuses with a
+    /// `ForeignFrame` barrier. A plain scalar counter (not a heap/kinded slot):
+    /// it is pure control-flow bookkeeping, never a Shape value, so no
+    /// NativeKind carrier is involved.
+    pub(crate) foreign_reentry_depth: u32,
+
+    /// Best-effort `(function, language)` identity of each live foreign frame,
+    /// pushed/popped in lockstep with `foreign_reentry_depth` at the one shared
+    /// `invoke_foreign_kinded` core. Used only to name the innermost foreign
+    /// frame in the §4.5 barrier message; never a Shape value, never
+    /// serialized. If a future async-lane increment bumps the depth without a
+    /// name, `live_foreign_frame_identity` degrades to a generic label.
+    pub(crate) foreign_frame_stack: Vec<(String, String)>,
+
     /// Content hashes for each function, indexed by function_id.
     /// Populated from `BytecodeProgram.content_addressed` or `LinkedProgram`.
     /// `None` entries mean the function has no content-addressed metadata.

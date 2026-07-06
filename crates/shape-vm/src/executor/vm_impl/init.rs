@@ -63,6 +63,8 @@ impl VirtualMachine {
             foreign_fn_handles: Vec::new(),
             language_runtimes: HashMap::new(),
             native_library_cache: HashMap::new(),
+            foreign_reentry_depth: 0,
+            foreign_frame_stack: Vec::new(),
             function_hashes: Vec::new(),
             function_hash_raw: Vec::new(),
             function_id_by_hash: HashMap::new(),

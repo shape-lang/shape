@@ -770,6 +770,24 @@ impl super::VirtualMachine {
         &mut self,
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> SnapshotOutcome {
+        // Barrier: a foreign frame is live on the stack (polyglot-distributed
+        // §4.5, ratified refuse-over-run-to-completion). This is only reachable
+        // when `snapshot()` runs inside the dynamic extent of a foreign call via
+        // a Shape callback re-entered from the foreign body; the foreign
+        // runtime's state (Python heap, V8 isolate, C process state) is opaque
+        // and can never be captured, so refuse cleanly and let the program retry
+        // after the foreign call returns. Jargon-free, catchable in Shape's
+        // Result model. Checked before the store lookup so the message names the
+        // foreign frame regardless of store configuration.
+        if self.foreign_reentry_depth > 0 {
+            let (function, language) = self.live_foreign_frame_identity();
+            return SnapshotOutcome::Barrier(format!(
+                "cannot snapshot() inside foreign call '{}' ({}): foreign runtime \
+                 state cannot be captured — retry after the foreign call returns",
+                function, language
+            ));
+        }
+
         // Barrier: no store installed (embedded host / deterministic opt-out)
         // → NoStore. Handleable in Shape, never a trap (design §4.1, §4.11).
         let Some(store) = self.snapshot_store.clone() else {
@@ -1343,6 +1361,54 @@ mod tests {
         assert_eq!(snap.stack.len(), 0);
         assert_eq!(snap.call_stack.len(), 0);
         assert_eq!(snap.ip, 0);
+    }
+
+    /// WF-2F axis B (polyglot-distributed §4.5): a capture attempted while a
+    /// foreign frame is live refuses with a clean, jargon-free `ForeignFrame`
+    /// barrier that names the foreign function and language, BEFORE the store
+    /// lookup. Locks in the ratified refuse-over-run-to-completion rule.
+    #[test]
+    fn test_snapshot_refuses_inside_live_foreign_frame() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Simulate a live `fn python` frame exactly as `invoke_foreign_kinded`
+        // brackets its dispatch. The foreign-frame barrier is checked BEFORE the
+        // store lookup, so no snapshot context is needed to observe it.
+        vm.foreign_reentry_depth += 1;
+        vm.foreign_frame_stack
+            .push(("compute".to_string(), "python".to_string()));
+
+        match vm.perform_snapshot_capture(None) {
+            SnapshotOutcome::Barrier(msg) => {
+                assert!(
+                    msg.contains("compute") && msg.contains("python"),
+                    "barrier must name the foreign frame; got: {msg}"
+                );
+                assert!(
+                    msg.contains("retry after the foreign call returns"),
+                    "barrier must be actionable; got: {msg}"
+                );
+            }
+            SnapshotOutcome::Saved(_) => panic!("expected ForeignFrame barrier, got Saved"),
+            SnapshotOutcome::PersistFailed(_) => {
+                panic!("expected ForeignFrame barrier, got PersistFailed")
+            }
+        }
+
+        // Once the foreign frame unwinds, the ForeignFrame barrier no longer
+        // fires — the only remaining refusal here is the unrelated NoStore
+        // barrier (no snapshot context configured on this bare test VM), which
+        // must NOT mention the foreign call. Proves the refusal above was
+        // caused by the live foreign frame, not something incidental.
+        vm.foreign_reentry_depth -= 1;
+        vm.foreign_frame_stack.pop();
+        match vm.perform_snapshot_capture(None) {
+            SnapshotOutcome::Barrier(msg) => assert!(
+                !msg.contains("foreign call 'compute'"),
+                "post-unwind refusal must not be the ForeignFrame barrier; got: {msg}"
+            ),
+            SnapshotOutcome::Saved(_) | SnapshotOutcome::PersistFailed(_) => {}
+        }
     }
 
     /// W17 roundtrip smoke: snapshot a scalar-window VM, restore via
