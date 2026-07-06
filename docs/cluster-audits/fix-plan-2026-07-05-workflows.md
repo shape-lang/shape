@@ -270,6 +270,17 @@ WF-1A fixed its 4 core bugs + 2 of 3 drift families; the rest are **routed, not 
 
 **Next: WF-2F (polyglot × distributed compose) + WF-2C-followup launch in parallel from `923a8857`** (pinned worktrees `shape-wf2f-polyglot-distributed` / `shape-wf2c-followup`). Then Wave-2 full close checkpoint, then Wave 3.
 
+## 6octies. Wave-2 close (2026-07-06, main `cc6d876c`) — WF-2F + WF-2C-followup merged, checkpoint #2 GREEN
+
+Both remaining Wave-2 workflows completed and merged serially (fold-main-in-first).
+
+- **WF-2C-followup (green, merged `0c435c0a`):** all 4 remote residuals landed + refuter-clean. R1 direct `remote::call(addr,fn,args)` compiler elaboration (Q33 typed TypedObject `_0.._n` arg-pack + function-ref FromSlot; **arg mismatch = compile error, not runtime coercion**), R2 closure-over-wire user-e2e, R3 heap-shaped (`Array<T>`/`TypedObject`) typed return projection, R4 active TLS termination in `wire-serve` (reused workspace hyper-rustls, no new stack). Independent forbidden-scan clean.
+- **WF-2F (yellow, merged `403fe04c`):** polyglot × distributed composition. 9-cell matrix `{C,python,typescript} × {transfer, snapshot→resume, combined}`: **6/9 fully green** (transfer + snapshot→resume for all three langs, vm==jit); the 3 **combined** cells execute correctly (right values on vm+jit) but the mid-remote `snapshot()` returns a **clean barrier `Err`** (surfaced, never silent — design §4.5) instead of a persistable `Snapshot::Hash`, because receiver-populated `HeapKind::ModuleFn` bindings have no `SerializableVMValue` projection. Ffi permission union + receiver `ffi_languages` strict-empty enforcement (zero sender trust); blob hash covers foreign source + extension id/version; typed carriers only. Close record: `docs/cluster-audits/wf2f-close-matrix.md`.
+- **Semantic merge conflict caught + fixed (`cc6d876c`):** WF-2F added `ffi_languages: &[String]` (3rd param) to `derive_serve_security`; WF-2C-fu's TLS/remote **test** call sites (1396/1739/1786/1822) predated it and passed 2 args. Git auto-merged both textually clean (disjoint regions) so `cargo check --bin` passed — but `--all-targets` (tests) failed E0061. Fixed by passing `&[]` (strict-empty, neutral for non-ffi tests), matching sibling 3-arg test sites. **Lesson: textual-clean auto-merge ≠ semantic-clean; a signature change on one branch + new call site on another needs `--all-targets`, not `--bin`, to catch.**
+- **Combined verify GREEN:** `check-clean` ✓, `check-no-dynamic` ✓, `verify-merge` 15/15 ✓, tier-2 `just test` = 4 pinned pre-existing (`jit_closure_capture_*`) only / **0 new** ✓, serve boot + `remote::execute` runtime smoke = genuine `Ok(...)` ✓, `diff-vmjit --fresh` **MATCH=466 / unexpected=0** (1 known-red pin, now-matching=1) ✓.
+
+**Sole Wave-2 residual → WF-2G `snapshot-completeness` (launched from `cc6d876c`):** two same-class snapshot-**projection** gaps (enum arms already exist; the projection runtime→`SerializableVMValue` refuses): (A) **ModuleFn-by-content-hash** — receiver-transferred `ModuleFn` has no local name, so `ModuleFunction(String)` can't carry it → flips the 3 WF-2F combined cells to persistable+resumable using the Q53(b) content-hash-carrier pattern; (B) **heap-element arrays** (`Array<string|Decimal|TypedObject>`, WF-2B Defect 1). Refuter targets silent snapshot corruption + share-accounting SIGABRT + Bool-default. Script: `docs/cluster-audits/wf2g-snapshot-completeness.js`.
+
 ## 7. Decisions requiring user ruling (recommended defaults marked)
 
 | # | Decision | Options | Recommendation |
