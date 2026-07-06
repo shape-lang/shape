@@ -278,6 +278,31 @@ impl BytecodeCompiler {
         Ok(borrow_id)
     }
 
+    /// Release a single-use `__field_read_ref_` / field-assignment reference
+    /// temp after its `DerefLoad` / `DerefStore` has run (WF-2B snapshot
+    /// defect 2).
+    ///
+    /// The typed-field read/write fast path stores a `RefTarget::TypedField`
+    /// (a non-promoted reference) into a temp local so the `Deref*` opcode can
+    /// project through it. The temp is dead the instant the deref completes —
+    /// but it stays in the frame's register window for the whole frame
+    /// lifetime, and `snapshot()` serializes that window. A non-promoted
+    /// reference has no owning `SharedCell`, so the §2.7.30.7 guard cleanly
+    /// refuses the whole capture: any `snapshot()` after a struct field touch
+    /// becomes un-checkpointable (the vertical's primary use case).
+    ///
+    /// Overwriting the slot with `Null` (StoreLocal drops the prior occupant
+    /// via `stack_write_kinded`) makes it serialize as a scalar. This is sound
+    /// rather than a mask: the temp is a fresh single-use local and is
+    /// provably dead at this point — no later opcode reads it.
+    pub(super) fn release_field_ref_temp(&mut self, field_ref: u16) {
+        self.emit(Instruction::simple(OpCode::PushNull));
+        self.emit(Instruction::new(
+            OpCode::StoreLocal,
+            Some(Operand::Local(field_ref)),
+        ));
+    }
+
     /// Collect the chain of typed field operands for a property access path.
     /// For `a.b.c`, returns [operand_for_b, operand_for_c].
     /// For `a.b` (flat), returns [operand_for_b].

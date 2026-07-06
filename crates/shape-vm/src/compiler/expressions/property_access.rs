@@ -346,6 +346,17 @@ impl BytecodeCompiler {
                 OpCode::DerefLoad,
                 Some(Operand::Local(field_ref)),
             ));
+            // WF-2B snapshot fix (defect 2): the `__field_read_ref_` temp now
+            // holds a dead `RefTarget::TypedField` reference — the value it
+            // projected is already on the stack (retained by DerefLoad's
+            // clone-on-read). If left in the register window it survives for
+            // the whole frame and trips the §2.7.30.7 non-promoted-reference
+            // guard on ANY later `snapshot()` in this frame (the canonical
+            // "checkpoint a struct-based loop" program). Release it by
+            // overwriting with Null (StoreLocal drops the prior occupant), so
+            // the slot serializes as a scalar. The reference is provably dead
+            // here (fresh single-use temp), so this is sound, not a mask.
+            self.release_field_ref_temp(field_ref);
 
             self.last_expr_schema = match &place.field_type_info {
                 FieldType::Object(type_name) => self

@@ -803,6 +803,13 @@ impl BytecodeCompiler {
                         OpCode::DerefStore,
                         Some(Operand::Local(field_ref)),
                     ));
+                    // WF-2B snapshot fix (defect 2): the `field_ref` temp now
+                    // holds a dead `RefTarget::TypedField` reference. Left in
+                    // the register window it trips the §2.7.30.7 non-promoted-
+                    // reference guard on any later `snapshot()` in this frame.
+                    // Release it (StoreLocal drops the prior occupant); the
+                    // temp is provably dead here. See `release_field_ref_temp`.
+                    self.release_field_ref_temp(field_ref);
                     self.emit(Instruction::new(
                         OpCode::LoadLocal,
                         Some(Operand::Local(value_local)),
