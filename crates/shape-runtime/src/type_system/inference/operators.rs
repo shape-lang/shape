@@ -77,7 +77,12 @@ impl TypeInferenceEngine {
             Type::Concrete(TypeAnnotation::Reference(n)) => n.as_str(),
             _ => return None,
         };
-        if !BuiltinTypes::is_numeric_type_name(ctx_name) {
+        // `ptr` is not a numeric type (no ptr arithmetic), but a non-negative
+        // integer literal losslessly denotes a pointer-width value — so a bare
+        // `0` / small literal adopts a `ptr` context (`ptr_write(cell, 0)`,
+        // ffi-rebuild §4.6.5 / §4.10 S4). Value-changing wide reinterpretation
+        // still requires an explicit `int as ptr` cast.
+        if !BuiltinTypes::is_numeric_type_name(ctx_name) && ctx_name != "ptr" {
             return None;
         }
         let fits = match lit {
@@ -157,6 +162,11 @@ impl TypeInferenceEngine {
             } else {
                 v >= 0 && v <= w.max_unsigned() as i128
             };
+        }
+        // `ptr` denotes a pointer-width unsigned value: a non-negative literal
+        // in `[0, u64::MAX]` is lossless (ffi-rebuild §4.6.5 / §4.10 S4).
+        if name == "ptr" {
+            return v >= 0 && v <= u64::MAX as i128;
         }
         match BuiltinTypes::canonical_numeric_runtime_name(name) {
             Some("i64") | Some("isize") => v >= i64::MIN as i128 && v <= i64::MAX as i128,
@@ -1212,9 +1222,33 @@ impl TypeInferenceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_ast::ast::{Literal, Span};
 
     fn basic(name: &str) -> Type {
         Type::Concrete(TypeAnnotation::Basic(name.to_string()))
+    }
+
+    #[test]
+    fn ptr_context_adopts_non_negative_int_literal() {
+        // ffi-rebuild §4.6.5 / §4.10 S4: a non-negative integer literal
+        // losslessly denotes a pointer-width value, so `ptr_write(cell, 0)`
+        // compiles — `0` adopts the `ptr` context.
+        let ptr = basic("ptr");
+        let zero = Expr::Literal(Literal::Int(0), Span { start: 0, end: 0 });
+        assert_eq!(
+            TypeInferenceEngine::adopt_int_literal_in_context(&zero, &ptr),
+            Some(ptr.clone())
+        );
+        // A negative literal is NOT a lossless pointer value → does not adopt.
+        let neg = Expr::Literal(Literal::Int(-1), Span { start: 0, end: 0 });
+        assert_eq!(
+            TypeInferenceEngine::adopt_int_literal_in_context(&neg, &ptr),
+            None
+        );
+        // Range check directly.
+        assert!(TypeInferenceEngine::int_value_fits_numeric(0, "ptr"));
+        assert!(TypeInferenceEngine::int_value_fits_numeric(u64::MAX as i128, "ptr"));
+        assert!(!TypeInferenceEngine::int_value_fits_numeric(-1, "ptr"));
     }
 
     #[test]
