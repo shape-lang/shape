@@ -46,9 +46,14 @@
 //!   the extension load gate (`shape-runtime/src/plugins/loader.rs`).
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
+use crate::executor::result_option_carrier::{build_err, build_ok, build_some};
 use rmpv::Value as Rmp;
-use shape_runtime::type_schema::{FieldType, TypeSchema, TypeSchemaRegistry};
-use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr};
+use shape_runtime::type_schema::{BuiltinSchemaIds, FieldType, TypeSchema, TypeSchemaRegistry};
+use shape_value::heap_value::{HashMapKindedRef, HeapKind, HeapValue, TypedObjectPtr};
+use shape_value::v2::string_obj::StringObj;
+use shape_value::v2::typed_array::{
+    ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING, TypedArray, stamp_elem_type,
+};
 use shape_value::{KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot};
 use std::sync::Arc;
 
@@ -74,6 +79,184 @@ pub fn marshal_args(args: &[KindedSlot], schemas: &TypeSchemaRegistry) -> Result
         VMError::RuntimeError(format!("Failed to marshal foreign function args: {}", e))
     })?;
     Ok(buf)
+}
+
+/// Serialize args using the declared param types as the compile-time
+/// element-kind oracle for scalar-element `Array<T>` / scalar-V
+/// `HashMap` args (ffi-rebuild §4.4, Q14). This is the dynamic-language
+/// entry point.
+///
+/// The OUTER dispatch is still on `slot.kind()` (clause 1) — the declared
+/// type is used ONLY to recover a container's element `NativeKind`, which
+/// is not stored at runtime (the v2-raw `TypedArray<T>` header does not
+/// tag the element type per `heap_header.rs`). Scalar args ignore the
+/// declared type entirely and route to `kinded_slot_to_msgpack`.
+pub fn marshal_args_typed(
+    args: &[KindedSlot],
+    param_types: &[String],
+    schemas: &TypeSchemaRegistry,
+) -> Result<Vec<u8>, VMError> {
+    let mut values = Vec::with_capacity(args.len());
+    for (i, arg) in args.iter().enumerate() {
+        let declared = param_types.get(i).map(|s| s.as_str()).unwrap_or("");
+        values.push(kinded_slot_to_msgpack_typed(arg, declared, schemas)?);
+    }
+    let arr = Rmp::Array(values);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &arr).map_err(|e| {
+        VMError::RuntimeError(format!("Failed to marshal foreign function args: {}", e))
+    })?;
+    Ok(buf)
+}
+
+fn kinded_slot_to_msgpack_typed(
+    slot: &KindedSlot,
+    declared: &str,
+    schemas: &TypeSchemaRegistry,
+) -> Result<Rmp, VMError> {
+    match slot.kind() {
+        NativeKind::Ptr(HeapKind::TypedArray) => typed_array_to_msgpack(slot.raw(), declared),
+        NativeKind::Ptr(HeapKind::HashMap) => hashmap_to_msgpack(slot.raw()),
+        // Scalars + already-covered heap kinds (String/TypedObject/…):
+        // the declared type is redundant; dispatch on kind alone.
+        _ => kinded_slot_to_msgpack(slot, schemas),
+    }
+}
+
+/// Strip `Array<T>` / `Vec<T>` → `T` (single level, for scalar elements).
+fn strip_array_elem(s: &str) -> Option<&str> {
+    let inner = if let Some(rest) = s.strip_prefix("Array<") {
+        rest.strip_suffix('>')?
+    } else if let Some(rest) = s.strip_prefix("Vec<") {
+        rest.strip_suffix('>')?
+    } else {
+        return None;
+    };
+    Some(inner.trim())
+}
+
+/// Project a `Ptr(HeapKind::TypedArray)` slot to a msgpack `Array`, using
+/// the declared `Array<T>` type to select the element monomorphization
+/// (§4.4 — element kind is compile-time-proven, never runtime-tagged).
+fn typed_array_to_msgpack(bits: u64, declared: &str) -> Result<Rmp, VMError> {
+    if bits == 0 {
+        return Ok(Rmp::Array(Vec::new()));
+    }
+    let elem = strip_array_elem(declared).ok_or_else(|| {
+        VMError::NotImplemented(format!(
+            "foreign_marshal: Array arg needs a declared `Array<T>` element \
+             type to select the buffer monomorphization; got '{declared}'"
+        ))
+    })?;
+    // `len` lives at offset 16 of the 24-byte struct — element-independent,
+    // so any monomorphization reads it correctly.
+    let n = unsafe { TypedArray::<i64>::len(bits as *const TypedArray<i64>) } as usize;
+    let mut out = Vec::with_capacity(n);
+    match elem {
+        "int" | "Int" => {
+            let s = unsafe { TypedArray::<i64>::as_slice(bits as *const TypedArray<i64>) };
+            for v in s {
+                out.push(Rmp::Integer((*v).into()));
+            }
+        }
+        "number" | "Number" | "float" | "Float" => {
+            let s = unsafe { TypedArray::<f64>::as_slice(bits as *const TypedArray<f64>) };
+            for v in s {
+                out.push(Rmp::F64(*v));
+            }
+        }
+        "bool" | "Bool" => {
+            let s = unsafe { TypedArray::<u8>::as_slice(bits as *const TypedArray<u8>) };
+            for v in s {
+                out.push(Rmp::Boolean(*v != 0));
+            }
+        }
+        "string" | "String" => {
+            let ptr = bits as *const TypedArray<*const StringObj>;
+            for i in 0..n {
+                let sp = unsafe { TypedArray::<*const StringObj>::get_unchecked(ptr, i as u32) };
+                let s = unsafe { StringObj::as_str(sp) };
+                out.push(Rmp::String(s.into()));
+            }
+        }
+        other => {
+            return Err(VMError::NotImplemented(format!(
+                "foreign_marshal: Array<{other}> arg has no scalar-element FFI \
+                 projection yet (ffi-rebuild §4.4 non-scalar element arms are \
+                 stage-7 territory)."
+            )));
+        }
+    }
+    Ok(Rmp::Array(out))
+}
+
+/// Project a `Ptr(HeapKind::HashMap)` slot to a msgpack `Map`. Keys are
+/// always `*const StringObj`; the value kind is recovered from the
+/// `HashMapKindedRef` variant (monomorphized at construction), so no
+/// declared type is needed here. Non-scalar value variants surface-and-stop.
+fn hashmap_to_msgpack(bits: u64) -> Result<Rmp, VMError> {
+    if bits == 0 {
+        return Ok(Rmp::Map(Vec::new()));
+    }
+    // SAFETY: kind=Ptr(HeapKind::HashMap) slot bits are
+    // `Arc::into_raw(Arc<HashMapKindedRef>)`; borrow the ref for the
+    // duration of the marshal (the slot owns the share).
+    let kref: &HashMapKindedRef = unsafe { &*(bits as *const HashMapKindedRef) };
+
+    // Read the insertion-ordered string keys (element-independent buffer).
+    let read_keys = |keys: *const TypedArray<*const StringObj>| -> Vec<&'static str> {
+        let n = unsafe { TypedArray::<*const StringObj>::len(keys) } as usize;
+        let mut ks = Vec::with_capacity(n);
+        for i in 0..n {
+            let ptr = unsafe { TypedArray::<*const StringObj>::get_unchecked(keys, i as u32) };
+            ks.push(unsafe { StringObj::as_str(ptr) });
+        }
+        ks
+    };
+
+    let mut entries: Vec<(Rmp, Rmp)> = Vec::with_capacity(kref.len());
+    unsafe {
+        match kref {
+            HashMapKindedRef::I64(arc) => {
+                let keys = read_keys(arc.keys);
+                for (i, k) in keys.iter().enumerate() {
+                    let v = *(*arc.values).data.add(i);
+                    entries.push((Rmp::String((*k).into()), Rmp::Integer(v.into())));
+                }
+            }
+            HashMapKindedRef::F64(arc) => {
+                let keys = read_keys(arc.keys);
+                for (i, k) in keys.iter().enumerate() {
+                    let v: f64 = *(*arc.values).data.add(i);
+                    entries.push((Rmp::String((*k).into()), Rmp::F64(v)));
+                }
+            }
+            HashMapKindedRef::Bool(arc) => {
+                let keys = read_keys(arc.keys);
+                for (i, k) in keys.iter().enumerate() {
+                    let v: u8 = *(*arc.values).data.add(i);
+                    entries.push((Rmp::String((*k).into()), Rmp::Boolean(v != 0)));
+                }
+            }
+            HashMapKindedRef::String(arc) => {
+                let keys = read_keys(arc.keys);
+                for (i, k) in keys.iter().enumerate() {
+                    let v_ptr: *const StringObj = *(*arc.values).data.add(i);
+                    let s = StringObj::as_str(v_ptr);
+                    entries.push((Rmp::String((*k).into()), Rmp::String(s.into())));
+                }
+            }
+            other => {
+                return Err(VMError::NotImplemented(format!(
+                    "foreign_marshal: HashMap with value kind {:?} has no \
+                     scalar-V FFI projection yet (ffi-rebuild §4.4 non-scalar-V \
+                     arms are stage-7 territory).",
+                    other.values_kind()
+                )));
+            }
+        }
+    }
+    Ok(Rmp::Map(entries))
 }
 
 /// Project a `KindedSlot` to an `rmpv::Value` per its `NativeKind`.
@@ -348,12 +531,19 @@ fn typed_object_storage_to_msgpack(
 /// the matching `KindedSlot::from_*` constructor (ADR-006 §2.7.6 / Q8
 /// carrier-bound). A wire-vs-declared-type mismatch surfaces as a
 /// structured error rather than a Bool-default fallback (§2.7.5.1
-/// forbidden).
+/// forbidden). For a dynamic-language foreign RETURN (the `fn python`
+/// / `fn typescript` path), this structured error is not the final
+/// user-visible surface: `wrap_dynamic_result` translates it into a
+/// class-1 `TypeConformanceError:` `Err` on the caller's `Result<T>`
+/// per the Q13/OQ10 ratification (2026-07-05), which amended ADR-006
+/// §2.7.29 clause 2 for exactly this sub-case (argument-path / extern-C
+/// mismatches keep the `VMError` channel).
 pub fn unmarshal_result(
     bytes: &[u8],
     return_type: &str,
     schema_id: Option<u32>,
     schemas: &TypeSchemaRegistry,
+    builtin: &BuiltinSchemaIds,
 ) -> Result<KindedSlot, VMError> {
     if bytes.is_empty() {
         return Ok(KindedSlot::none());
@@ -366,7 +556,7 @@ pub fn unmarshal_result(
         ))
     })?;
     let inner_type = strip_result_wrapper(return_type);
-    msgpack_to_kinded_slot(&value, inner_type, schema_id, schemas)
+    msgpack_to_kinded_slot(&value, inner_type, schema_id, schemas, builtin)
 }
 
 /// Convert an `rmpv::Value` into a `KindedSlot` whose `NativeKind`
@@ -376,7 +566,28 @@ fn msgpack_to_kinded_slot(
     target: &str,
     schema_id: Option<u32>,
     schemas: &TypeSchemaRegistry,
+    builtin: &BuiltinSchemaIds,
 ) -> Result<KindedSlot, VMError> {
+    // `Option<T>` (ffi-rebuild §4.4, stage 3): the declared type is the
+    // oracle. Nil → None; any other wire value → unmarshal per T → Some.
+    // Selected by the declared type BEFORE the nil-guard so `Option<int>`
+    // returning null builds `None` rather than a conformance error.
+    //
+    // Representation note: the pattern-matcher's `None` discriminator emits
+    // `IsNull` (null-coding), so `None` MUST be the null sentinel
+    // (`KindedSlot::none()`) — a non-null `build_none` carrier would read as
+    // `Some` under `IsNull` and then fault in `UnwrapOption`. `Some(v)` uses
+    // the canonical `build_some` carrier: it is always non-null (so `IsNull`
+    // is `false`) and `op_unwrap_option`'s `read_option` path unwraps it
+    // correctly even for `Some(0)`/`Some(false)`.
+    if let Some(inner) = strip_option_inner(target) {
+        if matches!(val, Rmp::Nil) {
+            return Ok(KindedSlot::none());
+        }
+        let payload = msgpack_to_kinded_slot(val, inner, schema_id, schemas, builtin)?;
+        return Ok(build_some(builtin, payload));
+    }
+
     // Handle nil first
     if matches!(val, Rmp::Nil) {
         if target == "none" || target == "Unit" || target == "()" {
@@ -439,21 +650,17 @@ fn msgpack_to_kinded_slot(
             msgpack_type_name(val)
         ))),
 
-        // Vec<T> / Array<T>
-        s if (s.starts_with("Vec<") || s.starts_with("Array<")) && s.ends_with('>') => {
-            let prefix_len = if s.starts_with("Vec<") { 4 } else { 6 };
-            let _elem_type = &s[prefix_len..s.len() - 1];
-            // Array unmarshal surfaces — building a TypedArray<T> requires
-            // per-element-kind monomorphization (T = f64/i64/string/…)
-            // which is V3-S5 territory (TypedArray rebuild). Surface-and-
-            // stop with a structured error rather than fabricating a
-            // boxed-array carrier.
-            Err(VMError::NotImplemented(format!(
-                "foreign_marshal::unmarshal_result: Array<T> return type \
-                 ({s}) is a V3-S5 follow-up (per-element-kind TypedArray<T> \
-                 monomorphization). Forms with object-of-array shapes \
-                 (TypedObject containing Array<T> fields) similarly defer."
-            )))
+        // Vec<T> / Array<T> — scalar element T (ffi-rebuild §4.4, stage 3).
+        s if strip_array_elem(s).is_some() => {
+            let elem = strip_array_elem(s).unwrap();
+            match val {
+                Rmp::Array(items) => build_scalar_typed_array(items, elem),
+                _ => Err(marshal_error(format!(
+                    "expected {}, got {}",
+                    s,
+                    msgpack_type_name(val)
+                ))),
+            }
         }
 
         // Object type literal: {f1: T1, f2: T2, ...}
@@ -706,6 +913,190 @@ fn strip_result_wrapper(s: &str) -> &str {
     }
 }
 
+/// Strip `Option<T>` / `T?` → `T` (the declared inner type).
+fn strip_option_inner(s: &str) -> Option<&str> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("Option<") {
+        return rest.strip_suffix('>').map(|inner| inner.trim());
+    }
+    // `T?` sugar. Guard against `??` and empty.
+    if let Some(inner) = s.strip_suffix('?') {
+        if !inner.is_empty() && !inner.ends_with('?') {
+            return Some(inner.trim());
+        }
+    }
+    None
+}
+
+/// Build a `Ptr(HeapKind::TypedArray)` slot from a msgpack array with a
+/// scalar declared element type (ffi-rebuild §4.4, stage 3). Every element
+/// is checked against the declared `elem`; the first mismatch surfaces a
+/// conformance `RuntimeError` (→ class-1 `TypeConformanceError` Err at the
+/// caller). The produced array carries a stamped element-type byte so the
+/// generic `release_v2_typed_array` drop frees it correctly.
+fn build_scalar_typed_array(items: &[Rmp], elem: &str) -> Result<KindedSlot, VMError> {
+    fn array_elem_err(i: usize, want: &str, got: &Rmp) -> VMError {
+        marshal_error(format!(
+            "Array element [{}]: expected {}, got {}",
+            i,
+            want,
+            msgpack_type_name(got)
+        ))
+    }
+    let ptr_bits: u64 = match elem {
+        "int" | "Int" => {
+            let mut vals = Vec::with_capacity(items.len());
+            for (i, it) in items.iter().enumerate() {
+                match it {
+                    Rmp::Integer(n) => vals.push(
+                        n.as_i64()
+                            .or_else(|| n.as_u64().map(|u| u as i64))
+                            .ok_or_else(|| array_elem_err(i, "int", it))?,
+                    ),
+                    _ => return Err(array_elem_err(i, "int", it)),
+                }
+            }
+            let ptr = TypedArray::<i64>::from_slice(&vals);
+            unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_I64) };
+            ptr as u64
+        }
+        "number" | "Number" | "float" | "Float" => {
+            let mut vals = Vec::with_capacity(items.len());
+            for (i, it) in items.iter().enumerate() {
+                match it {
+                    Rmp::F64(f) => vals.push(*f),
+                    Rmp::F32(f) => vals.push(*f as f64),
+                    Rmp::Integer(n) => vals.push(
+                        n.as_i64()
+                            .map(|v| v as f64)
+                            .or_else(|| n.as_u64().map(|v| v as f64))
+                            .ok_or_else(|| array_elem_err(i, "number", it))?,
+                    ),
+                    _ => return Err(array_elem_err(i, "number", it)),
+                }
+            }
+            let ptr = TypedArray::<f64>::from_slice(&vals);
+            unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F64) };
+            ptr as u64
+        }
+        "bool" | "Bool" => {
+            let mut vals = Vec::with_capacity(items.len());
+            for (i, it) in items.iter().enumerate() {
+                match it {
+                    Rmp::Boolean(b) => vals.push(*b as u8),
+                    _ => return Err(array_elem_err(i, "bool", it)),
+                }
+            }
+            let ptr = TypedArray::<u8>::from_slice(&vals);
+            unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_BOOL) };
+            ptr as u64
+        }
+        "string" | "String" => {
+            let mut ptrs: Vec<*const StringObj> = Vec::with_capacity(items.len());
+            for (i, it) in items.iter().enumerate() {
+                match it {
+                    Rmp::String(s) => {
+                        let s = s
+                            .as_str()
+                            .ok_or_else(|| array_elem_err(i, "string", it))?;
+                        ptrs.push(StringObj::new(s) as *const StringObj);
+                    }
+                    _ => return Err(array_elem_err(i, "string", it)),
+                }
+            }
+            let ptr = TypedArray::<*const StringObj>::from_slice(&ptrs);
+            unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_STRING) };
+            ptr as u64
+        }
+        other => {
+            return Err(VMError::NotImplemented(format!(
+                "foreign_marshal::unmarshal_result: Array<{other}> return has no \
+                 scalar-element construction arm yet (ffi-rebuild §4.4 non-scalar \
+                 element arms are stage-7 territory)."
+            )));
+        }
+    };
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(ptr_bits),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
+}
+
+/// Wrap a dynamic-language foreign invoke outcome into the caller's
+/// `Result<T, string>` carrier per the Q13/OQ10 ratified error channel
+/// (ffi-rebuild §4.5). Three disjoint outcomes, three visible surfaces:
+///
+/// * **foreign exception** (`invoke` rc != 0) → class-1 `Err(msg)` on the
+///   user's `Result`, carrying the extension-rendered message verbatim
+///   (no `TypeConformanceError:` prefix — genuine foreign failures stay
+///   distinguishable from contract violations).
+/// * **nonconforming return** (wire value ≠ declared type; the host is the
+///   single oracle, §4.5 (1b)) → class-1 `Err` whose payload begins with the
+///   stable `TypeConformanceError: ` discriminator prefix.
+/// * **host marshal-arm gap / wire corruption** (`NotImplemented` or a
+///   non-conformance error) → class-2 `VMError`, NEVER dressed as a foreign
+///   failure (§4.5 R7) and NEVER folded into the user's `Err`.
+pub fn wrap_dynamic_result(
+    invoke_outcome: Result<Vec<u8>, String>,
+    fn_name: &str,
+    language: &str,
+    return_type: &str,
+    schema_id: Option<u32>,
+    schemas: &TypeSchemaRegistry,
+    builtin: &BuiltinSchemaIds,
+) -> Result<KindedSlot, VMError> {
+    match invoke_outcome {
+        // (1a) foreign exception → Err, verbatim extension message.
+        Err(msg) => Ok(build_err(builtin, KindedSlot::from_string(&msg))),
+        Ok(bytes) => match unmarshal_result(&bytes, return_type, schema_id, schemas, builtin) {
+            Ok(payload) => Ok(build_ok(builtin, payload)),
+            // (1b) conformance violation → class-1 Err with the stable prefix.
+            Err(VMError::RuntimeError(detail)) => {
+                let msg = format!(
+                    "TypeConformanceError: {} (foreign function '{}' ({}), declared \
+                     {}); value: {}",
+                    detail,
+                    fn_name,
+                    language,
+                    return_type,
+                    wire_value_preview(&bytes),
+                );
+                Ok(build_err(builtin, KindedSlot::from_string(&msg)))
+            }
+            // Host-side gap / corruption → class-2 VMError (surface-and-stop).
+            Err(other) => Err(other),
+        },
+    }
+}
+
+/// Render a short, user-facing preview of the raw wire value for the
+/// `TypeConformanceError` message. Never rmpv variant names — Shape-shaped
+/// scalars, truncated.
+fn wire_value_preview(bytes: &[u8]) -> String {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let v = match rmpv::decode::read_value(&mut cursor) {
+        Ok(v) => v,
+        Err(_) => return "<unreadable>".to_string(),
+    };
+    let s = match &v {
+        Rmp::String(x) => format!("{:?}", x.as_str().unwrap_or("<binary>")),
+        Rmp::Integer(i) => format!("{}", i),
+        Rmp::F32(f) => format!("{}", f),
+        Rmp::F64(f) => format!("{}", f),
+        Rmp::Boolean(b) => format!("{}", b),
+        Rmp::Nil => "null".to_string(),
+        Rmp::Array(_) => "[...]".to_string(),
+        Rmp::Map(_) => "{...}".to_string(),
+        Rmp::Binary(_) => "<binary>".to_string(),
+        Rmp::Ext(_, _) => "<ext>".to_string(),
+    };
+    if s.chars().count() > 60 {
+        format!("{}...", s.chars().take(60).collect::<String>())
+    } else {
+        s
+    }
+}
+
 fn marshal_error(msg: impl Into<String>) -> VMError {
     VMError::RuntimeError(msg.into())
 }
@@ -733,7 +1124,20 @@ fn _unused_imports_keepalive(_hv: &HeapValue, _tp: &TypedObjectPtr) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_runtime::type_schema::TypeSchemaRegistry;
+    use shape_runtime::type_schema::builtin_schemas::register_builtin_schemas;
+    use shape_runtime::type_schema::registry::TypeSchemaRegistry;
+
+    fn schemas_with_builtins() -> (TypeSchemaRegistry, BuiltinSchemaIds) {
+        let mut registry = TypeSchemaRegistry::new();
+        let ids = register_builtin_schemas(&mut registry);
+        (registry, ids)
+    }
+
+    fn encode(v: &Rmp) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        rmpv::encode::write_value(&mut bytes, v).unwrap();
+        bytes
+    }
 
     #[test]
     fn marshal_scalar_args_roundtrips_through_msgpack() {
@@ -757,52 +1161,161 @@ mod tests {
 
     #[test]
     fn unmarshal_int_result_produces_int64_kind() {
-        let schemas = TypeSchemaRegistry::new();
-        let arr = Rmp::Integer(42i64.into());
-        let mut bytes = Vec::new();
-        rmpv::encode::write_value(&mut bytes, &arr).unwrap();
-        let slot = unmarshal_result(&bytes, "int", None, &schemas).expect("unmarshal");
+        let (schemas, builtin) = schemas_with_builtins();
+        let bytes = encode(&Rmp::Integer(42i64.into()));
+        let slot = unmarshal_result(&bytes, "int", None, &schemas, &builtin).expect("unmarshal");
         assert_eq!(slot.kind(), NativeKind::Int64);
         assert_eq!(slot.as_i64(), Some(42));
     }
 
     #[test]
     fn unmarshal_string_result_produces_string_kind() {
-        let schemas = TypeSchemaRegistry::new();
-        let v = Rmp::String("hi".into());
-        let mut bytes = Vec::new();
-        rmpv::encode::write_value(&mut bytes, &v).unwrap();
-        let slot = unmarshal_result(&bytes, "string", None, &schemas).expect("unmarshal");
+        let (schemas, builtin) = schemas_with_builtins();
+        let bytes = encode(&Rmp::String("hi".into()));
+        let slot = unmarshal_result(&bytes, "string", None, &schemas, &builtin).expect("unmarshal");
         assert_eq!(slot.kind(), NativeKind::String);
         assert_eq!(slot.as_str(), Some("hi"));
     }
 
     #[test]
     fn unmarshal_result_strips_result_wrapper() {
-        let schemas = TypeSchemaRegistry::new();
-        let v = Rmp::Boolean(true);
-        let mut bytes = Vec::new();
-        rmpv::encode::write_value(&mut bytes, &v).unwrap();
-        let slot = unmarshal_result(&bytes, "Result<bool>", None, &schemas).expect("unmarshal");
+        let (schemas, builtin) = schemas_with_builtins();
+        let bytes = encode(&Rmp::Boolean(true));
+        let slot =
+            unmarshal_result(&bytes, "Result<bool>", None, &schemas, &builtin).expect("unmarshal");
         assert_eq!(slot.kind(), NativeKind::Bool);
         assert_eq!(slot.as_bool(), Some(true));
     }
 
     #[test]
     fn unmarshal_empty_bytes_returns_none_slot() {
-        let schemas = TypeSchemaRegistry::new();
-        let slot = unmarshal_result(&[], "int", None, &schemas).expect("empty-bytes branch");
+        let (schemas, builtin) = schemas_with_builtins();
+        let slot =
+            unmarshal_result(&[], "int", None, &schemas, &builtin).expect("empty-bytes branch");
         assert_eq!(slot.kind(), NativeKind::Null);
     }
 
     #[test]
     fn unmarshal_wire_vs_declared_mismatch_surfaces_structured_error() {
-        let schemas = TypeSchemaRegistry::new();
-        let v = Rmp::Boolean(true);
-        let mut bytes = Vec::new();
-        rmpv::encode::write_value(&mut bytes, &v).unwrap();
-        let err = unmarshal_result(&bytes, "int", None, &schemas).unwrap_err();
+        let (schemas, builtin) = schemas_with_builtins();
+        let bytes = encode(&Rmp::Boolean(true));
+        let err = unmarshal_result(&bytes, "int", None, &schemas, &builtin).unwrap_err();
         // Structured RuntimeError, not a Bool-default fallback into Int64.
         assert!(matches!(err, VMError::RuntimeError(_)));
     }
+
+    #[test]
+    fn unmarshal_option_some_and_none() {
+        let (schemas, builtin) = schemas_with_builtins();
+        // Some(7) → canonical non-null `build_some` carrier (TypedObject).
+        let bytes = encode(&Rmp::Integer(7i64.into()));
+        let some = unmarshal_result(&bytes, "Option<int>", None, &schemas, &builtin).unwrap();
+        assert_eq!(some.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        // None → null sentinel (null-coding, matches the pattern-matcher's
+        // `IsNull` discriminator).
+        let bytes = encode(&Rmp::Nil);
+        let none = unmarshal_result(&bytes, "Option<int>", None, &schemas, &builtin).unwrap();
+        assert_eq!(none.kind(), NativeKind::Null);
+        drop(some);
+        drop(none);
+    }
+
+    #[test]
+    fn marshal_and_unmarshal_scalar_array_roundtrip() {
+        let (schemas, builtin) = schemas_with_builtins();
+        // OUTGOING: build an Array<int> slot, marshal it, expect a wire array.
+        let arr = TypedArray::<i64>::from_slice(&[1i64, 2, 3]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+        let slot = KindedSlot::new(
+            ValueSlot::from_raw(arr as u64),
+            NativeKind::Ptr(HeapKind::TypedArray),
+        );
+        let bytes = marshal_args_typed(
+            std::slice::from_ref(&slot),
+            std::slice::from_ref(&"Array<int>".to_string()),
+            &schemas,
+        )
+        .expect("outgoing array marshal");
+        drop(slot); // releases the array
+
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let decoded = rmpv::decode::read_value(&mut cursor).unwrap();
+        let outer = decoded.as_array().unwrap();
+        let inner = outer[0].as_array().unwrap();
+        assert_eq!(inner.len(), 3);
+        assert_eq!(inner[0].as_i64(), Some(1));
+
+        // INCOMING: unmarshal a wire array into a TypedArray<i64> slot.
+        let wire = encode(&Rmp::Array(vec![
+            Rmp::Integer(10i64.into()),
+            Rmp::Integer(20i64.into()),
+        ]));
+        let rt = unmarshal_result(&wire, "Array<int>", None, &schemas, &builtin).unwrap();
+        assert_eq!(rt.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+        let n = unsafe { TypedArray::<i64>::len(rt.raw() as *const TypedArray<i64>) };
+        assert_eq!(n, 2);
+        drop(rt);
+    }
+
+    #[test]
+    fn wrap_dynamic_result_exception_is_plain_err() {
+        let (schemas, builtin) = schemas_with_builtins();
+        let outcome = Err("ValueError: boom".to_string());
+        let slot =
+            wrap_dynamic_result(outcome, "f", "python", "Result<int>", None, &schemas, &builtin)
+                .unwrap();
+        // Result::Err carrier — a TypedObject.
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        drop(slot);
+    }
+
+    #[test]
+    fn wrap_dynamic_result_conformance_violation_has_prefix() {
+        let (schemas, builtin) = schemas_with_builtins();
+        // Python returned a string for a declared Result<int>.
+        let bytes = encode(&Rmp::String("str".into()));
+        let slot = wrap_dynamic_result(
+            Ok(bytes),
+            "f",
+            "python",
+            "Result<int>",
+            None,
+            &schemas,
+            &builtin,
+        )
+        .unwrap();
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        // Read the Err payload string and assert the discriminator prefix.
+        let carrier = read_result(&builtin, &slot).unwrap().unwrap();
+        assert!(!carrier.is_ok());
+        let payload = carrier.clone_payload().unwrap();
+        let msg = payload.as_str().unwrap();
+        assert!(
+            msg.starts_with("TypeConformanceError: "),
+            "got: {msg}"
+        );
+        assert!(msg.contains("int"));
+        drop(payload);
+        drop(slot);
+    }
+
+    #[test]
+    fn wrap_dynamic_result_missing_arm_stays_class2() {
+        let (schemas, builtin) = schemas_with_builtins();
+        // Declared return type has no marshal arm → NotImplemented, NOT Err.
+        let bytes = encode(&Rmp::Integer(1i64.into()));
+        let err = wrap_dynamic_result(
+            Ok(bytes),
+            "f",
+            "python",
+            "Result<Set<int>>",
+            None,
+            &schemas,
+            &builtin,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::NotImplemented(_)));
+    }
+
+    use crate::executor::result_option_carrier::read_result;
 }

@@ -97,3 +97,31 @@ fn extern_fn_returning_struct_concept() {
     )
     .expect_parse_ok();
 }
+
+// =========================================================================
+// ptr ↔ int (ffi-rebuild §4.6.5 / §4.10 S4)
+// =========================================================================
+
+/// `int as ptr` then `ptr as int` is a bit-preserving reinterpretation — the
+/// value round-trips (pure compile+run, no `.so` needed).
+#[test]
+fn ptr_int_reinterpret_round_trips() {
+    ShapeTest::new(
+        "let a: int = 42\nlet p: ptr = a as ptr\nlet back: int = p as int\nprint(back)",
+    )
+    .expect_output("42");
+}
+
+/// A non-negative integer literal losslessly adopts a `ptr` context — this is
+/// what makes the book's manual out-param `ptr_write(cell, 0)` compile.
+#[test]
+fn non_negative_int_literal_adopts_ptr_context() {
+    ShapeTest::new("let p: ptr = 0\nprint(\"ok\")").expect_output("ok");
+}
+
+/// `int as ptr` / `ptr as int` must NOT be implicit: a bare int in a ptr slot
+/// via a *variable* (not a literal) still requires the explicit cast.
+#[test]
+fn int_variable_does_not_implicitly_become_ptr() {
+    ShapeTest::new("let a: int = 5\nlet p: ptr = a\nprint(\"x\")").expect_run_err();
+}
