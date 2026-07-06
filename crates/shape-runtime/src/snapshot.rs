@@ -22,6 +22,63 @@ use shape_ast::data::Timeframe;
 
 use shape_value::datatable::DataTable;
 
+// ── WF-2G GAP A: native/stdlib ModuleFn qualified-name resolver ──
+//
+// A `Ptr(HeapKind::ModuleFn)` slot's bits are a module-fn id — a
+// process-local index into `VirtualMachine::module_fn_table`, whose entries
+// are native Rust `Arc<dyn Fn>` bodies (there is NO content hash and the
+// bodies are NOT wire-transferred; every node re-registers the identical
+// stdlib deterministically). The sound cross-process identity is therefore
+// the qualified export name `module::export` (e.g. `std::core::json::stringify`),
+// carried by `SerializableVMValue::ModuleFunction(String)`.
+//
+// The projection (`slot_heap_to_serializable`) and its restore inverse
+// (`serializable_to_heap_slot`) are shape-runtime free functions that cannot
+// reach the VM's `module_fn_table`. The id↔name mapping is threaded to them
+// through a thread-local install-once table — the same ambient-resolver shape
+// as `type_schema::current_registry()`. `VirtualMachine::populate_module_objects`
+// installs it after registering every module-fn (id order == registration
+// order == deterministic across nodes). This is NOT a tag/kind bridge and
+// carries no ValueWord shape — it is a plain `id → "module::export"` map.
+thread_local! {
+    /// `module_fn_id` (Vec index) → qualified export name `module::export`.
+    static MODULE_FN_NAME_BY_ID: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// qualified export name `module::export` → `module_fn_id`.
+    static MODULE_FN_ID_BY_NAME: std::cell::RefCell<HashMap<String, u64>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Install the module-fn qualified-name table for snapshot projection +
+/// restore on the current thread. `names[id]` is the qualified name of the
+/// module-fn registered with `module_fn_id == id`. Called by
+/// `VirtualMachine::populate_module_objects` on both the snapshotting host
+/// (projection: id → name) and the resuming host (restore: name → id).
+pub fn install_module_fn_name_table(names: Vec<String>) {
+    let mut by_name: HashMap<String, u64> = HashMap::with_capacity(names.len());
+    for (id, name) in names.iter().enumerate() {
+        // Duplicate names would be a stdlib-registration bug; last-writer
+        // wins deterministically (registration order is fixed).
+        by_name.insert(name.clone(), id as u64);
+    }
+    MODULE_FN_ID_BY_NAME.with(|m| *m.borrow_mut() = by_name);
+    MODULE_FN_NAME_BY_ID.with(|m| *m.borrow_mut() = names);
+}
+
+/// Projection: resolve a module-fn id to its qualified export name.
+/// `None` when the name table was never installed or the id is out of range
+/// (surface-and-stop — never fabricate a name).
+fn resolve_module_fn_name(id: u64) -> Option<String> {
+    MODULE_FN_NAME_BY_ID.with(|m| m.borrow().get(id as usize).cloned())
+}
+
+/// Restore: resolve a qualified export name back to its module-fn id on the
+/// resuming host. `None` when the module is absent here (clean-refuse — never
+/// fabricate an id).
+fn resolve_module_fn_id(name: &str) -> Option<u64> {
+    MODULE_FN_ID_BY_NAME.with(|m| m.borrow().get(name).copied())
+}
+
 /// Schema version for the snapshot binary format.
 ///
 /// This version is embedded in every [`ExecutionSnapshot`] via the `version`
@@ -1382,7 +1439,11 @@ fn slot_heap_to_serializable(
         AtomicData, ChannelData, DequeData, HashSetData, LazyData, MutexData, OptionData,
         PriorityQueueData, ResultData,
     };
-    if bits == 0 {
+    // WF-2G GAP A: `Ptr(HeapKind::ModuleFn)` bits are an inline-scalar
+    // module-fn id (NOT a pointer), and id 0 is the first-registered fn —
+    // a valid value, not a null pointer. Exempt it from the null-pointer
+    // guard so it reaches the ModuleFn projection arm below.
+    if bits == 0 && !matches!(expected_kind, HeapKind::ModuleFn) {
         return Err(format!(
             "slot_to_serializable: Ptr({expected_kind:?}) slot with null bits",
         ));
@@ -1712,6 +1773,25 @@ fn slot_heap_to_serializable(
             }
         }
 
+        // WF-2G GAP A: native/stdlib module-function value. The slot bits
+        // are the module-fn id (an inline scalar index into the VM's
+        // `module_fn_table` — NOT an `Arc<T>` pointer; clone/drop are
+        // no-ops per kinded_slot.rs:1148). Project to the qualified export
+        // name so the snapshot is self-contained across processes: native
+        // stdlib fns have no content hash and are re-registered identically
+        // on every node, so `module::export` is the sound identity carried
+        // by `SerializableVMValue::ModuleFunction(String)`. Surface-and-stop
+        // (never fabricate) if the id has no registered name.
+        HeapKind::ModuleFn => match resolve_module_fn_name(bits) {
+            Some(name) => Ok(SV::ModuleFunction(name)),
+            None => Err(format!(
+                "slot_to_serializable: ModuleFn slot id {bits} has no registered \
+                 qualified name (module-fn name table not installed on this \
+                 thread, or id out of range). Surface-and-stop — never \
+                 fabricate a name. ADR-006 §2.7.5.1."
+            )),
+        },
+
         // Pre-existing complex shapes: surface-and-stop per §2.7.5.1.
         // These have rich pre-bulldozer SerializableVMValue arms whose
         // construction requires more than typed-Arc recovery (DataTable /
@@ -1729,7 +1809,6 @@ fn slot_heap_to_serializable(
         | HeapKind::NativeScalar
         | HeapKind::NativeView
         | HeapKind::TraitObject
-        | HeapKind::ModuleFn
         | HeapKind::Matrix
         | HeapKind::MatrixSlice) => Err(format!(
             "slot_to_serializable: W17-snapshot-roundtrip surface — \
@@ -2158,6 +2237,7 @@ pub fn expected_kind_from_serializable(sv: &SerializableVMValue) -> NativeKind {
         SV::Range { .. } => NativeKind::Ptr(HeapKind::Range),
         SV::HashMap { .. } => NativeKind::Ptr(HeapKind::HashMap),
         SV::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
+        SV::ModuleFunction(_) => NativeKind::Ptr(HeapKind::ModuleFn),
         _ => NativeKind::Bool,
     }
 }
@@ -2235,6 +2315,8 @@ fn expected_heap_field_kind(sv: &SerializableVMValue) -> NativeKind {
         // Nested typed-object fields must not silently restore old
         // Arc<ResultData> / Arc<OptionData> carriers.
         SV::ResultData { .. } | SV::OptionData { .. } => NativeKind::Ptr(HeapKind::TypedObject),
+        // WF-2G GAP A: a module-fn field inside a module-binding TypedObject.
+        SV::ModuleFunction(_) => NativeKind::Ptr(HeapKind::ModuleFn),
         // Pre-existing complex arms — surface clean rather than guess.
         _ => NativeKind::Bool,
     }
@@ -2270,6 +2352,23 @@ fn serializable_to_heap_slot(
             let arc = Arc::new(*n);
             let raw = Arc::into_raw(arc) as u64;
             Ok((raw, NativeKind::Ptr(HeapKind::BigInt)))
+        }
+        (SV::ModuleFunction(name), HeapKind::ModuleFn) => {
+            // WF-2G GAP A restore. Re-resolve the qualified export name back
+            // to a module-fn id against the resuming host's registration
+            // (installed by `populate_module_objects`; deterministic order ⇒
+            // id parity with the origin). The id is an inline scalar (clone/
+            // drop no-op), so no share is minted. Clean-refuse if the module
+            // is absent on the resumer — never fabricate an id.
+            match resolve_module_fn_id(name) {
+                Some(id) => Ok((id, NativeKind::Ptr(HeapKind::ModuleFn))),
+                None => Err(format!(
+                    "serializable_to_slot: ModuleFunction '{name}' is not \
+                     registered on the resuming host (module absent, or the \
+                     module-fn name table was not installed before restore). \
+                     Clean-refuse — never fabricate an id. ADR-006 §2.7.5.1."
+                )),
+            }
         }
         (SV::Decimal(d), HeapKind::Decimal) => {
             let arc = Arc::new(*d);
@@ -2938,6 +3037,45 @@ mod l5_typed_object_result_option_snapshot_tests {
         assert_eq!(
             restored_storage.field_kinds[OPTION_PAYLOAD],
             NativeKind::Null
+        );
+    }
+
+    #[test]
+    fn wf2g_module_fn_projection_and_restore_round_trip() {
+        // WF-2G GAP A: a `Ptr(HeapKind::ModuleFn)` slot (inline-scalar
+        // module-fn id) projects to `SV::ModuleFunction(qualified_name)` and
+        // restores back to the SAME id via the installed name table. Id 0 is
+        // exercised explicitly (it was formerly swallowed by the null-pointer
+        // guard). No SIGABRT at drop (ModuleFn clone/drop are no-ops).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        super::install_module_fn_name_table(vec![
+            "std::core::json::stringify".to_string(),
+            "std::core::math::sqrt".to_string(),
+        ]);
+
+        for (id, name) in [(0u64, "std::core::json::stringify"), (1, "std::core::math::sqrt")] {
+            // Project.
+            let sv = slot_to_serializable(id, NativeKind::Ptr(HeapKind::ModuleFn), &store)
+                .expect("project module fn");
+            match &sv {
+                SV::ModuleFunction(n) => assert_eq!(n, name, "projected qualified name"),
+                other => panic!("expected ModuleFunction, got {other:?}"),
+            }
+            // Restore.
+            let (bits, kind) =
+                serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::ModuleFn), &store)
+                    .expect("restore module fn");
+            assert_eq!(bits, id, "restored id parity");
+            assert_eq!(kind, NativeKind::Ptr(HeapKind::ModuleFn));
+        }
+
+        // An unresolvable name on a resumer missing the module — clean refuse.
+        let missing = SV::ModuleFunction("absent::module::fn".to_string());
+        assert!(
+            serializable_to_slot(&missing, NativeKind::Ptr(HeapKind::ModuleFn), &store).is_err(),
+            "unresolvable module fn name must clean-refuse, never fabricate an id"
         );
     }
 

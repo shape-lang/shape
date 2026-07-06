@@ -272,6 +272,16 @@ impl super::VirtualMachine {
         let mut vm = super::VirtualMachine::new(crate::VMConfig::default());
         vm.load_program(program);
 
+        // WF-2G GAP A: register module-fn entries + install the
+        // `module_fn_id ↔ "module::export"` name table BEFORE the restore
+        // two-pass, so the `SV::ModuleFunction(name)` restore arm resolves
+        // name → id against this host's registration (deterministic order ⇒
+        // id parity with the origin). `populate_module_objects` is idempotent
+        // (guards on a non-empty `module_fn_table`), so the later
+        // `resume_from_snapshot_impl` call is a no-op and the restored
+        // module-binding TypedObjects (rewritten by the two-pass below) win.
+        vm.populate_module_objects();
+
         // STAGE-R5 two-pass restore (ADR-006 §2.7.30.5). Pass 1
         // materializes every `SV::SharedCell` BODY into ONE Arc<SharedCell>
         // per handle (recorded in `link.identity_map`, base share in the
