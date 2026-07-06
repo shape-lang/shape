@@ -112,6 +112,13 @@ impl BytecodeCompiler {
                 library: native.library.clone(),
                 symbol: native.symbol.clone(),
                 signature,
+                // ffi-rebuild §4.11 / WF-2A: carry the declaring package identity
+                // (stamped onto the AST binding by
+                // `annotate_program_native_abi_package_key`) into the runtime
+                // entry so the executing host can resolve a package-scoped
+                // `[native-dependencies]` alias via `NativeResolutionSet`. Excluded
+                // from the content hash (runtime metadata, host-stable per A7).
+                package_key: native.package_key.clone(),
             })
         } else {
             None

@@ -738,6 +738,18 @@ impl BytecodeExecutor {
             },
             None => vm.load_program(bytecode),
         }
+        // ffi-rebuild §4.11 / WF-2A: thread the resolved package-scoped
+        // `[native-dependencies]` map (set by the CLI's
+        // `wire_vm_executor_module_loading` → `set_native_resolution_context`)
+        // into the VM so the link-now path resolves an `extern C` declaration's
+        // `[native-dependencies]` alias to its real vendored/path `dlopen`
+        // target instead of `dlopen`-ing the bare alias string.
+        vm.set_native_resolutions(
+            self.native_resolution_context
+                .clone()
+                .map(std::sync::Arc::new),
+            self.root_package_key.clone(),
+        );
         for ext in &self.extensions {
             vm.register_extension(ext.clone());
         }

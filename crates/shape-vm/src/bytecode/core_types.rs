@@ -104,6 +104,17 @@ pub struct NativeAbiSpec {
     pub symbol: String,
     /// Canonical C signature string, e.g. `fn(f64) -> f64`.
     pub signature: String,
+    /// Declaring package identity for package-scoped `[native-dependencies]`
+    /// alias resolution (ffi-rebuild §4.11 / WF-2A). Populated at compile time
+    /// from the AST `NativeAbiBinding.package_key` (stamped by
+    /// `annotate_program_native_abi_package_key`). `None` for a raw path/soname
+    /// declaration with no owning package. The executing host uses
+    /// `(package_key, library)` to look up the resolved
+    /// `NativeResolutionSet.by_package_alias` load target at link-now — this is
+    /// runtime metadata, so it is excluded from the content hash (host-stable
+    /// per A7: identical source declarations hash identically across hosts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_key: Option<String>,
 }
 
 /// Native `type C` layout entry emitted by the compiler.

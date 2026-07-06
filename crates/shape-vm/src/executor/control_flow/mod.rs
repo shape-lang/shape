@@ -966,10 +966,14 @@ impl VirtualMachine {
                     // (ELF constructors must never run pre-refusal).
                     self.check_ffi_native_scope(&name, spec)?;
                     let layouts = self.program.native_struct_layouts.clone();
+                    let resolutions = self.native_resolutions.clone();
+                    let root_key = self.native_root_package_key.clone();
                     let linked = native_abi::link_native_function(
                         spec,
                         &layouts,
                         &mut self.native_library_cache,
+                        resolutions.as_deref(),
+                        root_key.as_deref(),
                     )
                     .map_err(|e| {
                         VMError::RuntimeError(format!(
