@@ -104,7 +104,23 @@ fn derive_serve_security(level: SandboxLevel, is_loopback: bool) -> SecurityPost
             (set, ResourceLimits::sandboxed())
         }
         // `off` == operator-declared total trust: `full()` includes `Ffi`.
-        SandboxLevel::None => (PermissionSet::full(), ResourceLimits::unlimited()),
+        //
+        // WF-2F axis A: `full()` also includes the `Deterministic` marker, but
+        // per ffi-rebuild §4.8.3 (Q6) that marker is a mode SELECTOR whose sole
+        // effect is refusing foreign code (extern C / fn python / fn typescript)
+        // — the local `shape run` path only inserts it on explicit
+        // `[sandbox] deterministic = true` (script_cmd.rs:73-79), never as an
+        // implication of "total trust". A serve node that grants `Ffi` and then
+        // refuses every foreign call in `check_ffi_permission` would be
+        // self-contradictory, so `off` drops Deterministic to genuinely RUN
+        // foreign-bearing transfers (the ratified `off -> grants ffi.call`
+        // posture). Deterministic serve execution remains reachable through a
+        // dedicated future knob, not by piling it onto the FFI-granting level.
+        SandboxLevel::None => {
+            let mut set = PermissionSet::full();
+            set.remove(&Permission::Deterministic);
+            (set, ResourceLimits::unlimited())
+        }
     };
 
     // Non-loopback binds fail closed to Pure-only until explicitly configured.
@@ -1229,6 +1245,17 @@ mod tests {
         let none = derive_serve_security(SandboxLevel::None, true);
         assert!(none.granted.contains(&Permission::FsWrite));
         assert!(none.limits.max_instructions.is_none());
+        // WF-2F axis A: `off` grants Ffi and must genuinely RUN foreign code —
+        // so it must NOT carry the Deterministic mode-selector, which
+        // `check_ffi_permission` treats as a blanket foreign-call refusal.
+        assert!(
+            none.granted.contains(&Permission::Ffi),
+            "off must grant ffi.call"
+        );
+        assert!(
+            !none.granted.contains(&Permission::Deterministic),
+            "off must NOT imply deterministic mode — it would refuse every foreign call"
+        );
 
         // Non-loopback → Pure-only regardless of level (fail closed).
         let remote_none = derive_serve_security(SandboxLevel::None, false);

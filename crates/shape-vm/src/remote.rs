@@ -857,14 +857,6 @@ fn run_remote_call(
     use shape_runtime::snapshot::{serializable_to_slot, slot_to_serializable};
     use shape_value::{KindedSlot, ValueSlot};
 
-    // Forward the language_runtimes registration through the VM hookup
-    // path. The current VM API does not expose a register-language-
-    // runtime entry-point; consumers that need foreign-function support
-    // through the remote-call boundary should pre-load runtimes via the
-    // extension pipeline before dispatch. T1 stages the parameter
-    // surface so downstream W17-foreign-ffi can wire it up.
-    let _ = language_runtimes;
-
     // Step 1: reconstruct the program. If function_blobs are supplied,
     // build a content-addressed Program; otherwise use the full payload.
     let mut program: BytecodeProgram = request.program;
@@ -907,6 +899,17 @@ fn run_remote_call(
     // receiver's granted set (§4.6) — never the sender's self-declared claim.
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.set_permissions(Some(granted.clone()), None);
+
+    // WF-2F axis A (design F3): register the receiver's language runtimes into
+    // the VM BEFORE load so the dynamic foreign-call link-now path
+    // (`fn python` / `fn typescript`) can resolve its runtime. `extern C`
+    // links via native_abi dlopen and needs no registry. Never-trust-the-
+    // sender is unaffected: these are the RECEIVER's own installed runtimes,
+    // and the `Ffi` permission gate below still governs whether any foreign
+    // call is allowed at all.
+    if let Some(runtimes) = language_runtimes {
+        vm.set_language_runtimes(runtimes.clone());
+    }
     match program.content_addressed.clone() {
         Some(ca) => {
             // (a) §4.3-2: recompute each blob's content hash and reject any
@@ -994,6 +997,15 @@ fn run_remote_call(
         None => vm.load_program(program),
     }
     vm.populate_module_objects();
+
+    // WF-2F axis A: initialize the module bindings holding foreign-stub
+    // function values. The transferred function reaches its `extern C` /
+    // `fn python` / `fn typescript` stub via `LoadModuleBinding` + `CallValue`,
+    // but per-function dispatch never runs top-level module-init, so those
+    // bindings would otherwise read the `(0, Bool)` uninitialised sentinel and
+    // `call_value_immediate_nb` would refuse the Bool-kinded callee. See
+    // `VirtualMachine::initialize_foreign_stub_bindings`.
+    vm.initialize_foreign_stub_bindings();
 
     // Step 3: resolve callee. function_hash (canonical) > function_id > name.
     let func_id: u16 = if let Some(hash) = request.function_hash {

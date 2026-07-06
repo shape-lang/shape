@@ -887,6 +887,60 @@ impl VirtualMachine {
         KindedSlot::new(shape_value::ValueSlot::from_raw(bits), kind)
     }
 
+    /// Initialize the module bindings that hold foreign-stub function values
+    /// (WF-2F axis A — polyglot × distributed composition).
+    ///
+    /// The per-function remote dispatch path (`remote::run_remote_call`) invokes
+    /// a transferred function directly via `execute_function_by_id` and never
+    /// runs the origin program's top-level module-init. A foreign-bearing
+    /// function references its `extern C` / `fn python` / `fn typescript` stub
+    /// through `LoadModuleBinding` + `CallValue` — and that stub's module
+    /// binding is written ONLY by the top-level `PushConst Function(idx)` +
+    /// `StoreModuleBinding` pair the compiler emits at
+    /// `compiler/functions_foreign.rs:314-326`. Without init, the receiver's
+    /// binding reads as the `(0, NativeKind::Bool)` uninitialised sentinel
+    /// (`module_binding_read_kinded_raw`), so the value-call callee kind is
+    /// `Bool` and `call_value_immediate_nb` refuses it.
+    ///
+    /// This writes each foreign stub's module binding to its function value —
+    /// exactly the `Constant::Function` slot shape `(func_id, NativeKind::UInt64)`
+    /// that `op_push_const` produces (`stack_ops/mod.rs:126-128`), so
+    /// `call_value_immediate_nb`'s `UInt64` callee arm dispatches identically to
+    /// a local run. `UInt64` is a scalar no-op kind (no strong-count share),
+    /// so no retain/release is required. This is a metadata-layer init, not a
+    /// value carrier — no tag/kind bridge, no Bool-default (ADR-006 §2.7.8).
+    pub(crate) fn initialize_foreign_stub_bindings(&mut self) {
+        // Collect (binding_idx, func_id) first so the immutable program borrow
+        // is released before the mutable `module_binding_write_kinded` writes.
+        let mut inits: Vec<(usize, u64)> = Vec::new();
+        for entry in self.program.foreign_functions.iter() {
+            // The stub function carries the SAME name as the foreign entry
+            // (functions_foreign.rs registers `def.name`). An annotation
+            // wrapper is a distinct `{name}___ann_wrapper` function, so an
+            // exact match resolves the stub, never the wrapper.
+            let Some(func_id) = self
+                .program
+                .functions
+                .iter()
+                .position(|f| f.name == entry.name)
+            else {
+                continue;
+            };
+            let Some(binding_idx) = self
+                .program
+                .module_binding_names
+                .iter()
+                .position(|n| *n == entry.name)
+            else {
+                continue;
+            };
+            inits.push((binding_idx, func_id as u64));
+        }
+        for (binding_idx, func_id) in inits {
+            self.module_binding_write_kinded(binding_idx, func_id, NativeKind::UInt64);
+        }
+    }
+
     /// Take ownership of `module_bindings[index]`, replacing it with
     /// the zero/Bool sentinel. Does NOT drop — the caller owns the
     /// returned bits. Mirrors `stack_take_kinded` in
