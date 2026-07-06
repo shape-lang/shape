@@ -210,3 +210,55 @@ fn bug15_let_copies_in_ref_fn() {
     )
     .expect_number(21.0);
 }
+
+// BUG-16 (WF-3A-tail): a bare module-qualified scalar builtin call used
+// DIRECTLY in operand position must infer its declared return type. Before
+// the inference-tier module-schema return-type propagation, `time::millis()`
+// (declared `-> number`) inferred to `unknown` in operand position, so
+// `time::millis() - start` rejected with "operand types are unknown and
+// number". The let-binding form already worked (emit-tier stamp); this is the
+// bare-operand form. `number - number` -> number.
+#[test]
+fn bug16_module_call_number_operand_position() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        let start = time::millis()
+        let dt = time::millis() - start
+        print(dt >= 0)
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("true");
+}
+
+// BUG-16b: both operands bare module calls — `millis() - millis()` infers
+// number on each side and subtracts to number.
+#[test]
+fn bug16b_module_call_both_bare_operands() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        let d = time::millis() - time::millis()
+        print(d <= 0)
+    "#,
+    )
+    .with_stdlib()
+    .expect_output_contains("true");
+}
+
+// BUG-16c: the recovered type is the ACTUAL declared type, not a fabricated
+// pass-anything. A `number`-returning module call used where a `string` is
+// required (string concatenation) is still a strict compile error.
+#[test]
+fn bug16c_module_call_number_in_string_context_errors() {
+    ShapeTest::new(
+        r#"
+        use std::core::time
+        let x = "elapsed: " + time::millis()
+        print(x)
+    "#,
+    )
+    .with_stdlib()
+    .expect_run_err_contains("string");
+}

@@ -5987,6 +5987,41 @@ impl BytecodeCompiler {
         None
     }
 
+    /// WF-3A-tail (operand-position inference): recover a native module export's
+    /// declared SCALAR return type as an inference-tier `Type`. This is the
+    /// inference-tier sibling of `native_module_declared_return_type_info`'s
+    /// emit-tier let-binding stamp. The runtime inference engine holds no
+    /// module-export signatures, so its `QualifiedFunctionCall` arm returns a
+    /// fresh type var — which made a BARE `time::millis()` used directly as a
+    /// binary operand (`time::millis() - start`) erase to `unknown` and reject
+    /// the `Sub`. Consult the native module schema's declared `-> T` and return
+    /// the proven scalar `ConcreteType` so the call carries its true declared
+    /// type in ANY position (binary operand, argument, return, index), not only
+    /// when bound to a `let`.
+    ///
+    /// Scoped to SCALAR returns (`bool`/`string`/`int`/`number`/`decimal`) via
+    /// `canonical_script_alias`, which returns `None` for `Result<..>` /
+    /// `Option<..>` / bare enums / arrays / objects — those keep the existing
+    /// inference/schema path so their navigation semantics (json::parse ->
+    /// Result<Json>, etc.) are untouched. `int` and `number` stay separate; the
+    /// type is the declared `-> T` from the stdlib source — nothing is
+    /// fabricated.
+    pub(super) fn native_module_declared_scalar_return_type(
+        &self,
+        canonical_module: &str,
+        method: &str,
+    ) -> Option<Type> {
+        use shape_ast::ast::TypeAnnotation;
+        let registry = self.extension_registry.as_ref()?;
+        let module = registry.iter().rev().find(|m| m.name == canonical_module)?;
+        let schema = module.get_schema(method)?;
+        let return_type = schema.return_type.as_ref()?.trim();
+        let canonical = shape_runtime::type_system::BuiltinTypes::canonical_script_alias(
+            return_type,
+        )?;
+        Some(Type::Concrete(TypeAnnotation::Basic(canonical.to_string())))
+    }
+
     /// Q33 / distributed §4.1.1: elaborate a direct
     /// `remote::call(addr, fn_ref, args…)` site — the imperative analog of the
     /// `@remote` annotation path, in the same special-casing class as
