@@ -1512,8 +1512,20 @@ async fn execute_file(
                 ) {
                     return Err(err);
                 }
-                let runtime_error = engine.get_runtime_mut().take_last_runtime_error();
-                print_shape_error(&err, runtime_error.as_ref());
+                match shape_diagnostics::output_format() {
+                    shape_diagnostics::OutputFormat::Json => {
+                        // LSDS JSON on stderr — one diagnostic object per line —
+                        // so a machine caller reads structured diagnostics off
+                        // stderr and the program's own stdout stays clean.
+                        for diag in crate::diagnostics_json::anyhow_to_diagnostics(&err) {
+                            eprintln!("{}", shape_diagnostics::render::json::render(&diag));
+                        }
+                    }
+                    shape_diagnostics::OutputFormat::Human => {
+                        let runtime_error = engine.get_runtime_mut().take_last_runtime_error();
+                        print_shape_error(&err, runtime_error.as_ref());
+                    }
+                }
                 std::process::exit(1);
             }
         };

@@ -17,6 +17,7 @@ pub mod extension_loading;
 // New modular structure
 pub mod cli_args;
 pub mod commands;
+pub mod diagnostics_json;
 pub mod helpers;
 pub mod module_loading;
 pub mod registry_client;
@@ -119,12 +120,17 @@ async fn main() -> Result<()> {
         (Some(Commands::Run { script, opts }), _) => {
             let cli_args::RunCommandOptions {
                 expand,
+                diagnostics,
                 resume,
                 eager_link,
                 runtime,
                 expand_filter,
                 limits,
             } = opts;
+            // Select the process-wide diagnostic renderer before any compile
+            // runs, so both the compile-error path and any non-fatal comptime
+            // warning surface in the requested format.
+            shape_diagnostics::set_output_format(diagnostics.into());
             let cli_args::RuntimeCommandOptions { mode, provider } = runtime;
             let cli_args::ProviderCommandOptions {
                 extensions,

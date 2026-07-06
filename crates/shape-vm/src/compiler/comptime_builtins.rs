@@ -168,6 +168,29 @@ pub(crate) struct ComptimeDiagnostic {
 thread_local! {
     static COMPTIME_DIRECTIVES: RefCell<Vec<ComptimeDirective>> = const { RefCell::new(Vec::new()) };
     static COMPTIME_DIAGNOSTICS: RefCell<Vec<ComptimeDiagnostic>> = const { RefCell::new(Vec::new()) };
+    /// True while the §4.5.1 whole-program pre-pass speculatively runs a
+    /// type-target comptime handler to materialize generated function
+    /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
+    /// the same handler while compiling the annotated type. So any raw
+    /// side-effecting output (`print`) the handler produces during the pre-pass
+    /// must be discarded, exactly as `warning()`/`error()` diagnostics drained
+    /// here are discarded by the pre-pass; otherwise a handler that prints
+    /// would emit its output twice. Set only around the pre-pass handler
+    /// invocation; the authoritative pass-2 run leaves it clear so the handler
+    /// prints exactly once.
+    static COMPTIME_OUTPUT_SUPPRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Set the comptime speculative-output suppression flag (§4.5.1 pre-pass).
+/// Returns the previous value so the caller can restore it.
+pub(crate) fn set_comptime_output_suppressed(suppressed: bool) -> bool {
+    COMPTIME_OUTPUT_SUPPRESSED.with(|c| c.replace(suppressed))
+}
+
+/// True while the §4.5.1 pre-pass is speculatively running a comptime handler;
+/// consulted by `builtin_print` to discard speculative output.
+pub fn is_comptime_output_suppressed() -> bool {
+    COMPTIME_OUTPUT_SUPPRESSED.with(|c| c.get())
 }
 
 /// Clear the thread-local comptime-diagnostics buffer before a comptime run.
@@ -490,11 +513,10 @@ pub(crate) fn create_comptime_builtins_module(
     // read `name`/`kind` at swapped offsets. Named construction in
     // {name, kind} order aligns the physical layout with the consumer.
     //
-    // Recursive `Array<FieldInfo>` (`type_info(T).fields`) is a W7 / S6
-    // follow-up once Array<TypedObject> field-storage is wired post the
-    // V3-S5 ckpt-5/ckpt-6 SURFACE classes; the current scope ships the
-    // {name, kind} pair which is enough for `if ti.kind == "TypedObject"`
-    // dispatch in comptime user code.
+    // `type_info(T).fields` returns the declared fields of a TypedObject type as
+    // an `Array<FieldDescriptor>` — the same row shape as `target.fields` in an
+    // annotation handler (comptime-excellence §4.1.2). Every non-TypedObject kind
+    // reflects an empty array.
     let snapshot_for_type_info = type_snapshot;
     register_typed_function(
         &mut module,
@@ -503,35 +525,15 @@ pub(crate) fn create_comptime_builtins_module(
         vec![],
         ConcreteType::OpaqueTypedObject("TypeInfo".to_string()),
         move |nb_args, _ctx| {
-            // Pre-existing infrastructure constraint: the
-            // `register_typed_function` marshal layer at
-            // `shape-runtime/src/marshal.rs` does not currently transmit
-            // string args to comptime builtins declared with `vec![]`
-            // arg types — the first arg always arrives as kind `Bool`.
-            // The `error()` builtin in this same module documents the
-            // same issue (`<Bool>` formatting fallback). The upstream
-            // marshal fix lives outside W7 territory; W7 surfaces a
-            // structured error so the cause is unambiguous, AND falls
-            // back to a best-effort `kind: Unknown` TypeInfo when the
-            // arg cannot be read as a string. The fall-back returns a
-            // valid TypeInfo (correct shape; correct schema_id;
-            // correct refcount discipline) so downstream consumers
-            // exercise the full receiver-recovery and field-access
-            // path even while the upstream marshal layer is being
-            // fixed.
+            // The type name arrives as a string arg (bare type identifiers are
+            // rewritten to string literals before the comptime block runs). If
+            // it cannot be read as a string, surface a clean error rather than
+            // reflecting an arbitrary name.
             let raw_name = nb_args
                 .first()
                 .and_then(|nb| nb.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    // Marshal-layer fallback path — surface a sentinel
-                    // name so downstream `ti.name` reads return a
-                    // diagnosable string. The kind defaults to
-                    // `Unknown` via `classify_bare_type_name`'s
-                    // unrecognized-name fallback arm.
-                    "__type_info_marshal_pending__".to_string()
-                });
-            let type_info_hv = build_type_info_heap_value(&raw_name, &snapshot_for_type_info)?;
+                .ok_or_else(|| "type_info expects a type name".to_string())?;
+            let type_info_hv = build_type_info_heap_value(raw_name, &snapshot_for_type_info)?;
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(type_info_hv),
             )))
@@ -841,14 +843,39 @@ fn build_type_info_heap_value(
     snapshot: &TypeReflectionSnapshot,
 ) -> Result<HeapValue, String> {
     let label = classify_bare_type_name(type_name, snapshot);
-    // {name, kind} order matches the stdlib `TypeInfo` declaration so the
+    // fields: only a TypedObject (struct) type has declared fields; every other
+    // kind reflects an empty array. Rows are built through the SAME
+    // `build_field_descriptor_array` row builder as `target.fields`
+    // (comptime-excellence §4.1.2) so both introspection surfaces agree.
+    let field_rows: Vec<(String, String, Vec<super::comptime_target::FieldAnnotation>)> = snapshot
+        .struct_defs
+        .get(type_name)
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|(fname, ftype)| {
+                    (
+                        fname.clone(),
+                        super::comptime_target::type_annotation_to_string(ftype),
+                        Vec::new(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let fields_arr =
+        super::comptime_target::build_field_descriptor_array(&field_rows).map_err(|e| {
+            format!("failed to build type_info fields for '{type_name}': {e}")
+        })?;
+    // {name, kind, fields} order matches the stdlib `TypeInfo` declaration so the
     // object's physical slot layout aligns with the compiler's typed field
-    // access on the `OpaqueTypedObject("TypeInfo")` return type (S2).
+    // access on the `OpaqueTypedObject("TypeInfo")` return type.
     let kinded = typed_object_for_named_schema(
         "__ComptimeTypeInfo",
         &[
             ("name", nb_str(type_name)),
             ("kind", nb_str(label.as_str())),
+            ("fields", fields_arr),
         ],
     );
     // Wave 2 Round 4 D4 receiver-recovery pattern (same as build_config):

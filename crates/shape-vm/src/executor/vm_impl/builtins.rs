@@ -1583,6 +1583,15 @@ impl VirtualMachine {
         args: &[KindedSlot],
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
+        // Comptime-excellence §4.5.1: while the whole-program pre-pass
+        // speculatively runs a type-target comptime handler (only to
+        // materialize generated function signatures), the same handler is
+        // re-run authoritatively in pass-2. Discard the speculative pre-pass's
+        // raw output so a handler that prints does not emit twice — the
+        // authoritative run (flag clear) prints exactly once.
+        if crate::compiler::comptime_builtins::is_comptime_output_suppressed() {
+            return Ok(());
+        }
         // The TypedObject schema names live on `self.program.type_schema_registry`
         // (the BytecodeProgram-bound registry that `lookup_schema` reads).
         // The ExecutionContext's registry is the runtime-tier copy populated

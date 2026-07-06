@@ -2010,8 +2010,30 @@ impl BytecodeCompiler {
             crate::compiler::expressions::closures::collect_returned_closure_callsite_param_hints(
                 &program,
             );
+        // comptime-excellence §4.5.1 whole-program pre-pass: run type-targeting
+        // comptime handlers that emit computed `extend (f"fn ...")` free
+        // functions, and hoist the generated functions into `program.items` as
+        // ordinary items BEFORE the analyzer and function-registration passes.
+        // Without this, a generated free function (`User_json_schema`) only
+        // enters the function table when its annotated type compiles in pass-2,
+        // so `fn main() { print(User_json_schema()) }` failed "Undefined
+        // function" even though the same call at top level resolved. Dependency
+        // modules (including the stdlib annotation) are already compiled at this
+        // point (graph phase 1), so their handlers and helpers are reachable.
+        let generated_comptime_items = self.materialize_computed_comptime_extends(&program)?;
+
         let mut analysis_program =
             shape_ast::transform::augment_program_with_generated_extends(&program);
+        // Make the generated free functions visible to the analyzer and
+        // inference — their signatures are already registered in the function
+        // table (so pass-2 user bodies resolve them); the compiled program's
+        // items are unchanged (the bodies are compiled by pass-2 exactly as
+        // before). Prepend so the annotated type's definition still follows.
+        if !generated_comptime_items.is_empty() {
+            let mut merged = generated_comptime_items;
+            merged.extend(analysis_program.items.drain(..));
+            analysis_program.items = merged;
+        }
         let native_auto_items = Self::native_auto_conversion_analysis_items(&analysis_program);
         if !native_auto_items.is_empty() {
             let mut merged = native_auto_items;

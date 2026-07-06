@@ -38,8 +38,47 @@ use serde::{Deserialize, Serialize};
 
 pub mod render;
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 /// Wire-format schema version. Bumped on breaking changes.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// How a diagnostic renders when a producer surfaces it to an output stream.
+///
+/// This is a process-wide rendering choice — the same LSDS [`Diagnostic`] is
+/// the source of truth regardless of format; the format only selects which
+/// renderer ([`render::terminal`] vs. [`render::json`]) a surfacing site uses.
+/// The CLI sets it once at startup (`shape run --diagnostics json`) so that
+/// both the compile-error path and any non-fatal warning surfaced mid-compile
+/// emit the same shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Human-readable terminal text (the default).
+    #[default]
+    Human,
+    /// One LSDS JSON object per diagnostic.
+    Json,
+}
+
+static OUTPUT_FORMAT: AtomicU8 = AtomicU8::new(0);
+
+/// Set the process-wide diagnostic output format. Call once at startup.
+pub fn set_output_format(format: OutputFormat) {
+    let encoded = match format {
+        OutputFormat::Human => 0,
+        OutputFormat::Json => 1,
+    };
+    OUTPUT_FORMAT.store(encoded, Ordering::Relaxed);
+}
+
+/// Read the process-wide diagnostic output format (defaults to
+/// [`OutputFormat::Human`]).
+pub fn output_format() -> OutputFormat {
+    match OUTPUT_FORMAT.load(Ordering::Relaxed) {
+        1 => OutputFormat::Json,
+        _ => OutputFormat::Human,
+    }
+}
 
 /// Severity of a diagnostic.
 ///

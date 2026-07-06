@@ -47,6 +47,105 @@ fn unwrap_option_type(type_str: &str) -> String {
 /// Per-field annotation: (annotation_name, Vec<stringified_args>).
 pub(crate) type FieldAnnotation = (String, Vec<String>);
 
+/// Build a string-kinded slot from an owned `String`.
+fn nb_string(s: String) -> KindedSlot {
+    KindedSlot::from_string_arc(Arc::new(s))
+}
+
+/// Build an `Array<string>` slot carried by a stamped v2-raw
+/// `TypedArray<*const StringObj>`.
+fn nb_string_array(strings: Vec<String>) -> Result<KindedSlot, ShapeError> {
+    let arr = TypedArray::<*const StringObj>::with_capacity(strings.len() as u32);
+    unsafe {
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+        for s in strings {
+            let ptr = StringObj::new(s.as_str()) as *const StringObj;
+            TypedArray::<*const StringObj>::push(arr, ptr);
+        }
+    }
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(arr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
+}
+
+/// Build an `Array<TypedObject>` slot carried by a stamped v2-raw
+/// `TypedArray<*const TypedObjectStorage>`. Each element's refcount share is
+/// transferred into the array.
+fn nb_object_array(objs: Vec<KindedSlot>) -> Result<KindedSlot, ShapeError> {
+    let arr = TypedArray::<*const TypedObjectStorage>::with_capacity(objs.len() as u32);
+    unsafe {
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+    }
+    for obj in objs {
+        if obj.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
+            unsafe {
+                TypedArray::<*const TypedObjectStorage>::drop_array_heap(arr);
+            }
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "comptime_target::nb_object_array expected TypedObject element, got {:?}",
+                    obj.kind()
+                ),
+                location: None,
+            });
+        }
+        let ptr = obj.raw() as *const TypedObjectStorage;
+        unsafe {
+            TypedArray::<*const TypedObjectStorage>::push(arr, ptr);
+        }
+        // Transfer the element's refcount share into the array.
+        std::mem::forget(obj);
+    }
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(arr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
+}
+
+/// Build the `Array<FieldDescriptor>` slot shared by `target.fields` (annotation
+/// handlers) and `type_info(T).fields` (general reflection). Each row is a
+/// `__ComptimeFieldDescriptor` TypedObject `{name, type, annotations, optional}`;
+/// a top-level `Option<T>` / `T?` field type is unwrapped to `T` with `optional`
+/// set true (comptime-excellence §4.1.1). Both introspection surfaces produce
+/// identical rows from this one builder.
+pub(crate) fn build_field_descriptor_array(
+    fields: &[(String, String, Vec<FieldAnnotation>)],
+) -> Result<KindedSlot, ShapeError> {
+    use shape_runtime::type_schema::typed_object_for_named_schema;
+
+    let mut field_objs: Vec<KindedSlot> = Vec::with_capacity(fields.len());
+    for (fname, ftype, fanns) in fields {
+        // Each annotation becomes {name, args} where args is an array of
+        // stringified arg values.
+        let mut ann_objs: Vec<KindedSlot> = Vec::with_capacity(fanns.len());
+        for (aname, aargs) in fanns {
+            let args_arr = nb_string_array(aargs.clone())?;
+            ann_objs.push(typed_object_for_named_schema(
+                "__ComptimeAnnotationDescriptor",
+                &[("name", nb_string(aname.clone())), ("args", args_arr)],
+            ));
+        }
+        let anns_arr = nb_object_array(ann_objs)?;
+        let is_optional = is_option_type(ftype);
+        let effective_type = if is_optional {
+            unwrap_option_type(ftype)
+        } else {
+            ftype.clone()
+        };
+        field_objs.push(typed_object_for_named_schema(
+            "__ComptimeFieldDescriptor",
+            &[
+                ("name", nb_string(fname.clone())),
+                ("type", nb_string(effective_type)),
+                ("annotations", anns_arr),
+                ("optional", KindedSlot::from_bool(is_optional)),
+            ],
+        ));
+    }
+    nb_object_array(field_objs)
+}
+
 /// A compile-time target descriptor passed to comptime annotation handlers
 /// in annotation definitions.
 #[derive(Debug, Clone)]
@@ -262,37 +361,10 @@ impl ComptimeTarget {
             ))
         };
 
-        // fields: array of {name, type, annotations, optional} TypedObjects
-        let mut field_objs: Vec<KindedSlot> = Vec::with_capacity(self.fields.len());
-        for (fname, ftype, fanns) in &self.fields {
-            // Each annotation becomes {name, args} where args is an
-            // array of stringified arg values.
-            let mut ann_objs: Vec<KindedSlot> = Vec::with_capacity(fanns.len());
-            for (aname, aargs) in fanns {
-                let args_arr = nb_string_array(aargs.clone())?;
-                ann_objs.push(typed_object_for_named_schema(
-                    "__ComptimeAnnotationDescriptor",
-                    &[("name", nb_string(aname.clone())), ("args", args_arr)],
-                ));
-            }
-            let anns_arr = nb_object_array(ann_objs)?;
-            let is_optional = is_option_type(ftype);
-            let effective_type = if is_optional {
-                unwrap_option_type(ftype)
-            } else {
-                ftype.clone()
-            };
-            field_objs.push(typed_object_for_named_schema(
-                "__ComptimeFieldDescriptor",
-                &[
-                    ("name", nb_string(fname.clone())),
-                    ("type", nb_string(effective_type)),
-                    ("annotations", anns_arr),
-                    ("optional", KindedSlot::from_bool(is_optional)),
-                ],
-            ));
-        }
-        let fields_arr = nb_object_array(field_objs)?;
+        // fields: array of {name, type, annotations, optional} TypedObjects,
+        // built through the shared `build_field_descriptor_array` row builder so
+        // `target.fields` and `type_info(T).fields` produce identical rows.
+        let fields_arr = build_field_descriptor_array(&self.fields)?;
 
         // params: array of {name, type, const} TypedObjects
         let param_objs: Vec<KindedSlot> = self
@@ -355,7 +427,7 @@ fn expr_to_string_lossy(expr: &Expr) -> String {
 }
 
 /// Convert a TypeAnnotation to a human-readable string.
-fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
+pub(crate) fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
     match ta {
         TypeAnnotation::Basic(name) => name.clone(),
         TypeAnnotation::Reference(name) => name.to_string(),

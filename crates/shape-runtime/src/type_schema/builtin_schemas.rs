@@ -285,15 +285,20 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
 
     // TypeInfo record returned by the `type_info(T)` comptime builtin.
     // `__`-prefixed to avoid clashing with the user-visible stdlib
-    // `TypeInfo` type (`stdlib-src/core/types.shape`); field NAMES and
-    // ORDER match that declaration ({name, kind}) so the object's physical
-    // layout aligns with the compiler's typed field access on the
-    // `OpaqueTypedObject("TypeInfo")` return type. (`TypeInfo.fields` +
-    // the single-owner lockstep with the stdlib declaration is S6.)
+    // `TypeInfo` type (`stdlib-src/core/types.shape`). `name` / `kind` NAMES
+    // and ORDER lead so the object's physical layout aligns with the first two
+    // typed fields; `fields` follows as the declared-field descriptor array.
+    // Field access on the reflection result resolves by NAME through this
+    // schema, so appending `fields` does not disturb `name` / `kind` reads.
     let _comptime_type_info = TypeSchemaBuilder::new("__ComptimeTypeInfo")
         .reserved()
         .string_field("name")
         .string_field("kind")
+        // `fields` reuses the same `__ComptimeFieldDescriptor` row as
+        // `target.fields` (comptime-excellence §4.1.2): one row shape, one
+        // builder, no split introspection story. TypedObject kinds populate it
+        // from the type's declared fields; every other kind is an empty array.
+        .array_field("fields", FieldType::Any)
         .register(registry);
 
     // §4.4 comptime-handler `ctx` compile-context record. Read-only build
