@@ -10,7 +10,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 |---|---|---|---|
 | Q1 Comptime | Partial (segfault, broken introspection) | ✅ works (visibility/type_info/diagnostics/method-emit) | Fable (set-return+strict) + WF-1B/3D refuters |
 | Q2 Polyglot | Broken (all foreign dead) | ✅ works locally (CPython/deno/extern-C real) | **Fable** (extension-removal probes) |
-| Q3 Distributed+resume | Broken both | 🟡 resume ✅ + plain `@remote` ✅; **`@remote`×foreign 🔵 + `remote::call` Result 🔵** | **Fable** (both sound half + 9 defects) |
+| Q3 Distributed+resume | Broken both | ✅ resume + plain `@remote` + **`@remote`×foreign + `remote::call` Result all GENUINE** (merged `800fb6b9`) | **Fable ×3** (WF-3E finisher + 2 independent re-proofs, 9/9 genuine server-side) |
 | Q4 C bindings | Broken at runtime | ✅ works (real `.so`, out-params, both modes) | **Fable** |
 
 ## §6 confirmed critical/high findings (29)
@@ -23,7 +23,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 4 | Extension V8 never invoked (overstated) | ✅ | **Fable** (ts works) |
 | 5 | Comptime `set return` segfault | ✅ compile-error, exit≠139 | WF-1B · **Fable** |
 | 6 | Annotation hooks dropped under JIT | 🟡 output correct via deopt; native = P9 | WF-1A(c) lane |
-| 7 | `@remote`/`remote::__call` non-functional | 🔵 arity/body fixed; **composition broken** | WF-2C done → **WF-3E** (Fable) |
+| 7 | `@remote`/`remote::__call` non-functional | ✅ **composition genuine** (transfer+snapshot+combined, server-side) | WF-3E merged `800fb6b9` · **Fable ×3** |
 | 8 | `snapshot()` never completes | ✅ | WF-2B · **Fable** |
 | 9 | `--resume` can never succeed | ✅ | WF-2B · **Fable** |
 | 10 | async let zero concurrency | 🟡 **claimed** (WF-2D), NOT independently verified | ⚠ needs Fable |
@@ -44,7 +44,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 25 | `__original__(args)` garbage | ✅ base(5)=12 | WF-1B · **Fable** |
 | 26 | i64 overflow VM/JIT split-brain | ✅ traps under jit | WF-1A · **Fable** |
 | 27 | `serve --sandbox strict` no-op | ✅ blocks file::write server-side | WF-1D · **Fable** |
-| 28 | Load-time permission check dead | 🟡 wired locally; **over-wire still empty perms** | WF-1D done → **WF-3E** (Fable D5) |
+| 28 | Load-time permission check dead | ✅ **over-wire enforced** (strict node refuses transferred fs.write at load, permission-union) | WF-3E merged `800fb6b9` · **Fable ×2 (D5)** |
 | 29 | bigint unconstructible | ⏳ | WF-3A / D2 |
 | 30 | Drop broken at escape boundaries | ✅ no use-after-finalize | WF-1C · **Fable** |
 | 31 | Reference cycles leak unboundedly | ⏳ | WF-3C / D3 |
@@ -81,7 +81,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | CRIT | `[native-dependencies]` alias resolution dead (`resolve_library_target` hardcoded) | WF-2A-fu | ⏳ |
 | HIGH | Module-scope closure-capture Drop finalizer leak (§2.7.30.4) | WF-3C | ⏳ (with real GC) |
 | HIGH | `--max-output-bytes` inert; `--max-memory-bytes` `panic!`-exits (serve DoS) | WF-3B | ⏳ |
-| HIGH | `remote::call` Result fiction + closure args skip compile-check | WF-3E | 🔵 wip-committed |
+| HIGH | `remote::call` Result fiction + closure args skip compile-check | WF-3E | ✅ merged `800fb6b9` (Ok+Err reachable; integration-tested) |
 | MED | `time::millis()->float` breaks operand-position inference | WF-3A-edges | ⏳ |
 | MED | Two closure-return compile bugs (tail-closure param; parameterized-closure return-kind) | WF-3A-edges | ⏳ |
 | DOC | Book teaches retired `__original__(args)` ×5; `json.mdx` non-existent `as?` cast | WF-4 | ⏳ |
@@ -90,3 +90,8 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 Branch `wave3/distributed-composition-fix` @ `0efa7561` has **4 wip commits, 982 insertions/13 files** (fixAB transfer+receiver-init, fixC remote-call-Result, fixDE perms+ffi, repair D1 arity + D7 namespace-snapshot + serve extension-double-load; new `remote_builtins.rs` +334). **The workflow process DIED before its finisher gates + Fable re-proof ran → these fixes are UNVERIFIED. Do NOT merge until the independent 9-cell re-proof + D5-perms-over-wire confirmation pass** (§6quaterdecies gate).
 
 ### Rulings applied (2026-07-06): SIGINT=release-blocking · D3=real GC · D4=delete · WF-3A=split · D2=implement · async=re-route.
+
+### WF-3E close (2026-07-06, merged `800fb6b9`) — user #1 priority, doubly-verified
+Convergent verification: WF-3E's own Fable finisher (verify-merge 15/15, diff-vmjit MATCH=466) + an independent 2× Fable re-proof (GREEN 9/9 genuine server-side, client `.so` isolated aside). Merged-state re-gated: check-clean, check-no-dynamic EXIT 0, 7/7 remote integration tests, verify-merge 15/15. Semantic merge (WF-3E ∩ WF-3D on `compiler_impl_initialization.rs`) auto-resolved + `--all-targets`-verified.
+**5 residual lanes routed** (all pre-existing, NOT regressions): `wf3e-remote-inframe-snapshot-persist` (persistable snapshot inside a remote frame — today clean §4.5 barrier Err) · `wf3e-annotation-args-heap-carrier` (@remote Array/object param = compile error) · `wf3e-remote-global-capture` (@remote reading module-global returns 0) · `wf3e-remote-execute-projection` (remote::execute renders via JsonValue projection — **shares the schema-id/projection family, high blast radius → couple with WF-3A-schema**) · `wf3e-extension-version-hash` (D8: content_hash omits extension version).
+**Process note:** the original WF-3E was still running (~3.9h) when a stale 0-byte output file led me to think it had died; I launched a redundant independent verify. Net-positive (convergent 2-model verification) but the lesson: check a workflow's journal/live status before concluding it died from an empty output file.
