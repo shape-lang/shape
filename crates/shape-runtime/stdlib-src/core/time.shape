@@ -35,6 +35,22 @@ pub builtin fn sleep(ms: float) -> _;
 /// * `ms` - Duration in milliseconds
 pub builtin fn sleep_sync(ms: float) -> _;
 
+/// Aggregate timing statistics returned by [`benchmark`].
+///
+/// A named result type (rather than an anonymous object) so the compiler
+/// infers a single stable schema for `report` across every call site and
+/// execution mode — the anonymous-object form auto-registered a fresh
+/// per-run schema id that collided with unrelated schemas at field-access
+/// time.
+pub type BenchmarkResult {
+    /// Total execution time across all iterations, in milliseconds.
+    elapsed_ms: number,
+    /// Number of iterations performed.
+    iterations: int,
+    /// Average time per iteration, in milliseconds.
+    avg_ms: number
+}
+
 /// Benchmark a function over N iterations, returning timing statistics.
 ///
 /// # Arguments
@@ -44,8 +60,8 @@ pub builtin fn sleep_sync(ms: float) -> _;
 ///
 /// # Returns
 ///
-/// Object with `elapsed_ms`, `iterations`, and `avg_ms` fields.
-pub builtin fn benchmark(callback: _, iterations: int) -> _;
+/// A [`BenchmarkResult`] with `elapsed_ms`, `iterations`, and `avg_ms` fields.
+pub builtin fn benchmark(callback: _, iterations: int) -> BenchmarkResult;
 
 /// Start a stopwatch (returns an Instant). Call `.elapsed()` to read.
 ///

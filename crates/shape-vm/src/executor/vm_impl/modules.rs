@@ -309,6 +309,16 @@ fn project_concrete_return(
         )),
         ConcreteReturn::Unit => Ok(KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Bool)),
         ConcreteReturn::String(s) => Ok(KindedSlot::from_string_arc(Arc::new(s))),
+        // `Instant` rides `Arc<std::time::Instant>` directly (no wrapper
+        // struct) per ADR-006 §2.3. `from_instant` moves one
+        // `Arc::into_raw` share into the slot with kind
+        // `Ptr(HeapKind::Instant)`; the matching Clone/Drop arms in
+        // `stack.rs` / `kinded_slot.rs` retire it. Fixes the
+        // `Discriminant(5)` K3 SURFACE that `time::now()` /
+        // `time::stopwatch()` previously hit — there was no explicit Instant
+        // arm, so it fell through to the polymorphic-HashMap K3 error. This
+        // is a specific typed-Arc leaf, NOT the polymorphic-value case.
+        ConcreteReturn::Instant(inst) => Ok(KindedSlot::from_instant(Arc::new(inst))),
         ConcreteReturn::OpaqueTypedObject(hv) => {
             // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): hv is
             // `Arc<HeapValue::TypedObject(TypedObjectPtr)>`. Clone the
@@ -819,46 +829,75 @@ impl VirtualMachine {
             .ok_or(VMError::InvalidCall)?
             .clone();
 
-        // **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).**
-        // Build a `ModuleContext` borrow against the live schema
-        // registry and capture a read-only `VmStateSnapshot` so state.*
-        // bodies can introspect the VM via `ctx.vm_state` (per
-        // ADR-006 §2.7.4 — state.* reads dispatched through the
-        // VmStateAccessor trait). The snapshot owns its own KindedSlot
-        // shares so the live VM is undisturbed.
-        let vm_state_snap = self.capture_vm_state();
-        let schema_registry: &shape_runtime::type_schema::TypeSchemaRegistry =
-            &self.program.type_schema_registry;
-        // SAFETY: extend the borrow lifetime to 'ctx via transmute is
-        // not needed here because `ModuleContext` is invariant on its
-        // lifetime parameter and the body call below holds the borrow
-        // for the duration of the dispatch.
-        let ctx = shape_runtime::module_exports::ModuleContext {
-            schemas: schema_registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: Some(&vm_state_snap),
-            // WF-1D security wiring: thread the VM's installed permission
-            // envelope into the gated-dispatch context. `None` (allow-all)
-            // only survives for genuinely-trusted local `unlimited()` runs;
-            // serve / remote / wire install a concrete set so `check_permission`
-            // fails closed on file::write_text / read_text / etc.
-            granted_permissions: self.granted_permissions.clone(),
-            scope_constraints: self.scope_constraints.clone(),
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-        };
-
         match entry {
             shape_runtime::module_exports::ModuleFnEntry::Typed(typed) => {
-                // The body takes `&[KindedSlot]` carriers directly — the
-                // caller's kinds (VM §2.7.7 parallel kind track) flow
-                // through UNCHANGED. No raw-bits flatten, no re-stamp.
-                let typed_return = (typed.invoke)(args, &ctx).map_err(VMError::RuntimeError)?;
+                // **W17-state-tier-roundtrip (Phase 2d Wave 3) +
+                // WF-2E invoke_callable wiring (2026-07-05).**
+                //
+                // Capture the read-only `VmStateSnapshot` (so `state.*`
+                // bodies introspect the VM via `ctx.vm_state`) and the
+                // permission envelope BEFORE `&mut self` is parked in the
+                // re-entrancy cell below. The snapshot owns its own
+                // KindedSlot shares so the live VM is undisturbed.
+                let vm_state_snap = self.capture_vm_state();
+                let granted_permissions = self.granted_permissions.clone();
+                let scope_constraints = self.scope_constraints.clone();
+
+                // `ctx.schemas` sources the ambient thread-local registry
+                // (`current_registry()`) — a cheap `Arc` clone of the same
+                // superset `execution.rs` installs at run start (the merged
+                // stdlib + user + inline-object-literal schemas). Borrowing
+                // this *local* `Arc` instead of `&self.program.type_schema_registry`
+                // is what frees `&mut self` for the re-entrant callback: the
+                // schema borrow and the `&mut self` re-entry touch disjoint
+                // memory, provably to the borrow checker — no unsafe aliasing,
+                // no `mem::take` that would blank the registry mid-callback.
+                let ambient_registry = shape_runtime::type_schema::current_registry();
+
+                // `&mut self` is parked in a `RefCell` so the `Fn`-typed
+                // `invoke_callable` bridge can take a fresh `&mut` per call.
+                // This is the designed use of `ModuleContext::invoke_callable`
+                // (e.g. `time.benchmark` driving a Shape callable back through
+                // the VM): RefCell enforces exclusivity at runtime, so a
+                // nested re-entry panics rather than aliasing. Mirrors how
+                // VM-side array methods invoke closures via
+                // `call_value_immediate_nb` — same ABI, same drive-to-completion
+                // loop — just reached from the native-module boundary.
+                let vm_cell = std::cell::RefCell::new(self);
+                let body_result = {
+                    let invoke_cb = |callee: &shape_value::KindedSlot,
+                                     cb_args: &[shape_value::KindedSlot]|
+                     -> Result<shape_value::KindedSlot, String> {
+                        vm_cell
+                            .borrow_mut()
+                            .call_value_immediate_nb(callee, cb_args, None)
+                            .map_err(|e| e.to_string())
+                    };
+                    let ctx = shape_runtime::module_exports::ModuleContext {
+                        schemas: &ambient_registry,
+                        invoke_callable: Some(&invoke_cb),
+                        raw_invoker: None,
+                        function_hashes: None,
+                        vm_state: Some(&vm_state_snap),
+                        // WF-1D security wiring: thread the VM's installed
+                        // permission envelope into the gated-dispatch context.
+                        granted_permissions,
+                        scope_constraints,
+                        set_pending_resume: None,
+                        set_pending_frame_resume: None,
+                    };
+                    // The body takes `&[KindedSlot]` carriers directly — the
+                    // caller's kinds (VM §2.7.7 parallel kind track) flow
+                    // through UNCHANGED. No raw-bits flatten, no re-stamp.
+                    (typed.invoke)(args, &ctx).map_err(VMError::RuntimeError)
+                    // `invoke_cb` + `ctx` drop here — `vm_cell` is no longer
+                    // borrowed, so `into_inner` below can reclaim `&mut self`.
+                };
+                let this = vm_cell.into_inner();
+                let typed_return = body_result?;
                 project_typed_return(
-                    &self.builtin_schemas,
-                    &self.program.type_schema_registry,
+                    &this.builtin_schemas,
+                    &this.program.type_schema_registry,
                     typed_return,
                 )
             }
@@ -868,16 +907,37 @@ impl VirtualMachine {
                 // — kinds preserved, no raw-bits flatten.
                 let kinded_args: Vec<shape_value::KindedSlot> = args.to_vec();
                 let fut = (async_entry.invoke)(kinded_args);
+                // Install the program's ambient schema registry as a
+                // TASK-LOCAL scope wrapping the future, so it is inherited
+                // when the future runs on a shared-runtime worker thread (ser).
+                // Argument marshalling (`FromSlot::from_kinded`) runs *inside*
+                // the future (the `async move` block in `marshal.rs`): an
+                // inline object-literal options arg (`Ptr(TypedObject)`) walks
+                // its schema through `current_registry()`. The
+                // `SyncRegistryScope` installed on the calling thread
+                // (`execution.rs`) is thread-local and does NOT cross the spawn
+                // boundary; `with_async_scope`'s task-local layer survives
+                // tokio task migration. Without it the future sees only the
+                // process-default registry and inline object-literal options
+                // fail with "unknown TypedObject schema id N". Same
+                // `current_registry()` handle the `Typed` arm above borrows.
+                // The wrapped future stays `Send + 'static` (both the source
+                // `ModuleAsyncFuture` and the `Arc<TypeSchemaRegistry>` are),
+                // so it re-boxes into `ModuleAsyncFuture` for the spawn.
+                let ambient_registry = shape_runtime::type_schema::current_registry();
+                let scoped_fut: ModuleAsyncFuture = Box::pin(
+                    shape_runtime::type_schema::with_async_scope(ambient_registry, fut),
+                );
                 // WF-2D real concurrency (Decision D1): do NOT drive the
-                // future to completion inline. Spawn it onto the shared
-                // background runtime and return a `Future(id)` handle
-                // immediately, so two independent `time::sleep`s launched
-                // back-to-back overlap on the worker pool (~1s wall for two
-                // 1s sleeps, not ~2s). `await`/`join` later collect the
+                // future to completion inline. Spawn the schema-scoped future
+                // onto the shared background runtime and return a `Future(id)`
+                // handle immediately, so two independent `time::sleep`s
+                // launched back-to-back overlap on the worker pool (~1s wall
+                // for two 1s sleeps, not ~2s). `await`/`join` later collect the
                 // result. This also keeps bug (b) fixed: nothing blocks the
                 // ambient current-thread runtime here. ADR-006 §2.7.4
                 // task-scheduler boundary.
-                self.spawn_async_module_future(fut)
+                self.spawn_async_module_future(scoped_fut)
             }
         }
     }

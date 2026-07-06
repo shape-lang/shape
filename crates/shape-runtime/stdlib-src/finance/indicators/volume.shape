@@ -4,6 +4,7 @@
 
 from std::core::utils::rolling use { rolling_sum }
 from std::core::utils::vector use { select }
+from std::finance::annotations::warmup use { @warmup }
 
 /// Compute on-balance volume.
 pub @warmup(1) fn obv(close, volume) {

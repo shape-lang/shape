@@ -209,6 +209,47 @@ impl MethodTable {
         // still errors — this is a correct resolution, not a blanket suppress.
         self.register_builtin_collection_methods();
         self.register_datetime_methods();
+        self.register_json_methods();
+    }
+
+    /// Seed the canonical `Json` enum navigation-method signatures for the
+    /// strict type-checker.
+    ///
+    /// WF-2E (2026-07-05): same STRICT-FLIP shape as
+    /// `register_datetime_methods` — the strict checker runs over the user
+    /// program only and never sees the stdlib `extend Json { … }` block
+    /// (`stdlib-src/core/json_value.shape`), so a `json::parse(text)` result
+    /// (`Type::Concrete(TypeAnnotation::Reference("Json"))`) had `lookup`
+    /// return `None` for `.get(...)` / `.at(...)` / `.is_null()` / `.keys()`
+    /// / `.len()`, surfacing a spurious "Method '…' not found on type 'Json'"
+    /// and (unannotated) falling through to a runtime dynamic dispatch that
+    /// aborts with "no method '…' on receiver kind Ptr(TypedObject)". The
+    /// runtime resolves these correctly once the compiler emits the static
+    /// UFCS call to the `Json.<m>` extend-method function; this seed unblocks
+    /// that resolution. Signatures mirror `json_value.shape`'s `extend Json`.
+    fn register_json_methods(&mut self) {
+        let json = "Json";
+        let json_ty = || Type::Concrete(TypeAnnotation::Reference("Json".into()));
+        let string = BuiltinTypes::string;
+        let number = BuiltinTypes::number;
+        let boolean = BuiltinTypes::boolean;
+
+        // get(key: string) -> Json
+        self.register_method(json, "get", vec![string()], json_ty(), false);
+        // at(index: number) -> Json
+        self.register_method(json, "at", vec![number()], json_ty(), false);
+        // is_null() -> bool
+        self.register_method(json, "is_null", vec![], boolean(), false);
+        // keys() -> Array<string>
+        self.register_method(
+            json,
+            "keys",
+            vec![],
+            BuiltinTypes::array(string()),
+            false,
+        );
+        // len() -> number
+        self.register_method(json, "len", vec![], number(), false);
     }
 
     /// Seed the canonical `DateTime` instance-method signatures for the

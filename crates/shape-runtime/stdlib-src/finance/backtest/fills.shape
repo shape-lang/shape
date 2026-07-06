@@ -8,25 +8,25 @@
 
 /// Fixed slippage model configuration
 /// Applies a constant slippage in basis points
-pub type FixedSlippage = {
-    model_type: string;     // "fixed"
-    bps: number;            // Slippage in basis points (1 bp = 0.01%)
-};
+pub type FixedSlippage {
+    model_type: string,     // "fixed"
+    bps: number             // Slippage in basis points (1 bp = 0.01%)
+}
 
 /// Percentage-based slippage model
 /// Slippage as percentage of price
-pub type PercentageSlippage = {
-    model_type: string;     // "percentage"
-    pct: number;            // Slippage as percentage (e.g., 0.1 = 0.1%)
-};
+pub type PercentageSlippage {
+    model_type: string,     // "percentage"
+    pct: number             // Slippage as percentage (e.g., 0.1 = 0.1%)
+}
 
 /// Volume impact slippage model (square-root market impact)
 /// Impact = coefficient * sqrt(volume / avg_volume)
-pub type VolumeImpactSlippage = {
-    model_type: string;     // "volume_impact"
-    coefficient: number;    // Impact coefficient
-    avg_volume: number;     // Average daily volume for reference
-};
+pub type VolumeImpactSlippage {
+    model_type: string,     // "volume_impact"
+    coefficient: number,    // Impact coefficient
+    avg_volume: number      // Average daily volume for reference
+}
 
 /// Create fixed slippage model
 /// @param bps - Slippage in basis points (e.g., 5 = 0.05%)
@@ -98,14 +98,14 @@ pub fn apply_slippage(price, side, volume, model) {
 // ===== Commission Models =====
 
 /// Commission configuration
-pub type Commission = {
-    model_type: string;     // "fixed" | "percentage" | "per_share" | "tiered"
-    fixed_amount: number;   // Fixed commission per trade
-    pct: number;            // Percentage of trade value
-    per_share: number;      // Commission per share
-    min_commission: number; // Minimum commission
-    max_commission: number; // Maximum commission (0 = no max)
-};
+pub type Commission {
+    model_type: string,     // "fixed" | "percentage" | "per_share" | "tiered"
+    fixed_amount: number,   // Fixed commission per trade
+    pct: number,            // Percentage of trade value
+    per_share: number,      // Commission per share
+    min_commission: number, // Minimum commission
+    max_commission: number  // Maximum commission (0 = no max)
+}
 
 /// Create fixed commission model
 /// @param amount - Fixed commission per trade
@@ -183,13 +183,13 @@ pub fn calculate_commission(price, quantity, model) {
 // ===== Fill Simulation =====
 
 /// Complete fill result
-pub type FillResult = {
-    filled: bool;           // Whether order was filled
-    fill_price: number;     // Actual fill price (with slippage)
-    fill_quantity: number;  // Filled quantity
-    commission: number;     // Commission paid
-    total_cost: number;     // Total cost including commission
-};
+pub type FillResult {
+    filled: bool,           // Whether order was filled
+    fill_price: number,     // Actual fill price (with slippage)
+    fill_quantity: number,  // Filled quantity
+    commission: number,     // Commission paid
+    total_cost: number      // Total cost including commission
+}
 
 /// Simulate filling an order
 /// @param order - Order to fill

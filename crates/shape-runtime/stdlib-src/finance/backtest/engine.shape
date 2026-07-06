@@ -11,16 +11,16 @@
 // ===== Backtest Configuration =====
 
 /// Backtest configuration
-pub type BacktestConfig = {
-    initial_capital: number;    // Starting capital
-    position_sizing: string;    // "fixed" | "percent" | "kelly"
-    fixed_size: number;         // Fixed position size (for "fixed" mode)
-    percent_size: number;       // Position size as % of equity (for "percent" mode)
-    max_position: number;       // Maximum position size
-    slippage_bps: number;       // Slippage in basis points
-    commission_pct: number;     // Commission as percentage
-    allow_short: bool;          // Whether to allow short selling
-};
+pub type BacktestConfig {
+    initial_capital: number,    // Starting capital
+    position_sizing: string,    // "fixed" | "percent" | "kelly"
+    fixed_size: number,         // Fixed position size (for "fixed" mode)
+    percent_size: number,       // Position size as % of equity (for "percent" mode)
+    max_position: number,       // Maximum position size
+    slippage_bps: number,       // Slippage in basis points
+    commission_pct: number,     // Commission as percentage
+    allow_short: bool           // Whether to allow short selling
+}
 
 /// Create default backtest configuration
 pub fn default_config() {

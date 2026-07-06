@@ -1,9 +1,8 @@
 // Shape Standard Library - Risk Management and Position Sizing
 // This module provides comprehensive risk management functions for trading
 
-module risk {
-    // Import indicators for calculations
-    from std::finance::indicators::moving_averages use { sma, ema };
+// Import indicators for calculations
+from std::finance::indicators::moving_averages use { sma, ema };
     from std::finance::indicators::volatility use { atr };
     
     // Constants for risk management
@@ -16,7 +15,7 @@ module risk {
     // Position Sizing Functions
     
     // Fixed Fractional Position Sizing
-    pub fn fixed_fractional_size(account_balance, risk_percent = DEFAULT_RISK_PERCENT, stop_loss_amount) {
+    pub fn fixed_fractional_size(account_balance, stop_loss_amount, risk_percent = DEFAULT_RISK_PERCENT) {
         if risk_percent > MAX_RISK_PERCENT {
             risk_percent = MAX_RISK_PERCENT;
         }
@@ -579,4 +578,3 @@ module risk {
         
         return same_sector_count >= 3;  // Limit correlated positions
     }
-}
