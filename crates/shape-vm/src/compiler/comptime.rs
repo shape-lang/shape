@@ -45,8 +45,8 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
     // before this forwarder dispatches into `__comptime__.type_info`.
     // Return-fields hint matches the `types.shape` TypeInfo declaration
     // so the comptime compiler can resolve field access on the result
-    // (`ti.name` / `ti.kind`).
-    ("type_info", 1, "type_info", Some(&["kind", "name"])),
+    // (`ti.name` / `ti.kind` / `ti.fields`).
+    ("type_info", 1, "type_info", Some(&["kind", "name", "fields"])),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
     ("string_lit", 1, "string_lit", None),
@@ -245,84 +245,203 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
     }
 }
 
-/// Rewrite bare identifier arguments to `implements()` calls as string literals.
-/// This allows `implements(Dog, Speak)` (bare type/trait names) to work in
-/// comptime blocks where those identifiers don't exist as variables.
-fn rewrite_implements_ident_args(stmt: &mut Statement) {
+/// Rewrite bare type/trait-name identifier arguments to `type_info()` and
+/// `implements()` calls as string literals, at ANY nesting depth.
+///
+/// `type_info(User)` and `implements(Dog, Speak)` name a type or trait directly;
+/// those identifiers are not value bindings, so the reflection builtins receive
+/// the name as a string. The walk is fully recursive so the natural nested forms
+/// work too — `print(type_info(User).name)`, `if implements(T, "Ord") { ... }`,
+/// `let n = type_info(field.type).name`, etc. — not only a bare top-level
+/// statement. The outer type-checker accepts the same bare-identifier form
+/// (inference/access.rs `type_symbol_ident_args`), so the two paths agree.
+fn rewrite_comptime_type_symbol_args(stmt: &mut Statement) {
     match stmt {
-        Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
-            rewrite_implements_in_expr(expr);
-        }
+        Statement::Expression(expr, _) => rewrite_comptime_type_symbol_args_expr(expr),
+        Statement::Return(Some(expr), _) => rewrite_comptime_type_symbol_args_expr(expr),
+        Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
         Statement::VariableDecl(decl, _) => {
             if let Some(init) = &mut decl.value {
-                rewrite_implements_in_expr(init);
+                rewrite_comptime_type_symbol_args_expr(init);
+            }
+        }
+        Statement::Assignment(assign, _) => {
+            rewrite_comptime_type_symbol_args_expr(&mut assign.value);
+        }
+        Statement::For(for_loop, _) => {
+            match &mut for_loop.init {
+                shape_ast::ast::ForInit::ForIn { iter, .. } => {
+                    rewrite_comptime_type_symbol_args_expr(iter);
+                }
+                shape_ast::ast::ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
+                    rewrite_comptime_type_symbol_args(init);
+                    rewrite_comptime_type_symbol_args_expr(condition);
+                    rewrite_comptime_type_symbol_args_expr(update);
+                }
+            }
+            for s in &mut for_loop.body {
+                rewrite_comptime_type_symbol_args(s);
+            }
+        }
+        Statement::While(while_loop, _) => {
+            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition);
+            for s in &mut while_loop.body {
+                rewrite_comptime_type_symbol_args(s);
             }
         }
         Statement::If(if_stmt, _) => {
+            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition);
             for s in &mut if_stmt.then_body {
-                rewrite_implements_ident_args(s);
+                rewrite_comptime_type_symbol_args(s);
             }
             if let Some(else_body) = &mut if_stmt.else_body {
                 for s in else_body {
-                    rewrite_implements_ident_args(s);
+                    rewrite_comptime_type_symbol_args(s);
                 }
             }
         }
-        _ => {}
+        Statement::SetParamValue { expression, .. }
+        | Statement::SetReturnExpr { expression, .. }
+        | Statement::ReplaceBodyExpr { expression, .. }
+        | Statement::ReplaceModuleExpr { expression, .. }
+        | Statement::ExtendItemsExpr { expression, .. } => {
+            rewrite_comptime_type_symbol_args_expr(expression);
+        }
+        Statement::ReplaceBody { body, .. } => {
+            for s in body {
+                rewrite_comptime_type_symbol_args(s);
+            }
+        }
+        // Directives with no embedded expression / already-parsed payloads.
+        Statement::Extend(_, _)
+        | Statement::RemoveTarget(_)
+        | Statement::SetParamType { .. }
+        | Statement::SetReturnType { .. } => {}
     }
 }
 
-fn rewrite_implements_in_expr(expr: &mut Expr) {
+fn rewrite_comptime_type_symbol_args_expr(expr: &mut Expr) {
+    // Rewrite this call's own bare-identifier args if it is a reflection call.
     if let Expr::FunctionCall { name, args, .. } = expr {
-        if name == "implements" {
+        if name == "type_info" || name == "implements" {
             for arg in args.iter_mut() {
                 if let Expr::Identifier(ident, span) = arg {
-                    *arg = Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
+                    *arg =
+                        Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
                 }
             }
         }
     }
-}
 
-/// Rewrite bare identifier arguments to `type_info()` calls as string
-/// literals. W7 (2026-05-17) — mirror of `rewrite_implements_ident_args`
-/// so `type_info(Point)` works inside comptime blocks where `Point` is a
-/// type symbol that doesn't exist as a value. The comptime function
-/// receives the type name as a string and reflects against the snapshot
-/// passed into `create_comptime_builtins_module`.
-fn rewrite_type_info_ident_args(stmt: &mut Statement) {
-    match stmt {
-        Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
-            rewrite_type_info_in_expr(expr);
-        }
-        Statement::VariableDecl(decl, _) => {
-            if let Some(init) = &mut decl.value {
-                rewrite_type_info_in_expr(init);
+    // Recurse into every child expression so nested reflection calls
+    // (`print(type_info(User).name)`) are rewritten too.
+    let recur = rewrite_comptime_type_symbol_args_expr;
+    match expr {
+        Expr::FunctionCall { args, named_args, .. } => {
+            for a in args.iter_mut() {
+                recur(a);
+            }
+            for (_, a) in named_args.iter_mut() {
+                recur(a);
             }
         }
-        Statement::If(if_stmt, _) => {
-            for s in &mut if_stmt.then_body {
-                rewrite_type_info_ident_args(s);
+        Expr::MethodCall {
+            receiver,
+            args,
+            named_args,
+            ..
+        } => {
+            recur(receiver);
+            for a in args.iter_mut() {
+                recur(a);
             }
-            if let Some(else_body) = &mut if_stmt.else_body {
-                for s in else_body {
-                    rewrite_type_info_ident_args(s);
+            for (_, a) in named_args.iter_mut() {
+                recur(a);
+            }
+        }
+        Expr::QualifiedFunctionCall {
+            args, named_args, ..
+        } => {
+            for a in args.iter_mut() {
+                recur(a);
+            }
+            for (_, a) in named_args.iter_mut() {
+                recur(a);
+            }
+        }
+        Expr::PropertyAccess { object, .. } => recur(object),
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            ..
+        } => {
+            recur(object);
+            recur(index);
+            if let Some(end) = end_index {
+                recur(end);
+            }
+        }
+        Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+            recur(left);
+            recur(right);
+        }
+        Expr::UnaryOp { operand, .. } => recur(operand),
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            recur(condition);
+            recur(then_expr);
+            if let Some(e) = else_expr {
+                recur(e);
+            }
+        }
+        Expr::Array(elems, _) => {
+            for e in elems.iter_mut() {
+                recur(e);
+            }
+        }
+        Expr::Object(entries, _) => {
+            for entry in entries.iter_mut() {
+                match entry {
+                    shape_ast::ast::ObjectEntry::Field { value, .. } => recur(value),
+                    shape_ast::ast::ObjectEntry::Spread(e) => recur(e),
                 }
             }
         }
+        Expr::Block(block, _) => {
+            for item in &mut block.items {
+                if let shape_ast::ast::BlockItem::Statement(s) = item {
+                    rewrite_comptime_type_symbol_args(s);
+                } else if let shape_ast::ast::BlockItem::Expression(e) = item {
+                    recur(e);
+                }
+            }
+        }
+        Expr::TryOperator(inner, _)
+        | Expr::Await(inner, _)
+        | Expr::Spread(inner, _)
+        | Expr::AsyncScope(inner, _)
+        | Expr::Reference { expr: inner, .. } => recur(inner),
+        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => recur(inner),
+        Expr::Range { start, end, .. } => {
+            if let Some(s) = start {
+                recur(s);
+            }
+            if let Some(e) = end {
+                recur(e);
+            }
+        }
+        // Leaves and constructs that do not embed a reflection call in
+        // practical comptime code are left untouched.
         _ => {}
-    }
-}
-
-fn rewrite_type_info_in_expr(expr: &mut Expr) {
-    if let Expr::FunctionCall { name, args, .. } = expr {
-        if name == "type_info" {
-            for arg in args.iter_mut() {
-                if let Expr::Identifier(ident, span) = arg {
-                    *arg = Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
-                }
-            }
-        }
     }
 }
 
@@ -386,10 +505,10 @@ pub(crate) fn execute_comptime_with_context(
     let mut body = statements.to_vec();
     // Transform bare identifiers in implements() / type_info() calls to
     // string literals, since type/trait names aren't variables in the
-    // comptime scope.
+    // comptime scope. Fully recursive so nested forms
+    // (`print(type_info(User).name)`) are rewritten too.
     for stmt in &mut body {
-        rewrite_implements_ident_args(stmt);
-        rewrite_type_info_ident_args(stmt);
+        rewrite_comptime_type_symbol_args(stmt);
     }
     ensure_tail_return(&mut body);
 
