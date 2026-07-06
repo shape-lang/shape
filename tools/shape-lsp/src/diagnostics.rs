@@ -1530,7 +1530,13 @@ pub fn validate_foreign_function_types(program: &Program, source: &str) -> Vec<D
             _ => continue,
         };
 
-        for (msg, span) in foreign_fn.validate_type_annotations(true) {
+        // Mirror the compiler oracle (functions_foreign.rs:30): native-ABI
+        // declarations (`extern C fn ... from "lib" as "sym"`) do NOT require a
+        // Result<T> return — their resolution is deferred to runtime dlopen.
+        // Only genuine dynamic-language runtimes (python/typescript) must return
+        // Result<T>. Param/return annotations are still required for all.
+        let dynamic_language = !foreign_fn.is_native_abi();
+        for (msg, span) in foreign_fn.validate_type_annotations(dynamic_language) {
             let range = if span.is_dummy() {
                 span_to_range(source, &foreign_fn.name_span)
             } else {
@@ -1957,6 +1963,54 @@ fn is_ident_byte(b: u8) -> bool {
 mod tests {
     use super::*;
     use crate::util::offset_to_line_col;
+
+    #[test]
+    fn test_extern_c_valid_no_false_diagnostic() {
+        use shape_ast::parser::parse_program;
+
+        // A valid extern C native-ABI declaration returns a bare type (int),
+        // NOT Result<int> — resolution is deferred to runtime dlopen. The LSP
+        // must not emit the dynamic-language Result<T> requirement here.
+        let source = r#"extern C fn labs(x: int) -> int from "c" as "labs";"#;
+        let program = parse_program(source).unwrap();
+        let diagnostics = validate_foreign_function_types(&program, source);
+        assert!(
+            diagnostics.is_empty(),
+            "Expected zero diagnostics for valid extern C fn, got: {:?}",
+            diagnostics
+        );
+    }
+
+    #[test]
+    fn test_extern_c_missing_return_type_still_errors() {
+        use shape_ast::parser::parse_program;
+
+        // Negative control: a foreign fn with no return type is malformed and
+        // must still error (annotations are required for opaque bodies).
+        let source = r#"extern C fn labs(x: int) from "c" as "labs";"#;
+        let program = parse_program(source).unwrap();
+        let diagnostics = validate_foreign_function_types(&program, source);
+        assert!(
+            !diagnostics.is_empty(),
+            "Expected a diagnostic for extern C fn missing a return type"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_language_foreign_fn_requires_result() {
+        use shape_ast::parser::parse_program;
+
+        // Negative control: a genuine dynamic-language (python) foreign fn that
+        // returns a bare non-Result type must still error.
+        let source = "fn python inc(x: int) -> int {\n    return x + 1\n}\n";
+        let program = parse_program(source).unwrap();
+        let diagnostics = validate_foreign_function_types(&program, source);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains("Result")),
+            "Expected Result<T> requirement for dynamic-language foreign fn, got: {:?}",
+            diagnostics
+        );
+    }
 
     #[test]
     fn test_location_to_range() {
