@@ -262,13 +262,140 @@ fn extract_closure_captures(
     }
 }
 
+/// Project a scalar / string leaf `SerializableVMValue` into a
+/// [`ConcreteReturn`] leaf (R3). Used both for the top-level scalar return arm
+/// and for each element of a heap-shaped return (array element / object field).
+///
+/// Heap-nested leaves (an object field that is itself an array/object, or a
+/// nested array element) surface clean — the R3 scope wires one level of
+/// heap-shaped projection (scalar-element arrays + scalar-field objects), and a
+/// deeper walk is the documented follow-up rather than a fabricated carrier.
+fn sv_leaf_to_concrete(sv: SerializableVMValue) -> Result<ConcreteReturn, String> {
+    use SerializableVMValue as SV;
+    match sv {
+        SV::Int(i) => Ok(ConcreteReturn::I64(i)),
+        SV::Number(f) => Ok(ConcreteReturn::F64(f)),
+        SV::Bool(b) => Ok(ConcreteReturn::Bool(b)),
+        SV::String(s) => Ok(ConcreteReturn::String(s)),
+        SV::None | SV::Unit => Ok(ConcreteReturn::Unit),
+        other => Err(format!(
+            "remote::call: a heap-shaped return contained a nested value \
+             shape ({:?}) that the receive-boundary typed projection does not \
+             yet cover (scalar / string leaves are wired; deeper heap nesting \
+             is a follow-up). Use remote.execute for polymorphic results.",
+            std::mem::discriminant(&other),
+        )),
+    }
+}
+
+/// Project a `SerializableVMValue::Array` (a heap-shaped scalar-element array
+/// return) into an element-kind-driven [`ConcreteReturn`] array leaf (R3). The
+/// element kind is read from the elements' own SV discriminators — never
+/// fabricated — and every element must agree (a homogeneous `Array<T>` is the
+/// only shape a typed return can carry). An empty array's element type is not
+/// recoverable from the wire SV, so it surfaces clean rather than guessing a
+/// kind (no Bool-default-style fabrication).
+///
+/// The resulting `ConcreteReturn::ArrayI64` / `ArrayF64` / `ArrayString` is
+/// materialized at the module-return boundary
+/// (`vm_impl/modules.rs::project_concrete_return`) into the monomorphic v2-raw
+/// `TypedArray<T>` carrier — the same carrier `Array<T>` literals use.
+fn array_to_concrete(items: Vec<SerializableVMValue>) -> Result<ConcreteReturn, String> {
+    use SerializableVMValue as SV;
+    let first = items.first().ok_or_else(|| {
+        "remote::call: remote returned an empty array whose element type is \
+         not recoverable at the receive boundary (an empty typed array carries \
+         no element discriminator over the wire). This edge is a follow-up; \
+         non-empty scalar-element arrays project. Use remote.execute for \
+         polymorphic results."
+            .to_string()
+    })?;
+    match first {
+        SV::Int(_) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                match it {
+                    SV::Int(i) => out.push(i),
+                    other => return Err(mixed_array_err(&other, "int")),
+                }
+            }
+            Ok(ConcreteReturn::ArrayI64(out))
+        }
+        SV::Number(_) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                match it {
+                    SV::Number(f) => out.push(f),
+                    other => return Err(mixed_array_err(&other, "number")),
+                }
+            }
+            Ok(ConcreteReturn::ArrayF64(out))
+        }
+        SV::String(_) => {
+            let mut out = Vec::with_capacity(items.len());
+            for it in items {
+                match it {
+                    SV::String(s) => out.push(s),
+                    other => return Err(mixed_array_err(&other, "string")),
+                }
+            }
+            Ok(ConcreteReturn::ArrayString(out))
+        }
+        other => Err(format!(
+            "remote::call: remote returned an array whose element shape ({:?}) \
+             has no scalar-element typed projection at the receive boundary \
+             (int / number / string element arrays are wired; heap-element and \
+             nested arrays are a follow-up). Use remote.execute for polymorphic \
+             results.",
+            std::mem::discriminant(other),
+        )),
+    }
+}
+
+fn mixed_array_err(other: &SerializableVMValue, elem_ty: &str) -> String {
+    format!(
+        "remote::call: remote returned a heterogeneous array (first element is \
+         {elem_ty} but a later element is {:?}); a typed return carries a \
+         homogeneous Array<T>. Use remote.execute for polymorphic results.",
+        std::mem::discriminant(other),
+    )
+}
+
 /// Map a remote-call reply value to a `TypedReturn`. The `SerializableVMValue`
 /// variant faithfully reflects the receiver's runtime slot kind (the receiver
 /// cross-checks it against the callee's `abi_return_kind` before replying), so
-/// scalar / string returns project directly. Heap-shaped returns (arrays,
-/// objects) are a typed-projection follow-up (same scope boundary as
-/// `wire_to_json_value`'s placeholder variants).
-fn reply_to_typed_return(sv: SerializableVMValue) -> Result<TypedReturn, String> {
+/// scalar / string returns project directly.
+///
+/// **R3 (heap-shaped return typed projection).** `SV::Array` (a scalar-element
+/// `Array<T>` return) and `SV::TypedObject` (a `TypedObject` return) now project
+/// through typed carriers rather than erroring:
+///
+/// - `SV::Array` → an element-kind-driven `ConcreteReturn::ArrayI64/F64/String`,
+///   materialized into the monomorphic v2-raw `TypedArray<T>` carrier at the
+///   module-return boundary.
+/// - `SV::TypedObject { schema_id, slot_data, .. }` → a `TypedReturn::ObjectPairs`
+///   whose field names are recovered from `schema_id`. The object literal was
+///   compiled once on the SENDER (the callee blob is transferred to the
+///   receiver, which runs the identical bytecode with the sender's schema
+///   registry threaded over the wire — distributed §4.1.1 `type_schemas`), so
+///   the `schema_id` baked into the transferred bytecode resolves to the same
+///   field-name list in the sender's `type_schema_registry`. Each field's slot
+///   is projected through `sv_leaf_to_concrete`; the object is rebuilt at the
+///   module-return boundary via `typed_object_from_pairs`, which re-binds the
+///   sender's real `{...}` schema by its field-name set (so field access reads
+///   the true field kinds — the same path `remote.ping`'s object return uses).
+///
+/// All projection rides typed carriers: `ConcreteReturn` / `TypedReturn`
+/// (kind-threaded per ADR-006 §2.7.4) materialize into `KindedSlot`s at the
+/// module-return boundary. Heap dispatch already happened on the RECEIVER
+/// (`slot_to_serializable` walked the `HeapValue` via `as_heap_value()` per
+/// ADR-005 §1); this arm consumes the typed `SerializableVMValue` tree it
+/// produced and re-projects each leaf by its own discriminator — never from
+/// raw bits.
+fn reply_to_typed_return(
+    sv: SerializableVMValue,
+    registry: &shape_runtime::type_schema::TypeSchemaRegistry,
+) -> Result<TypedReturn, String> {
     use SerializableVMValue as SV;
     match sv {
         SV::Int(i) => Ok(TypedReturn::Concrete(ConcreteReturn::I64(i))),
@@ -276,10 +403,70 @@ fn reply_to_typed_return(sv: SerializableVMValue) -> Result<TypedReturn, String>
         SV::Bool(b) => Ok(TypedReturn::Concrete(ConcreteReturn::Bool(b))),
         SV::String(s) => Ok(TypedReturn::Concrete(ConcreteReturn::String(s))),
         SV::None | SV::Unit => Ok(TypedReturn::Concrete(ConcreteReturn::Unit)),
+
+        // ── R3: heap-shaped array return ───────────────────────────────
+        SV::Array(items) => Ok(TypedReturn::Concrete(array_to_concrete(items)?)),
+
+        // ── R3: heap-shaped TypedObject return ─────────────────────────
+        SV::TypedObject {
+            schema_id,
+            slot_data,
+            ..
+        } => {
+            // Recover the field names from the schema the transferred
+            // bytecode baked in. Try the sender program's registry first,
+            // then the ambient public accessor (which also checks the
+            // predeclared-schema cache anonymous object literals land in).
+            // `SchemaId` is a `u32`; the wire `schema_id` is a `u64` — a value
+            // outside the `u32` range cannot name any registered schema, so it
+            // surfaces clean rather than truncating.
+            let schema_id_u32: shape_runtime::type_schema::SchemaId =
+                schema_id.try_into().map_err(|_| {
+                    format!(
+                        "remote::call: object return carried an out-of-range \
+                         schema id ({schema_id}) that names no registered \
+                         schema. Use remote.execute for polymorphic results."
+                    )
+                })?;
+            let schema = registry
+                .get_by_id(schema_id_u32)
+                .cloned()
+                .or_else(|| {
+                    shape_runtime::type_schema::lookup_schema_by_id_public(schema_id_u32)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "remote::call: the remote returned an object whose \
+                         schema (id {schema_id}) is not resolvable in the \
+                         sender's type registry — the field names cannot be \
+                         recovered. This is unexpected for a function compiled \
+                         on this node (the callee blob carries the sender's \
+                         schema ids). Use remote.execute for polymorphic \
+                         results."
+                    )
+                })?;
+            if schema.fields.len() != slot_data.len() {
+                return Err(format!(
+                    "remote::call: object return arity mismatch — schema '{}' \
+                     (id {schema_id}) declares {} fields but the remote sent \
+                     {} slot(s).",
+                    schema.name,
+                    schema.fields.len(),
+                    slot_data.len(),
+                ));
+            }
+            let mut pairs: Vec<(String, ConcreteReturn)> = Vec::with_capacity(slot_data.len());
+            for (field, field_sv) in schema.fields.iter().zip(slot_data.into_iter()) {
+                pairs.push((field.name.clone(), sv_leaf_to_concrete(field_sv)?));
+            }
+            Ok(TypedReturn::ObjectPairs(pairs))
+        }
+
         other => Err(format!(
             "remote::call: remote returned a value shape ({:?}) whose typed \
-             sender-side projection is a follow-up (scalar / string returns are \
-             wired). Use remote.execute for polymorphic results.",
+             sender-side projection is a follow-up (scalar / string / \
+             scalar-element-array / scalar-field-object returns are wired). \
+             Use remote.execute for polymorphic results.",
             std::mem::discriminant(&other),
         )),
     }
@@ -357,7 +544,7 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
         let response = call_with_resupply(program, request, |req| send_call(addr, req));
 
         match response.result {
-            Ok(value) => reply_to_typed_return(value),
+            Ok(value) => reply_to_typed_return(value, &program.type_schema_registry),
             // Q26: transport / protocol / remote failures raise as an ordinary
             // runtime error (the `_raising` sibling's contract). The recoverable
             // structured surface is the public `remote::call` primitive.
