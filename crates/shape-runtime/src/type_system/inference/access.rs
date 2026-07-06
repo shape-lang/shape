@@ -571,29 +571,23 @@ impl TypeInferenceEngine {
                 ))
             }
             Type::Concrete(TypeAnnotation::Array(elem_type)) => {
-                // Array indexing — the index must be NUMERIC. A hard `~ number`
-                // constraint would, under the tightened §2 lattice
-                // (numeric-conversion GREEN Stage 2), reject the dominant
-                // `arr[0]` / `arr[i]` cases where the index is an `int` literal
-                // or `int` variable (`int -> number` is now CAST-required, no
-                // longer the deleted `can_numeric_widen` free pass). Constrain
-                // to a `Numeric` BOUND instead, which both `int` and `number`
-                // indices satisfy — preserving the pre-Stage-2 acceptance of
-                // either-family indices without re-introducing implicit
-                // int->number value promotion.
-                self.push_numeric_index_constraint(index_type);
+                // Array indexing — the index must be `int` (WF-4, STRICT). See
+                // `require_int_index_constraint`: `number`/float/decimal indices
+                // are a compile error (explicit `as int` cast required), not a
+                // silent i64 reinterpretation.
+                self.require_int_index_constraint(index_type)?;
                 Ok(Type::Concrete(*elem_type.clone()))
             }
             Type::Concrete(TypeAnnotation::Generic { name, args })
                 if (name == "Vec" || name == "Array") && args.len() == 1 =>
             {
-                self.push_numeric_index_constraint(index_type);
+                self.require_int_index_constraint(index_type)?;
                 Ok(Type::Concrete(args[0].clone()))
             }
             Type::Concrete(TypeAnnotation::Generic { name, args })
                 if name == "Mat" && args.len() == 1 =>
             {
-                self.push_numeric_index_constraint(index_type);
+                self.require_int_index_constraint(index_type)?;
                 Ok(Type::Concrete(TypeAnnotation::Generic {
                     name: "Vec".into(),
                     args: args.clone(),
@@ -620,27 +614,26 @@ impl TypeInferenceEngine {
                             if n.as_str() == "Vec" || n.as_str() == "Array"
                     ) =>
             {
-                self.push_numeric_index_constraint(index_type);
+                self.require_int_index_constraint(index_type)?;
                 Ok(args[0].clone())
             }
             // String index `s[i]` — the i-th character (book
             // `fundamentals/strings.mdx` llm_summary + operators.mdx
             // §Indexing). Shape has NO first-class `char` type (STAGE-S4): a
             // single character is a real 1-char `string`, so `s[i]: string`
-            // (exact parity with `s.charAt(i)`). The index is `Numeric`-bound
-            // like array indexing — `int` and `number` both satisfy it without
-            // forcing `int -> number` promotion. Must precede the generic
+            // (exact parity with `s.charAt(i)`). The index must be `int` like
+            // array indexing (WF-4 STRICT). Must precede the generic
             // `Basic(name)` record-schema arm below (a "string" Basic would
             // otherwise fall to a fresh indexable var → `unknown`, breaking
             // strict-typed downstream uses like `acc + s[i]`).
             Type::Concrete(TypeAnnotation::Basic(name)) if name.as_str() == "string" => {
-                self.push_numeric_index_constraint(index_type);
+                self.require_int_index_constraint(index_type)?;
                 Ok(Type::Concrete(TypeAnnotation::Basic("string".into())))
             }
             Type::Concrete(TypeAnnotation::Basic(name)) => {
                 // Check if this is a registered record schema (e.g., "rows" returns "row")
                 if self.env.lookup_record_schema(name).is_some() {
-                    self.push_numeric_index_constraint(index_type);
+                    self.require_int_index_constraint(index_type)?;
                     Ok(Type::Concrete(TypeAnnotation::Basic(name.clone())))
                 } else {
                     // For unknown types, create an element-carrying index
@@ -690,22 +683,61 @@ impl TypeInferenceEngine {
         Ok(Type::Concrete(elem_types[k as usize].clone()))
     }
 
-    /// Push a `Numeric`-bound constraint on an array/record index type. Both
-    /// `int` and `number` (and any numeric width) satisfy `Numeric`, so this
-    /// accepts either-family indices without forcing the index to `number`
-    /// (which the tightened §2 lattice would reject for an `int` index, since
-    /// `int -> number` is now CAST-required). Numeric-conversion GREEN Stage 2.
-    fn push_numeric_index_constraint(&mut self, index_type: &Type) {
-        let bound = self.fresh_var();
-        self.constraints.push((
-            index_type.clone(),
-            Type::Constrained {
-                var: bound,
-                constraint: Box::new(TypeConstraint::ImplementsTrait {
-                    trait_name: "Numeric".to_string(),
-                }),
-            },
-        ));
+    /// Require an array/string/record index operand to be `int` (STRICT,
+    /// WF-4 index-type). `int` and `number` are SEPARATE families and do NOT
+    /// unify (CLAUDE.md §Type-System-Rules); a `number`/`decimal`/float index
+    /// silently reinterpreted as an `i64` index is the top strict-typing hole
+    /// (reliableonly_strict_bypass class): `arr[1.5]` / `arr[n: number]` /
+    /// `arr[time::millis()]` all used to compile and read a garbage element or
+    /// run off the end. The index MUST be proven `int` at compile time.
+    ///
+    /// - A CONCRETE non-`int` index (number/decimal/float/any non-int) is a
+    ///   compile error — the user must write an explicit `as int` cast
+    ///   (`number -> int` is lossy per the numeric-conversion rule, so it is
+    ///   NOT implicit; NO `IntToNumber`/`NumberToInt`/`Convert*To` coercion
+    ///   opcode is emitted — that is a §Forbidden Patterns dynamic-fallback).
+    /// - A still-unresolved index VARIABLE is unified with `int` (hard equality,
+    ///   NOT a `Numeric` bound that `number` would satisfy). A genuine int var
+    ///   binds; a var that later resolves to `number` conflicts → compile error.
+    ///   This is not the "unbound-var-unifies-with-anything" hole: the index USE
+    ///   site legitimately constrains the operand to `int`.
+    fn require_int_index_constraint(&mut self, index_type: &Type) -> TypeResult<()> {
+        let resolved = self.solver.unifier().apply_substitutions(index_type);
+        let int_ty = Type::Concrete(TypeAnnotation::Basic("int".to_string()));
+        let concrete_name = match &resolved {
+            Type::Concrete(TypeAnnotation::Basic(name)) => Some(name.as_str().to_string()),
+            Type::Concrete(TypeAnnotation::Reference(name)) => Some(name.as_str().to_string()),
+            _ => None,
+        };
+        match &resolved {
+            _ if concrete_name.is_some() => {
+                let name = concrete_name.unwrap();
+                if BuiltinTypes::is_integer_type_name(&name) {
+                    Ok(())
+                } else {
+                    Err(TypeError::TypeMismatch(
+                        "int".to_string(),
+                        format!(
+                            "{} — array index must be `int`; add an explicit `as int` \
+                             cast if truncation is intended",
+                            name
+                        ),
+                    ))
+                }
+            }
+            // Any other concrete shape (array/object/tuple/function/...) is not
+            // an integer index.
+            Type::Concrete(_) => Err(TypeError::TypeMismatch(
+                "int".to_string(),
+                "non-integer value — array index must be `int`".to_string(),
+            )),
+            // Unresolved variable / constrained var: constrain to `int` by
+            // unification (see doc comment above).
+            _ => {
+                self.constraints.push((resolved, int_ty));
+                Ok(())
+            }
+        }
     }
 
     /// Extract `T` from an `Array<T>` / `Vec<T>` type shape, for the series
