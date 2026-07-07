@@ -15,10 +15,11 @@
 //! reached through the single [`gc_meta`] function, which dispatches on
 //! `HeapKind` to decide **where** the metadata lives:
 //!
-//! - **Header carriers** (objects that embed a `HeapHeader` at offset 0 —
+//! - **Header carriers** (objects that embed a v2 `HeapHeader` at offset 0 —
 //!   `TypedObject`, `TypedArray`, `Closure`, `String`, `Decimal`,
-//!   `TraitObject`): color (bits 3–4) + buffered (bit 5) live in the
-//!   `HeapHeader.flags` byte at `HeapHeader::OFFSET_FLAGS`.
+//!   `TraitObject`): color (bits 4–5) + buffered (bit 6) live in the
+//!   v2 `HeapHeader.flags` byte at `HeapHeader::OFFSET_FLAGS`. Bit 3
+//!   (`FLAG_CLOSURE_CAPTURES_DROPPED`) is left untouched — no collision.
 //! - **Header-less kinds** (`std::sync::Arc`-backed — `SharedCell`,
 //!   `Reference`, `HashMap`, `HashSet`, `Deque`, `Channel`, `Mutex`, …): the
 //!   refcount lives in the Arc control block with no flags byte, so metadata is
@@ -27,8 +28,10 @@
 //! No new sum type projects 1:1 to `HeapKind`; `gc_meta` is a placement
 //! function, and heap dispatch continues to go through `HeapKind`/`HeapValue`.
 
-use crate::heap_header::{GC_COLOR_MASK, GC_COLOR_SHIFT, GC_FLAG_BUFFERED, GcColor, HeapHeader};
 use crate::heap_value::HeapKind;
+use crate::v2::heap_header::{
+    GC_COLOR_MASK, GC_COLOR_SHIFT, GC_FLAG_BUFFERED, GcColor, HeapHeader,
+};
 
 /// Does `kind` embed a `HeapHeader` (refcount + flags byte) at offset 0?
 ///
@@ -335,16 +338,17 @@ mod tests {
             assert!(meta.buffered(&side));
         }
 
-        // Only the color (bits 3–4) + buffered (bit 5) touched; low 3 bits and
-        // _pad (offset 7) untouched.
+        // Only the color (bits 4–5) + buffered (bit 6) touched; low 4 bits
+        // (incl. FLAG_CLOSURE_CAPTURES_DROPPED at bit 3) and _pad (offset 7)
+        // untouched.
         assert_eq!(
-            header[6] & 0b0000_0111,
+            header[6] & 0b0000_1111,
             0,
-            "MARKED/PINNED/READONLY untouched"
+            "MARKED/PINNED/READONLY/CLOSURE_CAPTURES_DROPPED untouched"
         );
         assert_eq!(header[7], 0, "_pad untouched");
-        // White = 2 << 3 = 0b10000, buffered = 0b100000 → 0b110000.
-        assert_eq!(header[6], 0b0011_0000);
+        // White = 2 << 4 = 0b0010_0000, buffered = 0b0100_0000 → 0b0110_0000.
+        assert_eq!(header[6], 0b0110_0000);
     }
 
     #[test]
