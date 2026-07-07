@@ -1238,3 +1238,139 @@ fn test_b3_array_add_type_checks_without_numeric_rejection() {
         result.err()
     );
 }
+
+// ============================================================================
+// Empty-in-context element-type inference (issue #14).
+//
+// A bare empty array literal `[]` carries no element type of its own. These
+// tests pin the element-type resolution across every context the fix threads:
+// a binding annotation, a struct-field type (via an object literal), a callee
+// param type, a subsequent push, and a function return annotation — each must
+// lower `[]` to the typed `NewTypedArray*(0)` allocator (a real `TypedArray<T>`
+// carrier), NOT the untyped `NewArray(0)` placeholder that SURFACEs at runtime.
+// A genuinely-unresolvable empty array (`let xs = []`, never annotated, never
+// pushed) must remain a clean compile error — never a crash, never an
+// untyped/any carrier. User-ratified CANONICAL-INSTANTIATE (2026-07-07) covers
+// the polymorphic/marshal-sink case, exercised via xml.stringify in the
+// shape-cli stdlib integration suite.
+// ============================================================================
+
+/// F1: an empty array as a struct field of an ANNOTATED-binding object literal
+/// (`let n: Node = { kids: [] }`) resolves its element type from `Node.kids`'s
+/// declared `Array<int>`. Compiles + runs (len == 0), no `op_new_array(0)`
+/// SURFACE.
+#[test]
+fn empty_array_struct_field_binding_infers_element_from_declared_field() {
+    let result = eval(
+        "type Node { kids: Array<int> }\n\
+         let n: Node = { kids: [] }\n\
+         n.kids.len()",
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// F2: an empty array as a struct field of an object literal passed as a CALL
+/// ARGUMENT (`count({ kids: [] })`) resolves its element type from the callee
+/// param's struct-field type.
+#[test]
+fn empty_array_struct_field_call_arg_infers_element_from_param() {
+    let result = eval(
+        "type Node { kids: Array<int> }\n\
+         fn count(n: Node) -> int { n.kids.len() }\n\
+         count({ kids: [] })",
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// F5: a NESTED object literal's empty-array field
+/// (`let o: Outer = { inner: { xs: [] } }`) resolves recursively through each
+/// declared struct-field type.
+#[test]
+fn empty_array_nested_object_field_infers_element_recursively() {
+    let result = eval(
+        "type Inner { xs: Array<int> }\n\
+         type Outer { inner: Inner }\n\
+         let o: Outer = { inner: { xs: [] } }\n\
+         o.inner.xs.len()",
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// F4: a bare empty array in IMPLICIT tail-return position
+/// (`fn empty() -> Array<int> { [] }`) resolves its element type from the
+/// function's declared return annotation.
+#[test]
+fn empty_array_implicit_tail_return_infers_element_from_return_type() {
+    let result = eval(
+        "fn empty() -> Array<int> { [] }\n\
+         empty().len()",
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// F4 (explicit): a bare empty array in EXPLICIT return position
+/// (`return []`) resolves its element type from the return annotation.
+#[test]
+fn empty_array_explicit_return_infers_element_from_return_type() {
+    let result = eval(
+        "fn empty() -> Array<int> { return [] }\n\
+         empty().len()",
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// The already-green binding form (`let xs: Array<int> = []`) stays green —
+/// regression guard alongside the new contexts.
+#[test]
+fn empty_array_binding_annotation_infers_element() {
+    let result = eval(
+        "let xs: Array<int> = []\n\
+         xs.len()",
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// The already-green bare-argument form (`takes([])` where `takes` declares
+/// `Array<int>`) stays green.
+#[test]
+fn empty_array_bare_argument_infers_element_from_param() {
+    let result = eval(
+        "fn takes(xs: Array<int>) -> int { xs.len() }\n\
+         takes([])",
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// The subsequent-push form (`let mut xs = []; xs.push(1)`) resolves the
+/// element type from the push site (the empty-array accumulator) — a real
+/// typed carrier, so the push and length observe `int`.
+#[test]
+fn empty_array_element_resolved_by_subsequent_push() {
+    let result = eval(
+        "let mut xs = []\n\
+         xs.push(1)\n\
+         xs.push(2)\n\
+         xs.len()",
+    );
+    assert_eq!(result.as_i64(), Some(2));
+}
+
+/// A genuinely-unresolvable empty array — created empty, never annotated, and
+/// never pushed to — is a CLEAN compile error (not a crash, not an untyped
+/// array). CANONICAL-INSTANTIATE must NOT leak into this non-sink position.
+#[test]
+fn empty_array_unresolvable_is_clean_compile_error() {
+    let result = eval_result(
+        "let xs = []\n\
+         xs.len()",
+    );
+    assert!(
+        result.is_err(),
+        "a never-annotated, never-pushed empty array must be a clean compile error"
+    );
+    let msg = format!("{:?}", result.err().unwrap());
+    assert!(
+        msg.contains("un-resolvable element type"),
+        "expected the un-resolvable-element compile error, got: {msg}"
+    );
+}

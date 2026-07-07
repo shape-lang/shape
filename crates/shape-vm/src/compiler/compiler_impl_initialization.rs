@@ -134,6 +134,7 @@ impl BytecodeCompiler {
             comprehension_push_sites: Vec::new(),
             empty_array_accumulators: HashMap::new(),
             pending_empty_array_alloc_idx: None,
+            pending_empty_array_canonical_instantiate: false,
             // ADR-006 §2.7.27 / Item 4 ruling: container-kind tracking for
             // `&mut self` write-back emission.
             mut_self_container_locals: HashMap::new(),

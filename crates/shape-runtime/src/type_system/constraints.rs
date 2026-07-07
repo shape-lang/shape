@@ -642,6 +642,18 @@ impl ConstraintSolver {
         if Self::is_any_error(ann1) || Self::is_any_error(ann2) {
             return Ok(true);
         }
+        // Empty-in-context element-type inference (issue #14): a `tyvar` marker
+        // (an unresolved type variable — canonically the element of an empty
+        // array `[]`, i.e. the generalized `∀T. Array<T>`) is compatible with
+        // ANY concrete annotation. A free variable unifies with anything (HM).
+        // We cannot record the binding here (`&self`), but the codegen path
+        // resolves the concrete element type from the target declaration; the
+        // compatibility check only needs to accept rather than reject. Bounded
+        // to the `\u{1}tyvar:` marker (`annotation_as_tyvar`), so real type
+        // names are never broadened.
+        if annotation_as_tyvar(ann1).is_some() || annotation_as_tyvar(ann2).is_some() {
+            return Ok(true);
+        }
         match (ann1, ann2) {
             // Basic types. Numeric pairs unify implicitly ONLY when `ann1`
             // (the src/value side) losslessly widens to `ann2` (the dst side)
