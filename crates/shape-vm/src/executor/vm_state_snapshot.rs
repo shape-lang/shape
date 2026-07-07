@@ -99,7 +99,12 @@ impl VirtualMachine {
             let mut locals: Vec<KindedSlot> = Vec::with_capacity(end - base);
             for i in base..end {
                 let bits = self.stack[i];
-                let kind = self.kinds.get(i).copied().unwrap_or(NativeKind::Bool);
+                // ADR-006 §2.7.7 lockstep: `self.kinds` is parallel to
+                // `self.stack` (debug_assert_kinds_in_sync). `i` is bounded
+                // by `end = ..min(self.stack.len())`, so `i < self.kinds.len()`.
+                // Direct index surfaces any invariant violation as a loud OOB
+                // panic instead of fabricating a Bool no-op sentinel.
+                let kind = self.kinds[i];
                 // Clone-on-read via clone_with_kind discipline: snapshot
                 // owns its own share.
                 let cloned = clone_slot_kinded(bits, kind);
@@ -188,7 +193,10 @@ impl VirtualMachine {
                 .and_then(|f| f.param_names.get(local_idx).cloned())
                 .unwrap_or_else(|| format!("local_{local_idx}"));
             let bits = self.stack[i];
-            let kind = self.kinds.get(i).copied().unwrap_or(NativeKind::Bool);
+            // ADR-006 §2.7.7 lockstep: `self.kinds` is parallel to `self.stack`;
+            // `i` is bounded by `end = ..min(self.stack.len())`. Direct index
+            // surfaces any violation as a loud OOB panic, never Bool-fabricates.
+            let kind = self.kinds[i];
             let cloned = clone_slot_kinded(bits, kind);
             locals.push((name, cloned));
         }
@@ -206,11 +214,12 @@ impl VirtualMachine {
                     break;
                 }
                 let bits = self.stack[slot_idx];
-                let kind = self
-                    .kinds
-                    .get(slot_idx)
-                    .copied()
-                    .unwrap_or(NativeKind::Bool);
+                // ADR-006 §2.7.7 lockstep: `self.kinds` is parallel to
+                // `self.stack`; `slot_idx` is bounds-guarded `< self.stack.len()`
+                // immediately above, so `slot_idx < self.kinds.len()`. Direct
+                // index surfaces any violation as a loud OOB panic instead of
+                // fabricating a Bool no-op sentinel.
+                let kind = self.kinds[slot_idx];
                 out.push(clone_slot_kinded(bits, kind));
             }
             out

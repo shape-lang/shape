@@ -37,6 +37,7 @@
 0	\bdispatch_value_call_handler_raw\b	W7 transitional shim name — refuse on sight
 0	\bcall_value_with_u64_slice\b	W7 transitional shim name — refuse on sight
 0	unwrap_or\(\(0,\s*NativeKind::Bool\)\)	Bool-default slot fabrication — ADR-006 §2.7.7 forbidden
+0	unwrap_or\(NativeKind::Bool\)	single-arg Bool-default read-fallback — ADR-006 §2.7.7 forbidden
 0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*[^;]*?\bas\s+\*(const|mut)\s+(\w+::)*TypedObjectStorage	R6 carrier-UB: Arc ptr-op on _new TypedObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
 0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*[^;]*?\bas\s+\*(const|mut)\s+(\w+::)*TraitObjectStorage	R6 carrier-UB: Arc ptr-op on _new TraitObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
 0	let\s+expected\s*=\s*NativeKind::Bool	W17 Stage-0: no-layout upvalue Bool-default fabrication — ADR-006 §2.7.8/Q10 (design §4.2.4)
