@@ -17,6 +17,10 @@ pub mod aligned_vec;
 pub mod content;
 pub mod context;
 pub mod datatable;
+/// GC cycle-collection metadata + accessors (Phase 0). Gated behind the
+/// default-off `gc` Cargo feature; feature-off is a strict no-op.
+#[cfg(feature = "gc")]
+pub mod gc;
 pub mod heap_header;
 #[macro_use]
 pub mod heap_variants;
