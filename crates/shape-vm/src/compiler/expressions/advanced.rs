@@ -839,6 +839,23 @@ impl BytecodeCompiler {
     /// RHS is a zero-argument call to a user-defined `async fn`; `None`
     /// otherwise (module/qualified calls, arg-bearing calls, non-async
     /// callees, and arbitrary expressions all keep their existing paths).
+    ///
+    /// WF-2D-fu repair (regression fix): the deferral runs the callee on a
+    /// fresh isolated VM whose result-marshal boundary
+    /// (`async_runtime::run_isolated_async_fn` →
+    /// `kinded_scalar_to_typed_return`) only carries LEAF SCALARS back —
+    /// `int` (Int64) / `number` (Float64) / `bool` (Bool). A HEAP-typed
+    /// return (`string`, `Array<T>`, `HashMap`, `Option`/`Result`,
+    /// `TypedObject`, enum, …) has no cross-isolation carrier and would
+    /// surface `NotImplemented` at runtime — but the eager path returns it
+    /// correctly (serially). So we gate deferral on the callee's PROVEN
+    /// declared return type: defer ONLY when the annotation names a
+    /// marshalable leaf scalar; every other declared return (heap types, and
+    /// an absent annotation whose inferred type cannot be proven scalar)
+    /// keeps the pre-WF-2D-fu eager path. No fabrication, no Bool-default —
+    /// the decision reads the declared annotation only. This gate makes the
+    /// isolation boundary's hard `NotImplemented` unreachable for any
+    /// previously-working program while preserving the scalar overlap win.
     pub(super) fn deferrable_async_call_target(
         &self,
         expr: &Expr,
@@ -860,7 +877,23 @@ impl BytecodeCompiler {
             .and_then(|def| def.return_type.as_ref())
             .and_then(|ann| ann.as_type_name_str())
             .map(|s| s.to_string());
+        // Gate: defer only when the declared return type is a leaf scalar the
+        // isolation boundary can marshal. Otherwise keep the eager path.
+        if !Self::is_marshalable_scalar_return(ret_type_name.as_deref()) {
+            return None;
+        }
         Some((idx as u16, ret_type_name))
+    }
+
+    /// True iff the declared return type name is a leaf scalar that
+    /// `run_isolated_async_fn`'s marshal boundary can carry back out of an
+    /// isolated task VM — `int` (Int64), `number` (Float64), `bool` (Bool).
+    /// These are exactly the kinds handled by
+    /// `async_runtime::kinded_scalar_to_typed_return`. An absent annotation
+    /// (`None`) is NOT provably scalar — an inferred return could be a heap
+    /// type — so it is rejected and keeps the eager path.
+    fn is_marshalable_scalar_return(ret_type_name: Option<&str>) -> bool {
+        matches!(ret_type_name, Some("int") | Some("number") | Some("bool"))
     }
 
     /// Compile `async scope { body }`
