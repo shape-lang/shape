@@ -638,9 +638,49 @@ impl CallableArrayElem {
     }
 }
 
+/// **Shared** read-only element enumeration for a `TypedArray<CallableArrayElem>`
+/// — the single source of truth for the callable array's per-element carriers
+/// (real-gc-cycle-collection.md §3.4).
+///
+/// Walks `data[0..len]` yielding each 16-byte `CallableArrayElem` by value (it
+/// is `Copy`), in slot order, for **every** element (no filter) so both the
+/// destructive release walk (`drop_array_callable`) and the read-only GC cycle
+/// visitor (`crate::gc_visit`, `gc` feature) consume ONE enumeration and cannot
+/// drift on *which* elements the array owns. `CallableArrayElem` is 16 bytes
+/// (`{ bits: u64, kind: u8 }`, align 8) — NOT the 8-byte pointer view the
+/// `for_each_typed_array_elem_ptr` primitive walks — so it has its own reader.
+///
+/// # Safety
+/// `ptr` must point to a live `TypedArray<CallableArrayElem>` (its `_pad`
+/// discriminant is `ELEM_TYPE_CALLABLE`). The yielded elements are `Copy`
+/// borrowed views; this function performs no refcount work.
+pub(crate) unsafe fn for_each_typed_array_callable_elem<F>(ptr: *const u8, mut f: F)
+where
+    F: FnMut(CallableArrayElem),
+{
+    // SAFETY: caller guarantees a live `TypedArray<CallableArrayElem>`.
+    let arr = unsafe { &*(ptr as *const TypedArray<CallableArrayElem>) };
+    if arr.data.is_null() {
+        return;
+    }
+    for i in 0..arr.len {
+        // SAFETY: `i < len <= cap` and `data` non-null ⇒ in-bounds read of a
+        // stored element. `CallableArrayElem` is `Copy`; no ownership moves.
+        let elem = unsafe { *arr.data.add(i as usize) };
+        f(elem);
+    }
+}
+
 impl TypedArray<CallableArrayElem> {
     /// Deallocate a callable array, releasing each stored closure share exactly
     /// once and freeing the element buffer + typed-array header.
+    ///
+    /// The element walk enumerates through the SHARED
+    /// [`for_each_typed_array_callable_elem`] primitive — the same enumeration
+    /// the read-only GC cycle visitor consumes — and releases each yielded
+    /// element via `CallableArrayElem::release`. Read-here / release-there over
+    /// one primitive ⇒ the Drop walk and the collector's trace cannot drift on
+    /// the callable array's element set (real-gc-cycle-collection.md §3.4).
     ///
     /// # Safety
     /// `ptr` must point to a live `TypedArray<CallableArrayElem>` allocated by
@@ -649,10 +689,9 @@ impl TypedArray<CallableArrayElem> {
         unsafe {
             let arr = &*ptr;
             if arr.cap > 0 && !arr.data.is_null() {
-                for i in 0..arr.len {
-                    let elem = ptr::read(arr.data.add(i as usize));
+                for_each_typed_array_callable_elem(ptr as *const u8, |elem| {
                     elem.release();
-                }
+                });
                 let data_layout = Layout::array::<CallableArrayElem>(arr.cap as usize)
                     .expect("invalid array layout");
                 dealloc(arr.data as *mut u8, data_layout);
@@ -816,10 +855,18 @@ pub unsafe fn free_v2_typed_array_memory_only(ptr: *mut u8) {
             "free_v2_typed_array_memory_only: POD-element array cannot be a cycle member"
         );
         if cap > 0 && !data.is_null() {
-            // Heap-element buffers are `*const _` runs — 8 bytes/element for
-            // every heap element type.
-            let data_layout =
-                Layout::array::<*const u8>(cap).expect("invalid array layout");
+            // Buffer layout is element-type-dependent: every heap-*pointer*
+            // element type is an 8-byte `*const _` run, but the CALLABLE
+            // carrier stores 16-byte `CallableArrayElem` records
+            // (`{ bits: u64, kind: u8 }`, align 8). Deallocating a CALLABLE
+            // buffer as an 8-byte-pointer run is a mismatched-`dealloc` (UB) —
+            // the real-#31 array is a CALLABLE array, so this branch is
+            // load-bearing for the closure-in-array cycle free.
+            let data_layout = if read_elem_type(ptr) == ELEM_TYPE_CALLABLE {
+                Layout::array::<CallableArrayElem>(cap).expect("invalid array layout")
+            } else {
+                Layout::array::<*const u8>(cap).expect("invalid array layout")
+            };
             dealloc(data, data_layout);
         }
         // Struct header is a fixed 24 bytes for every `T` (asserted above).
