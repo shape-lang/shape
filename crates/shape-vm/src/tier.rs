@@ -8,7 +8,7 @@
 //! - Tier 2: Optimizing JIT (inlining, constant propagation) — after 10,000 calls
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 
 use crate::bytecode::BytecodeProgram;
 use crate::deopt::DeoptTracker;
@@ -474,34 +474,6 @@ impl TierManager {
     /// Access the compilation request sender (for OSR requests from the executor).
     pub fn compilation_sender(&self) -> Option<&mpsc::Sender<CompilationRequest>> {
         self.compilation_tx.as_ref()
-    }
-
-    /// Set a compilation backend. Spawns a worker thread that drives the
-    /// backend, processing requests from the TierManager's channel.
-    ///
-    /// When the TierManager is dropped, `compilation_tx` is dropped, which
-    /// causes `req_rx.recv()` to return `Err` and the worker thread exits.
-    pub fn set_backend(
-        &mut self,
-        backend: Box<dyn CompilationBackend>,
-        program: Arc<BytecodeProgram>,
-    ) {
-        let (req_tx, req_rx) = mpsc::channel();
-        let (res_tx, res_rx) = mpsc::channel();
-        self.compilation_tx = Some(req_tx);
-        self.compilation_rx = Some(res_rx);
-        std::thread::Builder::new()
-            .name("shape-jit-worker".into())
-            .spawn(move || {
-                let mut backend = backend;
-                while let Ok(request) = req_rx.recv() {
-                    let result = backend.compile(&request, &program);
-                    if res_tx.send(result).is_err() {
-                        break;
-                    }
-                }
-            })
-            .expect("Failed to spawn JIT worker thread");
     }
 
     /// Check whether a loop is blacklisted (compilation previously failed).
