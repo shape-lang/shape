@@ -128,11 +128,20 @@ garbage cycle*. Everything else is out of scope by construction.
 
 Four Bacon–Rajan colors: **Black** (in use / not a candidate), **Gray** (being
 trial-scanned), **White** (provisional garbage), **Purple** (possible cycle
-root, buffered), plus a **buffered** bit. `HeapHeader.flags` (offset 6)
-currently uses bits 0–2 (`FLAG_MARKED`/`FLAG_PINNED`/`FLAG_READONLY`). We claim
-bits 3–4 for the 2-bit color and bit 5 for `buffered`. That fits entirely in the
-flags byte — we do **not** touch `_pad` (offset 7), which `TypedArray` stamps
-with its element-type tag. No new struct field, no new sum type (ADR-005 §1):
+root, buffered), plus a **buffered** bit.
+
+**CORRECTED carrier (impl finding 2026-07-07): the runtime header is
+`crates/shape-value/src/v2/heap_header.rs`** (all v2-raw carriers — TypedObject,
+TypedArray, Closure, StringV2, DecimalV2, TraitObject — embed
+`crate::v2::heap_header::HeapHeader`; 33 refs). The sibling
+`crates/shape-value/src/heap_header.rs` (v1) is re-exported but has **zero**
+runtime-carrier uses — GC metadata must NOT live there. On the v2 header
+`.flags` (offset 6), bits 0–2 are `FLAG_MARKED`/`FLAG_PINNED`/`FLAG_READONLY` and
+**bit 3 (0x08) is already `FLAG_CLOSURE_CAPTURES_DROPPED`**. We therefore claim
+**bits 4–5 for the 2-bit color and bit 6 for `buffered`** (bit 7 stays free) —
+this sidesteps the closure-flag collision entirely, no reconciliation needed. We
+do **not** touch `_pad` (offset 7), which `TypedArray` stamps with its
+element-type tag. No new struct field, no new sum type (ADR-005 §1):
 color/buffered are metadata accessed through one `gc_meta(ptr, kind)` function
 that dispatches on `HeapKind`, never a discriminator.
 
@@ -296,9 +305,10 @@ bincode **v6 → v7** wire-format bump (coupled, with migration surface).
 
 ## 7. GC metadata placement (constraint 5, no new discriminator)
 
-- **Header carriers**: color (bits 3–4) + buffered (bit 5) in
-  `HeapHeader.flags`. `FLAG_MARKED`/`FLAG_PINNED`/`FLAG_READONLY` (bits 0–2) and
-  `_pad` (offset 7, element-type-stamped) untouched.
+- **Header carriers** (v2 `HeapHeader`): color (bits 4–5) + buffered (bit 6) in
+  `HeapHeader.flags`. `FLAG_MARKED`/`FLAG_PINNED`/`FLAG_READONLY` (bits 0–2),
+  `FLAG_CLOSURE_CAPTURES_DROPPED` (bit 3), and `_pad` (offset 7,
+  element-type-stamped) untouched.
 - **Header-less kinds**: pointer-keyed side table (option A) or migration
   (option B).
 - **Access**: one `gc_meta` accessor + the `for_each_heap_child` visitor, both
@@ -447,7 +457,7 @@ A new ADR-006 section (proposed **§2.7.31 — Cycle collection**) is required
 because the design adds durable value-model semantics beyond the existing
 amendments:
 
-1. **New `HeapHeader.flags` semantics** (bits 3–5 = tri-color + buffered) — a
+1. **New v2 `HeapHeader.flags` semantics** (bits 4–6 = tri-color + buffered) — a
    change to the canonical heap-object metadata layout that other code must not
    repurpose.
 2. **A collection phase with observable `Drop` semantics** — cyclic garbage now
