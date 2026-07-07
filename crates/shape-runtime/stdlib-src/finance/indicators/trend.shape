@@ -144,16 +144,16 @@ pub @warmup(period) fn super_trend(high, low, close, period = 10, multiplier = 3
 pub @warmup(1) fn parabolic_sar(high, low, start = 0.02, inc = 0.02, max_val = 0.2) {
     let len = high.length();
     let sar = [];
-    let is_long = true;
-    let af = start;
-    let ep = high[0]; // Extreme point
+    let mut is_long = true;
+    let mut af = start;
+    let mut ep = high[0]; // Extreme point
     
     // Init SAR
     sar.push(low[0]);
     
     for i in 1..len {
         let prev_sar = sar[i-1];
-        let cur_sar = prev_sar + af * (ep - prev_sar);
+        let mut cur_sar = prev_sar + af * (ep - prev_sar);
         
         let cur_high = high[i];
         let cur_low = low[i];

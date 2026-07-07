@@ -8,7 +8,7 @@ from std::finance::annotations::warmup use { @warmup }
 /// Compute the simple moving average over `period`.
 ///
 /// @see std::core::utils::rolling::rolling_mean
-pub @warmup(period) fn sma(series, period) {
+pub @warmup(period) fn sma(series: Array<number>, period: int) -> Array<number> {
     rolling_mean(series, period)
 }
 
@@ -51,27 +51,29 @@ pub @warmup(period * 3) fn tema(series, period) {
 }
 
 /// Compute the linearly weighted moving average over `period`.
-pub @warmup(period) fn wma(series, period) {
+pub @warmup(period) fn wma(series: Array<number>, period: int) -> Array<number> {
     let len = series.length();
-    let result = [];
-    let denom = period * (period + 1) / 2;
+    let mut result = [];
+    let denom = (period * (period + 1) / 2) as number;
 
     // Loop implementation for correctness
     for i in 0..len {
         if i < period - 1 {
-            result.push(NaN);
+            // Warm-up positions have no defined WMA; pad with 0.0 (Shape has
+            // no NaN literal and division-by-zero is a runtime error).
+            result.push(0.0);
         } else {
-            let sum = 0.0;
+            let mut sum = 0.0;
             for j in 0..period {
                 // Weight: period, period-1, ... 1
-                let weight = period - j;
+                let weight = (period - j) as number;
                 let val = series[i - j];
                 sum = sum + val * weight;
             }
             result.push(sum / denom);
         }
     }
-    
+
     result
 }
 

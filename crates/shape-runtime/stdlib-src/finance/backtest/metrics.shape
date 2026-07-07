@@ -107,8 +107,8 @@ pub fn calmar_ratio(annual_return, max_drawdown) {
 /// Calculate maximum drawdown from equity series
 /// @param equity_series - Column of equity values
 pub fn max_drawdown(equity_series) {
-    let peak = 0.0;
-    let max_dd = 0.0;
+    let mut peak = 0.0;
+    let mut max_dd = 0.0;
 
     for equity in equity_series {
         if equity > peak {
@@ -126,9 +126,9 @@ pub fn max_drawdown(equity_series) {
 /// Calculate average drawdown
 /// @param equity_series - Column of equity values
 pub fn avg_drawdown(equity_series) {
-    let peak = 0.0;
-    let total_dd = 0.0;
-    let count = 0;
+    let mut peak = 0.0;
+    let mut total_dd = 0.0;
+    let mut count = 0;
 
     for equity in equity_series {
         if equity > peak {
