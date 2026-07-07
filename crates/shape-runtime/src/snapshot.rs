@@ -1476,8 +1476,7 @@ fn slot_heap_to_serializable(
 ) -> std::result::Result<SerializableVMValue, String> {
     use SerializableVMValue as SV;
     use shape_value::heap_value::{
-        AtomicData, ChannelData, DequeData, HashSetData, LazyData, MutexData, OptionData,
-        PriorityQueueData, ResultData,
+        AtomicData, HashSetData, LazyData, MutexData, OptionData, PriorityQueueData, ResultData,
     };
     // WF-2G GAP A: `Ptr(HeapKind::ModuleFn)` bits are an inline-scalar
     // module-fn id (NOT a pointer), and id 0 is the first-registered fn —
@@ -1571,19 +1570,25 @@ fn slot_heap_to_serializable(
             let _ = Arc::into_raw(arc);
             Ok(SV::MutexOpaque { has_value })
         },
-        HeapKind::Channel => unsafe {
-            let arc = Arc::<ChannelData>::from_raw(bits as *const ChannelData);
-            let closed = arc.is_closed();
-            let len = arc.len();
-            let _ = Arc::into_raw(arc);
-            Ok(SV::ChannelOpaque { closed, len })
-        },
-        HeapKind::Deque => unsafe {
-            let arc = Arc::<DequeData>::from_raw(bits as *const DequeData);
-            let len = arc.items.len();
-            let _ = Arc::into_raw(arc);
-            Ok(SV::DequeOpaque { len })
-        },
+        // CLEAN-REFUSE at snapshot() time (user-ruled disposition,
+        // 2026-05-29). A live channel/queue buffer is an in-process
+        // resource whose contents cannot be honestly serialized; the
+        // earliest honest refuse point is capture, not resume. Refuse
+        // here (naming the type) instead of silently dropping the payload
+        // into a discriminator-only opaque wire shape. No Arc is touched
+        // — the slot retains its share and drops on its own path.
+        HeapKind::Channel => Err(
+            "snapshot cannot capture a live Channel: an in-process channel \
+             buffer (queued values + closed flag) is a live resource, not \
+             snapshot-restorable — clean-refuse by design (ADR-006 §2.7.5.1)"
+                .to_string(),
+        ),
+        HeapKind::Deque => Err(
+            "snapshot cannot capture a live Deque: an in-process double-ended \
+             queue buffer is a live resource, not snapshot-restorable — \
+             clean-refuse by design (ADR-006 §2.7.5.1)"
+                .to_string(),
+        ),
         HeapKind::Result => unsafe {
             let arc = Arc::<ResultData>::from_raw(bits as *const ResultData);
             let is_ok = arc.is_ok;
@@ -1619,9 +1624,21 @@ fn slot_heap_to_serializable(
         // have NO owning cell — reading their bits as `*const SharedCell`
         // would be a wild-free, so they keep the opaque clean-refuse.
         HeapKind::Reference => serialize_reference(bits, store, ctx),
-        HeapKind::FilterExpr => Ok(SV::FilterExprOpaque),
+        // CLEAN-REFUSE at snapshot() time (user-ruled disposition,
+        // 2026-05-29) — same rationale as Channel/Deque above.
+        HeapKind::FilterExpr => Err(
+            "snapshot cannot capture a live FilterExpr: a query-DSL filter \
+             node (And/Or/Not predicate tree) is a live in-process resource, \
+             not snapshot-restorable — clean-refuse by design (ADR-006 §2.7.5.1)"
+                .to_string(),
+        ),
         HeapKind::SharedCell => serialize_shared_cell(bits, store, ctx),
-        HeapKind::Iterator => Ok(SV::IteratorOpaque),
+        HeapKind::Iterator => Err(
+            "snapshot cannot capture a live Iterator: an in-flight iterator \
+             cursor is a live in-process resource, not snapshot-restorable — \
+             clean-refuse by design (ADR-006 §2.7.5.1)"
+                .to_string(),
+        ),
         // Future is inline u64 per §2.7.4.
         HeapKind::Future => Ok(SV::Future(bits)),
 
@@ -2873,16 +2890,29 @@ fn serializable_to_heap_slot(
              resolve the identity-map handle. ADR-006 §2.7.30.5.",
         )),
 
-        // Opaque arms — surface-and-stop on restore. These produced
-        // discriminator-only wire shapes; the inner payload is lost.
-        (SV::MutexOpaque { .. }, HeapKind::Mutex) | (SV::LazyOpaque { .. }, HeapKind::Lazy) => {
-            Err(format!(
-                "serializable_to_slot: W17-snapshot-roundtrip surface — \
-             {heap_kind:?} arm restored from opaque wire shape; \
-             deep payload reconstruction is the W17-snapshot-{:?} \
-             follow-up. ADR-006 §2.7.5.1.",
-                heap_kind,
-            ))
+        // DEFINED-RESET arms (user-ruled disposition, 2026-05-29). These
+        // wrap a value/initializer that the discriminator-only wire shape
+        // does not carry; rather than refuse, they resume to a defined,
+        // deterministic reset state with NO stale payload:
+        //   • Mutex → unlocked / empty (holds the canonical Null absence
+        //     sentinel; single-threaded landing is always unlocked).
+        //   • Lazy  → unforced / uninitialized (no initializer, no cached
+        //     value); the next `lazy.get()` surfaces cleanly rather than
+        //     returning a wrong/empty value.
+        // Fresh `Arc::new(...)` + `Arc::into_raw` matches the Mutex/Lazy
+        // Clone/Drop carrier (`Arc::{increment,decrement}_strong_count`),
+        // so the restored slot owns exactly one share.
+        (SV::MutexOpaque { .. }, HeapKind::Mutex) => {
+            let m = Arc::new(shape_value::heap_value::MutexData::new(
+                shape_value::kinded_slot::KindedSlot::none(),
+            ));
+            let raw = Arc::into_raw(m) as u64;
+            Ok((raw, NativeKind::Ptr(HeapKind::Mutex)))
+        }
+        (SV::LazyOpaque { .. }, HeapKind::Lazy) => {
+            let l = Arc::new(shape_value::heap_value::LazyData::uninitialized());
+            let raw = Arc::into_raw(l) as u64;
+            Ok((raw, NativeKind::Ptr(HeapKind::Lazy)))
         }
 
         // Anything else: the discriminator doesn't pair with the
@@ -3608,15 +3638,24 @@ mod wf2g_gap_b_heap_element_array_tests {
 
 #[cfg(test)]
 mod opaque_disposition_tests {
-    //! Track A / A3 (2026-06-02): the restore-side opaque arms split into
-    //! two dispositions. Iterator / Deque / Channel / FilterExpr wrap a
-    //! live in-process resource and are **clean-refuse by design** (the
-    //! RULED terminal behavior, not a pending follow-up). Reference /
-    //! SharedCell / Mutex / Lazy keep the "deep payload reconstruction is
-    //! the W17-snapshot follow-up" wording (Mutex/Lazy reset disposition +
-    //! Reference/SharedCell identity-handle disposition are owned by other
-    //! workstreams). All eight still surface-and-stop; only the message
-    //! text differs.
+    //! Wave 7 resumability (2026-07-07): the six opaque-marker heap arms
+    //! now honor their user-ruled dispositions (2026-05-29).
+    //!
+    //! * **Clean-refuse** — Iterator / Deque / Channel / FilterExpr wrap a
+    //!   live in-process resource that is intrinsically not
+    //!   snapshot-restorable. They refuse at the earliest honest point:
+    //!   `snapshot()` **encode** returns a distinguishable per-type error
+    //!   naming the type ("snapshot cannot capture a live <Type>: …")
+    //!   instead of silently dropping the payload into a discriminator-only
+    //!   wire shape. The restore-side arm stays as terminal defense-in-depth
+    //!   (an externally-supplied opaque wire shape still refuses cleanly).
+    //! * **Defined-reset** — Mutex / Lazy resume to a defined, deterministic
+    //!   reset state with no stale payload: Mutex → unlocked/empty (Null
+    //!   absence sentinel), Lazy → unforced/uninitialized. Restore returns
+    //!   `Ok` with a fresh reset carrier, not an error.
+    //!
+    //! Reference / SharedCell are STAGE-R5 serialize-through (identity-map
+    //! two-pass); their ctx-free path surfaces the two-pass-required message.
 
     use super::*;
     use shape_value::{HeapKind, NativeKind};
@@ -3657,37 +3696,111 @@ mod opaque_disposition_tests {
         }
     }
 
-    /// A3: Mutex / Lazy stay on the follow-up wording (their dispositions
-    /// belong to other workstreams). Reference / SharedCell migrated to
-    /// STAGE-R5 serialize-through; their ctx-free path surfaces the
-    /// two-pass-required message (see `reference_arms_require_ctx_driver`).
+    /// CLEAN-REFUSE at snapshot()-encode time: a live Iterator / Deque /
+    /// Channel / FilterExpr carrier refuses at capture with a
+    /// distinguishable per-type message naming the type — NEVER a silent
+    /// drop to an opaque `Ok(...)` wire shape. This is the earliest honest
+    /// refuse point (the user-ruled preference).
     #[test]
-    fn deferred_arms_keep_followup_wording() {
+    fn clean_refuse_types_refuse_at_snapshot_encode() {
+        use shape_value::heap_value::{ChannelData, DequeData};
+        use shape_value::iterator_state::{IteratorSource, IteratorState};
+        use shape_value::kinded_slot::KindedSlot;
+        use shape_value::{FilterLiteral, FilterNode, FilterOp, ValueSlot};
+
         let (_tmp, st) = store();
+
+        // Live carriers held in owning KindedSlots — each releases its
+        // Arc share on Drop at scope end, so no leak / no double-free.
+        let channel = KindedSlot::from_channel(Arc::new(ChannelData::new()));
+        let deque = KindedSlot::from_deque(Arc::new(DequeData::new()));
+        let iterator = KindedSlot::from_iterator(Arc::new(IteratorState::new(
+            IteratorSource::Range {
+                start: 0,
+                end: 3,
+                step: 1,
+            },
+        )));
+        let filter_bits = Arc::into_raw(Arc::new(FilterNode::Compare {
+            column: "x".to_string(),
+            op: FilterOp::Eq,
+            value: FilterLiteral::Int(1),
+        })) as u64;
+        let filter = KindedSlot::new(
+            ValueSlot::from_raw(filter_bits),
+            NativeKind::Ptr(HeapKind::FilterExpr),
+        );
+
         let cases = [
-            (
-                SerializableVMValue::MutexOpaque { has_value: false },
-                HeapKind::Mutex,
-            ),
-            (
-                SerializableVMValue::LazyOpaque {
-                    is_initialized: false,
-                },
-                HeapKind::Lazy,
-            ),
+            (&channel, "Channel"),
+            (&deque, "Deque"),
+            (&iterator, "Iterator"),
+            (&filter, "FilterExpr"),
         ];
-        for (sv, hk) in cases {
-            let err = serializable_to_slot(&sv, NativeKind::Ptr(hk), &st)
-                .expect_err("deferred arm must surface-and-stop");
-            assert!(
-                err.contains("follow-up"),
-                "{hk:?} should keep follow-up wording, got: {err}"
+        for (ks, name) in cases {
+            let err = slot_to_serializable(ks.slot().raw(), ks.kind(), &st).expect_err(
+                "live clean-refuse carrier must refuse at snapshot()-encode, not serialize-through",
             );
             assert!(
-                !err.contains("clean-refuse by design"),
-                "{hk:?} must not be relabeled clean-refuse, got: {err}"
+                err.contains("snapshot cannot capture a live") && err.contains(name),
+                "{name} encode must produce a distinguishable clean-refuse \
+                 message naming the type, got: {err}"
             );
         }
+    }
+
+    // NOTE: the four live-resource arms also stay terminal clean-refuse on
+    // the restore side (defense-in-depth against an externally-supplied
+    // opaque wire shape), covered by
+    // `clean_refuse_by_design_arms_carry_design_wording` above.
+
+    /// DEFINED-RESET on restore: Mutex → unlocked/empty (Null absence
+    /// sentinel), Lazy → unforced/uninitialized. Both return `Ok` with a
+    /// fresh reset carrier — NOT an error, and with no stale payload.
+    #[test]
+    fn mutex_lazy_reset_to_defined_state_on_restore() {
+        use shape_value::heap_value::{LazyData, MutexData};
+
+        let (_tmp, st) = store();
+
+        // Mutex resets to empty (Null absence sentinel), unlocked.
+        let (mbits, mkind) = serializable_to_slot(
+            &SerializableVMValue::MutexOpaque { has_value: true },
+            NativeKind::Ptr(HeapKind::Mutex),
+            &st,
+        )
+        .expect("Mutex must resume to a defined reset state, not refuse");
+        assert_eq!(mkind, NativeKind::Ptr(HeapKind::Mutex));
+        // Reconstruct the owning share and inspect the reset value.
+        let m = unsafe { Arc::<MutexData>::from_raw(mbits as *const MutexData) };
+        assert_eq!(
+            m.get().kind(),
+            NativeKind::Null,
+            "reset Mutex must hold the Null absence sentinel (empty), no stale payload"
+        );
+        assert!(m.try_lock(), "reset Mutex must be unlocked");
+        drop(m); // release the one restored share
+
+        // Lazy resets to uninitialized (no cached value, no initializer).
+        let (lbits, lkind) = serializable_to_slot(
+            &SerializableVMValue::LazyOpaque {
+                is_initialized: true,
+            },
+            NativeKind::Ptr(HeapKind::Lazy),
+            &st,
+        )
+        .expect("Lazy must resume to a defined reset state, not refuse");
+        assert_eq!(lkind, NativeKind::Ptr(HeapKind::Lazy));
+        let l = unsafe { Arc::<LazyData>::from_raw(lbits as *const LazyData) };
+        assert!(
+            !l.is_initialized(),
+            "reset Lazy must be unforced/uninitialized (no cached value)"
+        );
+        assert!(
+            l.take_initializer().is_none(),
+            "reset Lazy carries no initializer — forcing it surfaces cleanly, no stale payload"
+        );
+        drop(l); // release the one restored share
     }
 
     /// STAGE-R5: the Reference / SharedCell serialize-through arms surface

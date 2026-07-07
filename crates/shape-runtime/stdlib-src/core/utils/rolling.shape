@@ -7,7 +7,7 @@
 /// @param series Input series.
 /// @param period Window size.
 /// @returns Windowed sum for each position.
-pub fn rolling_sum(series, period) {
+pub fn rolling_sum(series: Array<number>, period: int) -> Array<number> {
     __intrinsic_rolling_sum(series, period)
 }
 
@@ -17,7 +17,7 @@ pub fn rolling_sum(series, period) {
 /// @param period Window size.
 /// @returns Windowed mean for each position.
 /// @see std::finance::indicators::moving_averages::sma
-pub fn rolling_mean(series, period) {
+pub fn rolling_mean(series: Array<number>, period: int) -> Array<number> {
     __intrinsic_rolling_mean(series, period)
 }
 
@@ -26,7 +26,7 @@ pub fn rolling_mean(series, period) {
 /// @param series Input series.
 /// @param period Window size.
 /// @returns Windowed standard deviation for each position.
-pub fn rolling_std(series, period) {
+pub fn rolling_std(series: Array<number>, period: int) -> Array<number> {
     __intrinsic_rolling_std(series, period)
 }
 
@@ -36,7 +36,7 @@ pub fn rolling_std(series, period) {
 /// @param period Window size.
 /// @returns Windowed variance for each position.
 /// @see std::core::utils::rolling::rolling_std
-pub fn rolling_variance(series, period) {
+pub fn rolling_variance(series: Array<number>, period: int) -> Array<number> {
     let std = rolling_std(series, period)
     __intrinsic_vec_mul(std, std)
 }
@@ -50,6 +50,6 @@ pub fn rolling_variance(series, period) {
 /// @param initial_value Seed value for the recurrence.
 /// @returns Recurrence output series.
 /// @see std::finance::indicators::moving_averages::ema
-pub fn linear_recurrence(input, decay, initial_value) {
+pub fn linear_recurrence(input: Array<number>, decay: number, initial_value: number) -> Array<number> {
     __intrinsic_linear_recurrence(input, decay, initial_value)
 }

@@ -2,148 +2,202 @@
 /// Finance Trading Signals
 ///
 /// Finance-specific signal definitions for trading strategies.
-/// Uses the core signal module for domain-agnostic signal handling.
+/// Defines the canonical trading-signal representation plus the primitive
+/// constructors (`signal`, `signal_none`, `signal_with_targets`) and the
+/// `is_signal` discriminant used by the classification helpers below.
 
-// Import core signal functionality
-// (Note: imports will be resolved by the stdlib loader)
+// ===== Core Signal Representation =====
+
+/// A trading signal: an action plus a magnitude and optional price targets /
+/// sizing hint. The `kind` field is the discriminant checked by `is_signal`;
+/// consumers pattern-match on `action`.
+pub type Signal {
+    /// Discriminant marking a value as a trading signal.
+    kind: string,
+    /// The trading action, e.g. "buy", "sell", "short", "flat", "none".
+    action: string,
+    /// Signal strength in the range 0.0..=1.0.
+    magnitude: number,
+    /// Protective stop price; 0.0 means "no stop set" (matches the
+    /// backtest-state convention in std::finance::backtest::state).
+    stop_loss: number,
+    /// Profit target price; 0.0 means "no target set".
+    take_profit: number,
+    /// Position-sizing hint as a percentage of equity; 0.0 means "unset".
+    size_percent: number
+}
+
+/// Construct a plain trading signal with no targets or sizing hint.
+pub fn signal(action: string, magnitude: number) -> Signal {
+    Signal {
+        kind: "signal",
+        action: action,
+        magnitude: magnitude,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        size_percent: 0.0
+    }
+}
+
+/// The no-op signal: hold the current position.
+pub fn signal_none() -> Signal {
+    signal("none", 0.0)
+}
+
+/// Construct a directional signal carrying stop-loss / take-profit prices.
+/// A take-profit of 0.0 means "no target set".
+pub fn signal_with_targets(action: string, stop_loss: number, take_profit: number, magnitude: number) -> Signal {
+    Signal {
+        kind: "signal",
+        action: action,
+        magnitude: magnitude,
+        stop_loss: stop_loss,
+        take_profit: take_profit,
+        size_percent: 0.0
+    }
+}
+
+/// Return whether `sig` is a trading signal produced by this module.
+pub fn is_signal(sig: Signal) -> bool {
+    sig.kind == "signal"
+}
 
 // ===== Long Entry/Exit Signals =====
 
-/// Signal to enter a long position (buy)
-pub fn buy(magnitude = 1.0, metadata = {}) {
-    signal("buy", magnitude, metadata, {})
+/// Signal to enter a long position (buy).
+pub fn buy(magnitude: number = 1.0) -> Signal {
+    signal("buy", magnitude)
 }
 
-/// Signal to enter a long position (alias for buy)
-pub fn long(magnitude = 1.0, metadata = {}) {
-    signal("long", magnitude, metadata, {})
+/// Signal to enter a long position (alias for buy).
+pub fn long(magnitude: number = 1.0) -> Signal {
+    signal("long", magnitude)
 }
 
-/// Signal to exit a long position
-pub fn sell(magnitude = 1.0, metadata = {}) {
-    signal("sell", magnitude, metadata, {})
+/// Signal to exit a long position.
+pub fn sell(magnitude: number = 1.0) -> Signal {
+    signal("sell", magnitude)
 }
 
-/// Signal to exit a long position (alias for sell)
-pub fn exit_long(magnitude = 1.0, metadata = {}) {
-    signal("exit_long", magnitude, metadata, {})
+/// Signal to exit a long position (alias for sell).
+pub fn exit_long(magnitude: number = 1.0) -> Signal {
+    signal("exit_long", magnitude)
 }
 
 // ===== Short Entry/Exit Signals =====
 
-/// Signal to enter a short position
-pub fn short(magnitude = 1.0, metadata = {}) {
-    signal("short", magnitude, metadata, {})
+/// Signal to enter a short position.
+pub fn short(magnitude: number = 1.0) -> Signal {
+    signal("short", magnitude)
 }
 
-/// Signal to exit a short position (cover)
-pub fn cover(magnitude = 1.0, metadata = {}) {
-    signal("cover", magnitude, metadata, {})
+/// Signal to exit a short position (cover).
+pub fn cover(magnitude: number = 1.0) -> Signal {
+    signal("cover", magnitude)
 }
 
-/// Signal to exit a short position (alias for cover)
-pub fn exit_short(magnitude = 1.0, metadata = {}) {
-    signal("exit_short", magnitude, metadata, {})
+/// Signal to exit a short position (alias for cover).
+pub fn exit_short(magnitude: number = 1.0) -> Signal {
+    signal("exit_short", magnitude)
 }
 
 // ===== Position Management Signals =====
 
-/// Signal to close all positions and go flat
-pub fn flat() {
-    signal("flat", 1.0, {}, {})
+/// Signal to close all positions and go flat.
+pub fn flat() -> Signal {
+    signal("flat", 1.0)
 }
 
-/// Signal to close all positions (alias for flat)
-pub fn close_all() {
-    signal("close_all", 1.0, {}, {})
+/// Signal to close all positions (alias for flat).
+pub fn close_all() -> Signal {
+    signal("close_all", 1.0)
 }
 
-/// Signal to do nothing (hold current position)
-pub fn hold() {
+/// Signal to do nothing (hold current position).
+pub fn hold() -> Signal {
     signal_none()
 }
 
 // ===== Signals with Risk Management =====
 
-/// Buy signal with stop loss and optional take profit
-pub fn buy_with_stop(stop_loss, take_profit = None, magnitude = 1.0) {
+/// Buy signal with stop loss and optional take profit.
+pub fn buy_with_stop(stop_loss: number, take_profit: number = 0.0, magnitude: number = 1.0) -> Signal {
     signal_with_targets("buy", stop_loss, take_profit, magnitude)
 }
 
-/// Sell signal with stop loss and optional take profit
-pub fn sell_with_stop(stop_loss, take_profit = None, magnitude = 1.0) {
+/// Sell signal with stop loss and optional take profit.
+pub fn sell_with_stop(stop_loss: number, take_profit: number = 0.0, magnitude: number = 1.0) -> Signal {
     signal_with_targets("sell", stop_loss, take_profit, magnitude)
 }
 
-/// Short signal with stop loss and optional take profit
-pub fn short_with_stop(stop_loss, take_profit = None, magnitude = 1.0) {
+/// Short signal with stop loss and optional take profit.
+pub fn short_with_stop(stop_loss: number, take_profit: number = 0.0, magnitude: number = 1.0) -> Signal {
     signal_with_targets("short", stop_loss, take_profit, magnitude)
 }
 
 // ===== Signal with Sizing =====
 
-/// Buy signal with position sizing hint
-pub fn buy_sized(size_percent, magnitude = 1.0) {
-    signal("buy", magnitude, { size_percent: size_percent }, {})
+/// Buy signal with a position-sizing hint.
+pub fn buy_sized(size_percent: number, magnitude: number = 1.0) -> Signal {
+    Signal {
+        kind: "signal",
+        action: "buy",
+        magnitude: magnitude,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        size_percent: size_percent
+    }
 }
 
-/// Short signal with position sizing hint
-pub fn short_sized(size_percent, magnitude = 1.0) {
-    signal("short", magnitude, { size_percent: size_percent }, {})
+/// Short signal with a position-sizing hint.
+pub fn short_sized(size_percent: number, magnitude: number = 1.0) -> Signal {
+    Signal {
+        kind: "signal",
+        action: "short",
+        magnitude: magnitude,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        size_percent: size_percent
+    }
 }
 
 // ===== Signal Classification =====
 
-/// Check if signal is a buy/long entry
-pub fn is_buy(sig) {
-    if !is_signal(sig) {
-        return false;
-    }
+/// Check if signal is a buy/long entry.
+pub fn is_buy(sig: Signal) -> bool {
     let action = sig.action;
-    action == "buy" || action == "long"
+    action == "buy" or action == "long"
 }
 
-/// Check if signal is a sell/exit_long
-pub fn is_sell(sig) {
-    if !is_signal(sig) {
-        return false;
-    }
+/// Check if signal is a sell/exit_long.
+pub fn is_sell(sig: Signal) -> bool {
     let action = sig.action;
-    action == "sell" || action == "exit_long"
+    action == "sell" or action == "exit_long"
 }
 
-/// Check if signal is a short entry
-pub fn is_short(sig) {
-    if !is_signal(sig) {
-        return false;
-    }
+/// Check if signal is a short entry.
+pub fn is_short(sig: Signal) -> bool {
     sig.action == "short"
 }
 
-/// Check if signal is a cover/exit_short
-pub fn is_cover(sig) {
-    if !is_signal(sig) {
-        return false;
-    }
+/// Check if signal is a cover/exit_short.
+pub fn is_cover(sig: Signal) -> bool {
     let action = sig.action;
-    action == "cover" || action == "exit_short"
+    action == "cover" or action == "exit_short"
 }
 
-/// Check if signal is a flat/close_all
-pub fn is_flat(sig) {
-    if !is_signal(sig) {
-        return false;
-    }
+/// Check if signal is a flat/close_all.
+pub fn is_flat(sig: Signal) -> bool {
     let action = sig.action;
-    action == "flat" || action == "close_all"
+    action == "flat" or action == "close_all"
 }
 
-/// Check if signal is an entry signal (buy, long, or short)
-pub fn is_entry(sig) {
-    is_buy(sig) || is_short(sig)
+/// Check if signal is an entry signal (buy, long, or short).
+pub fn is_entry(sig: Signal) -> bool {
+    is_buy(sig) or is_short(sig)
 }
 
-/// Check if signal is an exit signal (sell, cover, flat)
-pub fn is_exit(sig) {
-    is_sell(sig) || is_cover(sig) || is_flat(sig)
+/// Check if signal is an exit signal (sell, cover, flat).
+pub fn is_exit(sig: Signal) -> bool {
+    is_sell(sig) or is_cover(sig) or is_flat(sig)
 }
