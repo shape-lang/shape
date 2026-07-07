@@ -1,9 +1,54 @@
 # Real Cycle-Collecting GC for Shape (Design Lane, D3)
 
-Status: DESIGN — not implemented. Ratifiable. User ruling 2026-07-06: D3 = a
+Status: DESIGN — RATIFIED 2026-07-07 (§0). User ruling 2026-07-06: D3 = a
 REAL cycle collector (the weaker weak-refs / explicit cycle-breaking option was
-explicitly rejected). This document designs it end-to-end; a later lane
-implements it after user ratification of the Open Questions (§13).
+explicitly rejected). This document designs it end-to-end; the impl lane builds
+the ratified variant.
+
+## 0. RATIFICATION (2026-07-07) — binding for the impl lane
+
+The §13 open questions were ratified by the strategic owner:
+
+1. **Cyclic `Drop` (OQ #1) — `Drop` is RAII-at-boundaries, NOT GC-run ("like in
+   Rust").** The collector is a **memory-only** reclaimer: when it frees a
+   garbage cycle it does **not** run `Drop` on the members. `Drop` fires **only**
+   at deterministic lexical/ownership boundaries, exactly as Rust's `Drop` does;
+   a reference cycle whose members impl `Drop` will have those finalizers **not
+   run** (identical to how Rust `Rc`/`Arc` cycles leak-without-finalizing) — the
+   GC only reclaims the *memory*. **Consequences:** §3.3 CollectWhite frees
+   member memory with NO finalize pass (delete the two-phase finalize-then-free
+   for cycles); §8 determinism becomes **trivially satisfied** — since GC runs no
+   observable `Drop`, collection timing cannot affect program output at all, so
+   the trigger is free to use a heap-pressure/allocation heuristic even under
+   `Deterministic` (GC is unobservable to the program). The old §8 finalizer-order
+   problem and §14.6 are **moot**. Finding #82's memory leak is fixed (GC reclaims
+   the cyclic cell's memory); its `Drop` still won't run for a self-referential
+   cycle — matching Rust, accepted.
+2. **Multi-thread scope (OQ #4) — REQUIRE the multi-thread rendezvous FIRST.** No
+   single-VM-first shortcut. v1 MUST include the cross-worker stop-the-world
+   safepoint rendezvous so `SharedAtomic` cross-thread cycles are collectable from
+   first ship. **Consequences:** the former Phase 6 (MT rendezvous) is pulled into
+   the **core v1 deliverable**; §10 rephased below; this is the largest
+   correctness piece and gates ship (higher v1 risk, accepted for cross-thread
+   soundness).
+3. **Snapshot × GC (OQ #3) — snapshot the live graph as-is + post-resume
+   collect.** No force-collect at `snapshot()`. Less coupling; a resumed VM
+   re-runs the collector. (§6 unchanged.)
+4. **Snapshot wire bump (OQ #6) — APPROVED v6→v7** with the generalized
+   identity-map (also fixes the pre-existing object-cycle serializer
+   infinite-recursion bug), as a coupled deliverable. (§6 / Phase 5 unchanged.)
+
+Supervisor defaults taken on the two non-escalated OQs: **OQ #2 trigger** =
+allocation/instruction-count quantum (now free to add a heap-pressure heuristic
+per ratification #1); **OQ #5 header-less** = side-table shadow-count (option A)
+for v1, option (B) migration as fast-follow.
+
+**Rephased §10 (per ratification #2):** the multi-thread rendezvous is no longer
+a fast-follow — it lands as part of the core collector (folded into Phase 3, or
+as a Phase 3.5 gate BEFORE `gc`-on-by-default in Phase 5). Phases 0/1/2 (metadata,
+shared edge primitive, barriers) are unchanged; the collector phase must be
+built thread-safe (all mutators — VM dispatch loop, async scheduler workers, JIT
+threads — halt at the safepoint rendezvous before trial-deletion).
 
 ## 1. Problem statement
 
@@ -420,7 +465,12 @@ amendments:
 The amendment should also fold the A2/A3/A4 dispositions into `docs/defections.md`
 as considered-but-rejected compromises, per CLAUDE.md.
 
-## 13. OPEN QUESTIONS FOR USER RATIFICATION
+## 13. OPEN QUESTIONS FOR USER RATIFICATION — ALL RESOLVED 2026-07-07 (see §0)
+
+> Ratified: OQ1 = Drop is RAII-at-boundaries, memory-only GC (not GC-run); OQ4 =
+> multi-thread rendezvous required in v1; OQ3 = snapshot-as-is + post-resume
+> collect; OQ6 = approve v6→v7. OQ2/OQ5 taken as supervisor defaults (§0). The
+> original questions are retained below for the rationale record.
 
 1. **Determinism scope.** Under `Deterministic`, is *stable-but-arbitrary*
    in-cycle finalizer order acceptable (Python-like), or must cyclic-garbage

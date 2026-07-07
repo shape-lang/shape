@@ -36,7 +36,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 17 | msgpack 100% stubbed | ✅ **decode+navigate FIXED** (shared json root) — **MERGED `aba8c444`** · 8 regression tests · **Opus-indep** | WF-3A-tail |
 | 18 | time module broken | ✅ claimed (WF-2E) | verify in WF-4 |
 | 19 | JIT double-execution | ✅ prints once | WF-1A · **Fable** |
-| 20 | Tiered compilation inert | ⏸ deferred | D4 ruling |
+| 20 | Tiered compilation inert | ✅ **inert machinery DELETED** (user-ruled) — **MERGED `48c1bc36`**: enable_tiered_compilation/register_jit_function/set_backend + NotImplemented promote-stub + cascade dead code (120 deletions); live tiering path (T1@100/T2@10k, osr) intact · **Opus-indep** | WF-4 D4 |
 | 21 | HashMap.filter garbage under JIT | ✅ vm==jit | WF-1A · **Fable** |
 | 22 | Drop-error guarantee unimplemented | ✅ | WF-1C |
 | 23 | Comptime descriptor key corruption | ✅ descriptors correct | WF-1B · **Fable** |
@@ -47,7 +47,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 28 | Load-time permission check dead | ✅ **over-wire enforced** (strict node refuses transferred fs.write at load, permission-union) | WF-3E merged `800fb6b9` · **Fable ×2 (D5)** |
 | 29 | bigint unconstructible | 🟡 **feature-scale, not a bug** — no construction path, no arithmetic (`HeapValue::BigInt` is an i64-backed placeholder), no grammar literal/suffix, no numeric-lattice integration. D2 "implement" = a real feature build (like decimal), not a point fix → own feature lane | → bigint feature |
 | 30 | Drop broken at escape boundaries | ✅ no use-after-finalize | WF-1C · **Fable** |
-| 31 | Reference cycles leak unboundedly | ⏳ | WF-3C / D3 |
+| 31 | Reference cycles leak unboundedly | 🎨 **DESIGN RATIFIED** (`docs/design/real-gc-cycle-collection.md`, `7e52ccde` + §0 ratified 2026-07-07): Bacon–Rajan trial-deletion cycle collector on Arc RC; memory-only (Drop stays RAII/Rust-semantics, GC runs no Drop); non-moving; multi-thread rendezvous required in v1; snapshot v6→v7. **Impl lane pending** (~2.5–4k LOC, ADR-006 §2.7.31) | WF-3C / D3 |
 | 32 | LSP false error on valid extern C | ✅ merged `c2a34826` (LSP now mirrors the compiler oracle: `dynamic_language = !is_native_abi()`) · **Opus-indep** | WF-3B-LSP |
 
 ## Cross-cutting
@@ -85,7 +85,7 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | MED | `time::millis()->float` breaks operand-position inference | WF-3A-tail | ✅ **FIXED + STRICTER — MERGED `aba8c444`**. Module-qualified scalar builtin now carries its declared return type through the type checker's inference engine in ANY position (operand/arg/index/return), not just `let`. `millis()-start`/`millis()-millis()` compile to number; **and** `needsString(millis())` now **errors** (number≠string — was a *silent pass* on main), `millis()-i`(int) errors (int/number separate), `"x"+millis()` errors. No coercion/fallback; recovered type is the declared `-> T`. Tests bug16..bug16f. Root corrected: not a float/number alias — the module-call return type didn't reach the inference tier |
 | MED | Two closure-return compile bugs | → grammar lane | 🟡 **both are `\|`-grammar ambiguities, not type bugs**: (a) tail closure after a stmt (`\|a\| a+base`) consumed as bitwise-or across the newline (needs newline-significant/ASI grammar); (b) unbraced typed-param body (`\|x:int\| x+1`) reads `int \| x` as a union type. The "mis-proves number" symptom did NOT reproduce. → Pest grammar change |
 | DOC | Book teaches retired `__original__(args)` ×5; `json.mdx` non-existent `as?` cast | WF-4 | ⏳ |
-| HIGH | **Float/number array index accepted (strict hole, `reliableonly_strict_bypass` class)** — `arr[1.5]`, `arr[n:number]`, `arr[time::millis()]` all COMPILE; a `number` (or unbound-var) index is not rejected, so a float is used as an int index → wrong element / garbage runtime index / out-of-bounds. PRE-EXISTING on main (identical at `764ff6b7`), orthogonal to WF-3A-tail — surfaced during that lane's negative-control probing. Index expression must REQUIRE `int` at compile time. | → **index-type lane** | ⏳ NEW (discovered 2026-07-06) |
+| HIGH | **Float/number array index accepted (strict hole, `reliableonly_strict_bypass` class)** — `arr[1.5]`, `arr[n:number]`, `arr[time::millis()]` all COMPILE; a `number` (or unbound-var) index used as an int index → wrong element / garbage index / OOB. | → **index-type lane** | ✅ **FIXED — MERGED `5067dea7`**: `require_int_index_constraint` across all 6 index arms (non-int index = compile error "add explicit `as int`"; unresolved var hard-unified to int); no coercion; blast delta 0; 6 tests · **Opus-indep** |
 
 ### WF-3E actual state (corrected 2026-07-06)
 Branch `wave3/distributed-composition-fix` @ `0efa7561` has **4 wip commits, 982 insertions/13 files** (fixAB transfer+receiver-init, fixC remote-call-Result, fixDE perms+ffi, repair D1 arity + D7 namespace-snapshot + serve extension-double-load; new `remote_builtins.rs` +334). **The workflow process DIED before its finisher gates + Fable re-proof ran → these fixes are UNVERIFIED. Do NOT merge until the independent 9-cell re-proof + D5-perms-over-wire confirmation pass** (§6quaterdecies gate).
