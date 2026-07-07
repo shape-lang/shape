@@ -26,9 +26,9 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 7 | `@remote`/`remote::__call` non-functional | ✅ **composition genuine** (transfer+snapshot+combined, server-side) | WF-3E merged `800fb6b9` · **Fable ×3** |
 | 8 | `snapshot()` never completes | ✅ | WF-2B · **Fable** |
 | 9 | `--resume` can never succeed | ✅ | WF-2B · **Fable** |
-| 10 | async let zero concurrency | 🟡 **claimed** (WF-2D), NOT independently verified | ⚠ needs Fable |
-| 11 | stdlib calls uncompilable in async fns | 🟡 claimed (WF-2D), unverified | ⚠ needs Fable |
-| 12 | top-level `await time::sleep` panics | 🟡 claimed (WF-2D), unverified | ⚠ needs Fable |
+| 10 | async let zero concurrency | ✅ **REAL overlap — MERGED `b6518d9b`**: zero-arg scalar-return user async fns overlap (2×1s=1.18s vs 2.17s serial; join race first-wins+cancel) via isolated per-task VM. **Regression caught+fixed by supervisor differential** (heap-return async-let → NotImplemented; now gated to scalar-return, heap keeps eager path) + **regression test added** (`async_let_heap_return_async_fn_keeps_eager_path`) · **Opus-indep differential vs main**. Caveats v0.4: arg-bearing/unit-return serial; join-all materialization | WF-2D-fu |
+| 11 | stdlib calls uncompilable in async fns | ✅ **not-a-bug** (was a missing `use` import, not a registration bug) — re-confirmed `b6518d9b` | WF-2D-fu |
+| 12 | top-level `await time::sleep` panics | ✅ **works** (exit 0, no block_in_place panic) — re-confirmed `b6518d9b` | WF-2D-fu |
 | 13 | http segfaults every call | ✅ claimed (WF-2E) | verify in WF-4 |
 | 14 | `xml::stringify` dumps core | 🟡 SIGSEGV+id-41 gone (M1); crash root is `op_new_array(0)` → **V3-S5 empty-array construction stub** (deferred; refuse-on-sight to band-aid) | → V3-S5 lane |
 | 15 | `std::finance` unusable | 🟡 compiler stack-overflow **M1-fixed/no-repro**; survivor = **stale stdlib source** (~85 `let`→`let mut` immutable-reassignment sites + undefined `signal`) → **stdlib-source-modernization** (not a compiler bug) | → source sweep |
