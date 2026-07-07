@@ -1,89 +1,31 @@
-// Heap allocation audit (PR-9 V8 Gap Closure):
-//   Category A (NaN-boxed returns): 3 sites (in allocation.rs, merge_ops.rs)
-//     box_typed_object — jit_typed_object_alloc, jit_new_typed_object,
-//     jit_typed_merge_object, jit_typed_object_from_hashmap
-//   Category B (intermediate/consumed): 0 sites
-//   Category C (heap islands): 0 sites
-//     (TypedObject uses custom alloc/dealloc with ref counting — not jit_box.
-//      Field values stored as raw u64 may contain JitAlloc pointers, but the
-//      TypedObject itself is not wrapped in JitAlloc — it uses TAG_TYPED_OBJECT
-//      encoding which directly embeds the pointer. Ref counting handles lifetime.)
+//! TypedObject FFI — v2-raw `*mut TypedObjectStorage` carrier.
 //!
-//! TypedObject - Fixed-layout objects for JIT optimization
+//! Wave-7 jit-typed-pointer-migration Phase C (2026-07-07): the JIT-private
+//! inline-cell `TypedObject` struct (its own `schema_id`/`ref_count` header +
+//! inline field cells + custom 64-byte-aligned allocator) is DELETED. Every
+//! JIT TypedObject producer and consumer is now on the SAME carrier the VM
+//! produces: the `#[repr(C)]` `shape_value::heap_value::TypedObjectStorage`
+//! (`HeapHeader` at offset 0, out-of-line slot buffer, refcount via the
+//! offset-0 header, self-describing `field_kinds` + `heap_mask`). This is the
+//! GC-sound carrier — `cycle_capable_direct_header` reads the offset-0 header
+//! and `for_each_heap_child` walks `heap_mask` + `field_kinds` — so a JIT
+//! object participates in Bacon–Rajan cycle collection identically to the VM
+//! tier.
 //!
-//! TypedObject provides O(1) field access by pre-computed byte offsets,
-//! eliminating HashMap lookups entirely. This is the core optimization
-//! for type-specialized JIT code.
+//! Field addressing on this carrier: the storage pointer IS the slot bits (no
+//! NaN-box, no `UNIFIED_PTR_MASK`); load the out-of-line slot buffer base at
+//! `storage + JIT_OFFSET_SLOT_DATA` (16), then field `i` lives at
+//! `[slot_data + i*8]`. See `mir_compiler/places.rs` (inline hot path) and
+//! `field_access.rs` (FFI consumers).
 //!
-//! # Memory Layout
-//!
-//! ```text
-//! +-------------+-------------+-------------+-------------+
-//! | schema_id   | ref_count   | field[0]    | field[1]    | ...
-//! | (4 bytes)   | (4 bytes)   | (8 bytes)   | (8 bytes)   |
-//! +-------------+-------------+-------------+-------------+
-//!              Header (8 bytes)              Data (field_count * 8 bytes)
-//! ```
-//!
-//! # Performance
-//!
-//! | Operation          | HashMap | TypedObject | Speedup |
-//! |--------------------|---------|-------------|---------|
-//! | Single field get   | ~25ns   | ~2ns        | 12.5x   |
-//! | Single field set   | ~30ns   | ~2ns        | 15x     |
-//! | 5 fields batch     | ~125ns  | ~10ns       | 12.5x   |
+//! The single live producer is `jit_typed_object_alloc` (`allocation.rs`),
+//! which allocates via `TypedObjectStorage::_new` with schema-derived
+//! `field_kinds`/`heap_mask`. Retain/release route through the offset-0 header
+//! (`jit_v2_typed_object_retain`/`_release` in `ffi/v2`); the deleted
+//! JIT-private manual `inc_ref`/`dec_ref` split-counter is gone.
 
 mod allocation;
 mod field_access;
-mod merge_ops;
-
-#[cfg(test)]
-mod ffi_exports;
 
 pub use allocation::*;
 pub use field_access::*;
-pub use merge_ops::*;
-
-/// Header size in bytes (schema_id + ref_count)
-pub const TYPED_OBJECT_HEADER_SIZE: usize = 8;
-
-/// Memory alignment for TypedObject allocation.
-/// 64-byte alignment for L1 cache line optimization and SIMD operations.
-pub const TYPED_OBJECT_ALIGNMENT: usize = 64;
-
-/// A typed object with fixed field layout for O(1) access.
-///
-/// This struct uses `#[repr(C)]` to ensure predictable memory layout.
-/// Fields are stored inline after the header, accessed by byte offset.
-//
-// ADR-005 §4 / Q9 forward pointer: VM↔JIT slot ABI uniformity is enforced
-// for the VM half of the boundary in cluster #1. The JIT FFI carrier
-// (this struct) is the JIT half; per the cluster #1 audit Q9 ruling, the
-// JIT-side migration to the per-FieldType / typed-pointer slot layout is
-// queued for a future cluster (cluster #N>7). Until that cluster lands,
-// reads/writes here MUST NOT introduce parallel discriminators (per
-// ADR-005 §1) — JIT codegen reads the schema's FieldType to interpret
-// each slot, same as the VM. See docs/adr/005-typed-slot-construction.md.
-#[repr(C)]
-pub struct TypedObject {
-    /// Schema ID for runtime type checking
-    pub schema_id: u32,
-    /// Reference count for garbage collection
-    pub ref_count: u32,
-    // Field data follows inline (not represented in struct)
-    // Access via get_field/set_field with byte offset
-}
-
-impl TypedObject {
-    /// Get a pointer to the field data area.
-    #[inline]
-    pub fn data_ptr(&self) -> *const u8 {
-        unsafe { (self as *const Self as *const u8).add(TYPED_OBJECT_HEADER_SIZE) }
-    }
-
-    /// Get a mutable pointer to the field data area.
-    #[inline]
-    pub fn data_ptr_mut(&mut self) -> *mut u8 {
-        unsafe { (self as *mut Self as *mut u8).add(TYPED_OBJECT_HEADER_SIZE) }
-    }
-}

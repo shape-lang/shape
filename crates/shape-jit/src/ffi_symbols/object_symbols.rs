@@ -42,7 +42,7 @@ use super::super::ffi::object::{
     jit_write_shared_cell_u8, jit_write_shared_cell_u16, jit_write_shared_cell_u32,
     jit_write_shared_cell_u64,
 };
-use super::super::ffi::typed_object::{jit_typed_merge_object, jit_typed_object_alloc};
+use super::super::ffi::typed_object::jit_typed_object_alloc;
 use super::helpers::jit_format_error;
 
 /// Register object FFI symbols with the JIT builder
@@ -486,16 +486,20 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         jit_typed_object_alloc as *const u8,
     );
     builder.symbol(
-        "jit_typed_merge_object",
-        jit_typed_merge_object as *const u8,
-    );
-    builder.symbol(
         "jit_typed_object_get_field",
         super::super::ffi::typed_object::jit_typed_object_get_field as *const u8,
     );
     builder.symbol(
         "jit_typed_object_set_field",
         super::super::ffi::typed_object::jit_typed_object_set_field as *const u8,
+    );
+    // Wave-7 Phase C — GC write-barrier FFI, called from the inline
+    // typed-object-field store path (`mir_compiler::places::inline_typed_field_set`)
+    // under the `gc` feature. Feature-off the barrier body is a compile-away
+    // no-op and the inline path never emits the call (byte-identical codegen).
+    builder.symbol(
+        "jit_write_barrier",
+        super::super::ffi::gc::jit_write_barrier as *const u8,
     );
     builder.symbol("jit_hashmap_shape_id", jit_hashmap_shape_id as *const u8);
     builder.symbol("jit_hashmap_value_at", jit_hashmap_value_at as *const u8);
@@ -1345,19 +1349,17 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_typed_object_set_field".to_string(), func_id);
     }
 
-    // jit_typed_merge_object(target_schema_id, left_size, right_size, left_obj, right_obj) -> u64
+    // jit_write_barrier(old_bits, new_bits, old_kind_tag) -> void
+    // Wave-7 Phase C — GC write-barrier for the inline typed-object-field store.
     {
         let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I32)); // target_schema_id (u32)
-        sig.params.push(AbiParam::new(types::I64)); // left_size
-        sig.params.push(AbiParam::new(types::I64)); // right_size
-        sig.params.push(AbiParam::new(types::I64)); // left_obj (NaN-boxed)
-        sig.params.push(AbiParam::new(types::I64)); // right_obj (NaN-boxed)
-        sig.returns.push(AbiParam::new(types::I64)); // result (NaN-boxed TypedObject)
+        sig.params.push(AbiParam::new(types::I64)); // old_bits (overwritten slot)
+        sig.params.push(AbiParam::new(types::I64)); // new_bits
+        sig.params.push(AbiParam::new(types::I64)); // old_kind_tag (gc_jit_kind_tag)
         let func_id = module
-            .declare_function("jit_typed_merge_object", Linkage::Import, &sig)
-            .expect("Failed to declare jit_typed_merge_object");
-        ffi_funcs.insert("jit_typed_merge_object".to_string(), func_id);
+            .declare_function("jit_write_barrier", Linkage::Import, &sig)
+            .expect("Failed to declare jit_write_barrier");
+        ffi_funcs.insert("jit_write_barrier".to_string(), func_id);
     }
 
     // jit_hashmap_shape_id(obj_bits: u64) -> u32 (shape_id, 0 = no shape)

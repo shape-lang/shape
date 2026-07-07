@@ -779,11 +779,67 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     /// Inline typed field write: store u64 to `[slot_data + byte_off]`.
-    fn inline_typed_field_set(&mut self, storage_bits: Value, byte_off: u16, val: Value) {
+    ///
+    /// Wave-7 Phase C — **write-barrier overwritten-slot kind (3c object-field
+    /// sink)**. `field_kind` is the field's compile-time-proven `NativeKind`
+    /// (from `field_native_kinds`). Under the `gc` feature, when the field is a
+    /// cycle-capable heap kind (`gc_jit_kind_tag(field_kind) != 0`), the store
+    /// is preceded by a read of the prior occupant and followed by a
+    /// `jit_write_barrier(old, new, tag)` call with `tag` baked as a
+    /// **compile-time constant** — never a runtime decode. This lets a
+    /// JIT-hot-loop store that overwrites a live self-referential object field
+    /// buffer the garbage cycle for collection.
+    ///
+    /// gc-off (the default) OR a scalar field: byte-identical to the pre-Phase-C
+    /// path — a single store, hot path stays two loads.
+    fn inline_typed_field_set(
+        &mut self,
+        storage_bits: Value,
+        byte_off: u16,
+        val: Value,
+        field_kind: Option<shape_vm::type_tracking::NativeKind>,
+    ) {
         let slot_data = self.emit_typed_object_ptr(storage_bits);
+
+        #[cfg(feature = "gc")]
+        {
+            let tag = field_kind.map_or(0, shape_value::gc::gc_jit_kind_tag);
+            if tag != 0 {
+                // Cycle-capable heap field. Read the prior occupant, store the
+                // new value, then fire the decrement-candidate barrier. `tag`
+                // is a compile-time constant iconst.
+                let old = self.builder.ins().load(
+                    types::I64,
+                    MemFlags::trusted(),
+                    slot_data,
+                    byte_off as i32,
+                );
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), val, slot_data, byte_off as i32);
+                let tag_val = self.builder.ins().iconst(types::I64, tag as i64);
+                self.builder
+                    .ins()
+                    .call(self.ffi.write_barrier, &[old, val, tag_val]);
+                return;
+            }
+        }
+        let _ = field_kind;
         self.builder
             .ins()
             .store(MemFlags::trusted(), val, slot_data, byte_off as i32);
+    }
+
+    /// Resolve a `Place::Field`'s compile-time-proven `NativeKind` for the GC
+    /// write-barrier overwritten-slot tag. Mirrors `try_resolve_field_byte_offset`
+    /// (field-name → producer-side stamped kind). `None` ⇒ no barrier (treated
+    /// as a scalar / no cycle-capable kind — conservative, never UB).
+    fn try_resolve_field_native_kind(
+        &self,
+        field_idx: &FieldIdx,
+    ) -> Option<shape_vm::type_tracking::NativeKind> {
+        let name = self.mir.field_name_table.get(field_idx)?;
+        self.field_native_kinds.get(name).copied()
     }
 
     /// γ-CP4 jit-makefieldref (ADR-006 §2.7.13 / §2.3): compute the
@@ -1290,9 +1346,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // as already-ValueWord-encoded I64 slots.
                 let base_val = self.read_place(base)?;
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
-                    // Inline typed field write — 2 loads + 1 store, no FFI call.
-                    // Write barrier is a no-op without the `gc` feature, so we skip it.
-                    self.inline_typed_field_set(base_val, byte_off, val);
+                    // Inline typed field write — 2 loads + 1 store, no FFI call
+                    // (gc-off / scalar). Under `gc`, a cycle-capable heap field
+                    // additionally fires the compile-time-kind write-barrier
+                    // (3c object-field sink) — see `inline_typed_field_set`.
+                    let field_kind = self.try_resolve_field_native_kind(field_idx);
+                    self.inline_typed_field_set(base_val, byte_off, val, field_kind);
                 } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
                     let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
                     self.builder

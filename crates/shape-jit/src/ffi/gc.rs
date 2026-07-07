@@ -174,4 +174,84 @@ mod gc_barrier_tests {
         }
         gc::clear_candidate_buffer();
     }
+
+    /// **Wave-7 Phase C — the object-field-sink payoff (3c complete).** A
+    /// JIT-hot-loop store that OVERWRITES a live self-referential object field
+    /// buffers the garbage cycle and the collector reclaims it — driven end-to-
+    /// end by the migrated set-field FFI `jit_typed_object_set_field`, whose
+    /// write-barrier now threads the object's compile-time-stamped
+    /// `field_kinds[idx]` kind (Phase C) instead of the pre-Phase-C hardcoded
+    /// `old_kind_tag = 0`.
+    ///
+    /// With the tag still `0` (the 3c gap), the overwrite barrier is inert: the
+    /// surviving prior occupant is NEVER buffered and the self-cycle leaks. This
+    /// test asserts the buffer is populated by the overwrite (kind threaded) and
+    /// then that `collect_cycles` frees the object — proving the object-field
+    /// sink participates in Bacon–Rajan collection through the real JIT store path.
+    #[test]
+    fn jit_set_field_overwrite_barrier_buffers_and_collects_object_cycle() {
+        use crate::ffi::typed_object::{jit_typed_object_alloc, jit_typed_object_set_field};
+        use shape_runtime::type_schema::{FieldType, SyncRegistryScope, TypeSchemaRegistry};
+        use std::sync::atomic::Ordering;
+
+        // Schema: one heap `Object` field ⇒ field_kinds[0] = Ptr(TypedObject),
+        // heap_mask bit 0. gc_jit_kind_tag(Ptr(TypedObject)) == 1 (nonzero).
+        let mut reg = TypeSchemaRegistry::new_with_stdlib();
+        let schema_id = reg.register_type(
+            "PocSink",
+            vec![("next".to_string(), FieldType::Object("PocSink".to_string()))],
+        );
+        let _scope = SyncRegistryScope::enter(Arc::new(reg));
+
+        gc::clear_candidate_buffer();
+        unsafe {
+            let a = jit_typed_object_alloc(schema_id as u32, 8) as *mut TypedObjectStorage;
+            let x = jit_typed_object_alloc(schema_id as u32, 8) as *mut TypedObjectStorage;
+            assert!(!a.is_null() && !x.is_null());
+
+            // x.next = x — self-cycle. Retain first (the edge owns one share);
+            // the store writes into a NULL slot (prior == 0 ⇒ barrier inert).
+            v2_retain(&(*x).header); // x.rc: 1 → 2
+            jit_typed_object_set_field(x as u64, 0, x as u64);
+
+            // a.next = x — a points at x. Retain (a's edge owns a share); again a
+            // null-slot store, no barrier.
+            v2_retain(&(*x).header); // x.rc: 2 → 3
+            jit_typed_object_set_field(a as u64, 0, x as u64);
+            assert_eq!((*x).header.refcount.load(Ordering::SeqCst), 3);
+
+            // OVERWRITE a.next with null — THE SINK. The set FFI reads prior = x,
+            // computes the tag from a's stamped field_kinds[0] (Ptr(TypedObject) ⇒
+            // tag 1) and fires jit_write_barrier(x, 0, 1) ⇒ x survives (rc 3 > 1)
+            // ⇒ buffered Purple. With the pre-Phase-C hardcoded tag 0 this store
+            // would NOT buffer x.
+            jit_typed_object_set_field(a as u64, 0, 0);
+            assert_eq!(
+                gc::candidate_buffer_len(),
+                1,
+                "overwrite barrier threaded the real kind and buffered the prior occupant"
+            );
+            assert_eq!(
+                gc::candidate_buffer_snapshot(),
+                vec![x as usize],
+                "the buffered possible-root is exactly the overwritten object x"
+            );
+
+            // Account for the edge the overwrite dropped (the set FFI buffers but
+            // does not decrement): a no longer points at x.
+            v2_release(&(*x).header); // x.rc: 3 → 2
+
+            // Drop external roots. a has next=null now (no heap child) ⇒ frees at
+            // zero cleanly. x drops to its self-edge only (rc 1) — pure garbage.
+            v2_release(&(*a).header); // a.rc: 1 → 0, freed
+            v2_release(&(*x).header); // x.rc: 2 → 1 (only the self-edge remains)
+
+            // CollectCycles reclaims the self-cycle x (memory-only), proving the
+            // object-field sink is collectable.
+            let freed = gc::collect_cycles();
+            assert_eq!(freed, 1, "the overwritten self-cycle object is reclaimed");
+            assert_eq!(gc::candidate_buffer_len(), 0);
+        }
+        gc::clear_candidate_buffer();
+    }
 }

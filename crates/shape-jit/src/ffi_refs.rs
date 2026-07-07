@@ -241,6 +241,13 @@ pub struct FFIFuncRefs {
     pub(crate) typed_object_alloc: FuncRef,
     pub(crate) typed_object_set_field: FuncRef,
 
+    // Wave-7 Phase C — GC write-barrier for the inline typed-object-field
+    // store path (`inline_typed_field_set`). Only emitted (and only present)
+    // under the `gc` feature; feature-off the inline path stores directly and
+    // never references this, keeping gc-off codegen byte-identical.
+    #[cfg(feature = "gc")]
+    pub(crate) write_barrier: FuncRef,
+
     // Arc refcount primitives (used by ownership-aware JIT paths).
     pub(crate) arc_retain: FuncRef,
     pub(crate) arc_release: FuncRef,

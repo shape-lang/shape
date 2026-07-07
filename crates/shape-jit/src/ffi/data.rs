@@ -462,12 +462,18 @@ pub extern "C" fn jit_set_field_typed(
         if idx >= (*ptr).slots().len() {
             return obj;
         }
+        // Wave-7 Phase C — write-barrier overwritten-slot kind threaded (3c
+        // object-field sink). The overwritten slot's kind is the object's own
+        // compile-time-stamped `field_kinds[idx]` (a §2.7.5 producer-placed
+        // field, guaranteed in-bounds: `field_kinds.len() == slots().len()`),
+        // mapped through `gc_jit_kind_tag` — not a tag-bit decode from bits.
+        // Feature-off this collapses to `0` (barrier is a compile-away no-op).
+        #[cfg(feature = "gc")]
+        let old_kind_tag = shape_value::gc::gc_jit_kind_tag((&(*ptr).field_kinds)[idx]);
+        #[cfg(not(feature = "gc"))]
+        let old_kind_tag = 0u64;
         let prior = TypedObjectStorage::write_slot_in_place(ptr, idx, value);
-        // GC barrier on the overwritten slot. Kind-tag `0` — the heap/Option-
-        // field overwritten-slot `NativeKind` threading is the Wave-7 Phase-C
-        // follow-up (same posture as the phase-1 `jit_typed_object_set_field`).
-        // Feature-off / tag-0 this is inert.
-        super::gc::jit_write_barrier(prior, value, 0);
+        super::gc::jit_write_barrier(prior, value, old_kind_tag);
     }
     obj
 }
