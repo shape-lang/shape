@@ -118,8 +118,9 @@ pub(crate) struct TypeReflectionSnapshot {
     pub(crate) alias_defs: HashMap<String, TypeAnnotation>,
     /// Generic type-parameter names known in the enclosing scope (e.g.
     /// `T`, `U`). When `type_info(T)` is called and `T` is in this set,
-    /// the returned TypeInfo's `kind` is `TypeKind::TypeVar` (Q2
-    /// parametric-supported disposition).
+    /// the returned TypeInfo's `kind` is `TypeKind::Unresolved` (Q2
+    /// parametric-supported disposition; `TypeVar` collapsed into
+    /// `Unresolved` per §4.1.2).
     pub(crate) known_type_params: HashSet<String>,
 }
 
@@ -752,7 +753,7 @@ fn render_shape_string_literal(s: &str) -> String {
 #[allow(dead_code)]
 enum TypeKindLabel {
     Int,
-    Float,
+    Number,
     Bool,
     String,
     Decimal,
@@ -763,18 +764,20 @@ enum TypeKindLabel {
     Result,
     TypedObject,
     TraitObject,
-    TypeVar,
     Function,
     Tuple,
     Unit,
-    Unknown,
+    /// Collapsed discriminator (§4.1.2 ratified): a generic type parameter in
+    /// parametric form (formerly `TypeVar`) AND an unprojectable / unregistered
+    /// type (formerly `Unknown`). One string owner: `"Unresolved"`.
+    Unresolved,
 }
 
 impl TypeKindLabel {
     fn as_str(self) -> &'static str {
         match self {
             TypeKindLabel::Int => "Int",
-            TypeKindLabel::Float => "Float",
+            TypeKindLabel::Number => "Number",
             TypeKindLabel::Bool => "Bool",
             TypeKindLabel::String => "String",
             TypeKindLabel::Decimal => "Decimal",
@@ -785,11 +788,10 @@ impl TypeKindLabel {
             TypeKindLabel::Result => "Result",
             TypeKindLabel::TypedObject => "TypedObject",
             TypeKindLabel::TraitObject => "TraitObject",
-            TypeKindLabel::TypeVar => "TypeVar",
             TypeKindLabel::Function => "Function",
             TypeKindLabel::Tuple => "Tuple",
             TypeKindLabel::Unit => "Unit",
-            TypeKindLabel::Unknown => "Unknown",
+            TypeKindLabel::Unresolved => "Unresolved",
         }
     }
 }
@@ -799,11 +801,11 @@ impl TypeKindLabel {
 /// scope project to `TypeVar` per Q2 disposition.
 fn classify_bare_type_name(name: &str, snapshot: &TypeReflectionSnapshot) -> TypeKindLabel {
     if snapshot.known_type_params.contains(name) {
-        return TypeKindLabel::TypeVar;
+        return TypeKindLabel::Unresolved;
     }
     match name {
         "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => TypeKindLabel::Int,
-        "number" | "f64" | "f32" | "float" => TypeKindLabel::Float,
+        "number" | "f64" | "f32" | "float" => TypeKindLabel::Number,
         "bool" => TypeKindLabel::Bool,
         "string" | "str" => TypeKindLabel::String,
         "decimal" => TypeKindLabel::Decimal,
@@ -823,7 +825,7 @@ fn classify_bare_type_name(name: &str, snapshot: &TypeReflectionSnapshot) -> Typ
                 // shape.
                 TypeKindLabel::TypedObject
             } else {
-                TypeKindLabel::Unknown
+                TypeKindLabel::Unresolved
             }
         }
     }
