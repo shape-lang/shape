@@ -99,6 +99,36 @@ await fetch_name()
         .expect_output("Hello, Shape!");
 }
 
+// Regression (WF-2D-fu repair): a zero-arg async fn whose DECLARED return type
+// is a heap value (here `string`) used in an `async let` must return its value
+// correctly via the eager path — NOT surface the isolation boundary's
+// `NotImplemented: ... non-scalar result kind String ...`. The deferral guard
+// gates on the proven declared return type; only leaf scalars (int/number/bool)
+// take the isolated-task path. Heap returns keep the pre-WF-2D-fu eager path.
+#[test]
+fn async_let_heap_return_async_fn_keeps_eager_path() {
+    let code = r#"
+use std::core::time
+
+async fn fetch() -> string {
+    await time::sleep(0.0)
+    return "hello"
+}
+
+async fn run() {
+    async let a = fetch()
+    print(await a)
+}
+
+await run()
+"#;
+
+    ShapeTest::new(code)
+        .with_stdlib()
+        .expect_run_ok()
+        .expect_output("hello");
+}
+
 // =========================================================================
 // Async let requires async function context
 // =========================================================================
