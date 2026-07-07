@@ -403,6 +403,44 @@ pub(crate) unsafe fn closure_immutable_heap_capture_edge(
     Some((bits, layout.capture_native_kind(i)))
 }
 
+/// Read the `*const SharedCell` stored in `CaptureKind::Shared` capture `i` of
+/// a live `TypedClosureHeader` block — the SINGLE source of truth for *which*
+/// captures are `Shared`-cell edges (real-gc-cycle-collection.md §3.4).
+///
+/// Both the destructive drop path (`drop_shared_capture`, which retires the
+/// cell's `Arc<SharedCell>` share) and the read-only GC cycle visitor
+/// (`crate::gc_visit::for_each_closure_heap_child`, `gc` feature, which traces
+/// the cell as a header-less child) consume THIS accessor, so the Drop walk and
+/// the collector's trace cannot drift on the closure's `Shared`-capture set.
+///
+/// Returns `None` for a non-`Shared` capture or a null slot. When `Some`, the
+/// returned pointer is one live `Arc<SharedCell>` strong-count share owned by
+/// the block (the drop path retires exactly that share, once); the GC visitor
+/// performs no refcount work on it.
+///
+/// # Safety
+/// `ptr` must point to a live `TypedClosureHeader` block whose layout is
+/// `layout`; `i` must be `< layout.capture_count()`.
+#[inline]
+pub(crate) unsafe fn closure_shared_capture_edge(
+    ptr: *const u8,
+    layout: &ClosureLayout,
+    i: usize,
+) -> Option<*const SharedCell> {
+    use crate::v2::closure_layout::CaptureKind;
+    if !matches!(layout.capture_storage_kind(i), CaptureKind::Shared) {
+        return None;
+    }
+    let off = layout.heap_capture_offset(i);
+    // SAFETY: Shared captures live at an 8-byte Ptr slot per `ClosureLayout`
+    // invariants; the read is in-bounds per the caller contract. Read-only.
+    let cell_ptr = unsafe { std::ptr::read(ptr.add(off) as *const *const SharedCell) };
+    if cell_ptr.is_null() {
+        return None;
+    }
+    Some(cell_ptr)
+}
+
 /// Release one refcount share of a `TypedClosureHeader` block. If the
 /// refcount reaches zero, this function walks all three per-capture masks
 /// to release each mutable-cell and heap-typed capture, then frees the
@@ -940,14 +978,16 @@ pub unsafe fn write_shared_ptr(cell: *const SharedCell, bits: u64) {
 ///   may have freed the underlying `SharedCell`).
 #[inline]
 pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usize) {
-    let off = layout.heap_capture_offset(i);
-    // SAFETY: caller upholds that `base` + `off` is in-bounds for an
-    // 8-byte read (per `ClosureLayout` invariants Shared captures live at
-    // an 8-byte Ptr slot).
-    let cell_ptr = unsafe { std::ptr::read(base.add(off) as *const *const SharedCell) };
-    if cell_ptr.is_null() {
-        return;
-    }
+    // Read the cell pointer via the SHARED [`closure_shared_capture_edge`]
+    // accessor — the same accessor the read-only GC cycle visitor
+    // (`crate::gc_visit::for_each_closure_heap_child`) consumes — so the Drop
+    // walk and the collector's trace cannot drift on *which* Shared captures
+    // are cell edges (real-gc-cycle-collection.md §3.4). A null / non-Shared
+    // slot yields `None` and the release is a no-op.
+    let cell_ptr = match unsafe { closure_shared_capture_edge(base as *const u8, layout, i) } {
+        Some(p) => p,
+        None => return,
+    };
 
     // CaptureCarrier F1 (ADR-006 §2.7.8 / Q10, 2026-06-18): the cell's
     // 8-byte PAYLOAD heap-refcount share is owned by the `SharedCell`

@@ -255,6 +255,27 @@ impl SharedCell {
         self.kind
     }
 
+    /// Read-only GC-edge view of the cell's payload
+    /// (real-gc-cycle-collection.md §3.4). Returns the raw payload bits paired
+    /// with the `kind` companion — the SAME `(bits, kind)` pair
+    /// `Drop for SharedCell` dispatches on to retire the payload share — so the
+    /// GC cycle visitor's trace of the cell's interior heap child and the
+    /// destructive drop cannot drift on *what* the cell points at. The visitor
+    /// performs no refcount work on the returned edge.
+    ///
+    /// # Safety
+    /// Called only at a stop-the-world GC safepoint where no mutator races the
+    /// payload; reads `value` without acquiring the spinlock — mirroring
+    /// `Drop for SharedCell`, which reads the payload lock-free under last-share
+    /// exclusivity.
+    #[cfg(feature = "gc")]
+    #[inline]
+    pub unsafe fn gc_payload_edge(&self) -> (u64, NativeKind) {
+        // SAFETY: safepoint quiescence ⇒ exclusive access to the payload.
+        let bits = unsafe { *self.value.get() };
+        (bits, self.kind)
+    }
+
     /// Acquire the lock, blocking (spinning) until the state byte
     /// transitions from `0` to `1`. Returns a RAII guard that unlocks
     /// on Drop.
