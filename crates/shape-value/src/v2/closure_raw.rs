@@ -2100,7 +2100,8 @@ mod owned_closure_block_kinded_tests {
         // read of the trailing I32 at heap offset 28 reads bytes 28..36 —
         // 4 bytes past the 32-byte allocation end (the prompt's
         // "alloc+0x1c with only 4 bytes left to end").
-        let layout = arc_immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::I32]);
+        let layout =
+            arc_immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::I32]);
         // SAFETY: alloc + per-slot writes are paired; single-threaded.
         unsafe {
             // Confirm the geometry actually places the last I32 in a slot
@@ -2135,7 +2136,8 @@ mod owned_closure_block_kinded_tests {
         // captures_size = round_up(6, 8) = 8, total = 24. An 8-byte read of
         // the trailing Bool at heap offset 21 reads 21..29 — 5 bytes past
         // the 24-byte allocation. The kind-width read takes the single byte.
-        let layout_b = arc_immutable_layout(&[ConcreteType::I32, ConcreteType::I8, ConcreteType::Bool]);
+        let layout_b =
+            arc_immutable_layout(&[ConcreteType::I32, ConcreteType::I8, ConcreteType::Bool]);
         // SAFETY: alloc + per-slot writes are paired; single-threaded.
         unsafe {
             let ptr = alloc_typed_closure(0, 0, &layout_b);

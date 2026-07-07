@@ -118,7 +118,8 @@ impl GcMeta {
         match *self {
             GcMeta::Header { flags_ptr } => {
                 let cur = unsafe { flags_ptr.read() };
-                let next = (cur & !GC_COLOR_MASK) | ((color.to_bits() << GC_COLOR_SHIFT) & GC_COLOR_MASK);
+                let next =
+                    (cur & !GC_COLOR_MASK) | ((color.to_bits() << GC_COLOR_SHIFT) & GC_COLOR_MASK);
                 unsafe { flags_ptr.write(next) };
             }
             GcMeta::SideTable { addr } => side.set_color(addr, color),
@@ -229,7 +230,10 @@ impl GcSideTable {
     /// Color of `addr`; absent == `Black`.
     #[inline]
     pub fn color(&self, addr: usize) -> GcColor {
-        self.entries.get(&addr).map(|e| e.color).unwrap_or(GcColor::Black)
+        self.entries
+            .get(&addr)
+            .map(|e| e.color)
+            .unwrap_or(GcColor::Black)
     }
 
     /// Set the color of `addr`, inserting a default entry if absent.
@@ -253,7 +257,10 @@ impl GcSideTable {
     /// Shadow trial count of `addr`; absent == 0.
     #[inline]
     pub fn shadow_trial_count(&self, addr: usize) -> u32 {
-        self.entries.get(&addr).map(|e| e.shadow_trial_count).unwrap_or(0)
+        self.entries
+            .get(&addr)
+            .map(|e| e.shadow_trial_count)
+            .unwrap_or(0)
     }
 
     /// Set the shadow trial count of `addr`, inserting a default entry if absent.
@@ -330,7 +337,11 @@ mod tests {
 
         // Only the color (bits 3–4) + buffered (bit 5) touched; low 3 bits and
         // _pad (offset 7) untouched.
-        assert_eq!(header[6] & 0b0000_0111, 0, "MARKED/PINNED/READONLY untouched");
+        assert_eq!(
+            header[6] & 0b0000_0111,
+            0,
+            "MARKED/PINNED/READONLY untouched"
+        );
         assert_eq!(header[7], 0, "_pad untouched");
         // White = 2 << 3 = 0b10000, buffered = 0b100000 → 0b110000.
         assert_eq!(header[6], 0b0011_0000);
