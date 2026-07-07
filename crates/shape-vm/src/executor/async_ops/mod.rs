@@ -435,8 +435,63 @@ impl VirtualMachine {
                 );
                 return Ok(AsyncExecutionResult::Continue);
             }
-            NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => {
-                // Callable — register for later execution.
+            NativeKind::UInt64 => {
+                // WF-2D-fu real concurrency for user-defined async functions.
+                //
+                // `slot_bits` is a user-function id (pushed by
+                // `compile_async_let`'s deferred path as
+                // `Constant::Function(func_id)` — see advanced.rs). A bare
+                // user `async fn` call is *eager*: run inline it would execute
+                // the whole body (including its inner `await time::sleep`,
+                // which blocks the interpreter thread), so two async-lets over
+                // user async fns serialize. Instead of registering for later
+                // INLINE execution, spawn the function on a FRESH isolated VM
+                // on the shared runtime's blocking pool. Each task blocks its
+                // OWN worker thread at its inner await, so two 1s sleeps
+                // overlap (~1s wall-clock). See
+                // `async_runtime::run_isolated_async_fn` for the isolation
+                // contract (no shared heap; scalar-return marshal; module
+                // globals not re-initialised).
+                let func_id = slot_bits as u16;
+                let program = self.program.clone();
+                let config = self.config.clone();
+                let granted = self.granted_permissions.clone();
+                let scope = self.scope_constraints.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let handle =
+                    crate::executor::async_runtime::shared_runtime().spawn_blocking(move || {
+                        let result = crate::executor::async_runtime::run_isolated_async_fn(
+                            program, config, granted, scope, func_id,
+                        );
+                        // Receiver may be gone (VM torn down / task aborted);
+                        // ignore the send error.
+                        let _ = tx.send(result);
+                    });
+                self.task_scheduler.store_pending_async(
+                    task_id,
+                    crate::executor::task_scheduler::PendingAsyncTask {
+                        completion: rx,
+                        abort: handle.abort_handle(),
+                    },
+                );
+                // Track the in-flight task for structured-scope cancellation,
+                // then push the Future(id) handle and return — the future is
+                // running NOW on the worker pool (same passthrough shape as the
+                // async-module-call arm above).
+                if let Some(active) = self.async_scope_stack.last_mut() {
+                    active.push(task_id);
+                }
+                self.push_kinded(task_id, NativeKind::Ptr(HeapKind::Future))?;
+                debug_assert_eq!(
+                    self.sp, sp_before,
+                    "op_spawn_task (isolated user async fn): stack depth changed \
+                     (before={}, after={})",
+                    sp_before, self.sp
+                );
+                return Ok(AsyncExecutionResult::Continue);
+            }
+            NativeKind::Ptr(HeapKind::Closure) => {
+                // Callable closure — register for later inline execution.
                 self.task_scheduler.register(task_id, slot_bits, slot_kind);
             }
             _ => {

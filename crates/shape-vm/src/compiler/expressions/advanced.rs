@@ -716,6 +716,55 @@ impl BytecodeCompiler {
             });
         }
 
+        // ── WF-2D-fu real concurrency: defer zero-arg user async-fn calls ──
+        //
+        // A bare user `async fn` call is *eager*: compiling the RHS inline
+        // (`compile_expr` below) emits the callee's whole body, which runs to
+        // completion — blocking at its own inner `await time::sleep(..)` — on
+        // THIS interpreter thread before `SpawnTask` ever executes. Two such
+        // async-lets therefore serialize (~2s for two 1s sleeps). Instead,
+        // emit the callee's function id as a `Constant::Function` and let
+        // `SpawnTask`'s UInt64 arm (`async_ops/mod.rs::op_spawn_task`) run the
+        // function on a FRESH isolated VM on the shared runtime's blocking
+        // pool, so the two bodies overlap on separate worker threads.
+        //
+        // Scope: only zero-argument calls to user-defined `async fn`s. Module
+        // async calls (`time::sleep(..)`) are `QualifiedFunctionCall`, not
+        // `FunctionCall`, and keep their already-overlapping Future path.
+        // Arg-bearing calls keep the eager path (no cross-isolation argument
+        // marshal in this lane).
+        if let Some((func_id, ret_type_name)) =
+            self.deferrable_async_call_target(&async_let.expr)
+        {
+            let const_idx = self.program.add_constant(Constant::Function(func_id));
+            self.emit(Instruction::new(OpCode::PushConst, Some(Operand::Const(const_idx))));
+            self.emit(Instruction::simple(OpCode::SpawnTask));
+
+            let local_idx = self.declare_local(&async_let.name)?;
+            self.emit(Instruction::new(
+                OpCode::StoreLocal,
+                Some(Operand::Local(local_idx)),
+            ));
+            self.immutable_locals.insert(local_idx);
+            self.type_tracker
+                .set_local_binding_semantics(local_idx, Self::owned_immutable_binding_semantics());
+
+            // Stamp the binding's awaited type from the callee's declared
+            // return type so `let v = await x` narrows under strict typing
+            // (the eager path derives this from `compile_expr`'s
+            // `last_expr_type_info`; the deferred path sets it directly).
+            if let Some(name) = ret_type_name {
+                self.last_expr_type_info = Some(VariableTypeInfo::named(name));
+            }
+            self.propagate_initializer_type_to_slot(local_idx, true, false, None);
+
+            self.emit(Instruction::new(
+                OpCode::LoadLocal,
+                Some(Operand::Local(local_idx)),
+            ));
+            return Ok(());
+        }
+
         // ── Three concurrency rules at task boundary ──
         // 1. Owned values (move/clone): always allowed
         // 2. &T (shared ref): allowed in structured child tasks
@@ -783,6 +832,68 @@ impl BytecodeCompiler {
         ));
 
         Ok(())
+    }
+
+    /// WF-2D-fu: classify an `async let` RHS as a deferrable concurrent
+    /// user-async-fn task. Returns `Some((func_id, return_type_name))` when the
+    /// RHS is a zero-argument call to a user-defined `async fn`; `None`
+    /// otherwise (module/qualified calls, arg-bearing calls, non-async
+    /// callees, and arbitrary expressions all keep their existing paths).
+    ///
+    /// WF-2D-fu repair (regression fix): the deferral runs the callee on a
+    /// fresh isolated VM whose result-marshal boundary
+    /// (`async_runtime::run_isolated_async_fn` →
+    /// `kinded_scalar_to_typed_return`) only carries LEAF SCALARS back —
+    /// `int` (Int64) / `number` (Float64) / `bool` (Bool). A HEAP-typed
+    /// return (`string`, `Array<T>`, `HashMap`, `Option`/`Result`,
+    /// `TypedObject`, enum, …) has no cross-isolation carrier and would
+    /// surface `NotImplemented` at runtime — but the eager path returns it
+    /// correctly (serially). So we gate deferral on the callee's PROVEN
+    /// declared return type: defer ONLY when the annotation names a
+    /// marshalable leaf scalar; every other declared return (heap types, and
+    /// an absent annotation whose inferred type cannot be proven scalar)
+    /// keeps the pre-WF-2D-fu eager path. No fabrication, no Bool-default —
+    /// the decision reads the declared annotation only. This gate makes the
+    /// isolation boundary's hard `NotImplemented` unreachable for any
+    /// previously-working program while preserving the scalar overlap win.
+    pub(super) fn deferrable_async_call_target(
+        &self,
+        expr: &Expr,
+    ) -> Option<(u16, Option<String>)> {
+        let Expr::FunctionCall { name, args, .. } = expr else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let idx = self.find_function(name)?;
+        let func = self.program.functions.get(idx)?;
+        if !func.is_async || func.arity != 0 {
+            return None;
+        }
+        let ret_type_name = self
+            .function_defs
+            .get(name)
+            .and_then(|def| def.return_type.as_ref())
+            .and_then(|ann| ann.as_type_name_str())
+            .map(|s| s.to_string());
+        // Gate: defer only when the declared return type is a leaf scalar the
+        // isolation boundary can marshal. Otherwise keep the eager path.
+        if !Self::is_marshalable_scalar_return(ret_type_name.as_deref()) {
+            return None;
+        }
+        Some((idx as u16, ret_type_name))
+    }
+
+    /// True iff the declared return type name is a leaf scalar that
+    /// `run_isolated_async_fn`'s marshal boundary can carry back out of an
+    /// isolated task VM — `int` (Int64), `number` (Float64), `bool` (Bool).
+    /// These are exactly the kinds handled by
+    /// `async_runtime::kinded_scalar_to_typed_return`. An absent annotation
+    /// (`None`) is NOT provably scalar — an inferred return could be a heap
+    /// type — so it is rejected and keeps the eager path.
+    fn is_marshalable_scalar_return(ret_type_name: Option<&str>) -> bool {
+        matches!(ret_type_name, Some("int") | Some("number") | Some("bool"))
     }
 
     /// Compile `async scope { body }`
