@@ -677,7 +677,22 @@ pub fn write_element(
             unsafe {
                 let arr = view.ptr as *mut TypedArray<*const TypedObjectStorage>;
                 let old_ptr = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
+                // GC Phase 2 decrement barrier (real-gc-cycle-collection.md
+                // §3.2), store-into-SharedCow-array sink: the prior element's
+                // share is released by `release_elem` below. Pre-read whether
+                // that leaves a surviving cycle-capable header carrier; buffer
+                // it after the release. RC fast path (last share → freed in
+                // `release_elem`) is unchanged.
+                #[cfg(feature = "gc")]
+                let gc_survivor = shape_value::gc::gc_decrement_precheck(
+                    old_ptr as u64,
+                    NativeKind::Ptr(HeapKind::TypedObject),
+                );
                 <TypedObjectStorage as HeapElement>::release_elem(old_ptr);
+                #[cfg(feature = "gc")]
+                if let Some((ptr, hk)) = gc_survivor {
+                    shape_value::gc::gc_buffer_possible_root(ptr, hk);
+                }
                 TypedArray::<*const TypedObjectStorage>::set(arr, index, new_ptr);
             }
         }
@@ -694,7 +709,19 @@ pub fn write_element(
             unsafe {
                 let arr = view.ptr as *mut TypedArray<*const TraitObjectStorage>;
                 let old_ptr = TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, index);
+                // GC Phase 2 decrement barrier (store-into-SharedCow-array sink):
+                // buffer a surviving cycle-capable prior element. See the
+                // TypedObject arm above.
+                #[cfg(feature = "gc")]
+                let gc_survivor = shape_value::gc::gc_decrement_precheck(
+                    old_ptr as u64,
+                    NativeKind::Ptr(HeapKind::TraitObject),
+                );
                 <TraitObjectStorage as HeapElement>::release_elem(old_ptr);
+                #[cfg(feature = "gc")]
+                if let Some((ptr, hk)) = gc_survivor {
+                    shape_value::gc::gc_buffer_possible_root(ptr, hk);
+                }
                 TypedArray::<*const TraitObjectStorage>::set(arr, index, new_ptr);
             }
         }
@@ -709,7 +736,18 @@ pub fn write_element(
             unsafe {
                 let arr = view.ptr as *mut TypedArray<*const TypedArrayElem>;
                 let old_ptr = TypedArray::<*const TypedArrayElem>::get_unchecked(arr, index);
+                // GC Phase 2 decrement barrier (store-into-SharedCow-array sink):
+                // a nested array is itself a cycle-capable header carrier.
+                #[cfg(feature = "gc")]
+                let gc_survivor = shape_value::gc::gc_decrement_precheck(
+                    old_ptr as u64,
+                    NativeKind::Ptr(HeapKind::TypedArray),
+                );
                 <TypedArrayElem as HeapElement>::release_elem(old_ptr);
+                #[cfg(feature = "gc")]
+                if let Some((ptr, hk)) = gc_survivor {
+                    shape_value::gc::gc_buffer_possible_root(ptr, hk);
+                }
                 TypedArray::<*const TypedArrayElem>::set(arr, index, new_ptr);
             }
         }

@@ -3085,7 +3085,23 @@ impl MutexData {
     /// owned by the cell.
     pub fn set(&self, new_value: crate::kinded_slot::KindedSlot) {
         let mut inner = self.inner.lock().expect("mutex poisoned");
+        // GC Phase 2 decrement barrier (real-gc-cycle-collection.md §3.2), one
+        // of the three interior-mutation sinks: the prior interior value is
+        // released when it is overwritten below (its `KindedSlot::drop` retires
+        // one share). Pre-read whether that release leaves a surviving
+        // cycle-capable header carrier; buffer it as a Purple candidate after
+        // the overwrite. Feature-off, this is a strict no-op and the
+        // `inner.value = Some(new_value)` assignment is byte-identical.
+        #[cfg(feature = "gc")]
+        let gc_survivor = inner
+            .value
+            .as_ref()
+            .and_then(|old| crate::gc::gc_decrement_precheck(old.slot().raw(), old.kind()));
         inner.value = Some(new_value);
+        #[cfg(feature = "gc")]
+        if let Some((ptr, hk)) = gc_survivor {
+            crate::gc::gc_buffer_possible_root(ptr, hk);
+        }
     }
 }
 

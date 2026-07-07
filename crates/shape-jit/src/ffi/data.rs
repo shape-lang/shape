@@ -456,7 +456,10 @@ pub extern "C" fn jit_set_field_typed(
                     obj // schema mismatch — return unchanged
                 } else {
                     let old_bits = (*ptr).get_field(offset as usize);
-                    super::gc::jit_write_barrier(old_bits, value);
+                    // GC Phase 2: kind-tag `0` — JIT-domain store, overwritten
+                    // slot kind not yet threaded (queued JIT typed-pointer
+                    // migration). Barrier body wired + tested; inert here.
+                    super::gc::jit_write_barrier(old_bits, value, 0);
                     (*ptr).set_field(offset as usize, value);
                     obj
                 }

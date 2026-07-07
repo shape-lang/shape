@@ -62,3 +62,8 @@ jit-trace = ["tracing/std", "tracing/release_max_level_debug"]
 # before the summary line. Run these via `just test-deep` (which already
 # enables deep-tests on shape-vm/shape-runtime/shape-ast).
 deep-tests = []
+# Cycle-collecting GC (real-gc-cycle-collection.md). Default OFF: enables the
+# real body of the JIT GC hooks (`jit_write_barrier` decrement-candidate logic,
+# `jit_gc_safepoint` real poll). Forwards to `shape-value/gc`. Feature-off keeps
+# the hooks null-safe no-ops (strict no-op).
+gc = ["shape-value/gc"]
