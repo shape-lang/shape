@@ -1329,3 +1329,50 @@ fn test_ok_literal_try_in_function_body() {
     let items = parse_items(input).expect("Ok(42)? in function body should parse");
     assert_eq!(items.len(), 1);
 }
+
+// =========================================================================
+// Closure-scoped typed params (tail #4 Bug 2): `|x: int| x + 1`
+//
+// pipe_lambda uses a closure-scoped param type (intersection_type) so a bare
+// `|` after the param type is the closure terminator, not a union operator.
+// A union-typed closure param must be parenthesized. The shared function_param
+// + top-level union_type are unchanged.
+// =========================================================================
+
+#[test]
+fn test_closure_typed_param_unbraced() {
+    let input = "let f = |x: int| x + 1;";
+    parse_items(input).expect("|x: int| x + 1 should parse");
+}
+
+#[test]
+fn test_closure_typed_param_in_map() {
+    let input = "let r = [1, 2, 3].map(|x: int| x + 1);";
+    parse_items(input).expect("[1,2,3].map(|x: int| x + 1) should parse");
+}
+
+#[test]
+fn test_closure_typed_param_braced_body() {
+    let input = "let f = |x: int| { x + 1 };";
+    parse_items(input).expect("|x: int| { x + 1 } should parse");
+}
+
+#[test]
+fn test_closure_parenthesized_union_param() {
+    let input = "let p = |x: (int | string)| x;";
+    parse_items(input).expect("|x: (int | string)| x should parse");
+}
+
+#[test]
+fn test_closure_untyped_forms_still_parse() {
+    parse_items("let a = |x| x;").expect("|x| x should parse");
+    parse_items("let b = || 42;").expect("|| 42 should parse");
+    parse_items("let c = |x, y| x + y;").expect("|x, y| x + y should parse");
+    parse_items("let d = |x| { x + 1 };").expect("|x| { x + 1 } should parse");
+}
+
+#[test]
+fn test_top_level_union_and_bitwise_or_still_parse() {
+    parse_items("type Mixed = A | B;").expect("top-level union type should parse");
+    parse_items("let x = a | b;").expect("bitwise-or should parse");
+}

@@ -3210,6 +3210,24 @@ impl LazyData {
         }
     }
 
+    /// Build a `LazyData` in the **defined-reset** state — neither an
+    /// initializer nor a cached value (`initializer: None, value: None`).
+    ///
+    /// This is the snapshot/resume reset carrier (user-ruled DEFINED-RESET
+    /// disposition, 2026-05-29): a snapshot cannot restore the initializer
+    /// closure, so a resumed `Lazy` lands unforced/uninitialized with no
+    /// stale payload. Forcing it (`lazy.get()`) surfaces a clean error via
+    /// the `take_initializer() == None` path rather than returning a
+    /// wrong/empty value or crashing.
+    pub fn uninitialized() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(LazyInner {
+                initializer: None,
+                value: None,
+            }),
+        }
+    }
+
     /// Whether `get()` has been called and the value cached.
     pub fn is_initialized(&self) -> bool {
         self.inner
