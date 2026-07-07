@@ -37,6 +37,9 @@
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
 
+use shape_runtime::typed_module_exports::{ConcreteReturn, TypedReturn};
+use shape_value::{NativeKind, VMError};
+
 static SHARED_ASYNC_RT: OnceLock<Runtime> = OnceLock::new();
 
 /// Return the process-global background async runtime, building it on first
@@ -53,4 +56,93 @@ pub(crate) fn shared_runtime() -> &'static Runtime {
             .build()
             .expect("failed to build shared Shape async runtime")
     })
+}
+
+/// WF-2D-fu real concurrency for user-defined async functions.
+///
+/// A user `async fn` call runs its whole body synchronously on the calling
+/// interpreter thread (a bare async-fn call is *eager* — see the print-order
+/// probe `1,50,150,2,3` in the WF-2D-fu diagnosis), and its inner
+/// `await time::sleep(..)` blocks that thread on the module future's
+/// completion channel. Two such calls launched back-to-back on one thread
+/// therefore serialize (~2s for two 1s sleeps). The single-threaded `!Sync`
+/// interpreter cannot suspend a mid-flight frame (the deferred Phase-2c
+/// snapshot-tier, ADR-006 §2.7.4), so the only way two user async-fn bodies
+/// overlap is to run each on its OWN thread.
+///
+/// `run_isolated_async_fn` runs one spawned async-fn task to completion on a
+/// FRESH, fully-isolated `VirtualMachine` — the same isolation model the
+/// distributed `run_remote_call` path already relies on. Because the fresh VM
+/// is built AND consumed entirely inside the `spawn_blocking` closure (it
+/// never crosses a thread boundary as a value), the VM's `!Send` raw-pointer
+/// fields are irrelevant. `VirtualMachine::new` already registers every
+/// stdlib module (`init.rs` — `time`, `math`, …), so `time::sleep` resolves
+/// inside the isolated VM; its inner `await` blocks THIS blocking-pool worker
+/// thread while the sleep future makes progress on the shared runtime's async
+/// worker pool. Two `spawn_blocking` tasks → two blocking workers → the two
+/// sleeps overlap → ~1s wall-clock.
+///
+/// ## Isolation contract (sound, but scoped)
+///
+/// - The task receives NO shared heap: only the (deep-cloned) immutable
+///   `BytecodeProgram` and the parent's permission envelope cross in; only a
+///   `TypedReturn` (owned, `Send`) crosses back. No `Arc<HeapValue>` is shared
+///   across threads, so there is no cross-thread refcount or GC hazard.
+/// - Module-binding initializers are NOT re-run in the isolated VM (running
+///   top-level code would re-execute the whole program). A deferred async task
+///   therefore sees module globals in their default (uninitialised) state.
+///   The compiler only defers **zero-argument** user async-fn calls
+///   (`compile_async_let`), which in practice are self-contained wrappers over
+///   stdlib async work. A deferred body that reads a module global is the
+///   documented boundary of this lane; arg-bearing async-fn calls keep the
+///   pre-existing eager (serial) path.
+/// - Only leaf scalar returns (`int` / `number` / `bool` / unit) are marshaled
+///   back. A heap-typed return surfaces `VMError::NotImplemented` — NOT a
+///   Bool-default — so an unsupported shape fails loudly per §Forbidden.
+pub(crate) fn run_isolated_async_fn(
+    program: crate::bytecode::BytecodeProgram,
+    config: crate::executor::VMConfig,
+    granted: Option<shape_abi_v1::PermissionSet>,
+    scope: Option<shape_abi_v1::ScopeConstraints>,
+    func_id: u16,
+) -> Result<TypedReturn, String> {
+    let mut vm = crate::executor::VirtualMachine::new(config);
+    vm.set_permissions(granted, scope);
+    vm.load_program(program);
+    // Populate the stdlib module-binding objects (the `time` / `math` / …
+    // TypedObjects whose fields are `ModuleFn` references) WITHOUT running the
+    // program's top-level code — the same isolated-load sequence the
+    // distributed `run_remote_call` path uses (remote.rs). Without this, a
+    // `time::sleep` call inside the task body loads an uninitialised module
+    // binding (`Null`) and fails the value-call dispatch.
+    vm.populate_module_objects();
+    let result = vm
+        .execute_function_by_id(func_id, Vec::new(), None)
+        .map_err(|e| e.to_string())?;
+    let bits = result.raw();
+    let kind = result.kind();
+    // The scalar payload is owned by value; no heap share leaves the task.
+    kinded_scalar_to_typed_return(bits, kind).map_err(|e| e.to_string())
+}
+
+/// Marshal a leaf-scalar `KindedSlot` result out of the isolated task VM into
+/// an owned, `Send` `TypedReturn`. Surface-and-stop on any heap kind (no
+/// Bool-default, no tag decode) per ADR-006 §Forbidden.
+fn kinded_scalar_to_typed_return(bits: u64, kind: NativeKind) -> Result<TypedReturn, VMError> {
+    let concrete = match kind {
+        NativeKind::Int64 => ConcreteReturn::I64(bits as i64),
+        NativeKind::Float64 => ConcreteReturn::F64(f64::from_bits(bits)),
+        NativeKind::Bool => ConcreteReturn::Bool(bits != 0),
+        NativeKind::Null => ConcreteReturn::Unit,
+        other => {
+            return Err(VMError::NotImplemented(format!(
+                "WF-2D-fu isolated async task returned a non-scalar result kind \
+                 {:?}; concurrent user async-fn tasks currently marshal only \
+                 leaf scalars (int/number/bool/unit) across the isolation \
+                 boundary. Return a scalar or await the call eagerly.",
+                other
+            )));
+        }
+    };
+    Ok(TypedReturn::Concrete(concrete))
 }
