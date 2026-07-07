@@ -1658,6 +1658,11 @@ pub(crate) unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
     // cancel the retain we just performed, so leak it. The caller's
     // freshly-cloned slot owns the new share.
     std::mem::forget(cloned);
+    // GC Phase 2 increment barrier (real-gc-cycle-collection.md §3.2): the
+    // retain above completed, so the target is in use — color it Black.
+    // Additive `#[cfg]`-gated no-op when the `gc` feature is off.
+    #[cfg(feature = "gc")]
+    crate::gc::gc_increment_barrier(bits, kind);
 }
 
 /// WB2.4 release-on-overwrite mirror of `KindedSlot::Drop`. Decrements the
@@ -1679,10 +1684,23 @@ pub(crate) unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
     if bits == 0 {
         return;
     }
+    // GC Phase 2 decrement barrier, pre-step (real-gc-cycle-collection.md §3.2):
+    // detect a cycle-capable header carrier that will survive the decrement.
+    // Reading before the release keeps the RC fast path byte-identical.
+    #[cfg(feature = "gc")]
+    let gc_survivor = crate::gc::gc_decrement_precheck(bits, kind);
     // SAFETY: caller upholds that `bits` is one strong-count share for
     // `kind`; reconstructing the `KindedSlot` and letting it drop retires
     // exactly one share via the canonical dispatch table.
     let _retire = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+    // GC Phase 2 decrement barrier, buffer-step: a surviving cycle-capable
+    // header carrier becomes a Purple buffered candidate. The precheck already
+    // proved refcount > 1, so the carrier stays live across `_retire`'s drop —
+    // the color/buffered bits are set on a live header regardless of order.
+    #[cfg(feature = "gc")]
+    if let Some((ptr, hk)) = gc_survivor {
+        crate::gc::gc_buffer_possible_root(ptr, hk);
+    }
 }
 
 /// Kind-aware closure capture cell store (§2.7.8 / Q10).
