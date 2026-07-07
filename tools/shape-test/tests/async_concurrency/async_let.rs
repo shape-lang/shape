@@ -119,3 +119,81 @@ sync_fn()
 
     ShapeTest::new(code).expect_run_err_contains("async");
 }
+
+// =========================================================================
+// Timing regression: async let must overlap, not serialize (WF-2D-fu)
+// =========================================================================
+
+// Two independent async lets, each awaiting a user-defined async fn that
+// sleeps ~1s. If the spawn is real (deferred-thunk + isolated task VM), the
+// two sleeps overlap and add ~1s of wall-clock over the fixed spawn/init
+// overhead. If it regresses to the pre-WF-2D-fu eager-RHS path, the bodies
+// run inline on the spawner thread and add ~2s.
+//
+// Absolute wall-clock is NOT usable as the threshold: the isolated task VMs
+// re-initialize state per spawn, and that fixed overhead is large and
+// build-mode dependent (seconds in an unoptimized test binary, ~200ms in a
+// release build). So we measure the SLEEP contribution differentially against
+// a zero-sleep baseline that walks the identical spawn path. The delta
+// isolates the sleeps: ~1s when they overlap, ~2s when they serialize.
+fn spawn_two_ms(sleep_ms: &str) -> u128 {
+    let code = format!(
+        r#"
+use std::core::time
+
+async fn work() -> int {{
+    await time::sleep({sleep_ms})
+    42
+}}
+
+async fn run_two() -> int {{
+    async let a = work()
+    async let b = work()
+    let ra = await a
+    let rb = await b
+    print(ra + rb)
+    0
+}}
+
+await run_two()
+"#
+    );
+    // IMPORTANT: exactly ONE terminal assertion here. Every `expect_*` method
+    // on the fluent builder RE-EXECUTES the whole program, so chaining
+    // `expect_run_ok().expect_output(..)` would run the two async lets twice
+    // and double the measured wall-clock. `expect_output` alone both proves
+    // the run succeeded (84 = 42+42) and drives a single execution.
+    let start = std::time::Instant::now();
+    ShapeTest::new(&code).with_stdlib().expect_output("84");
+    start.elapsed().as_millis()
+}
+
+#[test]
+fn async_let_two_one_second_tasks_overlap() {
+    // Warm up: the FIRST ShapeTest run in a process pays large one-time
+    // runtime/JIT init (many seconds in a debug test binary). Discard it so
+    // the measured runs below reflect steady-state cost only.
+    let _ = spawn_two_ms("0.0");
+
+    // Zero-sleep baseline measures the fixed spawn/init overhead of the two
+    // isolated task VMs on this exact code path and build (warm).
+    let baseline = spawn_two_ms("0.0");
+    // Same path, but each task now sleeps ~1s.
+    let with_sleep = spawn_two_ms("1000.0");
+
+    let sleep_contribution = with_sleep.saturating_sub(baseline);
+    eprintln!(
+        "async_let overlap timing: baseline={baseline}ms with_sleep={with_sleep}ms \
+         sleep_contribution={sleep_contribution}ms"
+    );
+
+    // Overlap => ~1000ms added; serial regression => ~2000ms added. The 1500ms
+    // midpoint pins overlap while tolerating scheduling jitter without being
+    // flaky on a loaded box.
+    assert!(
+        sleep_contribution < 1500,
+        "async let did not overlap: two 1s tasks added {sleep_contribution}ms over the \
+         {baseline}ms zero-sleep baseline (with_sleep={with_sleep}ms). Expected < 1500ms; \
+         a serial (eager-RHS) regression adds ~2000ms."
+    );
+}
