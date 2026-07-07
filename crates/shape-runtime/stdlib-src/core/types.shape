@@ -12,9 +12,10 @@
 /// TypedArrayData deletion territory and shape-runtime field-kind
 /// monomorphization status).
 ///
-/// `TypeVar` distinguishes generic type parameters still in their parametric
-/// form at the call site (Q2 parametric-supported disposition); `TypeInfo.name`
-/// carries the parameter name in that case (e.g. `"T"`).
+/// `Unresolved` covers generic type parameters still in their parametric
+/// form at the call site (Q2 parametric-supported disposition — `TypeInfo.name`
+/// carries the parameter name, e.g. `"T"`) as well as types that could not be
+/// projected (unregistered names, non-unified inference variables).
 ///
 /// Wire-format symmetry: `shape_wire::metadata::TypeInfo`
 /// (`crates/shape-wire/src/metadata.rs:35`) is the snapshot/IO carrier;
@@ -24,8 +25,8 @@
 pub enum TypeKind {
     /// Integer primitive (`int`, `i64`, `i32`, `i8`, ...).
     Int,
-    /// Floating-point primitive (`number`, `f64`).
-    Float,
+    /// Floating-point / real primitive (`number`, `f64`).
+    Number,
     /// Boolean primitive (`bool`).
     Bool,
     /// String primitive (`string`).
@@ -46,18 +47,19 @@ pub enum TypeKind {
     TypedObject,
     /// `dyn Trait` — trait name in `TypeInfo.name`.
     TraitObject,
-    /// Generic type parameter in parametric form (e.g. `T`).
-    TypeVar,
     /// Function type — parameter / return types currently not threaded (W7-followup).
     Function,
     /// Tuple type — element types currently not threaded (W7-followup).
     Tuple,
     /// Unit / void type.
     Unit,
-    /// Unknown / unresolved type — used as a safe fallback when a
-    /// type cannot be projected (e.g. inference variables that didn't
-    /// unify before comptime evaluation, or unregistered type names).
-    Unknown,
+    /// Unresolved type. Covers both a generic type parameter still in its
+    /// parametric form at the call site (e.g. `T`; `TypeInfo.name` carries the
+    /// parameter name) and a type that could not be projected (an inference
+    /// variable that didn't unify before comptime evaluation, or an
+    /// unregistered type name). The former `TypeVar` and `Unknown` variants
+    /// collapsed into this single discriminator (§4.1.2 ratified).
+    Unresolved,
 }
 
 /// Per-field metadata for `TypeInfo.fields`.
@@ -66,15 +68,23 @@ pub enum TypeKind {
 /// the user's `type Foo { ... }` declaration, mirroring `TypedObjectStorage`'s
 /// on-storage layout and the user's mental model.
 ///
-/// `type_info` is the bare string name of the field's declared type (matches
+/// `type` is the bare string name of the field's declared type (matches
 /// `TypeInfo.name` when the field is reflected directly). Recursive
 /// `TypeInfo` payloads land as a follow-up once Array<TypedObject> field
 /// carriers are wired (W7-followup).
+///
+/// Field names + order mirror the runtime `__ComptimeFieldDescriptor` schema
+/// (`crates/shape-runtime/src/type_schema/builtin_schemas.rs`), which is the
+/// single owner of the reflected row layout (§4.3.6). This declaration is the
+/// user-facing documentation mirror; comptime field access resolves through the
+/// runtime schema, so the two must stay in lockstep.
 pub type FieldInfo {
     /// Field name (e.g. `"x"`, `"y"`, `"created_at"`).
     name: string,
-    /// Bare type name of the field's declared type.
-    type_name: string,
+    /// Bare type name of the field's declared type (e.g. `"int"`, `"string"`).
+    type: string,
+    /// `true` when the field's declared type is optional (`T?`).
+    optional: bool,
 }
 
 /// Compile-time reflection of a Shape type.
@@ -82,9 +92,16 @@ pub type FieldInfo {
 /// Returned by `type_info(T)` inside `comptime { }` blocks.
 ///
 /// `kind` is a string-encoded `TypeKind` variant name (e.g. `"Int"`,
-/// `"TypedObject"`, `"TypeVar"`). Comptime user code can compare via
+/// `"TypedObject"`, `"Unresolved"`). Comptime user code can compare via
 /// equality (`if ti.kind == "TypedObject" { ... }`). The variant-name
 /// strings are stable and match `TypeKind` variant declarations 1:1.
+///
+/// `fields` is the declared-field descriptor array (populated for
+/// `TypedObject` kinds; empty for every other kind). It mirrors the runtime
+/// `__ComptimeTypeInfo` schema (`builtin_schemas.rs`), which is the single
+/// owner of the reflected object layout (§4.3.6) — comptime access
+/// (`type_info(T).fields[i].name`) resolves through that runtime schema, so
+/// this user-facing mirror must carry `fields` in lockstep.
 ///
 /// **W7-followup**: once the comptime VM can resolve user-defined
 /// enum schemas from the outer compilation's `current_registry()`
@@ -97,4 +114,7 @@ pub type TypeInfo {
     name: string,
     /// `TypeKind` variant name as a string (e.g. `"Int"`, `"TypedObject"`).
     kind: string,
+    /// Declared-field descriptors, in declaration order. Populated for
+    /// `TypedObject` kinds; empty for every other kind.
+    fields: Array<FieldInfo>,
 }

@@ -201,4 +201,60 @@ mod tests {
         let cleaned = clean_comptime_message(&e);
         assert!(!has_forbidden(&cleaned), "leaked jargon: {:?}", cleaned);
     }
+
+    /// WF-3D F3 gate: the comptime `error()` / `warning()` diagnostics are
+    /// built as canonical LSDS `Diagnostic`s (ids `C0001` / `C0002`) and the
+    /// `shape_diagnostics::render::json` serializer emits the machine-readable
+    /// shape the CLI `--diagnostics json` path ships. This gates the JSON
+    /// contract independently of the process-wide `output_format` global.
+    #[test]
+    fn f3_comptime_error_renders_lsds_json_shape() {
+        let loc = shape_diagnostics::Location::new(Some("prog.shape".to_string()), 2, 5, 10, 30);
+        let diag = shape_diagnostics::DiagnosticBuilder::new(
+            super::COMPTIME_ERROR_ID,
+            shape_diagnostics::Severity::Error,
+            loc,
+            "boom about widget".to_string(),
+        )
+        .with_note(shape_diagnostics::DiagnosticNote::new(
+            "during compile-time evaluation of the @json_schema annotation on Bad".to_string(),
+            None,
+        ))
+        .build();
+
+        let json = shape_diagnostics::render::json::render(&diag);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("comptime error JSON must parse");
+        assert_eq!(parsed["diagnostic_id"], "C0001");
+        assert_eq!(parsed["severity"], "error");
+        assert_eq!(parsed["message"], "boom about widget");
+        assert_eq!(parsed["location"]["line"], 2);
+        assert!(
+            parsed["notes"][0]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("during compile-time evaluation")),
+            "expected the comptime-trace note in the JSON payload: {json}"
+        );
+    }
+
+    /// WF-3D F3 gate (warning side): the non-fatal `warning()` diagnostic uses
+    /// the `C0002` id and renders through the same JSON serializer.
+    #[test]
+    fn f3_comptime_warning_renders_lsds_json_shape() {
+        let loc = shape_diagnostics::Location::new(Some("prog.shape".to_string()), 7, 1, 40, 55);
+        let diag = shape_diagnostics::DiagnosticBuilder::new(
+            super::COMPTIME_WARNING_ID,
+            shape_diagnostics::Severity::Warning,
+            loc,
+            "heads up about Foo".to_string(),
+        )
+        .build();
+
+        let json = shape_diagnostics::render::json::render(&diag);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("comptime warning JSON must parse");
+        assert_eq!(parsed["diagnostic_id"], "C0002");
+        assert_eq!(parsed["severity"], "warning");
+        assert_eq!(parsed["message"], "heads up about Foo");
+    }
 }

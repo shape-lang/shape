@@ -1499,7 +1499,7 @@ impl BytecodeCompiler {
         // registered this generated free function's SIGNATURE (so it is visible
         // to `fn main()` and every user body), skip re-registering it here — a
         // second `register_function` would create a duplicate slot. The body is
-        // still compiled below via `compile_function_body`, which fills the
+        // still compiled below via `compile_function`, which fills the
         // pre-registered slot, so the generated function is compiled exactly
         // once through the identical path as before the pre-pass existed.
         for func_def in &functions {
@@ -1509,7 +1509,15 @@ impl BytecodeCompiler {
             self.register_function(func_def)?;
         }
         for func_def in &functions {
-            self.compile_function_body(func_def)?;
+            // WF-3D generated-fn JIT parity: compile via the FULL driver
+            // (`compile_function`), not the bytecode-only `compile_function_body`.
+            // The driver lowers the body to MIR and attaches `Function.mir_data`,
+            // which the JIT's Phase-4 MirToIR pass requires — a bytecode-only
+            // generated function fails Phase-4 ("has no MIR data") and forces a
+            // whole-program deopt to the interpreter. A hand-written free function
+            // goes through `compile_function`; routing the generated one through
+            // the same path gives it native JIT codegen and VM == JIT.
+            self.compile_function(func_def)?;
         }
         for extend in extends {
             self.apply_comptime_extend(extend, target_name)?;

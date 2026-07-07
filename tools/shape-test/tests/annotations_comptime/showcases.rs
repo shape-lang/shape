@@ -5,6 +5,16 @@
 //! / `from std::llm::tools use { ... }`), under BOTH the interpreter and the JIT
 //! executor, asserting the generated code produces the exact expected output.
 //!
+//! The programs return the generated string as the program's final value and
+//! the tests assert on it via `expect_string` (not `expect_output`). A
+//! natively-JIT-compiled `print` emits straight to process stdout
+//! (`jit_v2_string_print`), bypassing the runtime `OutputAdapter` the harness
+//! installs to capture output — so `.expect_output()` under `--mode jit` would
+//! only observe output on a deopt. Asserting the return value observes the
+//! generated code's result identically under native JIT and the interpreter
+//! (WF-3D generated-free-function JIT-native fix). Print-channel VM == JIT
+//! parity for these same programs is gated by the book truth-gate.
+//!
 //! These make the CLAUDE.md "user-defined LLM integration patterns in
 //! stdlib/userland" claim true for the first time: `@json_schema`, `@llm_tool`
 //! and `@prompt` are ordinary Shape annotations living in `stdlib-src/serde/`
@@ -24,7 +34,7 @@ type User {
     email: string?,
 }
 
-print(User_json_schema())
+User_json_schema()
 "#;
 
 const SERDE_EXPECTED: &str = r#"{"type": "object", "title": "User", "properties": {"id": {"type": "integer", "description": "Unique identifier"}, "name": {"type": "string"}, "email": {"type": "string"}}, "required": ["id", "name"]}"#;
@@ -33,7 +43,7 @@ const SERDE_EXPECTED: &str = r#"{"type": "object", "title": "User", "properties"
 fn json_schema_derives_schema_via_stdlib_import_vm() {
     ShapeTest::new(SERDE_PROGRAM)
         .with_stdlib()
-        .expect_output(SERDE_EXPECTED);
+        .expect_string(SERDE_EXPECTED);
 }
 
 #[test]
@@ -41,7 +51,7 @@ fn json_schema_derives_schema_via_stdlib_import_jit() {
     ShapeTest::new(SERDE_PROGRAM)
         .with_stdlib()
         .with_jit()
-        .expect_output(SERDE_EXPECTED);
+        .expect_string(SERDE_EXPECTED);
 }
 
 // A field whose type has no JSON Schema mapping is a compile error naming the
@@ -71,7 +81,7 @@ from std::serde::serialize use { @to_json }
 type User { id: int, name: string }
 
 let u = User { id: 1, name: "Ada" }
-print(u.to_json())
+u.to_json()
 "#;
 
 const TO_JSON_EXPECTED: &str = r#"{ "id": 1, "name": "Ada" }"#;
@@ -80,7 +90,7 @@ const TO_JSON_EXPECTED: &str = r#"{ "id": 1, "name": "Ada" }"#;
 fn to_json_serializes_via_stdlib_import_vm() {
     ShapeTest::new(TO_JSON_PROGRAM)
         .with_stdlib()
-        .expect_output(TO_JSON_EXPECTED);
+        .expect_string(TO_JSON_EXPECTED);
 }
 
 #[test]
@@ -88,7 +98,7 @@ fn to_json_serializes_via_stdlib_import_jit() {
     ShapeTest::new(TO_JSON_PROGRAM)
         .with_stdlib()
         .with_jit()
-        .expect_output(TO_JSON_EXPECTED);
+        .expect_string(TO_JSON_EXPECTED);
 }
 
 const LLM_PROGRAM: &str = r#"
@@ -100,7 +110,7 @@ fn get_weather(city: string, units: string) -> string {
     f"\{\"city\": \"{city}\", \"temp_c\": 21\}"
 }
 
-print(get_weather_tool_def())
+get_weather_tool_def()
 "#;
 
 const LLM_EXPECTED: &str = r#"{"name": "get_weather", "description": "Get current weather for a city", "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "units": {"type": "string"}}, "required": ["city", "units"]}}"#;
@@ -109,7 +119,7 @@ const LLM_EXPECTED: &str = r#"{"name": "get_weather", "description": "Get curren
 fn llm_tool_derives_schema_via_stdlib_import_vm() {
     ShapeTest::new(LLM_PROGRAM)
         .with_stdlib()
-        .expect_output(LLM_EXPECTED);
+        .expect_string(LLM_EXPECTED);
 }
 
 #[test]
@@ -117,7 +127,7 @@ fn llm_tool_derives_schema_via_stdlib_import_jit() {
     ShapeTest::new(LLM_PROGRAM)
         .with_stdlib()
         .with_jit()
-        .expect_output(LLM_EXPECTED);
+        .expect_string(LLM_EXPECTED);
 }
 
 // A parameter whose type has no JSON mapping is a compile error naming the
