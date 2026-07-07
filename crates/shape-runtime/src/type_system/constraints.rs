@@ -29,7 +29,7 @@
 //! `Unifier` (Robinson's algorithm with path compression).
 
 use super::checking::MethodTable;
-use super::unification::Unifier;
+use super::unification::{Unifier, occurs_check};
 use super::*;
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
@@ -474,7 +474,16 @@ impl ConstraintSolver {
             Type::Function { params, returns } => {
                 params.iter().any(|p| self.occurs_in(var, p)) || self.occurs_in(var, returns)
             }
-            Type::Concrete(_) => false,
+            // A `Concrete` annotation can still embed `tyvar` markers — an
+            // object literal over an unresolved field var freezes to
+            // `Object({f: <tyvar>})` (see `tyvar_to_annotation` in
+            // types/core.rs). Descend into the annotation so a marker equal to
+            // `var` counts as an occurrence: without this the occurs-check
+            // guard below (`solve_constraint`) misses the cyclic binding
+            // `X |-> Concrete(Object({f: <tyvar X>}))`, the cycle is stored,
+            // and the mutually recursive `apply_substitutions <->
+            // apply_to_annotation` walk overflows the stack.
+            Type::Concrete(_) => occurs_check(var, ty),
         }
     }
 

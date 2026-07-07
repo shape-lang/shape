@@ -14,4 +14,4 @@ mod unifier;
 // type-equivalence relation is `ConstraintSolver::probe_equal`. Only the
 // annotation-layer structural comparison survives.
 pub use structural_equality::annotations_equal;
-pub use unifier::Unifier;
+pub use unifier::{Unifier, occurs_check};
