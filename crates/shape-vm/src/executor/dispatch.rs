@@ -9,6 +9,14 @@ use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use super::debugger_integration::DebuggerIntegration;
 use super::{DebugVMState, ExecutionResult, VirtualMachine, async_ops};
 
+/// GC Phase 3a: candidate-buffer size past which the same-thread dispatch
+/// safepoint runs `CollectCycles`. A quantum heuristic (§R2) — collection is
+/// memory-only and unobservable to the program, so the exact value only trades
+/// pause frequency against retained garbage. Only referenced under the `gc`
+/// feature.
+#[cfg(feature = "gc")]
+const GC_CANDIDATE_THRESHOLD: usize = 256;
+
 impl VirtualMachine {
     /// Execute the loaded program.
     ///
@@ -184,6 +192,18 @@ impl VirtualMachine {
             // Poll for completed tier promotions every 1024 instructions.
             if self.instruction_count & 0x3FF == 0 {
                 self.poll_tier_completions();
+
+                // GC Phase 3a same-thread safepoint (real-gc-cycle-collection.md
+                // §R2 / R4 3a): the dispatch loop is native-quiescent here (no
+                // mutator mid-edge-update), so drain accumulated possible-cycle
+                // roots via Bacon–Rajan trial-deletion when the candidate buffer
+                // has grown past the quantum threshold. Memory-only, unobservable
+                // to the program (no `Drop` runs). Additive `#[cfg]`-gated no-op
+                // with the `gc` feature off. Cross-worker STW is Phase 3b.
+                #[cfg(feature = "gc")]
+                {
+                    shape_value::gc::maybe_collect(GC_CANDIDATE_THRESHOLD);
+                }
             }
 
             // Time-travel capture check (debug path).
@@ -345,6 +365,12 @@ impl VirtualMachine {
             // Poll for completed tier promotions every 1024 instructions.
             if self.instruction_count & 0x3FF == 0 {
                 self.poll_tier_completions();
+
+                // GC Phase 3a same-thread safepoint (see the fast-path loop).
+                #[cfg(feature = "gc")]
+                {
+                    shape_value::gc::maybe_collect(GC_CANDIDATE_THRESHOLD);
+                }
             }
 
             // Resource limit check (sandboxed execution). WF-1D: the fast path

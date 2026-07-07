@@ -179,6 +179,11 @@ struct GcSideEntry {
     color: GcColor,
     buffered: bool,
     shadow_trial_count: u32,
+    /// Has `shadow_trial_count` been seeded from the real `Arc::strong_count`
+    /// yet? The shadow is meaningless until the collector's first trial-touch
+    /// seeds it (§3.5 option A — you cannot trial-decrement a std-`Arc` strong
+    /// count without dropping, so trial-deletion runs against this seeded copy).
+    shadow_seeded: bool,
 }
 
 impl Default for GcSideEntry {
@@ -190,6 +195,7 @@ impl Default for GcSideEntry {
             color: GcColor::Black,
             buffered: false,
             shadow_trial_count: 0,
+            shadow_seeded: false,
         }
     }
 }
@@ -272,6 +278,32 @@ impl GcSideTable {
     #[inline]
     pub fn set_shadow_trial_count(&mut self, addr: usize, count: u32) {
         self.entries.entry(addr).or_default().shadow_trial_count = count;
+    }
+
+    /// Seed the shadow trial-count of `addr` to `count` **iff** it has not been
+    /// seeded yet this collection, and mark it seeded. First-touch seeding of
+    /// the §3.5 option-A shadow copy from the real `Arc::strong_count`.
+    #[inline]
+    fn seed_shadow_if_absent(&mut self, addr: usize, count: u32) {
+        let e = self.entries.entry(addr).or_default();
+        if !e.shadow_seeded {
+            e.shadow_trial_count = count;
+            e.shadow_seeded = true;
+        }
+    }
+
+    /// Trial-decrement the shadow trial-count of `addr` (saturating at 0).
+    #[inline]
+    fn shadow_trial_decrement(&mut self, addr: usize) {
+        let e = self.entries.entry(addr).or_default();
+        e.shadow_trial_count = e.shadow_trial_count.saturating_sub(1);
+    }
+
+    /// Trial-increment the shadow trial-count of `addr`.
+    #[inline]
+    fn shadow_increment(&mut self, addr: usize) {
+        let e = self.entries.entry(addr).or_default();
+        e.shadow_trial_count = e.shadow_trial_count.saturating_add(1);
     }
 }
 
@@ -474,6 +506,494 @@ pub fn clear_candidate_buffer() {
         let CandidateBuffer { ptrs, side } = &mut *c.borrow_mut();
         ptrs.clear();
         *side = GcSideTable::new();
+    });
+}
+
+// ===========================================================================
+// Phase 3a — CollectCycles: Bacon–Rajan synchronous trial-deletion.
+//
+// real-gc-cycle-collection.md §3.3 / R2. Three passes over the Phase-2
+// candidate buffer (the Purple possible-roots), all edge enumeration via the
+// shared `gc_visit::for_each_heap_child` (`HeapKind`-dispatched — no root scan,
+// no `is_heap`, no tag decode, no `ValueWord`, no parallel discriminator). The
+// TRUE count is `HeapHeader.refcount` for header carriers; for header-less
+// (`Arc`-backed) kinds a side-table shadow trial-count seeded from
+// `Arc::strong_count` (you cannot trial-decrement a std-`Arc` strong count
+// without dropping).
+//
+// MEMORY-ONLY (§0 #1): CollectWhite frees a White node's memory with NO
+// finalize pass — no user `Drop`, and (for carriers with heap children) no
+// child-release walk. The White cycle peers are freed by the CollectWhite
+// recursion (each memory-only), so no peer is released twice; a surviving
+// (Black) external child already had this edge removed by the un-restored
+// trial-decrement. Non-cycle White descendants that are leaves (StringV2 /
+// DecimalV2) own no heap child, so their memory-only free reclaims all their
+// bytes — indistinguishable from a normal free.
+//
+// SINGLE-THREAD: runs at a same-thread safepoint (native-quiescent
+// top-of-dispatch). The cross-worker STW rendezvous is Phase 3b.
+// ===========================================================================
+
+/// How CollectWhite reclaims a White node's memory. A cycle-garbage node's
+/// user `Drop` never runs (memory-only, §0 #1); carriers with heap children
+/// additionally skip their child-release walk (the recursion handles peers).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FreeKind {
+    /// `*mut TypedObjectStorage` — `_free_memory_only` (skips `drop_fields`).
+    TypedObject,
+    /// `*mut TypedArray<*const T>` — `free_v2_typed_array_memory_only`.
+    TypedArray,
+    /// `*mut StringObj` v2-raw carrier (leaf) — full free (no children).
+    StringV2,
+    /// `*mut DecimalObj` v2-raw carrier (leaf) — full free (no children).
+    DecimalV2,
+    /// Reachable White node the collector does not free in Phase 3a (header-less
+    /// `Arc`-backed kinds, and `TraitObject` whose edges `for_each_heap_child`
+    /// does not yet enumerate). Leaving it unfreed is leak-safe — never a
+    /// premature free / double free (§3.5 option-A migration is fast-follow).
+    Leak,
+}
+
+/// A node visited during a collection, identified by its allocation address.
+///
+/// Color + trial-count placement is decided by the node's proven `NativeKind`
+/// (NOT re-derived from a raw-bits probe): header carriers keep both inline in
+/// `HeapHeader` (flags bits 4–5 color, `refcount` count); header-less
+/// `Arc`-backed carriers keep both in the address-keyed `GcSideTable`
+/// (§3.5 option A).
+#[derive(Clone, Copy)]
+struct GcNode {
+    addr: usize,
+    nk: NativeKind,
+}
+
+impl GcNode {
+    /// Does this node keep its color/count in an inline `HeapHeader`?
+    #[inline]
+    fn is_header(&self) -> bool {
+        matches!(
+            self.nk,
+            NativeKind::Ptr(
+                HeapKind::TypedObject
+                    | HeapKind::TypedArray
+                    | HeapKind::TraitObject
+                    | HeapKind::String
+                    | HeapKind::Decimal
+            ) | NativeKind::StringV2
+                | NativeKind::DecimalV2
+        ) && !self.is_arc_backed()
+    }
+
+    /// Is this node an `Arc`-backed header-less carrier (side-table shadow)?
+    ///
+    /// `NativeKind::String` and `NativeKind::Ptr(HeapKind::String)` are
+    /// `Arc<String>` (no `HeapHeader`); everything routed here is a leaf whose
+    /// children `for_each_heap_child` does not enumerate.
+    #[inline]
+    fn is_arc_backed(&self) -> bool {
+        matches!(
+            self.nk,
+            NativeKind::String
+                | NativeKind::Ptr(
+                    HeapKind::String
+                        | HeapKind::HashMap
+                        | HeapKind::HashSet
+                        | HeapKind::Deque
+                        | HeapKind::Channel
+                        | HeapKind::Mutex
+                        | HeapKind::Atomic
+                        | HeapKind::Lazy
+                        | HeapKind::Decimal
+                        | HeapKind::BigInt
+                        | HeapKind::DataTable
+                        | HeapKind::Closure
+                )
+        )
+    }
+
+    /// `GcMeta` locator for this node's color/buffered bits. Constructed
+    /// directly from the `NativeKind` classification (not `gc_meta`, which keys
+    /// on `HeapKind` alone and would mis-place `Arc<String>` vs the `StringObj`
+    /// carrier).
+    #[inline]
+    fn meta(&self) -> GcMeta {
+        if self.is_header() {
+            // SAFETY: pointer arithmetic only; dereference happens in the
+            // GcMeta accessors at the safepoint (no mutator races the byte).
+            let flags_ptr = unsafe { (self.addr as *mut u8).add(HeapHeader::OFFSET_FLAGS) };
+            GcMeta::Header { flags_ptr }
+        } else {
+            GcMeta::SideTable { addr: self.addr }
+        }
+    }
+
+    /// The `HeapKind` whose heap-child edges to enumerate, if this node can hold
+    /// outgoing edges the collector traces. Only `TypedObject` / `TypedArray`
+    /// are enumerated by `for_each_heap_child` today; all other kinds are
+    /// treated as leaves (leak-safe — an un-enumerated back-edge leaks its
+    /// cycle, never frees a live object; §R2 soundness note).
+    #[inline]
+    fn child_heapkind(&self) -> Option<HeapKind> {
+        match self.nk {
+            NativeKind::Ptr(hk @ (HeapKind::TypedObject | HeapKind::TypedArray)) => Some(hk),
+            _ => None,
+        }
+    }
+
+    /// How to reclaim this node's memory if it ends White.
+    #[inline]
+    fn free_kind(&self) -> FreeKind {
+        match self.nk {
+            NativeKind::Ptr(HeapKind::TypedObject) => FreeKind::TypedObject,
+            NativeKind::Ptr(HeapKind::TypedArray) => FreeKind::TypedArray,
+            NativeKind::StringV2 => FreeKind::StringV2,
+            NativeKind::DecimalV2 => FreeKind::DecimalV2,
+            _ => FreeKind::Leak,
+        }
+    }
+}
+
+/// Read a node's GC color.
+///
+/// # Safety
+/// For header nodes `addr` must be a live `HeapHeader` allocation.
+#[inline]
+unsafe fn node_color(node: GcNode, side: &GcSideTable) -> GcColor {
+    unsafe { node.meta().color(side) }
+}
+
+/// Set a node's GC color.
+///
+/// # Safety
+/// See [`node_color`].
+#[inline]
+unsafe fn node_set_color(node: GcNode, color: GcColor, side: &mut GcSideTable) {
+    unsafe { node.meta().set_color(color, side) }
+}
+
+/// Read a node's `buffered` bit.
+///
+/// # Safety
+/// See [`node_color`].
+#[inline]
+unsafe fn node_buffered(node: GcNode, side: &GcSideTable) -> bool {
+    unsafe { node.meta().buffered(side) }
+}
+
+/// Read a node's current (trial) count — real `HeapHeader.refcount` for header
+/// carriers, seeded side-table shadow for header-less kinds.
+///
+/// # Safety
+/// For header nodes `addr` must be a live `HeapHeader` allocation.
+#[inline]
+unsafe fn node_count(node: GcNode, side: &GcSideTable) -> u32 {
+    if node.is_header() {
+        unsafe { crate::v2::refcount::v2_get_refcount(node.addr as *const HeapHeader) }
+    } else {
+        side.shadow_trial_count(node.addr)
+    }
+}
+
+/// Real `Arc::strong_count` for a header-less `Arc`-backed leaf, read without
+/// taking a share (reconstruct-then-forget). Only `Arc<String>` is read
+/// precisely; every other header-less kind seeds to a large sentinel so it can
+/// never be mistaken for garbage (it is a leaf the collector never frees, so
+/// the exact seed is not load-bearing — a higher count only ever leaks, never
+/// frees).
+///
+/// # Safety
+/// `addr` must be a live `Arc::into_raw` pointer of the matching `T`.
+#[inline]
+unsafe fn arc_strong_count_seed(node: GcNode) -> u32 {
+    match node.nk {
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => unsafe {
+            let arc = std::sync::Arc::from_raw(node.addr as *const String);
+            let c = std::sync::Arc::strong_count(&arc) as u32;
+            let _ = std::sync::Arc::into_raw(arc); // do not drop — give the share back
+            c
+        },
+        // Conservative: treat as strongly externally-referenced (never White).
+        _ => u32::MAX / 2,
+    }
+}
+
+/// Trial-decrement a node's count: real `HeapHeader.refcount` for header
+/// carriers, seeded side-table shadow for header-less kinds.
+///
+/// # Safety
+/// For header nodes `addr` must be a live `HeapHeader` allocation.
+#[inline]
+unsafe fn node_trial_decrement(node: GcNode, side: &mut GcSideTable) {
+    if node.is_header() {
+        // Trial arithmetic on the REAL refcount (restored by ScanBlack for
+        // survivors; White nodes are freed so their count is moot).
+        unsafe {
+            (*(node.addr as *const HeapHeader))
+                .refcount
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    } else {
+        // Seed the shadow from the real strong count on first touch, then
+        // trial-decrement the shadow — the real Arc is NEVER mutated.
+        let seed = unsafe { arc_strong_count_seed(node) };
+        side.seed_shadow_if_absent(node.addr, seed);
+        side.shadow_trial_decrement(node.addr);
+    }
+}
+
+/// Trial-increment a node's count (ScanBlack restore).
+///
+/// # Safety
+/// For header nodes `addr` must be a live `HeapHeader` allocation.
+#[inline]
+unsafe fn node_increment(node: GcNode, side: &mut GcSideTable) {
+    if node.is_header() {
+        unsafe {
+            (*(node.addr as *const HeapHeader))
+                .refcount
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    } else {
+        side.shadow_increment(node.addr);
+    }
+}
+
+/// Enumerate a node's outgoing heap-child edges (read-only) via the SAME shared
+/// primitive the destructive Drop path uses — lockstep discipline (§3.4).
+///
+/// # Safety
+/// For a node with a `child_heapkind`, `addr` must be a live allocation of that
+/// kind. The visitor performs no refcount work.
+#[inline]
+unsafe fn node_for_each_child<F: FnMut(GcNode)>(node: GcNode, mut f: F) {
+    if let Some(hk) = node.child_heapkind() {
+        unsafe {
+            crate::gc_visit::for_each_heap_child(node.addr as *const u8, hk, |bits, cnk| {
+                if bits != 0 {
+                    f(GcNode {
+                        addr: bits as usize,
+                        nk: cnk,
+                    });
+                }
+            });
+        }
+    }
+}
+
+/// `MarkGray(s)` (§3.3 pass 1). If `s` is not already Gray, color it Gray and,
+/// for each heap child `t`, trial-decrement `t`'s count then `MarkGray(t)`.
+///
+/// # Safety
+/// All reachable header nodes must be live allocations.
+unsafe fn mark_gray(node: GcNode, side: &mut GcSideTable) {
+    if unsafe { node_color(node, side) } != GcColor::Gray {
+        unsafe { node_set_color(node, GcColor::Gray, side) };
+        unsafe {
+            node_for_each_child(node, |child| {
+                node_trial_decrement(child, side);
+                mark_gray(child, side);
+            });
+        }
+    }
+}
+
+/// `Scan(s)` (§3.3 pass 2). If `s` is Gray: a residual count `> 0` means an
+/// EXTERNAL reference survives ⇒ `ScanBlack` restores the subgraph; else `s` is
+/// provisional garbage ⇒ color White and `Scan` its children.
+///
+/// # Safety
+/// See [`mark_gray`].
+unsafe fn scan(node: GcNode, side: &mut GcSideTable) {
+    if unsafe { node_color(node, side) } == GcColor::Gray {
+        if unsafe { node_count(node, side) } > 0 {
+            unsafe { scan_black(node, side) };
+        } else {
+            unsafe { node_set_color(node, GcColor::White, side) };
+            unsafe { node_for_each_child(node, |child| scan(child, side)) };
+        }
+    }
+}
+
+/// `ScanBlack(s)`. Restore a live subgraph: color Black and re-increment each
+/// child's count (undoing the `MarkGray` trial-decrement for edges that really
+/// survive), recursing into not-yet-Black children.
+///
+/// # Safety
+/// See [`mark_gray`].
+unsafe fn scan_black(node: GcNode, side: &mut GcSideTable) {
+    unsafe { node_set_color(node, GcColor::Black, side) };
+    unsafe {
+        node_for_each_child(node, |child| {
+            node_increment(child, side);
+            if node_color(child, side) != GcColor::Black {
+                scan_black(child, side);
+            }
+        });
+    }
+}
+
+/// `CollectWhite(s)` (§3.3 pass 3). Color Black (the "visited" mark, so a
+/// shared White child is processed once) and recurse; **defer** the actual
+/// free of each White node into `freed` so no node's memory is released while
+/// another path may still read it (a White child shared by two White parents
+/// would otherwise be freed then re-read — a use-after-free). Header-less White
+/// nodes are removed from the side table (leak-safe: not freed in Phase 3a).
+///
+/// # Safety
+/// See [`mark_gray`].
+unsafe fn collect_white(node: GcNode, side: &mut GcSideTable, freed: &mut Vec<GcNode>) {
+    if unsafe { node_color(node, side) } == GcColor::White
+        && !unsafe { node_buffered(node, side) }
+    {
+        unsafe { node_set_color(node, GcColor::Black, side) };
+        unsafe { node_for_each_child(node, |child| collect_white(child, side, freed)) };
+        freed.push(node);
+    }
+}
+
+/// Free one White node's memory, **memory-only** (no user `Drop`, no
+/// child-release walk). Called only after the whole CollectWhite traversal has
+/// finished reading every node's children, so no live path reads freed memory.
+/// Returns `true` iff the node's memory was actually reclaimed (`false` for the
+/// leak-safe `Leak` disposition).
+///
+/// # Safety
+/// `node` must be a White cycle-garbage node the collector has proven has no
+/// surviving external reference, freed at most once here.
+unsafe fn free_white_node(node: GcNode, side: &mut GcSideTable) -> bool {
+    match node.free_kind() {
+        FreeKind::TypedObject => {
+            unsafe {
+                crate::heap_value::TypedObjectStorage::_free_memory_only(
+                    node.addr as *mut crate::heap_value::TypedObjectStorage,
+                );
+            }
+            true
+        }
+        FreeKind::TypedArray => {
+            unsafe {
+                crate::v2::typed_array::free_v2_typed_array_memory_only(node.addr as *mut u8);
+            }
+            true
+        }
+        FreeKind::StringV2 => {
+            // Leaf carrier: no heap children, no user finalizer ⇒ full free
+            // reclaims all its bytes (memory-only and normal free coincide).
+            unsafe {
+                crate::v2::string_obj::StringObj::drop(
+                    node.addr as *mut crate::v2::string_obj::StringObj,
+                );
+            }
+            true
+        }
+        FreeKind::DecimalV2 => {
+            unsafe {
+                crate::v2::decimal_obj::DecimalObj::drop(
+                    node.addr as *mut crate::v2::decimal_obj::DecimalObj,
+                );
+            }
+            true
+        }
+        FreeKind::Leak => {
+            // Header-less / not-yet-enumerated kind: leave unfreed (leak-safe).
+            side.remove(node.addr);
+            false
+        }
+    }
+}
+
+/// **CollectCycles** (§3.3 / R2): run Bacon–Rajan synchronous trial-deletion
+/// over the current candidate buffer, freeing every garbage cycle it proves,
+/// memory-only. Returns the number of nodes freed.
+///
+/// Runs at a same-thread safepoint (caller guarantees native-quiescence — no
+/// mutator is mid-edge-update). Drains and clears the candidate buffer.
+///
+/// This is the explicit entry point (tests + the safepoint trigger). Feature-off
+/// the whole module compiles to nothing, so this symbol does not exist in the
+/// shipped default build.
+pub fn collect_cycles() -> usize {
+    CANDIDATES.with(|c| {
+        // Take the buffer out so the passes hold a single `&mut GcSideTable`
+        // without re-borrowing the thread-local across the recursion.
+        let CandidateBuffer { ptrs, side } = &mut *c.borrow_mut();
+        if ptrs.is_empty() {
+            return 0;
+        }
+        let roots: Vec<GcNode> = ptrs
+            .iter()
+            .map(|&(addr, hk)| GcNode {
+                addr,
+                nk: NativeKind::Ptr(hk),
+            })
+            .collect();
+
+        // Pass 1 — MarkRoots.
+        for &root in &roots {
+            // SAFETY: buffered roots are kept alive by the cycle (or by an
+            // external ref); the RC free path clears any entry it reclaims
+            // (`gc_note_object_freed`), so a buffered root is a live allocation.
+            unsafe { mark_gray(root, side) };
+        }
+        // Pass 2 — ScanRoots.
+        for &root in &roots {
+            unsafe { scan(root, side) };
+        }
+        // Pass 3 — CollectRoots. Clear `buffered` on every root first so
+        // CollectWhite's `!buffered` guard does not skip a White root, then
+        // collect the deferred White set and free it memory-only.
+        for &root in &roots {
+            unsafe { root.meta().set_buffered(false, side) };
+        }
+        let mut freed: Vec<GcNode> = Vec::new();
+        for &root in &roots {
+            unsafe { collect_white(root, side, &mut freed) };
+        }
+        // Deferred free — every child read already happened above. Count only
+        // nodes whose MEMORY was reclaimed (header-less White nodes are
+        // leak-safe / removed from the side table but not freed in Phase 3a).
+        let mut reclaimed = 0usize;
+        for &node in &freed {
+            if unsafe { free_white_node(node, side) } {
+                reclaimed += 1;
+            }
+        }
+
+        // Buffer fully drained; survivors are Black with `buffered` cleared and
+        // will be re-buffered by future decrement barriers if they cycle again.
+        ptrs.clear();
+        *side = GcSideTable::new();
+        reclaimed
+    })
+}
+
+/// Safepoint trigger (§R2 / R4 3a): run [`collect_cycles`] when the candidate
+/// buffer has grown past `threshold`. Wired into the VM dispatch safepoint under
+/// the `gc` feature. Returns the number of nodes freed (0 if not triggered).
+#[inline]
+pub fn maybe_collect(threshold: usize) -> usize {
+    if candidate_buffer_len() > threshold {
+        collect_cycles()
+    } else {
+        0
+    }
+}
+
+/// RC free-path hook (soundness): the normal reference-counting free path calls
+/// this when it reclaims a cycle-capable header carrier at refcount 0, so a
+/// stale pointer to freed memory can never linger in the candidate buffer for
+/// the collector to dereference (use-after-free guard). Removes the address's
+/// buffer entry + side-table metadata if present; a no-op otherwise. Does NOT
+/// touch object memory. The RC fast path stays byte-identical — this runs only
+/// on the already-cold rc==0 branch, and only under the `gc` feature.
+#[inline]
+pub fn gc_note_object_freed(addr: usize) {
+    CANDIDATES.with(|c| {
+        let CandidateBuffer { ptrs, side } = &mut *c.borrow_mut();
+        if let Some(pos) = ptrs.iter().position(|&(a, _)| a == addr) {
+            ptrs.swap_remove(pos);
+        }
+        side.remove(addr);
     });
 }
 
@@ -731,6 +1251,335 @@ mod tests {
 
             crate::v2::refcount::v2_release(&(*a).header); // rc = 1
             crate::v2::refcount::v2_release(&(*a).header); // rc = 0 → freed
+        }
+        clear_candidate_buffer();
+    }
+
+    // ── Phase 3a — CollectCycles trial-deletion ─────────────────────────────
+
+    /// A single-field `TypedObjectStorage` whose one field is a
+    /// `Ptr(TypedObject)` heap edge, initialised to null. refcount 1.
+    unsafe fn mk_ref_obj(schema: u64) -> *mut TypedObjectStorage {
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+        TypedObjectStorage::_new(
+            schema,
+            vec![ValueSlot::from_typed_object_raw(std::ptr::null())].into_boxed_slice(),
+            0b1,
+            kinds,
+        )
+    }
+
+    /// Point `from`'s field-0 heap edge at `to`, taking one owning share on
+    /// `to` (the edge now owns it — exactly what an interior-mutation store
+    /// leaves behind). `from`'s field must currently be null.
+    unsafe fn link_obj(from: *mut TypedObjectStorage, to: *mut TypedObjectStorage) {
+        unsafe {
+            crate::v2::refcount::v2_retain(&(*to).header);
+            *(*from).slot_cells[0].get() = ValueSlot::from_typed_object_raw(to);
+        }
+    }
+
+    /// Simulate an external root of `obj` dropping: a decrement-to-nonzero
+    /// (the cycle back-edge pins it at ≥ 1), which the Phase-2 barrier buffers
+    /// as a Purple possible-cycle-root. `kind` is the carrier kind.
+    unsafe fn drop_external_and_buffer(obj: usize, kind: HeapKind) {
+        let surv = gc_decrement_precheck(obj as u64, NativeKind::Ptr(kind))
+            .expect("decrement-to-nonzero survivor");
+        unsafe { crate::v2::refcount::v2_release(&*(obj as *const HeapHeader)) };
+        gc_buffer_possible_root(surv.0, surv.1);
+    }
+
+    /// **Finding #31 / sink #2 — object↔object cycle is collected.** Two
+    /// TypedObjects reference each other; both external roots drop (buffered as
+    /// possible-roots). `CollectCycles` proves the 2-node garbage cycle and
+    /// frees both, memory-only. The leak is bounded to zero.
+    #[test]
+    fn collect_object_object_cycle_frees_both() {
+        clear_candidate_buffer();
+        unsafe {
+            let a = mk_ref_obj(101);
+            let b = mk_ref_obj(102);
+            link_obj(a, b); // b.rc = 2 (external + a.field)
+            link_obj(b, a); // a.rc = 2 (external + b.field)
+            assert_eq!((*a).header.refcount.load(Ordering::SeqCst), 2);
+            assert_eq!((*b).header.refcount.load(Ordering::SeqCst), 2);
+
+            drop_external_and_buffer(a as usize, HeapKind::TypedObject); // a.rc = 1
+            drop_external_and_buffer(b as usize, HeapKind::TypedObject); // b.rc = 1
+            assert_eq!(candidate_buffer_len(), 2);
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 2, "the 2-node garbage cycle is fully reclaimed");
+            assert_eq!(candidate_buffer_len(), 0, "buffer drained");
+        }
+        // a and b are freed memory-only; do not touch them again.
+        clear_candidate_buffer();
+    }
+
+    /// **Sink #3 — array↔object cycle is collected.** A `TypedArray` holds a
+    /// TypedObject whose field points back at the array (the collectable
+    /// header-carrier skeleton of "closure captured into a mutable array").
+    /// Both external roots drop; `CollectCycles` frees the array (memory-only,
+    /// element share not released) and the object.
+    #[test]
+    fn collect_array_object_cycle_frees_both() {
+        use crate::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray, stamp_elem_type};
+        clear_candidate_buffer();
+        unsafe {
+            let arr = TypedArray::<*const TypedObjectStorage>::with_capacity(1);
+            let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Ptr(HeapKind::TypedArray)]);
+            let obj = TypedObjectStorage::_new(
+                103,
+                vec![ValueSlot::from_raw(0)].into_boxed_slice(),
+                0b1,
+                kinds,
+            );
+
+            // arr owns a share of obj (element store).
+            crate::v2::refcount::v2_retain(&(*obj).header); // obj.rc = 2
+            TypedArray::<*const TypedObjectStorage>::push(arr, obj as *const _);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+
+            // obj.field0 owns a share of arr (interior-mutation store).
+            crate::v2::typed_array::retain_v2_typed_array(arr as *mut u8); // arr.rc = 2
+            *(*obj).slot_cells[0].get() = ValueSlot::from_raw(arr as u64);
+
+            drop_external_and_buffer(arr as usize, HeapKind::TypedArray); // arr.rc = 1
+            drop_external_and_buffer(obj as usize, HeapKind::TypedObject); // obj.rc = 1
+            assert_eq!(candidate_buffer_len(), 2);
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 2, "array↔object garbage cycle fully reclaimed");
+            assert_eq!(candidate_buffer_len(), 0);
+        }
+        clear_candidate_buffer();
+    }
+
+    /// **Sink #1 reduction / longer cycle — 3-node object cycle collected.** A →
+    /// B → C → A, all TypedObjects (the collectable header-carrier reduction of
+    /// the SharedCell interior-mutation cycle; the header-less `SharedCell`
+    /// carrier itself is the §3.5 option-A fast-follow). All three external
+    /// roots drop; `CollectCycles` frees all three.
+    #[test]
+    fn collect_three_node_object_cycle_frees_all() {
+        clear_candidate_buffer();
+        unsafe {
+            let a = mk_ref_obj(111);
+            let b = mk_ref_obj(112);
+            let c = mk_ref_obj(113);
+            link_obj(a, b); // b.rc = 2
+            link_obj(b, c); // c.rc = 2
+            link_obj(c, a); // a.rc = 2
+
+            drop_external_and_buffer(a as usize, HeapKind::TypedObject);
+            drop_external_and_buffer(b as usize, HeapKind::TypedObject);
+            drop_external_and_buffer(c as usize, HeapKind::TypedObject);
+            assert_eq!(candidate_buffer_len(), 3);
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 3, "3-node garbage cycle fully reclaimed");
+        }
+        clear_candidate_buffer();
+    }
+
+    /// **No premature free.** A garbage-shaped cycle that still has a LIVE
+    /// external reference must NOT be collected. `a` keeps one extra external
+    /// share; after both roots buffer, trial-deletion leaves `a` (and thus `b`,
+    /// via ScanBlack) reachable, so nothing is freed and refcounts are restored
+    /// exactly.
+    #[test]
+    fn live_cycle_with_external_ref_is_not_collected() {
+        clear_candidate_buffer();
+        unsafe {
+            let a = mk_ref_obj(121);
+            let b = mk_ref_obj(122);
+            link_obj(a, b); // b.rc = 2
+            link_obj(b, a); // a.rc = 2
+            // A second, still-live external reference to `a`.
+            crate::v2::refcount::v2_retain(&(*a).header); // a.rc = 3
+
+            // One external root of each drops (buffered). `a` keeps its second
+            // live external ref.
+            drop_external_and_buffer(a as usize, HeapKind::TypedObject); // a.rc = 2
+            drop_external_and_buffer(b as usize, HeapKind::TypedObject); // b.rc = 1
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 0, "a live external ref must prevent collection");
+
+            // Refcounts restored exactly by ScanBlack (a: live-ext + b.field;
+            // b: a.field).
+            assert_eq!((*a).header.refcount.load(Ordering::SeqCst), 2);
+            assert_eq!((*b).header.refcount.load(Ordering::SeqCst), 1);
+            // Both survivors are Black, buffered cleared.
+            assert_eq!(color_of(a as *mut u8, HeapKind::TypedObject), GcColor::Black);
+            assert_eq!(color_of(b as *mut u8, HeapKind::TypedObject), GcColor::Black);
+
+            // Teardown: drop the extra external ref → now a pure garbage cycle;
+            // re-buffer and collect it so the test leaks nothing.
+            crate::v2::refcount::v2_release(&(*a).header); // a.rc = 1
+            gc_buffer_possible_root(a as *mut u8, HeapKind::TypedObject);
+            gc_buffer_possible_root(b as *mut u8, HeapKind::TypedObject);
+            assert_eq!(collect_cycles(), 2, "the now-garbage cycle is reclaimed");
+        }
+        clear_candidate_buffer();
+    }
+
+    /// **Acyclic object unaffected.** A buffered false-positive candidate (it
+    /// survived a decrement-to-nonzero but is acyclic and externally held) is
+    /// NOT freed; its refcount is untouched by the collection.
+    #[test]
+    fn acyclic_buffered_object_is_not_collected() {
+        clear_candidate_buffer();
+        unsafe {
+            let a = mk_obj(131); // rc = 1, no heap children
+            crate::v2::refcount::v2_retain(&(*a).header); // rc = 2 (two ext roots)
+
+            drop_external_and_buffer(a as usize, HeapKind::TypedObject); // rc = 1, buffered
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 0, "acyclic externally-held object is not garbage");
+            assert_eq!((*a).header.refcount.load(Ordering::SeqCst), 1);
+
+            TypedObjectStorage::_drop(a); // reclaim normally
+        }
+        clear_candidate_buffer();
+    }
+
+    /// **Header-less side-table shadow path is exercised.** Each cycle member
+    /// also holds an `Arc<String>` field (`NativeKind::String`, header-less):
+    /// during MarkGray the collector seeds a side-table shadow trial-count from
+    /// the real `Arc::strong_count` and trial-decrements the shadow — never the
+    /// real Arc. The object cycle is still collected; the (now unreachable)
+    /// string shares are left to the §3.5 option-A fast-follow (leak-safe).
+    #[test]
+    fn collect_cycle_with_arc_string_field_uses_side_table_shadow() {
+        clear_candidate_buffer();
+        unsafe {
+            // Two-field objects: [Ptr(TypedObject) edge, Arc<String> leaf].
+            let mk = |schema: u64, s: &str| -> *mut TypedObjectStorage {
+                let kinds: Arc<[NativeKind]> =
+                    Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject), NativeKind::String]);
+                let arc: Arc<String> = Arc::new(s.to_string());
+                TypedObjectStorage::_new(
+                    schema,
+                    vec![
+                        ValueSlot::from_typed_object_raw(std::ptr::null()),
+                        ValueSlot::from_string_arc(arc),
+                    ]
+                    .into_boxed_slice(),
+                    0b11, // both fields are heap edges
+                    kinds,
+                )
+            };
+            let a = mk(141, "alpha");
+            let b = mk(142, "beta");
+            // Witness the string Arcs so we can assert the real strong count is
+            // untouched by trial-deletion (shadow-only).
+            let sa = (*a).slots()[1].raw() as *const String;
+            let sb = (*b).slots()[1].raw() as *const String;
+
+            link_obj(a, b);
+            link_obj(b, a);
+            drop_external_and_buffer(a as usize, HeapKind::TypedObject);
+            drop_external_and_buffer(b as usize, HeapKind::TypedObject);
+
+            // The real Arc<String> strong counts are 1 before collection.
+            let count_of = |p: *const String| -> usize {
+                let arc = Arc::from_raw(p);
+                let c = Arc::strong_count(&arc);
+                let _ = Arc::into_raw(arc);
+                c
+            };
+            assert_eq!(count_of(sa), 1);
+            assert_eq!(count_of(sb), 1);
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 2, "object cycle collected; string leaves via side table");
+
+            // The real Arc strong counts are STILL 1 — trial-deletion ran on the
+            // shadow copy, never the real Arc (the shares leak, §3.5 fast-follow).
+            assert_eq!(count_of(sa), 1);
+            assert_eq!(count_of(sb), 1);
+
+            // Reclaim the leaked string shares so the test itself leaks nothing.
+            Arc::from_raw(sa);
+            Arc::from_raw(sb);
+        }
+        clear_candidate_buffer();
+    }
+
+    /// **A cycle member skips `Drop` (memory-only reclaim, §0 ratification #1).**
+    /// A cycle member's exclusively-owned `Arc<String>` field models a droppable
+    /// owned resource. `CollectWhite` frees cycle members MEMORY-ONLY — no
+    /// `drop_fields` heap-child walk — so that owned share is NOT released
+    /// (identical to a leaked Rust `Rc`/`Arc` cycle). Contrasted head-to-head
+    /// against the normal `_drop` path, which DOES release it: the same object
+    /// shape proves Drop runs on RC reclaim and is skipped on cycle reclaim.
+    #[test]
+    fn cycle_member_skips_drop_of_owned_field() {
+        clear_candidate_buffer();
+        unsafe {
+            // A [Ptr(TypedObject) edge, Arc<String> owned-resource] object that
+            // takes one share of the witness string `s`.
+            let two_field_obj = |schema: u64,
+                                 field0: *const TypedObjectStorage,
+                                 s: &Arc<String>|
+             -> *mut TypedObjectStorage {
+                let kinds: Arc<[NativeKind]> =
+                    Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject), NativeKind::String]);
+                TypedObjectStorage::_new(
+                    schema,
+                    vec![
+                        ValueSlot::from_typed_object_raw(field0),
+                        ValueSlot::from_string_arc(Arc::clone(s)),
+                    ]
+                    .into_boxed_slice(),
+                    0b11, // both fields are heap edges
+                    kinds,
+                )
+            };
+
+            // ── Contrast: the normal `_drop` path RUNS Drop (releases the field
+            //    share). The witness strong count returns to 1.
+            let live = Arc::new("owned".to_string());
+            assert_eq!(Arc::strong_count(&live), 1);
+            let solo = two_field_obj(200, std::ptr::null(), &live);
+            assert_eq!(Arc::strong_count(&live), 2, "solo.field1 owns a share");
+            TypedObjectStorage::_drop(solo);
+            assert_eq!(
+                Arc::strong_count(&live),
+                1,
+                "_drop released the field share — Drop RAN on the RC path"
+            );
+
+            // ── The GC memory-only path SKIPS Drop. A 2-node object cycle where
+            //    `a` owns a witnessed Arc<String>; both roots buffer; collect.
+            let owned = Arc::new("cycle-owned".to_string());
+            assert_eq!(Arc::strong_count(&owned), 1);
+            let a = two_field_obj(201, std::ptr::null(), &owned);
+            let b = mk_ref_obj(202);
+            assert_eq!(Arc::strong_count(&owned), 2, "a.field1 owns a share");
+
+            link_obj(a, b); // b.rc = 2
+            link_obj(b, a); // a.rc = 2
+            drop_external_and_buffer(a as usize, HeapKind::TypedObject); // a.rc = 1
+            drop_external_and_buffer(b as usize, HeapKind::TypedObject); // b.rc = 1
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 2, "the garbage cycle is reclaimed");
+            // Drop was SKIPPED: `a`'s owned Arc<String> share was never released,
+            // so the witness strong count is unchanged (memory-only reclaim —
+            // Rust-cycle semantics, a Drop impl on a cycle member does not run).
+            assert_eq!(
+                Arc::strong_count(&owned),
+                2,
+                "cycle member SKIPPED Drop — owned field share not released"
+            );
+
+            // Reclaim the leaked share (the freed cycle member's un-run Drop) so
+            // the test itself leaks nothing; `owned` then drops normally.
+            Arc::decrement_strong_count(Arc::as_ptr(&owned));
+            assert_eq!(Arc::strong_count(&owned), 1);
         }
         clear_candidate_buffer();
     }
