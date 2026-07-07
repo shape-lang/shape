@@ -73,7 +73,7 @@ pub fn no_slippage() {
 /// @param volume - Order volume (used for volume impact model)
 /// @param model - Slippage model configuration
 pub fn apply_slippage(price, side, volume, model) {
-    let slip = 0.0;
+    let mut slip = 0.0;
 
     if model.model_type == "fixed" {
         // Fixed basis points
@@ -159,7 +159,7 @@ pub fn no_commission() {
 /// @param quantity - Number of shares/contracts
 /// @param model - Commission model configuration
 pub fn calculate_commission(price, quantity, model) {
-    let comm = 0.0;
+    let mut comm = 0.0;
 
     if model.model_type == "fixed" {
         comm = model.fixed_amount;
@@ -199,8 +199,8 @@ pub type FillResult {
 pub fn simulate_fill(order, candle, slippage_model, commission_model) {
     // For market orders, use close price as base
     // For limit orders, check if price is achievable
-    let base_price = candle.close;
-    let can_fill = true;
+    let mut base_price = candle.close;
+    let mut can_fill = true;
 
     if order.order_type == "limit" {
         if order.side == "buy" {
