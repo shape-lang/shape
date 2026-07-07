@@ -247,7 +247,6 @@ jit_collection_arc_table="crates/shape-jit/src/ffi/v2/collection_arc.rs"
 # resolution pass below, so it sits in this list for the Ptr-arm scan only.)
 declare -a jit_lockstep_baseline=(
   String
-  TypedObject
   Decimal
   BigInt
   DataTable
