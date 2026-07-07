@@ -374,49 +374,39 @@ pub extern "C" fn jit_eval_data_relative(_ctx: *mut JITContext, _expr: u64, _off
 /// This indicates a type system bug - the type checker should guarantee
 /// that typed field access only occurs on correctly-typed objects.
 pub extern "C" fn jit_get_field_typed(obj: u64, type_id: u64, field_idx: u64, offset: u64) -> u64 {
-    #[allow(unused_imports)]
-    use crate::ffi::object::conversion::{jit_bits_to_nanboxed, nanboxed_to_jit_bits};
-
-    // Fast path: JIT-allocated TypedObject with direct offset access (~2ns)
-    if is_typed_object(obj) {
-        let ptr = unbox_typed_object(obj) as *const super::typed_object::TypedObject;
-        if !ptr.is_null() {
-            return unsafe {
-                if type_id != 0 && (*ptr).schema_id != type_id as u32 {
-                    TAG_NULL
-                } else {
-                    (*ptr).get_field(offset as usize)
-                }
-            };
+    // Wave-7 jit-typed-pointer-migration Phase B: `obj` is the v2-raw
+    // `*mut TypedObjectStorage` produced by `jit_typed_object_alloc`. This FFI is
+    // reached only from `OpCode::GetFieldTyped`, which the compiler emits solely
+    // on a receiver PROVEN to be that TypedObject at compile time — so the kind is
+    // the `Ptr(HeapKind::TypedObject)` parallel-kind companion stamped at the call
+    // signature (ADR-006 §2.7.5), not decoded from bits. Read the field's raw bits
+    // directly from the out-of-line slot buffer via `slots()`, the same shape the
+    // phase-1 `jit_typed_object_get_field` migration uses. The deleted
+    // `is_typed_object(obj)` gate was `is_heap_kind(bits, HK_TYPED_OBJECT)`, which
+    // returns false on the raw `Box::into_raw` carrier (no NaN-box tag bits) and
+    // sent every call down the now-deleted TAG_NULL slow path.
+    use shape_value::heap_value::TypedObjectStorage;
+    let _ = field_idx;
+    if obj == 0 {
+        return TAG_NULL;
+    }
+    let offset = offset as usize;
+    // All fields are u64-sized slots — byte offset must be 8-byte aligned.
+    if offset % 8 != 0 {
+        return TAG_NULL;
+    }
+    let ptr = obj as *const TypedObjectStorage;
+    unsafe {
+        // Optional schema guard (type_id == 0 disables it) — same contract as
+        // the pre-migration fast path.
+        if type_id != 0 && (*ptr).schema_id != type_id {
+            return TAG_NULL;
+        }
+        match (*ptr).slots().get(offset / 8) {
+            Some(slot) => slot.raw(),
+            None => TAG_NULL,
         }
     }
-
-    // Slow path: VM-allocated object (Arc<HeapValue>).
-    //
-    // PHASE_2C / SURFACE (ADR-006 §2.7.4 / §2.7.5): pre-strict-typing
-    // the slow path called `ValueWord::clone_from_bits(obj)` and
-    // `vw.as_typed_object()` to decode an `Arc<HeapValue>` from raw
-    // bits, then routed through `slots[idx].as_value_word(is_heap)` to
-    // re-encode the field as a `ValueWord`. Both ends are the deleted
-    // kind-blind W-series helpers (`ValueWord::clone_from_bits` decodes
-    // a kind from `tag_bits`; `as_value_word(is_heap)` is the §2.7.7 #4
-    // is_heap-probe shape).
-    //
-    // The strict-typing rebuild target reads the field via
-    // `Arc<TypedObjectStorage>` (single-discriminator HeapValue per
-    // ADR-005 §1) directly from the JIT-stamped slot kind, returning a
-    // typed scalar where the JIT-emitted call signature carries the
-    // expected `NativeKind`. Until that lands, the slow path returns
-    // TAG_NULL — the fast path above handles JIT-allocated TypedObject
-    // (the production path for JIT-emitted typed field reads), so this
-    // surfaces only when VM-side construction crosses into JIT code.
-    //
-    // Forbidden under any rebuild: `tag_bits`-decode classification of
-    // `obj` (CLAUDE.md "Forbidden Patterns"); `as_value_word(is_heap)`
-    // re-encoding (deleted §2.7.7 #4 shape); Bool-default fallback when
-    // schema_id is unknown.
-    let _ = field_idx;
-    TAG_NULL
 }
 
 /// Set a field on a typed object using precomputed offset.
@@ -447,27 +437,112 @@ pub extern "C" fn jit_set_field_typed(
     _field_idx: u64,
     offset: u64,
 ) -> u64 {
-    // Fast path: JIT-allocated TypedObject
-    if is_typed_object(obj) {
-        let ptr = unbox_typed_object(obj) as *mut super::typed_object::TypedObject;
-        if !ptr.is_null() {
-            return unsafe {
-                if type_id != 0 && (*ptr).schema_id != type_id as u32 {
-                    obj // schema mismatch — return unchanged
-                } else {
-                    let old_bits = (*ptr).get_field(offset as usize);
-                    // GC Phase 2: kind-tag `0` — JIT-domain store, overwritten
-                    // slot kind not yet threaded (queued JIT typed-pointer
-                    // migration). Barrier body wired + tested; inert here.
-                    super::gc::jit_write_barrier(old_bits, value, 0);
-                    (*ptr).set_field(offset as usize, value);
-                    obj
-                }
-            };
-        }
+    // Wave-7 jit-typed-pointer-migration Phase B: `obj` is the v2-raw
+    // `*mut TypedObjectStorage`. Write the field through the interior-mutable
+    // `write_slot_in_place` projection (sound on a shared carrier per Q14 /
+    // ADR-006 §2.7.13) — the same primitive the phase-1 `jit_typed_object_set_field`
+    // migration and the VM's `DerefStore` use. The deleted `is_typed_object(obj)`
+    // gate returned false on the raw carrier (no NaN-box tag bits); the receiver
+    // kind is the `Ptr(HeapKind::TypedObject)` parallel-kind companion stamped at
+    // the `OpCode::SetFieldTyped` call signature.
+    use shape_value::heap_value::TypedObjectStorage;
+    if obj == 0 {
+        return obj;
     }
-
-    // Slow path: VM-allocated object — return unchanged.
-    // VM objects should be mutated through the trampoline VM, not directly.
+    let offset = offset as usize;
+    if offset % 8 != 0 {
+        return obj;
+    }
+    let ptr = obj as *mut TypedObjectStorage;
+    unsafe {
+        if type_id != 0 && (*ptr).schema_id != type_id {
+            return obj; // schema mismatch — return unchanged
+        }
+        let idx = offset / 8;
+        if idx >= (*ptr).slots().len() {
+            return obj;
+        }
+        let prior = TypedObjectStorage::write_slot_in_place(ptr, idx, value);
+        // GC barrier on the overwritten slot. Kind-tag `0` — the heap/Option-
+        // field overwritten-slot `NativeKind` threading is the Wave-7 Phase-C
+        // follow-up (same posture as the phase-1 `jit_typed_object_set_field`).
+        // Feature-off / tag-0 this is inert.
+        super::gc::jit_write_barrier(prior, value, 0);
+    }
     obj
+}
+
+#[cfg(test)]
+mod typed_field_v2_carrier_tests {
+    //! Wave-7 jit-typed-pointer-migration Phase B: the type-specialized field
+    //! consumers `jit_get_field_typed` / `jit_set_field_typed` now read/write the
+    //! canonical v2-raw `*mut TypedObjectStorage` carrier the producer FFI
+    //! (`jit_typed_object_alloc`) emits — via `slots()` (read) and
+    //! `write_slot_in_place` (write), the same shape the phase-1
+    //! `jit_typed_object_get_field` / `_set_field` FFIs migrated to. Pre-migration
+    //! the `is_typed_object(obj)` gate returned false on the raw carrier (no
+    //! NaN-box tag bits), so every call fell down the dead TAG_NULL / unchanged
+    //! slow path. These tests prove the round-trip on the shared carrier
+    //! (gc-off), guarding against a resurrected inline-cell (old-layout) read.
+
+    use crate::ffi::data::{jit_get_field_typed, jit_set_field_typed};
+    use crate::ffi::typed_object::jit_typed_object_alloc;
+    use crate::ffi::value_ffi::TAG_NULL;
+    use shape_runtime::type_schema::{FieldType, SyncRegistryScope, TypeSchemaRegistry};
+    use std::sync::Arc;
+
+    /// Produce a v2 carrier via the migrated producer, then set + read two
+    /// scalar fields by precomputed byte offset through the migrated
+    /// `jit_set_field_typed` / `jit_get_field_typed` consumers. The written bits
+    /// land in the out-of-line slot buffer and read back identically — proving
+    /// the consumers address the v2 layout (slot buffer at storage+16), not the
+    /// deleted inline-cell layout.
+    #[test]
+    fn get_set_field_typed_roundtrip_on_v2_carrier() {
+        let mut reg = TypeSchemaRegistry::new_with_stdlib();
+        let schema_id = reg.register_type(
+            "PhaseBPoint",
+            vec![
+                ("x".to_string(), FieldType::F64),
+                ("y".to_string(), FieldType::F64),
+            ],
+        );
+        let _scope = SyncRegistryScope::enter(Arc::new(reg));
+
+        let bits = jit_typed_object_alloc(schema_id as u32, 16);
+        assert_ne!(bits, TAG_NULL, "producer resolved schema + allocated");
+
+        // Write x (offset 0) and y (offset 8) with a type_id guard that matches.
+        let ret = jit_set_field_typed(bits, 3.5f64.to_bits(), schema_id as u64, 0, 0);
+        assert_eq!(ret, bits, "set_field_typed returns the object for chaining");
+        jit_set_field_typed(bits, 4.25f64.to_bits(), schema_id as u64, 1, 8);
+
+        // Read back through the migrated consumer (also with the schema guard).
+        assert_eq!(
+            f64::from_bits(jit_get_field_typed(bits, schema_id as u64, 0, 0)),
+            3.5,
+        );
+        assert_eq!(
+            f64::from_bits(jit_get_field_typed(bits, schema_id as u64, 1, 8)),
+            4.25,
+        );
+
+        // type_id == 0 disables the guard and still reads the same slot.
+        assert_eq!(f64::from_bits(jit_get_field_typed(bits, 0, 0, 0)), 3.5);
+
+        // A mismatched type_id surfaces the guard: get → TAG_NULL, set → unchanged
+        // object with the slot NOT overwritten.
+        let wrong = schema_id as u64 + 1;
+        assert_eq!(jit_get_field_typed(bits, wrong, 0, 0), TAG_NULL);
+        let set_ret = jit_set_field_typed(bits, 99.0f64.to_bits(), wrong, 0, 0);
+        assert_eq!(set_ret, bits);
+        assert_eq!(
+            f64::from_bits(jit_get_field_typed(bits, schema_id as u64, 0, 0)),
+            3.5,
+            "mismatched-schema set must NOT overwrite the slot",
+        );
+
+        // Balance the single producer share (offset-0 header; last share frees).
+        crate::ffi::v2::jit_v2_typed_object_release(bits as *const u8);
+    }
 }
