@@ -299,6 +299,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // whose HeapHeader is at offset 0. Route to the dedicated v2
             // helper (`v2_retain` against the on-header refcount).
             Some(NativeKind::Ptr(HeapKind::TypedArray)) => self.ffi.v2_typed_array_retain,
+            // Wave-7 jit-typed-pointer-migration: v2-raw `*mut TypedObjectStorage`
+            // carrier (HeapHeader at offset 0). The legacy `arc_retain` writes a
+            // `fetch_add` at offset +4 — inside the header's kind|flags region,
+            // scribbling the object and misdirecting the GC barrier. Route to the
+            // dedicated v2 helper (`v2_retain` against the on-header refcount),
+            // exactly mirroring the TypedArray arm above.
+            Some(NativeKind::Ptr(HeapKind::TypedObject)) => self.ffi.v2_typed_object_retain,
             _ => self.ffi.arc_retain,
         }
     }
@@ -331,6 +338,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // helper (`v2_release` + stamped-element-type `drop_array` /
             // `drop_array_heap` on the last share).
             Some(NativeKind::Ptr(HeapKind::TypedArray)) => self.ffi.v2_typed_array_release,
+            // Wave-7 jit-typed-pointer-migration: mirror of the TypedObject retain
+            // arm. `v2_release` on the offset-0 header runs the heap-mask field
+            // walk + frees on the last share; the legacy `arc_release` would
+            // dealloc the wrong shape and corrupt the heap.
+            Some(NativeKind::Ptr(HeapKind::TypedObject)) => self.ffi.v2_typed_object_release,
             _ => self.ffi.arc_release,
         }
     }

@@ -136,23 +136,29 @@ impl TypedObject {
 /// Null-pointer / mis-alignment guards remain as defensive checks.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 {
+    // Wave-7 jit-typed-pointer-migration: `obj_bits` is the v2-raw
+    // `*mut TypedObjectStorage` produced by `jit_typed_object_alloc`. Read the
+    // slot's raw bits directly through the out-of-line slot buffer — no
+    // NaN-box unwrap, no inline-cell offset. The companion `NativeKind` is on
+    // the parallel-kind track per ADR-006 §2.7.5.
+    use shape_value::heap_value::TypedObjectStorage;
     if obj_bits == 0 {
         return TAG_NULL;
     }
-
-    let ptr = unbox_typed_object(obj_bits) as *const TypedObject;
-    if ptr.is_null() {
-        return TAG_NULL;
-    }
+    let ptr = obj_bits as *const TypedObjectStorage;
 
     let offset = offset as usize;
-
     // Safety: verify offset is 8-byte aligned (all fields are u64-sized slots)
     if offset % 8 != 0 {
         return TAG_NULL;
     }
-
-    unsafe { (*ptr).get_field(offset) }
+    let idx = offset / 8;
+    unsafe {
+        match (*ptr).slots().get(idx) {
+            Some(slot) => slot.raw(),
+            None => TAG_NULL,
+        }
+    }
 }
 
 /// Set a field on a typed object by byte offset.
@@ -173,29 +179,34 @@ pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 
 /// precondition.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: u64) -> u64 {
+    // Wave-7 jit-typed-pointer-migration: `obj_bits` is the v2-raw
+    // `*mut TypedObjectStorage`. Write the field through the interior-mutable
+    // `write_slot_in_place` projection (sound on a shared carrier per Q14 /
+    // ADR-006 §2.7.13) — the same primitive the VM's `DerefStore` uses.
+    use shape_value::heap_value::TypedObjectStorage;
     if obj_bits == 0 {
         return TAG_NULL;
     }
-
-    let ptr = unbox_typed_object(obj_bits) as *mut TypedObject;
-    if ptr.is_null() {
-        return TAG_NULL;
-    }
+    let ptr = obj_bits as *mut TypedObjectStorage;
 
     let offset = offset as usize;
-
     // Safety: verify offset is 8-byte aligned (all fields are u64-sized slots)
     if offset % 8 != 0 {
         return TAG_NULL;
     }
-
+    let idx = offset / 8;
     unsafe {
-        let old_bits = (*ptr).get_field(offset);
-        // GC Phase 2: kind-tag `0` — JIT-domain store, overwritten slot kind
-        // not yet threaded (queued JIT typed-pointer migration). Barrier body
-        // wired + tested; inert here.
-        super::super::gc::jit_write_barrier(old_bits, value, 0);
-        (*ptr).set_field(offset, value);
+        // Bounds guard against the schema-derived slot count.
+        if idx >= (*ptr).slots().len() {
+            return TAG_NULL;
+        }
+        // Interior-mutable projection write; returns the overwritten bits.
+        let prior = TypedObjectStorage::write_slot_in_place(ptr, idx, value);
+        // GC barrier on the overwritten slot. Kind-tag `0` — the scalar
+        // construction path does not yet thread the overwritten slot's
+        // `NativeKind` (heap-field kind threading is the Wave-7 Phase-B
+        // follow-up). Feature-off / tag-0 this is inert.
+        super::super::gc::jit_write_barrier(prior, value, 0);
     }
     obj_bits
 }
@@ -219,16 +230,15 @@ pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: 
 /// kind is the parallel-kind track companion; null-pointer guards remain.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_typed_object_schema_id(obj_bits: u64) -> u32 {
+    // Wave-7 jit-typed-pointer-migration: `obj_bits` is the v2-raw
+    // `*mut TypedObjectStorage`; read `schema_id` (u64) directly at offset 8.
+    // Used by `call_method::receiver_type_name` for receiver classification.
+    use shape_value::heap_value::TypedObjectStorage;
     if obj_bits == 0 {
         return 0;
     }
-
-    let ptr = unbox_typed_object(obj_bits) as *const TypedObject;
-    if ptr.is_null() {
-        return 0;
-    }
-
-    unsafe { (*ptr).schema_id }
+    let ptr = obj_bits as *const TypedObjectStorage;
+    unsafe { (*ptr).schema_id as u32 }
 }
 
 // ============================================================================

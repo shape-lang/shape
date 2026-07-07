@@ -113,4 +113,65 @@ mod gc_barrier_tests {
         }
         gc::clear_candidate_buffer();
     }
+
+    /// **Wave-7 jit-typed-pointer-migration — the payoff.** A cycle built from
+    /// objects produced by the JIT PRODUCER FFI (`jit_typed_object_alloc`, now
+    /// emitting the v2-raw `*mut TypedObjectStorage` carrier) is soundly read by
+    /// the GC barrier and fully collected. Pre-migration the producer emitted a
+    /// `UnifiedValue`-wrapped JIT-internal `TypedObject` (kind@0 / refcount@4)
+    /// whose bits `cycle_capable_direct_header` would misread — the exact
+    /// soundness gap the 3c JIT write-barrier could not close. This proves the
+    /// migrated producer's carrier participates in Bacon–Rajan cycle collection
+    /// identically to the VM tier's `TypedObjectStorage::_new` carrier.
+    #[test]
+    fn jit_produced_typed_object_cycle_is_collected() {
+        use crate::ffi::typed_object::jit_typed_object_alloc;
+        use shape_runtime::type_schema::{FieldType, SyncRegistryScope, TypeSchemaRegistry};
+        use shape_value::gc::{gc_buffer_possible_root, gc_decrement_precheck};
+        use std::sync::atomic::Ordering;
+
+        // Schema with one heap `Object` field ⇒ field_kinds = [Ptr(TypedObject)],
+        // heap_mask bit 0 set, slot initialised null by the producer.
+        let mut reg = TypeSchemaRegistry::new_with_stdlib();
+        let schema_id = reg.register_type(
+            "PocNode",
+            vec![("next".to_string(), FieldType::Object("PocNode".to_string()))],
+        );
+        let _scope = SyncRegistryScope::enter(Arc::new(reg));
+
+        gc::clear_candidate_buffer();
+        unsafe {
+            // Two objects straight from the JIT producer FFI.
+            let a = jit_typed_object_alloc(schema_id as u32, 8) as *mut TypedObjectStorage;
+            let b = jit_typed_object_alloc(schema_id as u32, 8) as *mut TypedObjectStorage;
+            assert!(!a.is_null() && !b.is_null());
+            assert_eq!((*a).heap_mask, 0b1, "Object field sets heap_mask bit 0");
+
+            // Link a.next=b and b.next=a, each edge taking one owning share
+            // (interior-mutation store shape).
+            v2_retain(&(*b).header);
+            *(*a).slot_cells[0].get() = ValueSlot::from_typed_object_raw(b);
+            v2_retain(&(*a).header);
+            *(*b).slot_cells[0].get() = ValueSlot::from_typed_object_raw(a);
+            assert_eq!((*a).header.refcount.load(Ordering::SeqCst), 2);
+            assert_eq!((*b).header.refcount.load(Ordering::SeqCst), 2);
+
+            // Drop both external roots (decrement-to-nonzero ⇒ buffered Purple).
+            for obj in [a, b] {
+                let surv = gc_decrement_precheck(obj as u64, NativeKind::Ptr(HeapKind::TypedObject))
+                    .expect("survivor after external drop");
+                v2_release(&(*obj).header);
+                gc_buffer_possible_root(surv.0, surv.1);
+            }
+            assert_eq!(gc::candidate_buffer_len(), 2);
+
+            // CollectCycles proves the 2-node garbage cycle and frees BOTH,
+            // memory-only — reading the JIT-produced carrier's offset-0 header
+            // and walking its heap-mask child edges soundly.
+            let freed = gc::collect_cycles();
+            assert_eq!(freed, 2, "JIT-produced TypedObject cycle fully reclaimed");
+            assert_eq!(gc::candidate_buffer_len(), 0);
+        }
+        gc::clear_candidate_buffer();
+    }
 }

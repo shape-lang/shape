@@ -251,6 +251,12 @@ pub struct FFIFuncRefs {
     pub(crate) v2_typed_array_retain: FuncRef,
     pub(crate) v2_typed_array_release: FuncRef,
 
+    // Wave-7 jit-typed-pointer-migration: v2-raw `*mut TypedObjectStorage`
+    // retain / release. Carrier has its `HeapHeader` at offset 0; the legacy
+    // `arc_retain` / `arc_release` would corrupt it (offset +4 write).
+    pub(crate) v2_typed_object_retain: FuncRef,
+    pub(crate) v2_typed_object_release: FuncRef,
+
     // v2 typed-array allocators (used by v2 lowerings).
     pub(crate) v2_array_new_f64: FuncRef,
     pub(crate) v2_array_new_i64: FuncRef,

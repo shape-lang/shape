@@ -18,11 +18,14 @@ use crate::ffi::value_ffi::UNIFIED_PTR_MASK;
 use shape_value::v2::struct_layout::FieldKind;
 use shape_vm::mir::types::*;
 
-/// Byte offset of the `data` field within `UnifiedValue<T>` (kind u16 + flags u8 + _reserved u8 + refcount u32 = 8).
-const UNIFIED_VALUE_DATA_OFFSET: i32 = 8;
-
-/// Header size of a TypedObject in bytes (schema_id u32 + ref_count u32 = 8).
-const TYPED_OBJ_HEADER: i32 = 8;
+/// Wave-7 jit-typed-pointer-migration: byte offset of the `slot_cells`
+/// `Box<[UnsafeCell<ValueSlot>]>` fat-pointer DATA word within `#[repr(C)]`
+/// `TypedObjectStorage` — the base of the OUT-OF-LINE slot buffer. JIT inline
+/// field access loads this word once, then addresses field `i` at
+/// `[slot_data + i*8]`. Pinned to the authoritative shape-value constant (whose
+/// `jit_offset_constants_hold` test asserts the `#[repr(C)]` layout).
+const TYPED_OBJ_SLOT_DATA_OFFSET: i32 =
+    shape_value::heap_value::TypedObjectStorage::JIT_OFFSET_SLOT_DATA as i32;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
     // ── Track A.1E: Shared capture lock fast path ─────────────────
@@ -739,51 +742,48 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     // ── Inline typed-struct field access ──────────────────────────────
     //
-    // When the compiler knows the field byte offset at compile time, we
-    // emit 2 Cranelift loads (pointer chase through the UnifiedValue
-    // wrapper) instead of an FFI call to jit_typed_object_get_field.
+    // Wave-7 jit-typed-pointer-migration. When the compiler knows the field
+    // byte offset at compile time, we emit 2 Cranelift loads instead of an FFI
+    // call — the SAME two-load hot path the VM tier's `slots()` accessor
+    // resolves, now against the shared v2-raw `*mut TypedObjectStorage` carrier.
     //
-    // Memory layout:
-    //   NaN-boxed bits  --&(UNIFIED_PTR_MASK)-->  UnifiedValue<*const u8>
-    //     +8 (data field) -->  raw TypedObject*
-    //       +8 (TYPED_OBJ_HEADER) + field_byte_offset --> field u64 slot
+    // Memory layout (carrier bits ARE the storage pointer — no NaN-box, no mask):
+    //   storage_ptr +16 (slot_cells DATA word) --load--> slot_data (buffer base)
+    //     [slot_data + field_byte_offset] --> field u64 slot (out-of-line)
+    //
+    // The slot buffer is a SEPARATE allocation (`Box<[UnsafeCell<ValueSlot>]>`),
+    // so the field offset from `slot_data` is exactly `byte_off` (= idx*8) with
+    // NO object-header addend — the prior JIT-internal carrier stored fields
+    // inline after an 8-byte header, hence the deleted `TYPED_OBJ_HEADER`.
 
-    /// Extract the raw `TypedObject*` from a NaN-boxed typed-object value.
+    /// Load the out-of-line slot-buffer base of a v2-raw TypedObject carrier.
     ///
-    /// Two-step pointer chase:
-    /// 1. `uv_ptr = bits & UNIFIED_PTR_MASK` → `UnifiedValue<*const u8>*`
-    /// 2. `to_ptr = load i64 [uv_ptr + 8]`   → `TypedObject*`
-    fn emit_typed_object_ptr(&mut self, nanboxed_bits: Value) -> Value {
-        let ptr_mask = self
-            .builder
-            .ins()
-            .iconst(types::I64, UNIFIED_PTR_MASK as i64);
-        let uv_ptr = self.builder.ins().band(nanboxed_bits, ptr_mask);
-        // Load the `data` field from the UnifiedValue wrapper
+    /// `storage_bits` IS the `*const TypedObjectStorage` (no NaN-box, no mask).
+    /// One load recovers the `slot_cells` fat-pointer DATA word:
+    ///   `slot_data = load i64 [storage_bits + TYPED_OBJ_SLOT_DATA_OFFSET]`
+    fn emit_typed_object_ptr(&mut self, storage_bits: Value) -> Value {
         self.builder.ins().load(
             types::I64,
             MemFlags::trusted(),
-            uv_ptr,
-            UNIFIED_VALUE_DATA_OFFSET,
+            storage_bits,
+            TYPED_OBJ_SLOT_DATA_OFFSET,
         )
     }
 
-    /// Inline typed field read: load u64 from `[typed_obj_ptr + HEADER + byte_off]`.
-    fn inline_typed_field_get(&mut self, nanboxed_bits: Value, byte_off: u16) -> Value {
-        let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
-        let offset = TYPED_OBJ_HEADER + byte_off as i32;
+    /// Inline typed field read: load u64 from `[slot_data + byte_off]`.
+    fn inline_typed_field_get(&mut self, storage_bits: Value, byte_off: u16) -> Value {
+        let slot_data = self.emit_typed_object_ptr(storage_bits);
         self.builder
             .ins()
-            .load(types::I64, MemFlags::trusted(), to_ptr, offset)
+            .load(types::I64, MemFlags::trusted(), slot_data, byte_off as i32)
     }
 
-    /// Inline typed field write: store u64 to `[typed_obj_ptr + HEADER + byte_off]`.
-    fn inline_typed_field_set(&mut self, nanboxed_bits: Value, byte_off: u16, val: Value) {
-        let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
-        let offset = TYPED_OBJ_HEADER + byte_off as i32;
+    /// Inline typed field write: store u64 to `[slot_data + byte_off]`.
+    fn inline_typed_field_set(&mut self, storage_bits: Value, byte_off: u16, val: Value) {
+        let slot_data = self.emit_typed_object_ptr(storage_bits);
         self.builder
             .ins()
-            .store(MemFlags::trusted(), val, to_ptr, offset);
+            .store(MemFlags::trusted(), val, slot_data, byte_off as i32);
     }
 
     /// γ-CP4 jit-makefieldref (ADR-006 §2.7.13 / §2.3): compute the
@@ -793,14 +793,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// A field reference (`&mut b.value`) is the address of the field's
     /// 8-byte slot inside the object — the JIT analogue of the VM's
     /// `RefTarget::TypedField { receiver, field_offset, .. }` carrier
-    /// (`crates/shape-value/src/reference.rs`). The VM resolves the field
-    /// slot as `TypedObjectStorage` base + `field_offset`; the JIT does the
-    /// structurally identical computation against its own
-    /// `UnifiedValue<*const u8>`-wrapped `TypedObject` heap layout:
+    /// (`crates/shape-value/src/reference.rs`). Post Wave-7 the JIT and VM
+    /// share the v2-raw `TypedObjectStorage` carrier, so the computation is now
+    /// byte-identical: the field slot lives in the out-of-line slot buffer at
+    /// `slot_data + byte_off`, where `slot_data` is the `slot_cells` DATA word:
     ///
-    ///   nanboxed_bits --&UNIFIED_PTR_MASK--> UnifiedValue*
-    ///     +UNIFIED_VALUE_DATA_OFFSET --load--> raw TypedObject*
-    ///       +TYPED_OBJ_HEADER + byte_off ---> field slot address
+    ///   storage_bits +TYPED_OBJ_SLOT_DATA_OFFSET --load--> slot_data
+    ///     slot_data + byte_off ---> field slot address
     ///
     /// The returned address is a real pointer into the live object's field
     /// memory; loading/storing through it (`Place::Deref`) mutates the
@@ -816,12 +815,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// stays valid for every deref reachable from this borrow.
     pub(crate) fn emit_typed_field_address(
         &mut self,
-        nanboxed_bits: Value,
+        storage_bits: Value,
         byte_off: u16,
     ) -> Value {
-        let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
-        let offset = TYPED_OBJ_HEADER + byte_off as i32;
-        self.builder.ins().iadd_imm(to_ptr, offset as i64)
+        let slot_data = self.emit_typed_object_ptr(storage_bits);
+        self.builder.ins().iadd_imm(slot_data, byte_off as i64)
     }
 
     /// γ-CP4: resolve a `Place::Field`'s slot byte offset for the
@@ -1495,59 +1493,34 @@ mod tests {
         (module, ctx, fb_ctx)
     }
 
-    /// Simulate the NaN-boxed UnifiedValue<*const u8> pointer chase that
-    /// `inline_typed_field_get` / `inline_typed_field_set` perform.
-    ///
-    /// Allocates:
-    /// - A TypedObject (header 8 bytes + N field slots of 8 bytes each)
-    /// - A UnifiedValue wrapper: [kind:u16, flags:u8, _reserved:u8, refcount:u32, data:*const u8]
-    ///
-    /// Returns `(nanboxed_bits, typed_obj_ptr, uv_ptr)` — caller must free both allocations.
-    unsafe fn make_test_typed_object(field_count: usize) -> (u64, *mut u8, *mut u8) {
-        use crate::ffi::typed_object::TYPED_OBJECT_HEADER_SIZE;
+    /// Wave-7 jit-typed-pointer-migration: build a real v2-raw
+    /// `TypedObjectStorage` (`field_count` `Float64` slots) and return its raw
+    /// pointer bits — exactly what `jit_typed_object_alloc` now produces and
+    /// what `inline_typed_field_get` / `_set` consume. Caller frees via
+    /// `TypedObjectStorage::_drop`.
+    unsafe fn make_test_typed_object(field_count: usize) -> (u64, *mut shape_value::heap_value::TypedObjectStorage)
+    {
+        use shape_value::heap_value::TypedObjectStorage;
+        use shape_value::native_kind::NativeKind;
+        use shape_value::slot::ValueSlot;
+        use std::sync::Arc;
 
-        // 1. Allocate the TypedObject itself (8-byte header + fields)
-        let to_size = TYPED_OBJECT_HEADER_SIZE + field_count * 8;
-        let to_layout = std::alloc::Layout::from_size_align(to_size, 8).unwrap();
-        let to_ptr = unsafe { std::alloc::alloc_zeroed(to_layout) };
-        assert!(!to_ptr.is_null());
-
-        // 2. Allocate the UnifiedValue<*const u8> wrapper (16 bytes: 8 header + 8 data)
-        let uv_layout = std::alloc::Layout::from_size_align(16, 8).unwrap();
-        let uv_ptr = unsafe { std::alloc::alloc_zeroed(uv_layout) };
-        assert!(!uv_ptr.is_null());
-
-        // Fill the UnifiedValue fields:
-        //   kind (u16) at offset 0
-        unsafe { *(uv_ptr as *mut u16) = crate::ffi::value_ffi::HK_TYPED_OBJECT };
-        //   refcount (u32) at offset 4
-        unsafe { *(uv_ptr.add(4) as *mut u32) = 1 };
-        //   data (*const u8) at offset 8
-        unsafe { *(uv_ptr.add(8) as *mut *const u8) = to_ptr as *const u8 };
-
-        // 3. Build NaN-boxed bits: TAG_HEAP with UNIFIED_HEAP_FLAG + pointer
-        let bits = shape_value::ValueBits::make_unified_heap(uv_ptr as *const u8).raw();
-
-        (bits, to_ptr, uv_ptr)
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Float64; field_count]);
+        let slots: Vec<ValueSlot> = (0..field_count).map(|_| ValueSlot::from_raw(0)).collect();
+        let ptr = TypedObjectStorage::_new(7, slots.into_boxed_slice(), 0, kinds);
+        (ptr as u64, ptr)
     }
 
-    unsafe fn free_test_typed_object(to_ptr: *mut u8, uv_ptr: *mut u8, field_count: usize) {
-        use crate::ffi::typed_object::TYPED_OBJECT_HEADER_SIZE;
-        let to_size = TYPED_OBJECT_HEADER_SIZE + field_count * 8;
-        let to_layout = std::alloc::Layout::from_size_align(to_size, 8).unwrap();
-        unsafe { std::alloc::dealloc(to_ptr, to_layout) };
-        let uv_layout = std::alloc::Layout::from_size_align(16, 8).unwrap();
-        unsafe { std::alloc::dealloc(uv_ptr, uv_layout) };
-    }
-
-    /// Test that the inline typed field read produces the correct result
-    /// by compiling a Cranelift function that performs the UNIFIED_PTR_MASK +
-    /// double-load pattern used by `inline_typed_field_get`.
+    /// Test that the inline typed field read produces the correct result by
+    /// compiling a Cranelift function that performs the two-load pattern used by
+    /// `inline_typed_field_get` against the v2-raw carrier: load the slot-buffer
+    /// base at `[storage_ptr + TYPED_OBJ_SLOT_DATA_OFFSET]`, then the field at
+    /// `[slot_data + byte_off]`.
     #[test]
-    fn inline_typed_field_get_through_unified_value() {
+    fn inline_typed_field_get_through_storage() {
         let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
 
-        // fn(nanboxed_bits: i64) -> i64
+        // fn(storage_bits: i64) -> i64
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.returns.push(AbiParam::new(types::I64));
@@ -1571,22 +1544,16 @@ mod tests {
             let bits = builder.block_params(entry)[0];
 
             // Manually emit the inline_typed_field_get pattern for field at byte_off=8
-            // (second field, first field is at byte_off=0).
-            let ptr_mask = builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
-            let uv_ptr = builder.ins().band(bits, ptr_mask);
-            let to_ptr = builder.ins().load(
+            // (second field). load slot_data @ +16, then field @ +8.
+            let slot_data = builder.ins().load(
                 types::I64,
                 MemFlags::trusted(),
-                uv_ptr,
-                UNIFIED_VALUE_DATA_OFFSET,
+                bits,
+                TYPED_OBJ_SLOT_DATA_OFFSET,
             );
-            // field at byte_off=8 -> total offset = TYPED_OBJ_HEADER(8) + 8 = 16
-            let result = builder.ins().load(
-                types::I64,
-                MemFlags::trusted(),
-                to_ptr,
-                TYPED_OBJ_HEADER + 8,
-            );
+            let result = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), slot_data, 8);
 
             builder.ins().return_(&[result]);
             builder.finalize();
@@ -1599,34 +1566,35 @@ mod tests {
         let code_ptr = module.get_finalized_function(func_id);
 
         unsafe {
-            let (bits, to_ptr, uv_ptr) = make_test_typed_object(3);
+            let (bits, ptr) = make_test_typed_object(3);
 
-            // Write test values to TypedObject fields (NaN-boxed numbers)
-            let field_base = to_ptr.add(8) as *mut u64; // past 8-byte header
-            *field_base = crate::ffi::value_ffi::box_number(100.0); // field[0] at offset 0
-            *field_base.add(1) = crate::ffi::value_ffi::box_number(200.0); // field[1] at offset 8
-            *field_base.add(2) = crate::ffi::value_ffi::box_number(300.0); // field[2] at offset 16
+            // Write RAW f64 bits into the out-of-line slots (matching the JIT's
+            // raw-native field representation).
+            use shape_value::heap_value::TypedObjectStorage;
+            TypedObjectStorage::write_slot_in_place(ptr, 0, 100.0f64.to_bits());
+            TypedObjectStorage::write_slot_in_place(ptr, 1, 200.0f64.to_bits());
+            TypedObjectStorage::write_slot_in_place(ptr, 2, 300.0f64.to_bits());
 
             let func: unsafe fn(u64) -> u64 = std::mem::transmute(code_ptr);
             let result = func(bits);
             assert_eq!(
-                crate::ffi::value_ffi::unbox_number(result),
+                f64::from_bits(result),
                 200.0,
                 "inline_typed_field_get should load the second field (byte_off=8)"
             );
 
-            free_test_typed_object(to_ptr, uv_ptr, 3);
+            TypedObjectStorage::_drop(ptr);
         }
     }
 
-    /// Test that the inline typed field write correctly stores a value
-    /// by compiling a Cranelift function that performs the UNIFIED_PTR_MASK +
-    /// load + store pattern used by `inline_typed_field_set`.
+    /// Test that the inline typed field write correctly stores a value by
+    /// compiling a Cranelift function that performs the load-base + store pattern
+    /// used by `inline_typed_field_set` against the v2-raw carrier.
     #[test]
-    fn inline_typed_field_set_through_unified_value() {
+    fn inline_typed_field_set_through_storage() {
         let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
 
-        // fn(nanboxed_bits: i64, value: i64)
+        // fn(storage_bits: i64, value: i64)
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
         sig.params.push(AbiParam::new(types::I64));
@@ -1650,20 +1618,14 @@ mod tests {
             let bits = builder.block_params(entry)[0];
             let val = builder.block_params(entry)[1];
 
-            // Manually emit the inline_typed_field_set pattern for field at byte_off=0
-            // (first field).
-            let ptr_mask = builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
-            let uv_ptr = builder.ins().band(bits, ptr_mask);
-            let to_ptr = builder.ins().load(
+            // Manually emit the inline_typed_field_set pattern for field at byte_off=0.
+            let slot_data = builder.ins().load(
                 types::I64,
                 MemFlags::trusted(),
-                uv_ptr,
-                UNIFIED_VALUE_DATA_OFFSET,
+                bits,
+                TYPED_OBJ_SLOT_DATA_OFFSET,
             );
-            // field at byte_off=0 -> total offset = TYPED_OBJ_HEADER(8) + 0 = 8
-            builder
-                .ins()
-                .store(MemFlags::trusted(), val, to_ptr, TYPED_OBJ_HEADER + 0);
+            builder.ins().store(MemFlags::trusted(), val, slot_data, 0);
 
             builder.ins().return_(&[]);
             builder.finalize();
@@ -1676,36 +1638,33 @@ mod tests {
         let code_ptr = module.get_finalized_function(func_id);
 
         unsafe {
-            let (bits, to_ptr, uv_ptr) = make_test_typed_object(2);
+            let (bits, ptr) = make_test_typed_object(2);
 
             let func: unsafe fn(u64, u64) = std::mem::transmute(code_ptr);
-            func(bits, crate::ffi::value_ffi::box_number(999.0));
+            func(bits, 999.0f64.to_bits());
 
-            // Verify the value was written to the correct location
-            let field_base = to_ptr.add(8) as *const u64;
-            let stored = *field_base;
+            // Verify the value was written to the first out-of-line slot.
+            use shape_value::heap_value::TypedObjectStorage;
+            let stored = (*ptr).slots()[0].raw();
             assert_eq!(
-                crate::ffi::value_ffi::unbox_number(stored),
+                f64::from_bits(stored),
                 999.0,
                 "inline_typed_field_set should store to the first field (byte_off=0)"
             );
 
-            free_test_typed_object(to_ptr, uv_ptr, 2);
+            TypedObjectStorage::_drop(ptr);
         }
     }
 
-    /// Verify that the constants match the actual Rust struct layouts.
+    /// Verify the JIT inline-access offset constant matches the authoritative
+    /// shape-value `#[repr(C)]` layout constant (itself pinned by
+    /// `TypedObjectStorage::jit_offset_constants_hold`).
     #[test]
     fn constants_match_struct_layouts() {
         assert_eq!(
-            UNIFIED_VALUE_DATA_OFFSET as usize,
-            std::mem::offset_of!(crate::ffi::jit_kinds::UnifiedValue::<*const u8>, data),
-            "UNIFIED_VALUE_DATA_OFFSET must match UnifiedValue<*const u8>::data offset"
-        );
-        assert_eq!(
-            TYPED_OBJ_HEADER as usize,
-            crate::ffi::typed_object::TYPED_OBJECT_HEADER_SIZE,
-            "TYPED_OBJ_HEADER must match TYPED_OBJECT_HEADER_SIZE"
+            TYPED_OBJ_SLOT_DATA_OFFSET as usize,
+            shape_value::heap_value::TypedObjectStorage::JIT_OFFSET_SLOT_DATA,
+            "TYPED_OBJ_SLOT_DATA_OFFSET must match TypedObjectStorage::JIT_OFFSET_SLOT_DATA"
         );
     }
 

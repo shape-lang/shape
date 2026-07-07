@@ -1291,6 +1291,43 @@ pub extern "C" fn jit_v2_typed_array_release(ptr: *const u8) {
     unsafe { shape_value::v2::typed_array::release_v2_typed_array(ptr as *mut u8) };
 }
 
+// Wave-7 jit-typed-pointer-migration: v2-raw `*mut TypedObjectStorage` retain /
+// release. The carrier's `HeapHeader` is at offset 0; the legacy `arc_retain` /
+// `arc_release` would `fetch_add` / `fetch_sub` at offset +4 (inside the header's
+// kind|flags), corrupting the object and misdirecting the GC barrier. These route
+// through the same header-refcount primitives the VM tier uses (`v2_retain` and
+// `TypedObjectStorage::release_elem`), keeping VM and JIT on ONE carrier.
+
+/// Retain (bump the offset-0 HeapHeader refcount of) a v2-raw
+/// `*mut TypedObjectStorage` carrier.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_typed_object_retain(ptr: *const u8) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        shape_value::v2::refcount::v2_retain(
+            &(*(ptr as *const shape_value::heap_value::TypedObjectStorage)).header,
+        )
+    };
+}
+
+/// Release one refcount share of a v2-raw `*mut TypedObjectStorage` carrier;
+/// on the last share, `TypedObjectStorage::_drop` runs the heap-mask field walk
+/// and frees the allocation (via the `HeapElement::release_elem` trait method).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_typed_object_release(ptr: *const u8) {
+    if ptr.is_null() {
+        return;
+    }
+    use shape_value::v2::heap_element::HeapElement;
+    unsafe {
+        shape_value::heap_value::TypedObjectStorage::release_elem(
+            ptr as *const shape_value::heap_value::TypedObjectStorage,
+        )
+    };
+}
+
 // ============================================================================
 // Struct allocation FFI
 // ============================================================================
