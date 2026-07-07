@@ -2,8 +2,7 @@ export const meta = {
   name: 'wf6-finance-stack-overflow',
   description: 'Audit finding #15: std::finance is UNUSABLE — importing/using a std::finance function triggers a COMPILER stack-overflow (compile-time recursion: type inference / comptime / import cycle). Diagnose-first (reproduce the overflow from scratch, pin the recursion root), fix at the root so std::finance compiles + a finance function runs, independent Opus verify, gates + regression test.',
   phases: [
-    { title: 'Diagnose', detail: 'reproduce the compiler stack-overflow; pin the unbounded recursion root' },
-    { title: 'Fix', detail: 'break the recursion at the root; std::finance compiles + a fn runs' },
+    { title: 'Fix', detail: 'add occurs-check into Type::Concrete; std::finance compiles + a fn runs' },
     { title: 'Verify', detail: 'independent Opus: finance usable; the fix is a real termination, not a limit bump' },
     { title: 'Finish', detail: 'gates + regression test (finance program compiles+runs)' },
   ],
@@ -28,18 +27,13 @@ const CTX = [
   'STRUCTURED-OUTPUT: emit ONE clean JSON object, 1-4 plain sentences per field, NO XML tags / code blocks in fields.',
 ].join('\n')
 
-phase('Diagnose')
-const DIAG_SCHEMA = {
-  type: 'object', additionalProperties: false,
-  required: ['reproduced', 'recursion_root', 'fix_plan'],
-  properties: {
-    reproduced: { type: 'boolean', description: 'true iff a finance program stack-overflows the COMPILER from scratch' },
-    recursion_root: { type: 'string', description: 'the exact unbounded recursion (file:line + kind: type-infer / comptime / generic / import cycle)' },
-    fix_plan: { type: 'string', description: 'the root termination fix, brief' },
-  },
+// Diagnosis already established (recovered from the prior run's transcript, gdb-confirmed):
+const diag = {
+  reproduced: true,
+  recursion_root: 'Infinite recursion: Unifier::apply_to_annotation (unifier.rs:100, calls apply_substitutions) <-> Unifier::apply_substitutions (unifier.rs:55/86, calls apply_to_annotation for Type::Concrete) chasing a CYCLIC substitution binding X |-> Type::Concrete(Object{...X...}) that transitively embeds X own tyvar marker. ROOT: the occurs-check occurs_in (constraints.rs:467-479) returns false for the Type::Concrete(_) arm (line 477) — it never traverses INTO an annotation to find embedded tyvar markers — so the guard at constraints.rs:328 fails to reject X |-> Concrete(...X...) and bind (constraints.rs:332 / unifier.rs:30) stores the cycle. Unifier::bind has no occurs-check beyond the trivial Variable(v)==var case, and most bind call sites are unguarded. Triggered by engine.shape open object-literal state maps flowing through data.simulate(|candle, state, idx| ...) closures where state and the returned object literal unify a var against an object type containing itself.',
+  fix_plan: 'Extend occurs_in to recurse into Type::Concrete(annotation), detecting any embedded tyvar marker (walk the annotation tree via annotation_as_tyvar) equal to var, so the constraints.rs:328 guard rejects the cyclic binding as TypeError::InfiniteType. Additionally harden Unifier::bind with the same occurs-check so EVERY bind site (not only the one guarded one) is protected. Real termination (honest infinite-type error), not a stack/depth cap, not a type-check weakening.',
+  repro: 'from std::finance::backtest::engine use { backtest }  ->  thread main has overflowed its stack; fatal runtime error: stack overflow (exit 134). Only backtest::engine triggers it; other finance modules give ordinary compile errors.',
 }
-const diag = await agent(CTX + '\n\nPHASE 1 — DIAGNOSE ONLY (no fix). Reproduce the compiler stack-overflow on a minimal finance program; pin the exact unbounded recursion root with evidence. Do NOT commit.',
-  { label: 'diagnose', phase: 'Diagnose', effort: 'high', schema: DIAG_SCHEMA })
 
 phase('Fix')
 const FIX_SCHEMA = {
