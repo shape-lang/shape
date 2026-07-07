@@ -346,7 +346,11 @@ fn append_kept_slots(
         let new_idx = merged_slots.len();
         let bits = src_slots[orig_idx].raw();
         // Per-slot kind from the source's parallel-kind track.
-        let kind = src_kinds.get(orig_idx).copied().unwrap_or(NativeKind::Bool);
+        // TypedObjectStorage::new/_new enforce `field_kinds.len() ==
+        // slots.len()`, and `orig_idx < src_slots.len()` is guarded above,
+        // so `orig_idx < src_kinds.len()`. Direct index surfaces any
+        // violation as a loud OOB panic instead of fabricating a Bool.
+        let kind = src_kinds[orig_idx];
         merged_slots.push(src_slots[orig_idx]);
         merged_kinds.push(kind);
         if src_mask & (1u64 << orig_idx) != 0 {

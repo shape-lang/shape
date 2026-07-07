@@ -896,14 +896,12 @@ impl VirtualMachine {
             "ADR-006 §2.7.8 / Q10 lockstep invariant violated at \
              module_binding_read_kinded_raw",
         );
-        // The lockstep invariant has been observed; if the kinds vec
-        // is short the bounded access falls back to the no-op sentinel
-        // rather than panicking on a release build.
-        let kind = self
-            .module_binding_kinds
-            .get(index)
-            .copied()
-            .unwrap_or(NativeKind::Bool);
+        // ADR-006 §2.7.8 / Q10 lockstep: `module_binding_kinds` is parallel
+        // to `module_bindings`, and `index < module_bindings.len()` is
+        // guarded by the early return above. Direct index surfaces any
+        // invariant violation as a loud OOB panic instead of fabricating a
+        // Bool no-op sentinel.
+        let kind = self.module_binding_kinds[index];
         (self.module_bindings[index], kind)
     }
 
@@ -1035,11 +1033,12 @@ impl VirtualMachine {
             return (0u64, NativeKind::Bool);
         }
         let bits = self.module_bindings[index];
-        let kind = self
-            .module_binding_kinds
-            .get(index)
-            .copied()
-            .unwrap_or(NativeKind::Bool);
+        // ADR-006 §2.7.8 / Q10 lockstep: `module_binding_kinds` is parallel
+        // to `module_bindings`, and `index < module_bindings.len()` is
+        // guarded by the early return above. Direct index surfaces any
+        // invariant violation as a loud OOB panic instead of fabricating a
+        // Bool no-op sentinel.
+        let kind = self.module_binding_kinds[index];
         self.module_bindings[index] = Self::NONE_BITS;
         if index < self.module_binding_kinds.len() {
             self.module_binding_kinds[index] = NativeKind::Bool;
