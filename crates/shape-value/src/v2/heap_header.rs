@@ -72,6 +72,77 @@ pub const FLAG_READONLY: u8 = 0x04;
 /// `closure_raw::{typed_closure_captures_dropped, set_typed_closure_captures_dropped}`.
 pub const FLAG_CLOSURE_CAPTURES_DROPPED: u8 = 0x08;
 
+// ---------------------------------------------------------------------------
+// GC cycle-collection metadata (WF-3C prep-fix A, real-gc-cycle-collection.md
+// §3.1 CORRECTED carrier note / §7 metadata placement).
+//
+// This is the V2 header — the actual runtime carrier. Every v2-raw carrier
+// (TypedObject, TypedArray, Closure, StringV2, DecimalV2, TraitObject) embeds
+// this struct at offset 0, so GC color/buffered metadata must live HERE, not on
+// the v1 `crate::heap_header::HeapHeader` (which has zero runtime-carrier uses).
+//
+// Bacon–Rajan trial-deletion needs a 2-bit tri-color (Black/Gray/White/Purple)
+// plus a 1-bit `buffered` flag per header carrier. Bits 0–2 are
+// MARKED/PINNED/READONLY; bit 3 (0x08) is FLAG_CLOSURE_CAPTURES_DROPPED (already
+// taken on closure blocks). To avoid ANY collision with that flag with no
+// reconciliation, the GC COLOR occupies bits 4–5 (0x10|0x20) and BUFFERED
+// occupies bit 6 (0x40); bit 7 is free. The header layout / size /
+// OFFSET_FLAGS / offset tests stay byte-identical.
+//
+// These are metadata *constants only* — no struct field, no discriminator
+// (ADR-005 §1). Access is via `crate::gc::gc_meta(ptr, kind)`, which dispatches
+// on `HeapKind` and reads/writes this flags byte for header carriers or routes
+// to the header-less side table otherwise.
+//
+// The whole surface is gated behind the default-off `gc` Cargo feature so that
+// feature-off compilation is a strict no-op.
+/// GC color field mask within `HeapHeader.flags` (bits 4–5, 2-bit color).
+#[cfg(feature = "gc")]
+pub const GC_COLOR_MASK: u8 = 0b0011_0000;
+/// Bit position of the low color bit within `HeapHeader.flags`.
+#[cfg(feature = "gc")]
+pub const GC_COLOR_SHIFT: u8 = 4;
+/// GC `buffered` flag within `HeapHeader.flags` (bit 6).
+#[cfg(feature = "gc")]
+pub const GC_FLAG_BUFFERED: u8 = 0b0100_0000;
+
+/// Bacon–Rajan trial-deletion color (design §3.1). Two-bit field stored in
+/// `HeapHeader.flags` bits 4–5 for header carriers, or in the side table for
+/// header-less kinds. Ordinals are stable (persisted into the flags byte).
+#[cfg(feature = "gc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GcColor {
+    /// In use / not a cycle candidate.
+    Black = 0,
+    /// Being trial-scanned.
+    Gray = 1,
+    /// Provisional garbage.
+    White = 2,
+    /// Possible cycle root (buffered candidate).
+    Purple = 3,
+}
+
+#[cfg(feature = "gc")]
+impl GcColor {
+    /// Decode a 2-bit color ordinal (already masked+shifted into 0..=3).
+    #[inline]
+    pub fn from_bits(bits: u8) -> Self {
+        match bits & 0b11 {
+            0 => GcColor::Black,
+            1 => GcColor::Gray,
+            2 => GcColor::White,
+            _ => GcColor::Purple,
+        }
+    }
+
+    /// The 2-bit ordinal for this color.
+    #[inline]
+    pub fn to_bits(self) -> u8 {
+        self as u8
+    }
+}
+
 /// 8-byte header for all v2 heap-allocated objects.
 /// Refcount at offset 0 for fastest access.
 #[repr(C)]

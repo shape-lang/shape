@@ -17,6 +17,17 @@ pub mod aligned_vec;
 pub mod content;
 pub mod context;
 pub mod datatable;
+/// GC cycle-collection metadata + accessors (Phase 0). Gated behind the
+/// default-off `gc` Cargo feature; feature-off is a strict no-op.
+#[cfg(feature = "gc")]
+pub mod gc;
+/// Read-only heap-child edge visitor (Phase 1) — consumes the SAME edge
+/// enumeration primitive the destructive Drop path uses, so the collector's
+/// trace and the Drop walk cannot drift (real-gc-cycle-collection.md §3.4).
+/// Gated behind the default-off `gc` Cargo feature; feature-off is a strict
+/// no-op.
+#[cfg(feature = "gc")]
+pub mod gc_visit;
 pub mod heap_header;
 #[macro_use]
 pub mod heap_variants;

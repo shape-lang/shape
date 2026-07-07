@@ -4305,11 +4305,52 @@ impl TypedObjectStorage {
     /// field_kinds / heap_mask all valid per the `new` / `_new`
     /// construction-side contract). Must run at most once per instance.
     unsafe fn drop_fields(&mut self) {
-        use crate::heap_value::HeapKind;
-        use crate::native_kind::NativeKind;
+        // Edge enumeration is the single shared primitive
+        // `for_each_heap_child_edge` — the SAME enumeration the read-only GC
+        // cycle visitor (`crate::gc_visit::for_each_heap_child`, `gc` feature)
+        // consumes. One source of truth: this destructive path releases exactly
+        // the edge set the primitive yields (via `release_one_field`), so the
+        // Drop walk and the collector's trace can never drift out of lockstep
+        // (real-gc-cycle-collection.md §3.4 lockstep discipline). The
+        // enumeration and per-`HeapKind` release logic are unchanged from the
+        // pre-extraction form, so Drop semantics stay byte-identical.
+        //
+        // Reborrow through a raw pointer so the enumerator's shared read of
+        // `self.slots()` and the per-field release (which also reads `self` for
+        // Miri provenance) can coexist without a borrow conflict — both are
+        // read-only views of a uniquely-owned object at drop time; neither
+        // mutates `self`.
+        let this: *const Self = self;
+        // SAFETY: `this` aliases `self`, uniquely owned during drop. Both the
+        // enumerator and `release_one_field` only read immutable state and
+        // retire external Arc/heap shares; no mutation of `self` occurs.
+        unsafe {
+            (*this).for_each_heap_child_edge(|i, bits, kind| {
+                (*this).release_one_field(i, bits, kind);
+            });
+        }
+    }
 
+    /// Shared, **read-only** heap-child edge enumeration (design §3.4).
+    ///
+    /// Yields `(slot_index, bits, kind)` for every slot that holds a live heap
+    /// pointer — exactly the edges the destructive [`Self::drop_fields`] path
+    /// releases (it is the sole enumeration both call). The GC cycle visitor
+    /// (`crate::gc_visit::for_each_heap_child`) consumes the same enumeration
+    /// read-only, so the destructive walk and the collector's trace can never
+    /// drift. Dispatch is on the object's own `heap_mask` + per-field
+    /// `NativeKind` track — no `is_heap()` probe, no tag decode, no `ValueWord`.
+    ///
+    /// # Safety
+    /// `self` must be in a live, constructed state (slots / field_kinds /
+    /// heap_mask valid per the `new` / `_new` construction-side contract).
+    #[inline]
+    pub(crate) unsafe fn for_each_heap_child_edge<F>(&self, mut f: F)
+    where
+        F: FnMut(usize, u64, crate::native_kind::NativeKind),
+    {
         // Defensive: if construction left a length mismatch (debug_assert
-        // catches it earlier), drop only the prefix where both bookkeeping
+        // catches it earlier), enumerate only the prefix where both bookkeeping
         // structures agree. Better a leak than UB.
         let slots = self.slots();
         let n = slots.len().min(self.field_kinds.len());
@@ -4325,231 +4366,246 @@ impl TypedObjectStorage {
             if bits == 0 {
                 continue;
             }
-            // SAFETY (each arm): the construction-side contract guarantees
-            // that for every set heap_mask bit, the slot's bits are the
-            // result of `Arc::into_raw::<T>` where `T` matches `field_kinds[i]`.
-            // We reclaim exactly one strong-count share per slot via
-            // `Arc::decrement_strong_count::<T>` and then never look at the
-            // bits again.
-            unsafe {
-                match self.field_kinds[i] {
-                    NativeKind::String => {
+            f(i, bits, self.field_kinds[i]);
+        }
+    }
+
+    /// Release exactly one heap-child edge yielded by
+    /// [`Self::for_each_heap_child_edge`]. This is the per-`HeapKind`
+    /// destructive dispatch extracted verbatim from the former `drop_fields`
+    /// body — only the enumeration moved to the shared primitive; the release
+    /// logic (and its Miri-provenance handling) is unchanged, so Drop semantics
+    /// stay byte-identical.
+    ///
+    /// # Safety
+    /// `(i, bits, kind)` must be an edge just yielded by
+    /// `for_each_heap_child_edge` on `self`: `bits` is one `Arc<T>`
+    /// strong-count share (or v2-raw carrier share) for the `T` matching
+    /// `kind`, retired exactly once here.
+    #[inline]
+    unsafe fn release_one_field(&self, i: usize, bits: u64, kind: crate::native_kind::NativeKind) {
+        use crate::heap_value::HeapKind;
+        use crate::native_kind::NativeKind;
+        // SAFETY (each arm): the construction-side contract guarantees that for
+        // every set heap_mask bit, the slot's bits are the result of
+        // `Arc::into_raw::<T>` where `T` matches `kind`. We reclaim exactly one
+        // strong-count share per slot via `Arc::decrement_strong_count::<T>`
+        // (or the matching v2-raw `release_elem`) and then never look at the
+        // bits again.
+        unsafe {
+            match kind {
+                NativeKind::String => {
+                    self.decrement_string_field(i, bits);
+                }
+                // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
+                // A TypedObject field of kind `NativeKind::StringV2` /
+                // `NativeKind::DecimalV2` holds slot bits = `ptr as u64`
+                // where `ptr: *const StringObj` / `*const DecimalObj`
+                // — v2-raw carrier shape per the §H.4 H-c decision.
+                // Refcount discipline goes through `release_elem`
+                // (HeapElement trait — calls `v2_release` against the
+                // HeapHeader at offset 0; on refcount=0 the carrier-side
+                // `drop` deallocates the repr(C) 24-byte struct). NOT
+                // `Arc::decrement_strong_count` — these are manually-
+                // allocated carriers, not `Arc<T>` allocations.
+                NativeKind::StringV2 => {
+                    use crate::v2::heap_element::HeapElement;
+                    crate::v2::string_obj::StringObj::release_elem(
+                        bits as *const crate::v2::string_obj::StringObj,
+                    );
+                }
+                NativeKind::DecimalV2 => {
+                    use crate::v2::heap_element::HeapElement;
+                    crate::v2::decimal_obj::DecimalObj::release_elem(
+                        bits as *const crate::v2::decimal_obj::DecimalObj,
+                    );
+                }
+                NativeKind::Ptr(hk) => match hk {
+                    HeapKind::String => {
                         self.decrement_string_field(i, bits);
                     }
-                    // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
-                    // A TypedObject field of kind `NativeKind::StringV2` /
-                    // `NativeKind::DecimalV2` holds slot bits = `ptr as u64`
-                    // where `ptr: *const StringObj` / `*const DecimalObj`
-                    // — v2-raw carrier shape per the §H.4 H-c decision.
+                    // r5c-2-β-δ-(α) (2026-05-20): `HeapKind::TypedArray`
+                    // dispatch arm RE-INSTATED. The V3-S5 ckpt-5-prime
+                    // retirement claimed "no live slot bits carry this
+                    // kind", but a struct with an `Array<T>` field is
+                    // exactly such a site — `field_tag_to_native_kind`
+                    // maps `FIELD_TAG_ARRAY` → `Ptr(HeapKind::TypedArray)`,
+                    // so the field slot stores a v2-raw `*mut TypedArray<T>`
+                    // carrier (HeapHeader at offset 0, refcount). When the
+                    // enclosing `TypedObjectStorage` is freed this walk
+                    // must release the field's share. `release_v2_typed_array`
+                    // retires one refcount share and, on the last share,
+                    // frees the array via the stamped-element-type
+                    // `drop_array` / `drop_array_heap`. Mirror of the
+                    // `TypedObject` field arm below (4-table lockstep,
+                    // ADR-006 §2.3 / §2.7.7).
+                    HeapKind::TypedArray => {
+                        crate::v2::typed_array::release_v2_typed_array(bits as *mut u8);
+                    }
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
+                    // amendment, 2026-05-14): a `TypedObject` field of
+                    // kind `NativeKind::Ptr(HeapKind::TypedObject)`
+                    // holds slot bits = `ptr as u64` where
+                    // `ptr: *const TypedObjectStorage` (v2-raw carrier
+                    // per Agent D1's `_new` /
+                    // `impl HeapElement for TypedObjectStorage`).
                     // Refcount discipline goes through `release_elem`
-                    // (HeapElement trait — calls `v2_release` against the
-                    // HeapHeader at offset 0; on refcount=0 the carrier-side
-                    // `drop` deallocates the repr(C) 24-byte struct). NOT
-                    // `Arc::decrement_strong_count` — these are manually-
-                    // allocated carriers, not `Arc<T>` allocations.
-                    NativeKind::StringV2 => {
+                    // (HeapElement trait — calls `v2_release` against
+                    // the HeapHeader at offset 0; on refcount=0 the
+                    // carrier-side `_drop` runs the per-field
+                    // heap-mask walk and deallocates the `repr(C)`
+                    // struct). Mirror of the §2.7.5 StringV2 /
+                    // DecimalV2 release arms above (Agent B precedent).
+                    HeapKind::TypedObject => {
+                        self.release_typed_object_field(i, bits);
+                    }
+                    HeapKind::HashMap => {
+                        // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
+                        // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`
+                        // per ADR-006 §2.7.24 Q25.B SUPERSEDED carrier
+                        // shape. Release dispatches outer Arc decrement;
+                        // enum Drop chains to per-V `Arc<HashMapData<V>>`
+                        // release.
+                        std::sync::Arc::decrement_strong_count(bits as *const HashMapKindedRef);
+                    }
+                    HeapKind::HashSet => {
+                        std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
+                    }
+                    HeapKind::Deque => {
+                        std::sync::Arc::decrement_strong_count(bits as *const DequeData);
+                    }
+                    HeapKind::Channel => {
+                        std::sync::Arc::decrement_strong_count(bits as *const ChannelData);
+                    }
+                    HeapKind::Mutex => {
+                        std::sync::Arc::decrement_strong_count(bits as *const MutexData);
+                    }
+                    HeapKind::Atomic => {
+                        std::sync::Arc::decrement_strong_count(bits as *const AtomicData);
+                    }
+                    HeapKind::Lazy => {
+                        std::sync::Arc::decrement_strong_count(bits as *const LazyData);
+                    }
+                    // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 /
+                    // Q25.C.5 + E close 2026-05-14): TraitObject
+                    // release via `HeapElement::release_elem` +
+                    // carrier-side `_drop` (per Agent E's
+                    // `impl HeapElement for TraitObjectStorage`).
+                    // Mirror of the TypedObject arm above.
+                    HeapKind::TraitObject => {
                         use crate::v2::heap_element::HeapElement;
-                        crate::v2::string_obj::StringObj::release_elem(
-                            bits as *const crate::v2::string_obj::StringObj,
+                        TraitObjectStorage::release_elem(bits as *const TraitObjectStorage);
+                    }
+                    HeapKind::Decimal => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const rust_decimal::Decimal,
                         );
                     }
-                    NativeKind::DecimalV2 => {
-                        use crate::v2::heap_element::HeapElement;
-                        crate::v2::decimal_obj::DecimalObj::release_elem(
-                            bits as *const crate::v2::decimal_obj::DecimalObj,
+                    HeapKind::BigInt => {
+                        std::sync::Arc::decrement_strong_count(bits as *const i64);
+                    }
+                    HeapKind::DataTable => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const crate::datatable::DataTable,
                         );
                     }
-                    NativeKind::Ptr(hk) => match hk {
-                        HeapKind::String => {
-                            self.decrement_string_field(i, bits);
-                        }
-                        // r5c-2-β-δ-(α) (2026-05-20): `HeapKind::TypedArray`
-                        // dispatch arm RE-INSTATED. The V3-S5 ckpt-5-prime
-                        // retirement claimed "no live slot bits carry this
-                        // kind", but a struct with an `Array<T>` field is
-                        // exactly such a site — `field_tag_to_native_kind`
-                        // maps `FIELD_TAG_ARRAY` → `Ptr(HeapKind::TypedArray)`,
-                        // so the field slot stores a v2-raw `*mut TypedArray<T>`
-                        // carrier (HeapHeader at offset 0, refcount). When the
-                        // enclosing `TypedObjectStorage` is freed this walk
-                        // must release the field's share. `release_v2_typed_array`
-                        // retires one refcount share and, on the last share,
-                        // frees the array via the stamped-element-type
-                        // `drop_array` / `drop_array_heap`. Mirror of the
-                        // `TypedObject` field arm below (4-table lockstep,
-                        // ADR-006 §2.3 / §2.7.7).
-                        HeapKind::TypedArray => {
-                            crate::v2::typed_array::release_v2_typed_array(bits as *mut u8);
-                        }
-                        // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
-                        // amendment, 2026-05-14): a `TypedObject` field of
-                        // kind `NativeKind::Ptr(HeapKind::TypedObject)`
-                        // holds slot bits = `ptr as u64` where
-                        // `ptr: *const TypedObjectStorage` (v2-raw carrier
-                        // per Agent D1's `_new` /
-                        // `impl HeapElement for TypedObjectStorage`).
-                        // Refcount discipline goes through `release_elem`
-                        // (HeapElement trait — calls `v2_release` against
-                        // the HeapHeader at offset 0; on refcount=0 the
-                        // carrier-side `_drop` runs the per-field
-                        // heap-mask walk and deallocates the `repr(C)`
-                        // struct). Mirror of the §2.7.5 StringV2 /
-                        // DecimalV2 release arms above (Agent B precedent).
-                        HeapKind::TypedObject => {
-                            self.release_typed_object_field(i, bits);
-                        }
-                        HeapKind::HashMap => {
-                            // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
-                            // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`
-                            // per ADR-006 §2.7.24 Q25.B SUPERSEDED carrier
-                            // shape. Release dispatches outer Arc decrement;
-                            // enum Drop chains to per-V `Arc<HashMapData<V>>`
-                            // release.
-                            std::sync::Arc::decrement_strong_count(bits as *const HashMapKindedRef);
-                        }
-                        HeapKind::HashSet => {
-                            std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
-                        }
-                        HeapKind::Deque => {
-                            std::sync::Arc::decrement_strong_count(bits as *const DequeData);
-                        }
-                        HeapKind::Channel => {
-                            std::sync::Arc::decrement_strong_count(bits as *const ChannelData);
-                        }
-                        HeapKind::Mutex => {
-                            std::sync::Arc::decrement_strong_count(bits as *const MutexData);
-                        }
-                        HeapKind::Atomic => {
-                            std::sync::Arc::decrement_strong_count(bits as *const AtomicData);
-                        }
-                        HeapKind::Lazy => {
-                            std::sync::Arc::decrement_strong_count(bits as *const LazyData);
-                        }
-                        // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.7.24 /
-                        // Q25.C.5 + E close 2026-05-14): TraitObject
-                        // release via `HeapElement::release_elem` +
-                        // carrier-side `_drop` (per Agent E's
-                        // `impl HeapElement for TraitObjectStorage`).
-                        // Mirror of the TypedObject arm above.
-                        HeapKind::TraitObject => {
-                            use crate::v2::heap_element::HeapElement;
-                            TraitObjectStorage::release_elem(bits as *const TraitObjectStorage);
-                        }
-                        HeapKind::Decimal => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const rust_decimal::Decimal,
-                            );
-                        }
-                        HeapKind::BigInt => {
-                            std::sync::Arc::decrement_strong_count(bits as *const i64);
-                        }
-                        HeapKind::DataTable => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const crate::datatable::DataTable,
-                            );
-                        }
-                        HeapKind::IoHandle => {
-                            std::sync::Arc::decrement_strong_count(bits as *const IoHandleData);
-                        }
-                        HeapKind::NativeView => {
-                            std::sync::Arc::decrement_strong_count(bits as *const NativeViewData);
-                        }
-                        HeapKind::Content => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const crate::content::ContentNode,
-                            );
-                        }
-                        HeapKind::Instant => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const std::time::Instant,
-                            );
-                        }
-                        HeapKind::Temporal => {
-                            std::sync::Arc::decrement_strong_count(bits as *const TemporalData);
-                        }
-                        HeapKind::TableView => {
-                            std::sync::Arc::decrement_strong_count(bits as *const TableViewData);
-                        }
-                        HeapKind::TaskGroup => {
-                            std::sync::Arc::decrement_strong_count(bits as *const TaskGroupData);
-                        }
-                        HeapKind::FilterExpr => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const crate::value::FilterNode,
-                            );
-                        }
-                        HeapKind::Reference => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const crate::reference::RefTarget,
-                            );
-                        }
-                        HeapKind::Iterator => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const crate::iterator_state::IteratorState,
-                            );
-                        }
-                        HeapKind::PriorityQueue => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const PriorityQueueData,
-                            );
-                        }
-                        HeapKind::Range => {
-                            std::sync::Arc::decrement_strong_count(bits as *const RangeData);
-                        }
-                        HeapKind::Result => {
-                            std::sync::Arc::decrement_strong_count(bits as *const ResultData);
-                        }
-                        HeapKind::Option => {
-                            std::sync::Arc::decrement_strong_count(bits as *const OptionData);
-                        }
-                        HeapKind::Closure => {
-                            std::sync::Arc::decrement_strong_count(bits as *const HeapValue);
-                        }
-                        HeapKind::Future => {
-                            // No-op: future-id inline scalar.
-                        }
-                        HeapKind::ModuleFn => {
-                            // No-op: module-fn-id inline scalar.
-                        }
-                        HeapKind::Matrix => {
-                            std::sync::Arc::decrement_strong_count(bits as *const MatrixData);
-                        }
-                        HeapKind::MatrixSlice => {
-                            std::sync::Arc::decrement_strong_count(bits as *const MatrixSliceData);
-                        }
-                        HeapKind::SharedCell => {
-                            std::sync::Arc::decrement_strong_count(
-                                bits as *const crate::v2::closure_layout::SharedCell,
-                            );
-                        }
-                        HeapKind::Char => {
-                            debug_assert!(
-                                false,
-                                "TypedObjectStorage::drop_fields: heap_mask bit {} set with \
-                                 inline-scalar kind Char (schema_id={}); \
-                                 construction-side soundness violation",
-                                i, self.schema_id
-                            );
-                        }
-                        HeapKind::NativeScalar => {
-                            debug_assert!(
-                                false,
-                                "TypedObjectStorage::drop_fields: NativeScalar kinded carrier \
-                                 pending phase-2c kinded redesign (ADR-006 §2.7.4); \
-                                 schema_id={}, bit {}",
-                                self.schema_id, i
-                            );
-                        }
-                    },
-                    other => {
+                    HeapKind::IoHandle => {
+                        std::sync::Arc::decrement_strong_count(bits as *const IoHandleData);
+                    }
+                    HeapKind::NativeView => {
+                        std::sync::Arc::decrement_strong_count(bits as *const NativeViewData);
+                    }
+                    HeapKind::Content => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const crate::content::ContentNode,
+                        );
+                    }
+                    HeapKind::Instant => {
+                        std::sync::Arc::decrement_strong_count(bits as *const std::time::Instant);
+                    }
+                    HeapKind::Temporal => {
+                        std::sync::Arc::decrement_strong_count(bits as *const TemporalData);
+                    }
+                    HeapKind::TableView => {
+                        std::sync::Arc::decrement_strong_count(bits as *const TableViewData);
+                    }
+                    HeapKind::TaskGroup => {
+                        std::sync::Arc::decrement_strong_count(bits as *const TaskGroupData);
+                    }
+                    HeapKind::FilterExpr => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const crate::value::FilterNode,
+                        );
+                    }
+                    HeapKind::Reference => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const crate::reference::RefTarget,
+                        );
+                    }
+                    HeapKind::Iterator => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const crate::iterator_state::IteratorState,
+                        );
+                    }
+                    HeapKind::PriorityQueue => {
+                        std::sync::Arc::decrement_strong_count(bits as *const PriorityQueueData);
+                    }
+                    HeapKind::Range => {
+                        std::sync::Arc::decrement_strong_count(bits as *const RangeData);
+                    }
+                    HeapKind::Result => {
+                        std::sync::Arc::decrement_strong_count(bits as *const ResultData);
+                    }
+                    HeapKind::Option => {
+                        std::sync::Arc::decrement_strong_count(bits as *const OptionData);
+                    }
+                    HeapKind::Closure => {
+                        std::sync::Arc::decrement_strong_count(bits as *const HeapValue);
+                    }
+                    HeapKind::Future => {
+                        // No-op: future-id inline scalar.
+                    }
+                    HeapKind::ModuleFn => {
+                        // No-op: module-fn-id inline scalar.
+                    }
+                    HeapKind::Matrix => {
+                        std::sync::Arc::decrement_strong_count(bits as *const MatrixData);
+                    }
+                    HeapKind::MatrixSlice => {
+                        std::sync::Arc::decrement_strong_count(bits as *const MatrixSliceData);
+                    }
+                    HeapKind::SharedCell => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const crate::v2::closure_layout::SharedCell,
+                        );
+                    }
+                    HeapKind::Char => {
                         debug_assert!(
                             false,
                             "TypedObjectStorage::drop_fields: heap_mask bit {} set with \
-                             non-heap NativeKind {:?} (schema_id={}); \
-                             construction-side soundness violation",
-                            i, other, self.schema_id
+                                 inline-scalar kind Char (schema_id={}); \
+                                 construction-side soundness violation",
+                            i, self.schema_id
                         );
                     }
+                    HeapKind::NativeScalar => {
+                        debug_assert!(
+                            false,
+                            "TypedObjectStorage::drop_fields: NativeScalar kinded carrier \
+                                 pending phase-2c kinded redesign (ADR-006 §2.7.4); \
+                                 schema_id={}, bit {}",
+                            self.schema_id, i
+                        );
+                    }
+                },
+                other => {
+                    debug_assert!(
+                        false,
+                        "TypedObjectStorage::release_one_field: heap_mask bit {} set with \
+                             non-heap NativeKind {:?} (schema_id={}); \
+                             construction-side soundness violation",
+                        i, other, self.schema_id
+                    );
                 }
             }
         }
