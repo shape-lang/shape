@@ -1540,14 +1540,18 @@ async fn execute_file(
         println!("[{}] {}", level, message.text);
     }
 
-    // Print the result — prefer content_terminal (ANSI-styled) over raw JSON
+    // Print the result. Styled Content values (tables, charts, rich text) are
+    // rendered via `content_terminal`. A bare trailing expression's plain value
+    // is intentionally NOT auto-echoed in `shape run` (file mode) — use
+    // `print(...)` for program output. This (a) keeps VM and JIT stdout
+    // byte-identical: the JIT script path returns no echo value, so echoing the
+    // trailing value only under the interpreter was a spurious VM/JIT mode
+    // divergence (e.g. datetime `dt.unix_timestamp()`); and (b) stops the
+    // internal WireValue wrapper JSON (`{"Integer": N}`, `{"Array": [...]}`)
+    // from leaking to stdout. The engine still exposes `result.value` for the
+    // programmatic API / REPL; only the file-run stdout echo is suppressed.
     if let Some(ref terminal_str) = response.content_terminal {
         println!("{}", terminal_str);
-    } else if !matches!(&response.value, shape_wire::WireValue::Null) {
-        match serde_json::to_string_pretty(&response.value) {
-            Ok(json) => println!("{}", json),
-            Err(_) => println!("{:?}", response.value),
-        }
     }
 
     Ok(())
