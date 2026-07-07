@@ -19,7 +19,7 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
     let pair_loc = pair_location(&pair);
 
     match pair.as_rule() {
-        Rule::type_annotation => {
+        Rule::type_annotation | Rule::closure_type_annotation => {
             let loc = pair_loc.clone();
             let mut inner = pair.into_inner();
             let type_part = inner.next().ok_or_else(|| ShapeError::ParseError {
