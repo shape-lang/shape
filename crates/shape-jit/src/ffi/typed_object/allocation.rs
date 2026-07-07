@@ -354,6 +354,72 @@ mod tests {
         crate::ffi::v2::jit_v2_typed_object_release(bits as *const u8);
     }
 
+    /// Wave-7 jit-typed-pointer-migration (Phase-1 regression): the migrated
+    /// refcount FFIs `jit_v2_typed_object_retain` / `jit_v2_typed_object_release`
+    /// — the pair the `mir_compiler::ownership` `Ptr(TypedObject)` retain/release
+    /// arm now routes to — operate a SINGLE canonical counter: the offset-0
+    /// `HeapHeader` refcount of the v2-raw `*mut TypedObjectStorage`.
+    ///
+    /// Pre-migration TWO competing counters existed (the `UnifiedValue` wrapper
+    /// refcount@+4 hit by the legacy `arc_retain`/`arc_release` fall-through arm,
+    /// AND the inner JIT `TypedObject.ref_count`@+4 hit by the deleted
+    /// `jit_typed_object_inc_ref`/`dec_ref`). This guards the unified balance:
+    /// alloc = 1, retain → 2, one release → 1 (object still live + field
+    /// readable), last release → 0 (freed via `_drop`). A resurrected second
+    /// counter would leave the header refcount wrong at each step and this test
+    /// would fail before any use-after-free.
+    #[test]
+    fn jit_v2_typed_object_retain_release_balances_single_counter() {
+        use crate::ffi::typed_object::{jit_typed_object_get_field, jit_typed_object_set_field};
+        use crate::ffi::v2::{jit_v2_typed_object_release, jit_v2_typed_object_retain};
+        use shape_runtime::type_schema::{SyncRegistryScope, TypeSchemaRegistry};
+        use shape_value::heap_value::TypedObjectStorage;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let mut reg = TypeSchemaRegistry::new_with_stdlib();
+        let schema_id = reg.register_type("PocBalance", vec![("v".to_string(), FieldType::F64)]);
+        let _scope = SyncRegistryScope::enter(Arc::new(reg));
+
+        let bits = jit_typed_object_alloc(schema_id as u32, 8);
+        assert_ne!(bits, TAG_NULL, "producer resolved the schema and allocated");
+        let ptr = bits as *const TypedObjectStorage;
+
+        unsafe {
+            // alloc = exactly one share on the offset-0 header (no second counter).
+            assert_eq!(
+                (*ptr).header.refcount.load(Ordering::SeqCst),
+                1,
+                "alloc = 1 share on the canonical header counter"
+            );
+            jit_typed_object_set_field(bits, 0, 42.0f64.to_bits());
+
+            jit_v2_typed_object_retain(bits as *const u8);
+            assert_eq!(
+                (*ptr).header.refcount.load(Ordering::SeqCst),
+                2,
+                "retain bumps the SAME header counter → 2"
+            );
+
+            jit_v2_typed_object_release(bits as *const u8);
+            assert_eq!(
+                (*ptr).header.refcount.load(Ordering::SeqCst),
+                1,
+                "one release → 1; a single release must NOT free the object"
+            );
+            // Object survived the retain/release pair: field still readable.
+            assert_eq!(
+                f64::from_bits(jit_typed_object_get_field(bits, 0)),
+                42.0,
+                "object still live after balanced retain/release pair"
+            );
+
+            // Last release drives the header counter to 0 → `_drop` frees it.
+            // (Do not deref `ptr` after this point.)
+            jit_v2_typed_object_release(bits as *const u8);
+        }
+    }
+
     #[test]
     fn test_typed_object_alloc() {
         let schema = TypeSchema::new(
