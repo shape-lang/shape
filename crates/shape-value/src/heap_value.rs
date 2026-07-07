@@ -3553,6 +3553,9 @@ impl Clone for TraitObjectStorage {
 unsafe impl crate::v2::heap_element::HeapElement for TraitObjectStorage {
     unsafe fn release_elem(ptr: *const Self) {
         if unsafe { crate::v2::refcount::v2_release(&(*ptr).header) } {
+            // GC Phase 3a use-after-free guard (see TypedObjectStorage above).
+            #[cfg(feature = "gc")]
+            crate::gc::gc_note_object_freed(ptr as usize);
             unsafe { Self::_drop(ptr as *mut Self) };
         }
     }
@@ -4305,6 +4308,47 @@ impl TypedObjectStorage {
         }
     }
 
+    /// GC Phase 3a (real-gc-cycle-collection.md §0 ratification / §3.3
+    /// CollectWhite): **memory-only** free of a cycle-garbage `TypedObjectStorage`.
+    ///
+    /// Frees the struct allocation plus its directly-owned metadata allocations
+    /// (`slot_cells`, `field_kinds`, and — under Miri — `field_provenance`)
+    /// **WITHOUT** running the `drop_fields` heap-child walk. That is the whole
+    /// point: a cycle member's outgoing heap-child shares are **not** released
+    /// here — the White cycle peers are freed by the CollectWhite recursion
+    /// (each memory-only, so no peer is released twice), and any live (Black)
+    /// child already had this edge removed by the un-restored trial-decrement.
+    /// Running `drop_fields` here would double-free White peers / prematurely
+    /// free a live Black child, so it MUST be skipped. No user finalizer runs
+    /// (identical to a leaked Rust `Rc`/`Arc` cycle, §0 #1).
+    ///
+    /// This is distinct from [`Self::_drop`]: `_drop` releases children (RAII at
+    /// an ownership boundary); this frees only the node's own memory (GC cycle
+    /// reclamation). The `impl Drop for TypedObjectStorage` is never invoked —
+    /// the struct memory is `dealloc`'d directly, never dropped as a `Self`.
+    ///
+    /// # Safety
+    /// `ptr` must point to a live `TypedObjectStorage` allocated via `Self::_new`
+    /// that the collector has proven to be a White cycle member (no external
+    /// reference survives; its refcount reached 0 under trial-deletion). Must be
+    /// called at most once per allocation; the pointer is invalid afterwards.
+    #[cfg(feature = "gc")]
+    pub unsafe fn _free_memory_only(ptr: *mut Self) {
+        unsafe {
+            // Free the in-place `Box<[UnsafeCell<ValueSlot>]>` and
+            // `Arc<[NativeKind]>` metadata — these are the node's OWN
+            // allocations (raw `u64` slot bits carry no Drop that would release
+            // heap children). NO `drop_fields()`: heap-child shares are handled
+            // by the CollectWhite recursion, not released here.
+            std::ptr::drop_in_place(&mut (*ptr).slot_cells);
+            std::ptr::drop_in_place(&mut (*ptr).field_kinds);
+            #[cfg(miri)]
+            std::ptr::drop_in_place(&mut (*ptr).field_provenance);
+            let layout = std::alloc::Layout::new::<Self>();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+
     /// Wave 2 Agent D1 (2026-05-14): shared per-field heap-mask walk.
     ///
     /// Walks `heap_mask`, dispatches per-slot on `field_kinds[i]`, and
@@ -4791,6 +4835,12 @@ impl Drop for TypedObjectStorage {
 unsafe impl crate::v2::heap_element::HeapElement for TypedObjectStorage {
     unsafe fn release_elem(ptr: *const Self) {
         if unsafe { crate::v2::refcount::v2_release(&(*ptr).header) } {
+            // GC Phase 3a use-after-free guard: drop any stale candidate-buffer
+            // entry for this address before the RC free path deallocates it, so
+            // the collector never dereferences freed memory. Additive
+            // `#[cfg]`-gated no-op with the `gc` feature off (RC path unchanged).
+            #[cfg(feature = "gc")]
+            crate::gc::gc_note_object_freed(ptr as usize);
             unsafe { Self::_drop(ptr as *mut Self) };
         }
     }

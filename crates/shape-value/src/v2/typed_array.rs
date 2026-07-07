@@ -700,6 +700,10 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
             return;
         }
         // Refcount reached zero — this thread owns the deallocation.
+        // GC Phase 3a use-after-free guard: drop any stale candidate-buffer
+        // entry before deallocating (additive `#[cfg]`-gated no-op, gc off).
+        #[cfg(feature = "gc")]
+        crate::gc::gc_note_object_freed(ptr as usize);
         match read_elem_type(ptr) {
             ELEM_TYPE_F64 => TypedArray::<f64>::drop_array(ptr as *mut TypedArray<f64>),
             ELEM_TYPE_I64 => TypedArray::<i64>::drop_array(ptr as *mut TypedArray<i64>),
@@ -767,6 +771,60 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
                 dealloc(ptr, layout);
             }
         }
+    }
+}
+
+/// GC Phase 3a (real-gc-cycle-collection.md §0 ratification / §3.3 CollectWhite):
+/// **memory-only** free of a cycle-garbage `TypedArray`.
+///
+/// Frees the element buffer + the 24-byte struct header **WITHOUT** releasing
+/// any per-element heap share. Only heap-element arrays (`String` / `Decimal` /
+/// `TypedObject` / `TraitObject` / nested `TypedArray`) can be cycle members;
+/// their element buffer is a contiguous run of 8-byte pointers, so the buffer
+/// layout is element-type-agnostic (`*const ()` × `cap`) and the header is a
+/// fixed 24 bytes for every `T`. The stored element shares are **not** retired
+/// here — the White cycle peers are freed by the CollectWhite recursion, and
+/// live (Black) children already had this array's edge removed by the
+/// un-restored trial-decrement. Running the destructive element walk would
+/// double-free / prematurely free, so it MUST be skipped.
+///
+/// POD-element arrays own no per-element share and can never be cycle members;
+/// this asserts (debug) it is only ever handed a heap-element (or unstamped)
+/// array and frees the buffer as an 8-byte-pointer run regardless.
+///
+/// # Safety
+/// `ptr` must point to a live heap-element `TypedArray<*const T>` that the
+/// collector has proven a White cycle member. Called at most once; the pointer
+/// is invalid afterwards.
+#[cfg(feature = "gc")]
+pub unsafe fn free_v2_typed_array_memory_only(ptr: *mut u8) {
+    unsafe {
+        let arr = &*(ptr as *const TypedArray<*const u8>);
+        let cap = arr.cap as usize;
+        let data = arr.data as *mut u8;
+        debug_assert!(
+            matches!(
+                read_elem_type(ptr),
+                ELEM_TYPE_STRING
+                    | ELEM_TYPE_DECIMAL
+                    | ELEM_TYPE_TYPED_OBJECT
+                    | ELEM_TYPE_TRAIT_OBJECT
+                    | ELEM_TYPE_TYPED_ARRAY
+                    | ELEM_TYPE_CALLABLE
+                    | ELEM_TYPE_UNKNOWN
+            ),
+            "free_v2_typed_array_memory_only: POD-element array cannot be a cycle member"
+        );
+        if cap > 0 && !data.is_null() {
+            // Heap-element buffers are `*const _` runs — 8 bytes/element for
+            // every heap element type.
+            let data_layout =
+                Layout::array::<*const u8>(cap).expect("invalid array layout");
+            dealloc(data, data_layout);
+        }
+        // Struct header is a fixed 24 bytes for every `T` (asserted above).
+        let layout = Layout::new::<TypedArray<u8>>();
+        dealloc(ptr, layout);
     }
 }
 
