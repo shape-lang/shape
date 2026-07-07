@@ -57,6 +57,6 @@ pub fn is_red(row) {
 pub fn is_doji(row, threshold) {
     let thresh = if threshold == None { 0.001 } else { threshold };
     let body_size = body(row);
-    let range_size = range(row);
+    let range_size = candle_range(row);
     range_size > 0 and (body_size / range_size) < thresh
 }

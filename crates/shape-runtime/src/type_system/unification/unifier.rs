@@ -38,6 +38,23 @@ impl Unifier {
             }
         }
 
+        // Occurs check (full, including tyvar markers embedded inside a
+        // `Concrete` annotation). Storing a cyclic binding `X |-> T` where `X`
+        // occurs inside `T` — e.g. an object literal over its own unresolved
+        // field var `X |-> Object({f: <tyvar X>})` — makes the mutually
+        // recursive `apply_substitutions <-> apply_to_annotation` pair diverge
+        // and overflow the stack. The trivial `Variable(v) == var` case above
+        // catches only the direct self-binding; a marker buried in an
+        // annotation slips past it. Refuse to store the cycle: the variable
+        // stays unresolved and projects to `unknown` downstream — the same
+        // honest "not inferred" outcome an unbound marker already produces
+        // (see `tyvar_to_annotation` doc in types/core.rs). This is the
+        // safety net for the many `bind` call sites that are not fronted by
+        // the `occurs_in` guard in the constraint solver.
+        if occurs_check(&var, &ty) {
+            return;
+        }
+
         self.substitutions.insert(var, ty);
     }
 
@@ -190,5 +207,134 @@ impl Unifier {
     /// Get all substitutions
     pub fn substitutions(&self) -> &HashMap<TypeVar, Type> {
         &self.substitutions
+    }
+}
+
+/// Occurs check: does `var` appear anywhere in `ty`?
+///
+/// Unlike a naive structural walk, this descends into `Type::Concrete`
+/// annotations and decodes embedded `tyvar` markers (the SOH-prefixed
+/// `Basic("\u{1}tyvar:..")` encoding used to keep an unresolved variable
+/// recoverable inside an object-literal field type — see
+/// `tyvar_to_annotation` in `types/core.rs`). A marker equal to `var` buried
+/// inside `Object`/`Array`/`Function`/… must count as an occurrence, otherwise
+/// a cyclic binding `X |-> Concrete(Object({f: <tyvar X>}))` is stored and the
+/// substitution walk diverges.
+pub fn occurs_check(var: &TypeVar, ty: &Type) -> bool {
+    match ty {
+        Type::Variable(v) => v == var,
+        Type::Constrained { var: v, .. } => v == var,
+        Type::Generic { base, args } => {
+            occurs_check(var, base) || args.iter().any(|a| occurs_check(var, a))
+        }
+        Type::Function { params, returns } => {
+            params.iter().any(|p| occurs_check(var, p)) || occurs_check(var, returns)
+        }
+        Type::Concrete(ann) => annotation_occurs(var, ann),
+    }
+}
+
+/// Occurs check over a `TypeAnnotation`: does the tyvar marker for `var` appear
+/// anywhere in `ann`? Walks every annotation form that can nest a marker.
+fn annotation_occurs(var: &TypeVar, ann: &TypeAnnotation) -> bool {
+    if let Some(v) = annotation_as_tyvar(ann) {
+        return &v == var;
+    }
+    match ann {
+        TypeAnnotation::Borrow { inner, .. } => annotation_occurs(var, inner),
+        TypeAnnotation::Array(elem) => annotation_occurs(var, elem),
+        TypeAnnotation::Tuple(elems) => elems.iter().any(|e| annotation_occurs(var, e)),
+        TypeAnnotation::Object(fields) => fields
+            .iter()
+            .any(|f| annotation_occurs(var, &f.type_annotation)),
+        TypeAnnotation::Function { params, returns } => {
+            params
+                .iter()
+                .any(|p| annotation_occurs(var, &p.type_annotation))
+                || annotation_occurs(var, returns)
+        }
+        TypeAnnotation::Union(types) | TypeAnnotation::Intersection(types) => {
+            types.iter().any(|t| annotation_occurs(var, t))
+        }
+        TypeAnnotation::Generic { args, .. } => args.iter().any(|a| annotation_occurs(var, a)),
+        TypeAnnotation::Basic(_)
+        | TypeAnnotation::Reference(_)
+        | TypeAnnotation::Void
+        | TypeAnnotation::Never
+        | TypeAnnotation::Null
+        | TypeAnnotation::Undefined
+        | TypeAnnotation::Dyn(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod occurs_check_tests {
+    use super::*;
+    use shape_ast::ast::ObjectTypeField;
+
+    /// Build `Concrete(Object({ field_name: <tyvar var> }))` — the shape an
+    /// object literal over an unresolved field variable freezes to.
+    fn object_over_tyvar(field_name: &str, var: &TypeVar) -> Type {
+        Type::Concrete(TypeAnnotation::Object(vec![ObjectTypeField {
+            name: field_name.to_string(),
+            optional: false,
+            type_annotation: tyvar_to_annotation(var),
+            annotations: vec![],
+        }]))
+    }
+
+    #[test]
+    fn occurs_check_sees_tyvar_marker_inside_concrete_object() {
+        let x = TypeVar("X".to_string());
+        let cyclic = object_over_tyvar("state", &x);
+        assert!(
+            occurs_check(&x, &cyclic),
+            "occurs check must detect a tyvar marker embedded inside a \
+             Concrete object annotation"
+        );
+        // A different variable must NOT be reported as occurring.
+        let y = TypeVar("Y".to_string());
+        assert!(!occurs_check(&y, &cyclic));
+    }
+
+    /// WF-6 regression: the std::finance compiler stack-overflow.
+    ///
+    /// Binding `X |-> Concrete(Object({ f: <tyvar X>}))` used to be stored
+    /// because the occurs check treated every `Concrete(_)` as
+    /// variable-free. The stored cycle then made
+    /// `apply_substitutions <-> apply_to_annotation` recurse forever and blow
+    /// the stack at compile time (surfaced by `from
+    /// std::finance::backtest::engine use { backtest }`). `bind` must now
+    /// refuse the cyclic binding, and substitution must terminate.
+    #[test]
+    fn bind_refuses_cyclic_object_binding_and_substitution_terminates() {
+        let x = TypeVar("X".to_string());
+        let cyclic = object_over_tyvar("state", &x);
+
+        let mut unifier = Unifier::new();
+        unifier.bind(x.clone(), cyclic);
+
+        // The cycle must not have been stored.
+        assert!(
+            unifier.lookup(&x).is_none(),
+            "cyclic binding X |-> Object({{state: X}}) must be refused, not stored"
+        );
+
+        // Substitution over the (still-unbound) variable must terminate and
+        // leave it as an honest unresolved variable — no stack overflow.
+        let resolved = unifier.apply_substitutions(&Type::Variable(x.clone()));
+        assert_eq!(resolved, Type::Variable(x));
+    }
+
+    #[test]
+    fn bind_still_stores_acyclic_object_binding() {
+        // A non-self-referential object binding must still be stored.
+        let x = TypeVar("X".to_string());
+        let y = TypeVar("Y".to_string());
+        let acyclic = object_over_tyvar("field", &y); // mentions Y, not X
+
+        let mut unifier = Unifier::new();
+        unifier.bind(x.clone(), acyclic.clone());
+        assert_eq!(unifier.lookup(&x), Some(&acyclic));
     }
 }
