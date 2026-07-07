@@ -38,13 +38,24 @@
 //! No child slot is ever inspected to ask "are these bits a pointer?" — the
 //! object's own construction-time kind tracks answer that.
 
-use crate::heap_value::{HeapKind, TypedObjectStorage};
+use crate::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
 use crate::native_kind::NativeKind;
-use crate::v2::closure_layout::ClosureLayout;
+use crate::v2::closure_layout::{ClosureLayout, SharedCell};
 use crate::v2::typed_array::{
-    self, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY,
-    ELEM_TYPE_TYPED_OBJECT,
+    self, CallableArrayElemKind, ELEM_TYPE_CALLABLE, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING,
+    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT,
 };
+
+/// Is `kind` a heap-bearing carrier the collector may need to trace (as opposed
+/// to an inline scalar)? Used to filter the `SharedCell` interior payload edge
+/// so a scalar payload is never mis-yielded as a heap pointer.
+#[inline]
+fn is_heap_bearing(kind: NativeKind) -> bool {
+    matches!(
+        kind,
+        NativeKind::Ptr(_) | NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2
+    )
+}
 
 /// Read-only visit of every heap-child edge of the object at `ptr` of `kind`.
 ///
@@ -77,9 +88,57 @@ where
             // SAFETY: caller guarantees `ptr` is a live TypedArray header.
             unsafe { for_each_typed_array_heap_child(ptr, f) };
         }
-        // Closure needs its layout (see `for_each_closure_heap_child`).
+        HeapKind::SharedCell => {
+            // A `Shared` capture's `SharedCell` (header-less `Arc<SharedCell>`)
+            // holds ONE interior payload. Its single heap-child edge is that
+            // payload — read via the SHARED `SharedCell::gc_payload_edge`
+            // accessor (the same `(bits, kind)` `Drop for SharedCell` retires),
+            // filtered to heap-bearing kinds so a scalar payload is never
+            // mis-traced. This is the `SharedCell → TypedArray` back-edge that
+            // closes the real closure-in-array cycle (Finding #31).
+            // SAFETY: caller guarantees `ptr` is a live `SharedCell`; the
+            // safepoint is mutator-quiescent.
+            let cell = unsafe { &*(ptr as *const SharedCell) };
+            let (bits, kind) = unsafe { cell.gc_payload_edge() };
+            if bits != 0 && is_heap_bearing(kind) {
+                f(bits, kind);
+            }
+        }
+        // Closure needs its layout (see `for_each_closure_heap_child` for the
+        // block-tier capture walk and `for_each_closure_value_heap_child` for
+        // the `Arc<HeapValue::ClosureRaw> → block` ownership edge).
         // All other kinds are leaves / non-cycle-capable: no outgoing heap edges.
         _ => {}
+    }
+}
+
+/// Read-only visit of the single heap-child edge of an
+/// `Arc<HeapValue::ClosureRaw>` value at `hv_ptr`: the owned
+/// `TypedClosureHeader` block plus its [`ClosureLayout`].
+///
+/// This is the `Arc<HeapValue::ClosureRaw> → block` ownership edge (the closure
+/// value B → its block C in the Finding-#31 cycle). It cannot flow through the
+/// `(u64, NativeKind)` [`for_each_heap_child`] callback because the block is not
+/// self-describing — the collector needs the block's `ClosureLayout` (looked up
+/// by `type_id`, not reachable from the block pointer alone) to walk the block's
+/// captures and to free it. The layout reference is borrowed from the live
+/// `HeapValue`, so it outlives the collection (the closure value B is a cycle
+/// member kept alive until the collector's deferred free).
+///
+/// A non-`ClosureRaw` heap value yields nothing.
+///
+/// # Safety
+/// `hv_ptr` must be a live `Arc::into_raw(Arc<HeapValue>)` pointer (offset 0 =
+/// the `HeapValue`). The yielded block pointer + layout are borrowed views; the
+/// visitor performs no refcount work.
+pub unsafe fn for_each_closure_value_heap_child<F>(hv_ptr: *const u8, mut f: F)
+where
+    F: FnMut(*const u8, &ClosureLayout),
+{
+    // SAFETY: `hv_ptr` points at a live `HeapValue` (the Arc's data payload).
+    let hv = unsafe { &*(hv_ptr as *const HeapValue) };
+    if let HeapValue::ClosureRaw(owned) = hv {
+        f(owned.as_header_ptr() as *const u8, owned.layout().as_ref());
     }
 }
 
@@ -103,6 +162,24 @@ where
 {
     // SAFETY: `ptr` is a live TypedArray header per the caller contract.
     let elem_type = unsafe { typed_array::read_elem_type(ptr) };
+    // The CALLABLE carrier is not an 8-byte pointer run — it stores 16-byte
+    // `CallableArrayElem` records. Only the `Closure` variant owns a heap share
+    // (an `Arc<HeapValue::ClosureRaw>`); `FunctionId` / `ModuleFn` are inline
+    // ids (no edge). Walk it via the SHARED callable-element primitive (the same
+    // one `drop_array_callable` releases through, §3.4) and yield each closure
+    // element as `Ptr(HeapKind::Closure)`. This is the `array element → closure`
+    // edge (A → B) of the real closure-in-array cycle (Finding #31).
+    if elem_type == ELEM_TYPE_CALLABLE {
+        // SAFETY: `ptr` is a live `TypedArray<CallableArrayElem>` per its stamp.
+        unsafe {
+            typed_array::for_each_typed_array_callable_elem(ptr, |elem| {
+                if elem.kind == CallableArrayElemKind::Closure && elem.bits != 0 {
+                    f(elem.bits, NativeKind::Ptr(HeapKind::Closure));
+                }
+            });
+        }
+        return;
+    }
     let child_kind = match elem_type {
         ELEM_TYPE_STRING => NativeKind::StringV2,
         ELEM_TYPE_DECIMAL => NativeKind::DecimalV2,
@@ -151,20 +228,36 @@ where
     F: FnMut(u64, NativeKind),
 {
     for i in 0..layout.capture_count() {
-        // Enumerate each capture's heap-child edge via the SAME shared accessor
-        // the destructive `release_typed_closure` path consumes
-        // (`closure_raw::closure_immutable_heap_capture_edge`) — one accessor,
-        // so the collector's trace and the Drop walk cannot drift on the
-        // closure's heap-child edge set (real-gc-cycle-collection.md §3.4). The
-        // `OwnedMutable` / `Shared` interior captures yield `None` here (their
-        // GC edges are deferred to the §3.5 side table). Skip null: a read-only
-        // per-edge filter that leaves the destructive walk byte-identical.
+        // (1) Immutable Ptr captures — enumerate each heap-child edge via the
+        // SAME shared accessor the destructive `release_typed_closure` path
+        // consumes (`closure_raw::closure_immutable_heap_capture_edge`) — one
+        // accessor, so the collector's trace and the Drop walk cannot drift on
+        // the closure's immutable heap-child edge set
+        // (real-gc-cycle-collection.md §3.4). Skip null: a read-only per-edge
+        // filter that leaves the destructive walk byte-identical.
         // SAFETY: `ptr` is a live closure block whose layout is `layout`.
         if let Some((bits, kind)) =
             unsafe { crate::v2::closure_raw::closure_immutable_heap_capture_edge(ptr, layout, i) }
             && bits != 0
         {
             f(bits, kind);
+        }
+
+        // (2) `Shared` captures — enumerate the `*const SharedCell` cell edge via
+        // the SAME shared accessor the destructive `drop_shared_capture` path
+        // consumes (`closure_raw::closure_shared_capture_edge`), §3.4. The cell
+        // is a header-less `Arc<SharedCell>` child yielded as
+        // `Ptr(HeapKind::SharedCell)`; the collector traces INTO it (its interior
+        // payload edge is read by the `SharedCell` arm of `for_each_heap_child`).
+        // This is the closure-capture → cell edge (C → D) of the real
+        // closure-in-array cycle (Finding #31). `OwnedMutable` (Box-cell)
+        // captures remain a documented §3.5 deferral — they are not `Arc`-shared
+        // and cannot form the mutable-array cycle this lane targets.
+        // SAFETY: `ptr` is a live closure block whose layout is `layout`.
+        if let Some(cell_ptr) =
+            unsafe { crate::v2::closure_raw::closure_shared_capture_edge(ptr, layout, i) }
+        {
+            f(cell_ptr as u64, NativeKind::Ptr(HeapKind::SharedCell));
         }
     }
 }

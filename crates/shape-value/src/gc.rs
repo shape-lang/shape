@@ -30,6 +30,7 @@
 
 use crate::heap_value::HeapKind;
 use crate::native_kind::NativeKind;
+use crate::v2::closure_layout::{ClosureLayout, SharedCell};
 use crate::v2::heap_header::{
     GC_COLOR_MASK, GC_COLOR_SHIFT, GC_FLAG_BUFFERED, GcColor, HeapHeader,
 };
@@ -547,10 +548,20 @@ enum FreeKind {
     StringV2,
     /// `*mut DecimalObj` v2-raw carrier (leaf) — full free (no children).
     DecimalV2,
+    /// Raw `*mut TypedClosureHeader` block (the closure VALUE's owned block C in
+    /// the real closure-in-array cycle) — `dealloc_typed_closure_no_drop` using
+    /// the block's `ClosureLayout` (carried on the node). MEMORY-ONLY: the
+    /// capture-mask walk is skipped, so no captured share is released (the White
+    /// cycle peers are freed by the CollectWhite recursion; the header-less
+    /// `Arc<HeapValue>` VALUE holding this block is leak-safe-deferred, so it
+    /// never re-enters the freed block). No user `Drop`.
+    ClosureBlock,
     /// Reachable White node the collector does not free in Phase 3a (header-less
-    /// `Arc`-backed kinds, and `TraitObject` whose edges `for_each_heap_child`
-    /// does not yet enumerate). Leaving it unfreed is leak-safe — never a
-    /// premature free / double free (§3.5 option-A migration is fast-follow).
+    /// `Arc`-backed kinds — including the `Arc<HeapValue::ClosureRaw>` closure
+    /// VALUE and the `Arc<SharedCell>` capture cell — and `TraitObject` whose
+    /// edges `for_each_heap_child` does not yet enumerate). Leaving it unfreed is
+    /// leak-safe — never a premature free / double free (§3.5 option-A migration
+    /// is fast-follow).
     Leak,
 }
 
@@ -565,12 +576,27 @@ enum FreeKind {
 struct GcNode {
     addr: usize,
     nk: NativeKind,
+    /// `Some(layout)` **iff** this node is a raw `TypedClosureHeader` block
+    /// (the closure VALUE's owned block C), reached via the
+    /// `Arc<HeapValue::ClosureRaw> → block` edge. The block is not
+    /// self-describing — its `ClosureLayout` (looked up by `type_id`, not
+    /// reachable from the block pointer alone) is needed to walk the block's
+    /// captures and to free it memory-only. The layout is borrowed from the
+    /// live closure VALUE (a cycle member kept alive through the whole
+    /// collection), so the pointer stays valid for every pass + the deferred
+    /// free. `None` for every other node — including the `Arc<HeapValue>`
+    /// closure VALUE node itself (`nk = Ptr(Closure)`, header-less, leak-safe).
+    clo: Option<*const ClosureLayout>,
 }
 
 impl GcNode {
     /// Does this node keep its color/count in an inline `HeapHeader`?
     #[inline]
     fn is_header(&self) -> bool {
+        if self.clo.is_some() {
+            // Raw `TypedClosureHeader` block — a v2 `HeapHeader` carrier.
+            return true;
+        }
         matches!(
             self.nk,
             NativeKind::Ptr(
@@ -591,6 +617,10 @@ impl GcNode {
     /// children `for_each_heap_child` does not enumerate.
     #[inline]
     fn is_arc_backed(&self) -> bool {
+        if self.clo.is_some() {
+            // Raw block C is a header carrier, never side-table shadowed.
+            return false;
+        }
         matches!(
             self.nk,
             NativeKind::String
@@ -606,7 +636,11 @@ impl GcNode {
                         | HeapKind::Decimal
                         | HeapKind::BigInt
                         | HeapKind::DataTable
+                        // Closure VALUE (`Arc<HeapValue::ClosureRaw>`) and the
+                        // `Arc<SharedCell>` capture cell are header-less — their
+                        // shadow trial-count lives in the side table (§3.5 A).
                         | HeapKind::Closure
+                        | HeapKind::SharedCell
                 )
         )
     }
@@ -635,7 +669,9 @@ impl GcNode {
     #[inline]
     fn child_heapkind(&self) -> Option<HeapKind> {
         match self.nk {
-            NativeKind::Ptr(hk @ (HeapKind::TypedObject | HeapKind::TypedArray)) => Some(hk),
+            NativeKind::Ptr(
+                hk @ (HeapKind::TypedObject | HeapKind::TypedArray | HeapKind::SharedCell),
+            ) => Some(hk),
             _ => None,
         }
     }
@@ -643,11 +679,18 @@ impl GcNode {
     /// How to reclaim this node's memory if it ends White.
     #[inline]
     fn free_kind(&self) -> FreeKind {
+        if self.clo.is_some() {
+            // Raw `TypedClosureHeader` block — memory-only via
+            // `dealloc_typed_closure_no_drop` (uses the carried layout).
+            return FreeKind::ClosureBlock;
+        }
         match self.nk {
             NativeKind::Ptr(HeapKind::TypedObject) => FreeKind::TypedObject,
             NativeKind::Ptr(HeapKind::TypedArray) => FreeKind::TypedArray,
             NativeKind::StringV2 => FreeKind::StringV2,
             NativeKind::DecimalV2 => FreeKind::DecimalV2,
+            // Header-less `Arc`-backed (`Arc<HeapValue>` closure VALUE,
+            // `Arc<SharedCell>` cell) + not-yet-enumerated kinds: leak-safe.
             _ => FreeKind::Leak,
         }
     }
@@ -712,6 +755,24 @@ unsafe fn arc_strong_count_seed(node: GcNode) -> u32 {
             let _ = std::sync::Arc::into_raw(arc); // do not drop — give the share back
             c
         },
+        // Closure VALUE — `Arc<HeapValue::ClosureRaw>`. Read the exact strong
+        // count so the value node can go White when the array element is its
+        // only holder (the A → B edge of the real closure-in-array cycle).
+        NativeKind::Ptr(HeapKind::Closure) => unsafe {
+            let arc = std::sync::Arc::from_raw(node.addr as *const crate::heap_value::HeapValue);
+            let c = std::sync::Arc::strong_count(&arc) as u32;
+            let _ = std::sync::Arc::into_raw(arc); // do not drop — give the share back
+            c
+        },
+        // Shared capture cell — `Arc<SharedCell>`. Exact strong count so the
+        // cell node can go White when the closure capture is its only holder
+        // (the C → D edge of the cycle).
+        NativeKind::Ptr(HeapKind::SharedCell) => unsafe {
+            let arc = std::sync::Arc::from_raw(node.addr as *const SharedCell);
+            let c = std::sync::Arc::strong_count(&arc) as u32;
+            let _ = std::sync::Arc::into_raw(arc); // do not drop — give the share back
+            c
+        },
         // Conservative: treat as strongly externally-referenced (never White).
         _ => u32::MAX / 2,
     }
@@ -766,16 +827,63 @@ unsafe fn node_increment(node: GcNode, side: &mut GcSideTable) {
 /// kind. The visitor performs no refcount work.
 #[inline]
 unsafe fn node_for_each_child<F: FnMut(GcNode)>(node: GcNode, mut f: F) {
-    if let Some(hk) = node.child_heapkind() {
+    // (C) Raw `TypedClosureHeader` block: walk its captures (immutable heap
+    // edges + `Shared` cells) via the shared closure visitor, using the layout
+    // carried on the node. Yields the `Shared` cell children (Ptr(SharedCell))
+    // that close the cycle.
+    if let Some(layout) = node.clo {
         unsafe {
-            crate::gc_visit::for_each_heap_child(node.addr as *const u8, hk, |bits, cnk| {
-                if bits != 0 {
+            // SAFETY: `layout` is borrowed from the live closure VALUE (a cycle
+            // member alive for the whole collection); `node.addr` is a live
+            // block per the caller contract.
+            crate::gc_visit::for_each_closure_heap_child(
+                node.addr as *const u8,
+                &*layout,
+                |bits, cnk| {
+                    if bits != 0 {
+                        f(GcNode {
+                            addr: bits as usize,
+                            nk: cnk,
+                            clo: None,
+                        });
+                    }
+                },
+            );
+        }
+        return;
+    }
+    match node.nk {
+        // (B) Closure VALUE — `Arc<HeapValue::ClosureRaw>`. Its single heap
+        // child is the owned `TypedClosureHeader` block C, carried WITH its
+        // layout so the collector can walk C's captures and free C memory-only.
+        NativeKind::Ptr(HeapKind::Closure) => unsafe {
+            crate::gc_visit::for_each_closure_value_heap_child(
+                node.addr as *const u8,
+                |block_ptr, layout| {
                     f(GcNode {
-                        addr: bits as usize,
-                        nk: cnk,
+                        addr: block_ptr as usize,
+                        nk: NativeKind::Ptr(HeapKind::Closure),
+                        clo: Some(layout as *const ClosureLayout),
+                    });
+                },
+            );
+        },
+        // (A) TypedArray / (D) SharedCell / TypedObject: `(bits, kind)` children
+        // via the shared `for_each_heap_child` dispatch.
+        _ => {
+            if let Some(hk) = node.child_heapkind() {
+                unsafe {
+                    crate::gc_visit::for_each_heap_child(node.addr as *const u8, hk, |bits, cnk| {
+                        if bits != 0 {
+                            f(GcNode {
+                                addr: bits as usize,
+                                nk: cnk,
+                                clo: None,
+                            });
+                        }
                     });
                 }
-            });
+            }
         }
     }
 }
@@ -894,6 +1002,29 @@ unsafe fn free_white_node(node: GcNode, side: &mut GcSideTable) -> bool {
             }
             true
         }
+        FreeKind::ClosureBlock => {
+            // MEMORY-ONLY: deallocate the block WITHOUT walking its capture
+            // masks. The captured `Shared` cell (a White cycle peer) is freed
+            // — leak-safe-deferred — by its own node; the immutable heap
+            // captures are peers too. The `Arc<HeapValue>` closure VALUE that
+            // owns this block is leak-safe-deferred (never freed this lane), so
+            // it never re-enters this freed block. No user `Drop`.
+            // SAFETY: `node.clo` is the block's layout (borrowed from the still
+            // -live closure VALUE); `node.addr` is a White cycle member freed
+            // exactly once here.
+            let layout = unsafe {
+                &*node
+                    .clo
+                    .expect("ClosureBlock free-kind node must carry its layout")
+            };
+            unsafe {
+                crate::v2::closure_raw::dealloc_typed_closure_no_drop(
+                    node.addr as *mut u8,
+                    layout,
+                );
+            }
+            true
+        }
         FreeKind::Leak => {
             // Header-less / not-yet-enumerated kind: leave unfreed (leak-safe).
             side.remove(node.addr);
@@ -925,6 +1056,7 @@ pub fn collect_cycles() -> usize {
             .map(|&(addr, hk)| GcNode {
                 addr,
                 nk: NativeKind::Ptr(hk),
+                clo: None,
             })
             .collect();
 
@@ -1580,6 +1712,178 @@ mod tests {
             // the test itself leaks nothing; `owned` then drops normally.
             Arc::decrement_strong_count(Arc::as_ptr(&owned));
             assert_eq!(Arc::strong_count(&owned), 1);
+        }
+        clear_candidate_buffer();
+    }
+
+    // ── Phase 3.5 — the REAL closure-in-array Finding #31 cycle ──────────────
+
+    /// The four raw-carrier handles of a real Finding-#31 cycle
+    /// (`var arr = []; arr.push(|| arr.len())`).
+    struct Finding31Cycle {
+        /// Node A — `*mut TypedArray<CallableArrayElem>` (v2 header carrier).
+        arr: *mut crate::v2::typed_array::TypedArray<
+            crate::v2::typed_array::CallableArrayElem,
+        >,
+        /// Node B — `Arc::into_raw(Arc<HeapValue::ClosureRaw>)` (header-less).
+        closure_value: *const crate::heap_value::HeapValue,
+        /// Node D — `Arc::into_raw(Arc<SharedCell>)` (header-less).
+        cell: *const SharedCell,
+    }
+
+    /// Build the authentic real-#31 carrier topology using the PRODUCTION
+    /// allocators — a CALLABLE `TypedArray` (A) whose element owns an
+    /// `Arc<HeapValue::ClosureRaw>` (B); the closure's `TypedClosureHeader`
+    /// block (C) has one `CaptureKind::Shared` capture owning an
+    /// `Arc<SharedCell>` (D) whose payload back-edges to A. `extra_external`
+    /// extra live shares are taken on A (0 = pure garbage after the root drop;
+    /// ≥1 = a still-live cycle).
+    ///
+    /// Steady-state refcounts: A.rc = 1 (root) + 1 (cell payload) +
+    /// `extra_external`; B/C/D each 1 (their single cycle holder).
+    unsafe fn build_finding31_cycle(extra_external: u32) -> Finding31Cycle {
+        use crate::v2::closure_layout::CaptureKind;
+        use crate::v2::closure_raw::{alloc_typed_closure, write_capture_raw_u64, OwnedClosureBlock};
+        use crate::v2::concrete_type::ConcreteType;
+        use crate::v2::typed_array::{
+            stamp_elem_type, CallableArrayElem, CallableArrayElemKind, TypedArray,
+            ELEM_TYPE_CALLABLE,
+        };
+        unsafe {
+            // A — CALLABLE TypedArray (external root share = 1).
+            let arr = TypedArray::<CallableArrayElem>::with_capacity(1);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_CALLABLE);
+            for _ in 0..extra_external {
+                crate::v2::typed_array::retain_v2_typed_array(arr as *mut u8);
+            }
+
+            // D — SharedCell whose payload back-edges to A. Transfer one share
+            // of A into the cell payload.
+            crate::v2::typed_array::retain_v2_typed_array(arr as *mut u8); // cell payload share
+            let cell_arc = Arc::new(SharedCell::new(
+                arr as u64,
+                NativeKind::Ptr(HeapKind::TypedArray),
+            ));
+            let cell = Arc::into_raw(cell_arc); // D strong = 1
+
+            // C — closure block with one Shared capture holding D.
+            let layout_arc = Arc::new(ClosureLayout::from_capture_types(
+                &[ConcreteType::Array(Box::new(ConcreteType::I64))],
+                &[CaptureKind::Shared],
+            ));
+            let block = alloc_typed_closure(0, 0, &layout_arc); // C.rc = 1
+            write_capture_raw_u64(block, &layout_arc, 0, cell as u64); // C owns D's share
+
+            // B — Arc<HeapValue::ClosureRaw> owning block C.
+            let owned = OwnedClosureBlock::from_raw(block as *const u8, Arc::clone(&layout_arc));
+            let hv_arc = Arc::new(crate::heap_value::HeapValue::ClosureRaw(owned));
+            let closure_value = Arc::into_raw(hv_arc); // B strong = 1
+
+            // A's element owns B's share (the array push).
+            TypedArray::<CallableArrayElem>::push(
+                arr,
+                CallableArrayElem {
+                    bits: closure_value as u64,
+                    kind: CallableArrayElemKind::Closure,
+                },
+            );
+
+            Finding31Cycle {
+                arr,
+                closure_value,
+                cell,
+            }
+        }
+    }
+
+    /// Read an `Arc<T>`'s strong count from a raw `Arc::into_raw` pointer
+    /// WITHOUT taking or dropping a share (reconstruct-then-forget).
+    unsafe fn arc_strong<T>(raw: *const T) -> usize {
+        unsafe {
+            let arc = Arc::from_raw(raw);
+            let c = Arc::strong_count(&arc);
+            let _ = Arc::into_raw(arc);
+            c
+        }
+    }
+
+    /// **The real Finding #31 is collected.** `var arr = []; arr.push(|| arr.len())`
+    /// — a closure that captures the mutable array and is pushed into it — is a
+    /// four-node cycle A(TypedArray CALLABLE) → B(Arc<HeapValue::ClosureRaw>) →
+    /// C(TypedClosureHeader block) → D(Arc<SharedCell>) → A. The two v2 header
+    /// carriers (array A + closure block C) are reclaimed MEMORY-ONLY; the two
+    /// header-less `Arc` intermediaries (B, D) are leak-safe-deferred (§3.5).
+    /// The leak is bounded: `freed == 2` and the dominant RSS (array buffer +
+    /// closure block) is reclaimed, not pinned forever.
+    #[test]
+    fn collect_real_closure_in_array_finding31_frees_array_and_block() {
+        clear_candidate_buffer();
+        unsafe {
+            let c = build_finding31_cycle(0);
+            // Steady state: A.rc = 2 (root + cell payload).
+            assert_eq!((*(c.arr as *const HeapHeader)).get_refcount(), 2);
+            assert_eq!(arc_strong(c.closure_value), 1, "B held only by array elem");
+            assert_eq!(arc_strong(c.cell), 1, "D held only by closure capture");
+
+            // The `var arr` binding drops: a decrement-to-nonzero (the cell
+            // back-edge pins A at ≥ 1) → buffered as a Purple possible-root.
+            drop_external_and_buffer(c.arr as usize, HeapKind::TypedArray);
+            assert_eq!(candidate_buffer_len(), 1);
+
+            // CollectCycles proves the 4-node garbage cycle and frees the array
+            // + the closure block, memory-only.
+            let freed = collect_cycles();
+            assert_eq!(
+                freed, 2,
+                "array (A) + closure block (C) reclaimed memory-only; B + D leak-safe-deferred"
+            );
+            assert_eq!(candidate_buffer_len(), 0);
+
+            // Drop was SKIPPED on the cycle members: the closure block's
+            // capture-release never ran, so D's `Arc<SharedCell>` strong count
+            // is still 1 (had `release_typed_closure` run, it would have retired
+            // D's share → 0). Likewise B's `Arc<HeapValue>` strong count is
+            // still 1 (the array's memory-only free never released the element).
+            assert_eq!(arc_strong(c.cell), 1, "cycle member skipped Drop (D not released)");
+            assert_eq!(arc_strong(c.closure_value), 1, "cycle member skipped Drop (B not released)");
+
+            // A and C are freed; B and D leak (the §3.5 boundary). Do NOT drop B
+            // or D — their Drops would re-enter the freed block/array (UAF).
+        }
+        clear_candidate_buffer();
+    }
+
+    /// **A LIVE closure-in-array cycle is NOT collected.** Same topology, but an
+    /// extra live external reference to the array survives the root drop. Trial
+    /// deletion finds A's residual count > 0 ⇒ `ScanBlack` restores the whole
+    /// subgraph and nothing is freed. Teardown then removes the live ref and
+    /// re-collects the now-garbage cycle (freeing A + C) so no premature free
+    /// ever occurred.
+    #[test]
+    fn live_closure_in_array_cycle_is_not_collected() {
+        clear_candidate_buffer();
+        unsafe {
+            let c = build_finding31_cycle(1); // one extra live external ref on A
+            // A.rc = 3 (root + cell payload + live-external).
+            assert_eq!((*(c.arr as *const HeapHeader)).get_refcount(), 3);
+
+            // The `var arr` binding drops (root), but the live-external ref
+            // remains → A.rc = 2, buffered.
+            drop_external_and_buffer(c.arr as usize, HeapKind::TypedArray);
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 0, "a live external ref must prevent collection");
+            // Refcounts restored exactly by ScanBlack: A back to 2, block C
+            // back to 1, and the Arc intermediaries untouched.
+            assert_eq!((*(c.arr as *const HeapHeader)).get_refcount(), 2);
+            assert_eq!(arc_strong(c.closure_value), 1);
+            assert_eq!(arc_strong(c.cell), 1);
+
+            // Teardown: drop the live-external ref → now pure garbage. Re-buffer
+            // A and collect so the array + block are reclaimed (B + D leak-safe).
+            crate::v2::typed_array::release_v2_typed_array(c.arr as *mut u8); // A.rc = 1
+            gc_buffer_possible_root(c.arr as *mut u8, HeapKind::TypedArray);
+            assert_eq!(collect_cycles(), 2, "the now-garbage cycle is reclaimed");
         }
         clear_candidate_buffer();
     }
