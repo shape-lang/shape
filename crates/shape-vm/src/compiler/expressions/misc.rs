@@ -773,14 +773,25 @@ impl BytecodeCompiler {
             });
         }
 
-        // Compile each branch: wrap in closure, spawn task
+        // Compile each branch and spawn it as a task.
+        //
+        // WF-2D-fu real concurrency: a zero-arg call to a user `async fn` is
+        // deferred (its function id + SpawnTask), so `op_spawn_task`'s UInt64
+        // arm runs it on a fresh isolated VM on the shared runtime's blocking
+        // pool. All branches then become in-flight `pending_async` tasks, so
+        // `join race`/`any` (`op_join_await` → `join_race_first_settled` /
+        // `join_any_first_success`) genuinely poll them concurrently and
+        // return at the first settlement, cancelling the losers. A branch that
+        // is not a deferrable async-fn call keeps the eager
+        // `compile_expr + SpawnTask` shape (evaluated on this thread).
         for branch in &join_expr.branches {
-            // Compile the branch expression as-is.
-            // In a full implementation, each branch would be wrapped in a closure
-            // and SpawnTask would schedule it. For now, we compile the expression
-            // and emit SpawnTask which creates a Future from the top-of-stack value.
-            self.plan_flexible_binding_escape_from_expr(&branch.expr);
-            self.compile_expr(&branch.expr)?;
+            if let Some((func_id, _)) = self.deferrable_async_call_target(&branch.expr) {
+                let const_idx = self.program.add_constant(Constant::Function(func_id));
+                self.emit(Instruction::new(OpCode::PushConst, Some(Operand::Const(const_idx))));
+            } else {
+                self.plan_flexible_binding_escape_from_expr(&branch.expr);
+                self.compile_expr(&branch.expr)?;
+            }
             self.emit(Instruction::simple(OpCode::SpawnTask));
         }
 
