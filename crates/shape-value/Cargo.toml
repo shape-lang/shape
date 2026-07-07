@@ -25,3 +25,8 @@ tokio = { workspace = true }
 
 [features]
 default = []
+# Cycle-collecting GC (real-gc-cycle-collection.md). Default OFF: with the
+# feature off, all GC code compiles to nothing and the build is a strict no-op.
+# Phase 0 lands metadata + accessors only (no collector, no barriers, no Drop
+# change).
+gc = []
