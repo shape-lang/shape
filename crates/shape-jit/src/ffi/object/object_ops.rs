@@ -90,7 +90,12 @@ pub extern "C" fn jit_set_prop(obj_bits: u64, key_bits: u64, value_bits: u64) ->
                 let obj = unified_unbox_mut::<HashMap<String, u64>>(obj_bits);
                 let key = unbox_string(key_bits).to_string();
                 let old_bits = obj.get(&key).copied().unwrap_or(TAG_NULL);
-                super::super::gc::jit_write_barrier(old_bits, value_bits);
+                // GC Phase 2: kind-tag `0` — this JIT-domain store does not yet
+                // thread the overwritten slot's `NativeKind` (per-field kind
+                // threading into JIT stores is the queued JIT typed-pointer
+                // migration cluster). The barrier body is wired and tested; it
+                // is inert here until the kind is supplied.
+                super::super::gc::jit_write_barrier(old_bits, value_bits, 0);
                 obj.insert(key, value_bits);
                 obj_bits
             }

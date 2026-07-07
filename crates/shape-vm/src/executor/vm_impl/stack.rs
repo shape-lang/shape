@@ -577,6 +577,12 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
             | NativeKind::Null => {}
         }
     }
+    // GC Phase 2 increment barrier (real-gc-cycle-collection.md §3.2): the
+    // retain above completed, so the target is demonstrably in use — color it
+    // Black. Additive `#[cfg]`-gated no-op when the `gc` feature is off; the RC
+    // retain path above is byte-identical either way.
+    #[cfg(feature = "gc")]
+    shape_value::gc::gc_increment_barrier(bits, kind);
 }
 
 /// WB2.4 retain-on-read inverse: decrement the matching `Arc<T>`
@@ -589,6 +595,14 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
     if bits == 0 {
         return;
     }
+    // GC Phase 2 decrement barrier, pre-step (real-gc-cycle-collection.md §3.2):
+    // read whether this is a cycle-capable header carrier that will SURVIVE the
+    // imminent decrement (refcount currently > 1). Reading *before* the release
+    // keeps the RC fast path byte-identical: a refcount-1 object returns `None`
+    // here and the existing release below frees it exactly as today. Additive
+    // `#[cfg]`-gated no-op when the `gc` feature is off.
+    #[cfg(feature = "gc")]
+    let gc_survivor = shape_value::gc::gc_decrement_precheck(bits, kind);
     // SAFETY: per the construction-side contract on every push site, when
     // `kind` selects a heap arm the `bits` are the result of
     // `Arc::into_raw::<T>` for the matching `T`. We retire exactly one
@@ -918,6 +932,15 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
             // `Arc<T>` payload, no refcount work.
             | NativeKind::Null => {}
         }
+    }
+    // GC Phase 2 decrement barrier, buffer-step (real-gc-cycle-collection.md
+    // §3.2): if the pre-step found a surviving cycle-capable header carrier
+    // (refcount was > 1, so the release above left it at > 0), color it Purple
+    // and buffer it as a possible cycle root. The RC fast path (refcount hit
+    // zero → freed above) never reaches here (`gc_survivor` is `None`).
+    #[cfg(feature = "gc")]
+    if let Some((ptr, hk)) = gc_survivor {
+        shape_value::gc::gc_buffer_possible_root(ptr, hk);
     }
 }
 
@@ -1362,6 +1385,67 @@ impl VirtualMachine {
         F: FnOnce(u64, NativeKind) -> R,
     {
         f(self.stack[idx], self.kinds[idx])
+    }
+}
+
+#[cfg(all(test, feature = "gc"))]
+mod gc_barrier_wiring_tests {
+    use super::{clone_with_kind, drop_with_kind};
+    use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::native_kind::NativeKind;
+    use shape_value::slot::ValueSlot;
+    use shape_value::{HeapKind, gc};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    /// End-to-end proof that `stack::drop_with_kind` wires the GC Phase-2
+    /// decrement barrier: a decrement-to-nonzero of a cycle-capable TypedObject
+    /// buffers it as a Purple candidate, while the retain path
+    /// (`clone_with_kind`) leaves it Black. The RC arithmetic is unchanged.
+    #[test]
+    fn drop_with_kind_buffers_survivor_and_clone_colors_black() {
+        gc::clear_candidate_buffer();
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let obj = TypedObjectStorage::_new(
+            314,
+            vec![ValueSlot::from_int(0)].into_boxed_slice(),
+            0,
+            kinds,
+        );
+        // SAFETY: `obj` is a live refcount-1 carrier throughout.
+        unsafe {
+            // clone_with_kind performs a real retain (rc 1 → 2) AND colors Black.
+            clone_with_kind(obj as u64, NativeKind::Ptr(HeapKind::TypedObject));
+            assert_eq!((*obj).header.refcount.load(Ordering::SeqCst), 2);
+
+            // drop_with_kind decrements (rc 2 → 1, nonzero) ⇒ buffered Purple.
+            drop_with_kind(obj as u64, NativeKind::Ptr(HeapKind::TypedObject));
+            assert_eq!((*obj).header.refcount.load(Ordering::SeqCst), 1);
+            assert_eq!(gc::candidate_buffer_snapshot(), vec![obj as usize]);
+
+            // Final drop hits zero ⇒ RC fast path frees; NOT re-buffered.
+            drop_with_kind(obj as u64, NativeKind::Ptr(HeapKind::TypedObject));
+            assert_eq!(gc::candidate_buffer_len(), 1, "rc→0 free is not a candidate");
+        }
+        gc::clear_candidate_buffer();
+    }
+
+    /// A leaf carrier (String) is never a cycle member: its decrement-to-nonzero
+    /// must NOT be buffered.
+    #[test]
+    fn drop_with_kind_leaf_string_not_buffered() {
+        gc::clear_candidate_buffer();
+        let s: Arc<String> = Arc::new("leaf".to_string());
+        let bits = Arc::into_raw(s) as u64;
+        // SAFETY: bits is one Arc<String> share; retain once so the drop is
+        // decrement-to-nonzero.
+        unsafe {
+            Arc::increment_strong_count(bits as *const String); // rc = 2
+            drop_with_kind(bits, NativeKind::String); // rc = 2 → 1, nonzero
+            assert_eq!(gc::candidate_buffer_len(), 0, "leaf String is not cycle-capable");
+            Arc::decrement_strong_count(bits as *const String); // rc = 1 → 0, freed
+        }
+        gc::clear_candidate_buffer();
     }
 }
 

@@ -191,7 +191,10 @@ pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: 
 
     unsafe {
         let old_bits = (*ptr).get_field(offset);
-        super::super::gc::jit_write_barrier(old_bits, value);
+        // GC Phase 2: kind-tag `0` — JIT-domain store, overwritten slot kind
+        // not yet threaded (queued JIT typed-pointer migration). Barrier body
+        // wired + tested; inert here.
+        super::super::gc::jit_write_barrier(old_bits, value, 0);
         (*ptr).set_field(offset, value);
     }
     obj_bits

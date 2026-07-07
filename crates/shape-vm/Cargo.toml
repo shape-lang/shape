@@ -66,6 +66,11 @@ jit-trace = ["tracing/std", "tracing/release_max_level_debug"]
 # itself lives in the shape-jit crate; shape-vm carries no cranelift deps.
 jit = []
 gc_barrier_debug = [] # Debug-mode write barrier coverage counters
+# Cycle-collecting GC (real-gc-cycle-collection.md). Default OFF: enables the
+# RC barriers (Black-on-increment / Purple+buffer-on-decrement-to-nonzero) at
+# the VM decrement/increment sites. Forwards to `shape-value/gc` for the
+# metadata + candidate-buffer surface. Feature-off is a strict no-op.
+gc = ["shape-value/gc"]
 quic = ["shape-wire/quic"]
 # V3.6 audit knob: print a stderr line every time `emit_binary_op` falls back
 # to a `*Dynamic` opcode. Off by default — reserved for debugging residual
