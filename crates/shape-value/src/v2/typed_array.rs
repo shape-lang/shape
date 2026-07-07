@@ -875,6 +875,47 @@ pub unsafe fn free_v2_typed_array_memory_only(ptr: *mut u8) {
     }
 }
 
+/// GC §3.5-part2 (real-gc-cycle-collection.md): break the A→B cycle edge of a
+/// White callable `TypedArray` (node A of the closure-in-array Finding #31
+/// cycle) by zeroing the `bits` of every `Closure`-kind element in its buffer.
+///
+/// After this, the array's own `drop_array_callable` walk sees `bits == 0` at
+/// each closure slot and `CallableArrayElem::release` no-ops there — so when the
+/// array is later freed by the natural RC cascade
+/// (`SharedCell::Drop → release_v2_typed_array → drop_array_callable`) it does
+/// NOT re-drop the closure VALUE `Arc<HeapValue>` share. The collector drives
+/// that share to zero itself by dropping the value Arc directly (§3.5-part2
+/// Model 1), so re-dropping it here would be a double-free. `FunctionId` /
+/// `ModuleFn` elements are inline (`release` is a no-op), so they are left
+/// untouched.
+///
+/// # Safety
+/// `ptr` must point to a live `TypedArray<CallableArrayElem>` (its `_pad`
+/// discriminant is `ELEM_TYPE_CALLABLE`) that the collector has proven a White
+/// cycle member. Performs no refcount work — only zeroes the neutered slots'
+/// `bits`.
+#[cfg(feature = "gc")]
+pub unsafe fn gc_neuter_callable_closure_edges(ptr: *mut u8) {
+    unsafe {
+        debug_assert_eq!(
+            read_elem_type(ptr),
+            ELEM_TYPE_CALLABLE,
+            "gc_neuter_callable_closure_edges: not a CALLABLE array"
+        );
+        let arr = &*(ptr as *const TypedArray<CallableArrayElem>);
+        if arr.data.is_null() {
+            return;
+        }
+        for i in 0..arr.len {
+            // SAFETY: `i < len <= cap` and `data` non-null ⇒ in-bounds.
+            let elem_ptr = arr.data.add(i as usize);
+            if (*elem_ptr).kind == CallableArrayElemKind::Closure {
+                (*elem_ptr).bits = 0;
+            }
+        }
+    }
+}
+
 // Allocation + size-only operations available for non-Copy element types
 // (e.g. `TypedObjectPtr` with manual `Drop`). Per ADR-006 §2.7.24 Q25.B
 // SUPERSEDED + Wave 2 Round 3b C2-joint ckpt-1 — `HashMapData<V>` (in

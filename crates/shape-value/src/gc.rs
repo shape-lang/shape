@@ -694,6 +694,31 @@ impl GcNode {
             _ => FreeKind::Leak,
         }
     }
+
+    /// Is this the **closure VALUE** node — an `Arc<HeapValue::ClosureRaw>`
+    /// (`Ptr(Closure)`, no carried layout)? This is node **B** of the
+    /// closure-in-array Finding #31 cycle. Dropping its single `Arc<HeapValue>`
+    /// share is the one cycle edge the §3.5-part2 cascade breaks on to tear the
+    /// whole sub-cycle down through the natural RC paths.
+    #[inline]
+    fn is_closure_value(&self) -> bool {
+        self.clo.is_none() && matches!(self.nk, NativeKind::Ptr(HeapKind::Closure))
+    }
+
+    /// Is this a CALLABLE `TypedArray` — node **A** of the closure-in-array
+    /// cycle (the array whose element owns the closure VALUE B)?
+    ///
+    /// # Safety
+    /// `addr` must be a live `TypedArray` allocation (reads its `_pad`
+    /// element-type discriminant).
+    #[inline]
+    unsafe fn is_callable_array(&self) -> bool {
+        self.clo.is_none()
+            && matches!(self.nk, NativeKind::Ptr(HeapKind::TypedArray))
+            && unsafe { crate::v2::typed_array::read_elem_type(self.addr as *const u8) }
+                == crate::v2::typed_array::ELEM_TYPE_CALLABLE
+    }
+
 }
 
 /// Read a node's GC color.
@@ -1044,12 +1069,20 @@ unsafe fn free_white_node(node: GcNode, side: &mut GcSideTable) -> bool {
 /// the whole module compiles to nothing, so this symbol does not exist in the
 /// shipped default build.
 pub fn collect_cycles() -> usize {
-    CANDIDATES.with(|c| {
+    // ── Phase A — inside the CANDIDATES borrow ──────────────────────────────
+    // Trial-deletion passes + collect the White set. For a closure-in-array
+    // sub-cycle (§3.5-part2) additionally restore the header members' refcounts
+    // and break the A→B edge, then gather the closure-VALUE `Arc` pointers whose
+    // drop drives the RC cascade. The cascade itself runs in Phase B AFTER the
+    // borrow is released: `release_v2_typed_array` re-enters
+    // `gc_note_object_freed` (which borrows CANDIDATES), so driving it inside
+    // this borrow would be a `RefCell` double-borrow panic.
+    let (reclaimed, cascade_b_ptrs) = CANDIDATES.with(|c| {
         // Take the buffer out so the passes hold a single `&mut GcSideTable`
         // without re-borrowing the thread-local across the recursion.
         let CandidateBuffer { ptrs, side } = &mut *c.borrow_mut();
         if ptrs.is_empty() {
-            return 0;
+            return (0usize, Vec::<usize>::new());
         }
         let roots: Vec<GcNode> = ptrs
             .iter()
@@ -1073,7 +1106,7 @@ pub fn collect_cycles() -> usize {
         }
         // Pass 3 — CollectRoots. Clear `buffered` on every root first so
         // CollectWhite's `!buffered` guard does not skip a White root, then
-        // collect the deferred White set and free it memory-only.
+        // collect the deferred White set.
         for &root in &roots {
             unsafe { root.meta().set_buffered(false, side) };
         }
@@ -1081,12 +1114,88 @@ pub fn collect_cycles() -> usize {
         for &root in &roots {
             unsafe { collect_white(root, side, &mut freed) };
         }
-        // Deferred free — every child read already happened above. Count only
-        // nodes whose MEMORY was reclaimed (header-less White nodes are
-        // leak-safe / removed from the side table but not freed in Phase 3a).
+
+        // A closure-in-array sub-cycle is present iff the White set holds a
+        // closure-VALUE node (B — `Arc<HeapValue::ClosureRaw>`). Its `Arc`
+        // intermediaries (B, D) cannot be raw-freed; they are reclaimed by the
+        // natural RC cascade (§3.5-part2 Model 1) instead of the raw
+        // memory-only free that part-1 used for the header carriers A + C.
+        let has_cascade = freed.iter().any(|n| n.is_closure_value());
+
+        if !has_cascade {
+            // Generic object↔object / array↔object cycle (no std-`Arc` member):
+            // the part-1 per-node raw memory-only free is exactly right.
+            let mut reclaimed = 0usize;
+            for &node in &freed {
+                if unsafe { free_white_node(node, side) } {
+                    reclaimed += 1;
+                }
+            }
+            ptrs.clear();
+            *side = GcSideTable::new();
+            return (reclaimed, Vec::new());
+        }
+
+        // (1) RESTORE. Trial-deletion left every header member's real
+        // `HeapHeader.refcount` at 0; the RC cascade decrements each exactly
+        // once (1→0) to free it, so restore each to its in-cycle indegree by
+        // re-incrementing along the SAME `node_for_each_child` enumeration
+        // MarkGray trial-decremented. Header children get their real refcount
+        // bumped (A→1 via D→A, C→1 via B→C); the `Arc`-backed children (B, D)
+        // bump only their side-table shadow — their real strong counts were
+        // never touched and stay at 1 — and the shadow is discarded when the
+        // table is cleared below.
+        for &node in &freed {
+            unsafe { node_for_each_child(node, |child| node_increment(child, side)) };
+        }
+
+        // (2) Compute the cascade-reachable set S: every node the RC cascade
+        // will reclaim, via a DFS from each closure-VALUE node over the same
+        // single-source enumeration. For the real #31 topology this is the whole
+        // {A,B,C,D} cycle; any DISJOINT generic cycle buffered in the same
+        // collection is NOT reachable and is raw-freed in step (5). Read BEFORE
+        // the neuter in (3), while every array element still points at B.
+        let mut reachable: ahash::AHashSet<usize> = ahash::AHashSet::new();
+        let mut stack: Vec<GcNode> =
+            freed.iter().copied().filter(|n| n.is_closure_value()).collect();
+        for n in &stack {
+            reachable.insert(n.addr);
+        }
+        while let Some(node) = stack.pop() {
+            unsafe {
+                node_for_each_child(node, |child| {
+                    if reachable.insert(child.addr) {
+                        stack.push(child);
+                    }
+                });
+            }
+        }
+
+        // (3) BREAK the A→B edge on every cascade-reachable CALLABLE array: zero
+        // its closure elements' `bits` so the array's own eventual
+        // `drop_array_callable` does NOT re-drop B (the cascade drops B's `Arc`
+        // directly in Phase B — re-dropping would be a double-free).
+        for &node in &freed {
+            if reachable.contains(&node.addr) && unsafe { node.is_callable_array() } {
+                unsafe {
+                    crate::v2::typed_array::gc_neuter_callable_closure_edges(node.addr as *mut u8);
+                }
+            }
+        }
+
+        // (4) Gather the closure-VALUE `Arc` pointers to drop in Phase B.
+        let cascade_b_ptrs: Vec<usize> =
+            freed.iter().filter(|n| n.is_closure_value()).map(|n| n.addr).collect();
+
+        // (5) Count + raw-free. Every cascade-reachable node is reclaimed by the
+        // Phase-B cascade (count it). Any node NOT reachable is a disjoint
+        // generic cycle with no std-`Arc` member → raw memory-only free here
+        // (safe inside the borrow: that path does not re-enter CANDIDATES).
         let mut reclaimed = 0usize;
         for &node in &freed {
-            if unsafe { free_white_node(node, side) } {
+            if reachable.contains(&node.addr) {
+                reclaimed += 1;
+            } else if unsafe { free_white_node(node, side) } {
                 reclaimed += 1;
             }
         }
@@ -1095,8 +1204,37 @@ pub fn collect_cycles() -> usize {
         // will be re-buffered by future decrement barriers if they cycle again.
         ptrs.clear();
         *side = GcSideTable::new();
-        reclaimed
-    })
+        (reclaimed, cascade_b_ptrs)
+    });
+
+    // ── Phase B — outside the CANDIDATES borrow ─────────────────────────────
+    // Drive the RC cascade by dropping each closure-VALUE
+    // `Arc<HeapValue::ClosureRaw>` share exactly once. Each drop tears down its
+    // whole closure sub-cycle through the natural Arc/refcount paths:
+    //   B.strong 1→0 → OwnedClosureBlock::Drop → release_typed_closure(C)
+    //     [C.rc 1→0, walks the Shared capture] → drop(Arc<SharedCell> D)
+    //     [D.strong 1→0] → SharedCell::Drop [intact kind=Ptr(TypedArray)]
+    //     → release_v2_typed_array(A) [A.rc 1→0, drop_array_callable sees the
+    //       neutered element ⇒ no re-drop of B] → A freed
+    //     → dealloc block C → B's HeapValue dropped → B freed.
+    // Every node is freed exactly once; the A→B edge was pre-broken so A's free
+    // cannot re-enter B, and no raw-free touches these nodes (no raw-vs-Arc
+    // double reclaim). The SharedCell kind/value companion is never mutated, so
+    // the closure_layout.rs:157-160 lockstep invariant is fully respected.
+    for b in cascade_b_ptrs {
+        // SAFETY: `b` is one live `Arc::into_raw(Arc<HeapValue::ClosureRaw>)`
+        // share owned by the (now-neutered) array element; the collector proved
+        // the whole sub-cycle White (no external reference survives). Dropping
+        // this single share is the one cycle edge that triggers the tear-down,
+        // and it is dropped exactly once (one node per address in `freed`).
+        unsafe {
+            drop(std::sync::Arc::from_raw(
+                b as *const crate::heap_value::HeapValue,
+            ));
+        }
+    }
+
+    reclaimed
 }
 
 /// Safepoint trigger (§R2 / R4 3a): run [`collect_cycles`] when the candidate
@@ -1337,9 +1475,14 @@ mod tests {
             assert_eq!(candidate_buffer_len(), 2, "buffered-bit dedup");
 
             // Teardown (no real cross-edges in the fixture ⇒ no cascade): drop
-            // the remaining share on each.
-            crate::v2::refcount::v2_release(&(*a).header); // a.rc = 0 → freed
-            crate::v2::refcount::v2_release(&(*b).header); // b.rc = 0 → freed
+            // the remaining share on each. Use `_drop` — the raw `v2_release`
+            // refcount primitive only decrements the header and returns whether
+            // it hit zero; it does NOT deallocate the `TypedObjectStorage`, so
+            // the earlier `a.rc = 0 → freed` comment was aspirational and the
+            // objects leaked (both nodes' memory + their `kinds` Arc). `_drop`
+            // does the release-and-deallocate so the fixture leaks nothing.
+            TypedObjectStorage::_drop(a); // a.rc 1 → 0 → freed (memory reclaimed)
+            TypedObjectStorage::_drop(b); // b.rc 1 → 0 → freed (memory reclaimed)
         }
         clear_candidate_buffer();
     }
@@ -1382,7 +1525,9 @@ mod tests {
             assert_eq!(candidate_buffer_snapshot(), vec![a as usize]);
 
             crate::v2::refcount::v2_release(&(*a).header); // rc = 1
-            crate::v2::refcount::v2_release(&(*a).header); // rc = 0 → freed
+            // `_drop` releases-and-deallocates; the raw `v2_release` primitive
+            // only decrements the header and would leak the object's memory.
+            TypedObjectStorage::_drop(a); // rc 1 → 0 → freed (memory reclaimed)
         }
         clear_candidate_buffer();
     }
@@ -1807,16 +1952,32 @@ mod tests {
         }
     }
 
-    /// **The real Finding #31 is collected.** `var arr = []; arr.push(|| arr.len())`
-    /// — a closure that captures the mutable array and is pushed into it — is a
-    /// four-node cycle A(TypedArray CALLABLE) → B(Arc<HeapValue::ClosureRaw>) →
-    /// C(TypedClosureHeader block) → D(Arc<SharedCell>) → A. The two v2 header
-    /// carriers (array A + closure block C) are reclaimed MEMORY-ONLY; the two
-    /// header-less `Arc` intermediaries (B, D) are leak-safe-deferred (§3.5).
-    /// The leak is bounded: `freed == 2` and the dominant RSS (array buffer +
-    /// closure block) is reclaimed, not pinned forever.
+    /// Downgrade a raw `Arc::into_raw` pointer to a `Weak<T>` WITHOUT changing
+    /// the strong count (reconstruct → downgrade → forget the strong share).
+    /// After the underlying value is reclaimed the `Weak` keeps the control
+    /// block alive, so `weak.strong_count()` (== 0) can be read without any
+    /// use-after-free on the freed payload.
+    unsafe fn weak_of<T>(raw: *const T) -> std::sync::Weak<T> {
+        unsafe {
+            let arc = Arc::from_raw(raw);
+            let w = Arc::downgrade(&arc);
+            let _ = Arc::into_raw(arc); // give the strong share back
+            w
+        }
+    }
+
+    /// **The real Finding #31 is FULLY collected (§3.5-part2).**
+    /// `var arr = []; arr.push(|| arr.len())` — a closure that captures the
+    /// mutable array and is pushed into it — is a four-node cycle
+    /// A(TypedArray CALLABLE) → B(Arc<HeapValue::ClosureRaw>) →
+    /// C(TypedClosureHeader block) → D(Arc<SharedCell>) → A. All FOUR nodes are
+    /// reclaimed: the collector breaks the A→B edge and drops B's `Arc`, and the
+    /// natural RC cascade tears down A, B, C, and D exactly once (memory-only —
+    /// no user Drop; the runtime carriers have none). `freed == 4` and the
+    /// std-`Arc` intermediaries B and D reach strong count 0 (proven via `Weak`,
+    /// which never touches the freed payload). The cycle is fully BOUNDED.
     #[test]
-    fn collect_real_closure_in_array_finding31_frees_array_and_block() {
+    fn collect_real_closure_in_array_finding31_frees_all_four_nodes() {
         clear_candidate_buffer();
         unsafe {
             let c = build_finding31_cycle(0);
@@ -1825,30 +1986,65 @@ mod tests {
             assert_eq!(arc_strong(c.closure_value), 1, "B held only by array elem");
             assert_eq!(arc_strong(c.cell), 1, "D held only by closure capture");
 
+            // Weak witnesses for the two std-Arc members (strong counts intact).
+            let weak_b = weak_of(c.closure_value);
+            let weak_d = weak_of(c.cell);
+            assert_eq!(weak_b.strong_count(), 1);
+            assert_eq!(weak_d.strong_count(), 1);
+
             // The `var arr` binding drops: a decrement-to-nonzero (the cell
             // back-edge pins A at ≥ 1) → buffered as a Purple possible-root.
             drop_external_and_buffer(c.arr as usize, HeapKind::TypedArray);
             assert_eq!(candidate_buffer_len(), 1);
 
-            // CollectCycles proves the 4-node garbage cycle and frees the array
-            // + the closure block, memory-only.
+            // CollectCycles proves the 4-node garbage cycle and reclaims ALL of
+            // it (A + C via the RC cascade; B + D via the driven Arc drop).
             let freed = collect_cycles();
             assert_eq!(
-                freed, 2,
-                "array (A) + closure block (C) reclaimed memory-only; B + D leak-safe-deferred"
+                freed, 4,
+                "all four cycle nodes (A array + B value + C block + D cell) reclaimed"
             );
             assert_eq!(candidate_buffer_len(), 0);
 
-            // Drop was SKIPPED on the cycle members: the closure block's
-            // capture-release never ran, so D's `Arc<SharedCell>` strong count
-            // is still 1 (had `release_typed_closure` run, it would have retired
-            // D's share → 0). Likewise B's `Arc<HeapValue>` strong count is
-            // still 1 (the array's memory-only free never released the element).
-            assert_eq!(arc_strong(c.cell), 1, "cycle member skipped Drop (D not released)");
-            assert_eq!(arc_strong(c.closure_value), 1, "cycle member skipped Drop (B not released)");
+            // B and D reached strong count 0 — the std-Arc residuals are gone,
+            // not leaked (part-1 left them at 1). Read via `Weak` — the payloads
+            // are freed, so a direct `arc_strong` would be a use-after-free.
+            assert_eq!(weak_b.strong_count(), 0, "B (Arc<HeapValue>) fully reclaimed");
+            assert_eq!(weak_d.strong_count(), 0, "D (Arc<SharedCell>) fully reclaimed");
 
-            // A and C are freed; B and D leak (the §3.5 boundary). Do NOT drop B
-            // or D — their Drops would re-enter the freed block/array (UAF).
+            // A and C are freed by the cascade. Do NOT touch c.arr / c.cell /
+            // c.closure_value again — the allocations are gone. Dropping the
+            // Weaks releases the (now strong-0) control blocks so the test
+            // itself leaks nothing.
+            drop(weak_b);
+            drop(weak_d);
+        }
+        clear_candidate_buffer();
+    }
+
+    /// **Finding #31 is BOUNDED over N iterations.** Building and collecting the
+    /// closure-in-array cycle N times must reclaim all four nodes every time —
+    /// total live allocation stays flat (no per-iteration residual). Each
+    /// iteration asserts B and D reach strong count 0 (full reclaim); run under
+    /// valgrind the loop must show no linear growth / no leak.
+    #[test]
+    fn closure_in_array_finding31_bounded_over_iterations() {
+        clear_candidate_buffer();
+        for _ in 0..64 {
+            unsafe {
+                let c = build_finding31_cycle(0);
+                let weak_b = weak_of(c.closure_value);
+                let weak_d = weak_of(c.cell);
+
+                drop_external_and_buffer(c.arr as usize, HeapKind::TypedArray);
+                let freed = collect_cycles();
+                assert_eq!(freed, 4, "every iteration reclaims all four nodes");
+                assert_eq!(weak_b.strong_count(), 0, "B reclaimed each iteration");
+                assert_eq!(weak_d.strong_count(), 0, "D reclaimed each iteration");
+
+                drop(weak_b);
+                drop(weak_d);
+            }
         }
         clear_candidate_buffer();
     }
@@ -1857,8 +2053,8 @@ mod tests {
     /// extra live external reference to the array survives the root drop. Trial
     /// deletion finds A's residual count > 0 ⇒ `ScanBlack` restores the whole
     /// subgraph and nothing is freed. Teardown then removes the live ref and
-    /// re-collects the now-garbage cycle (freeing A + C) so no premature free
-    /// ever occurred.
+    /// re-collects the now-garbage cycle (freeing all four nodes) so no
+    /// premature free ever occurred.
     #[test]
     fn live_closure_in_array_cycle_is_not_collected() {
         clear_candidate_buffer();
@@ -1880,10 +2076,11 @@ mod tests {
             assert_eq!(arc_strong(c.cell), 1);
 
             // Teardown: drop the live-external ref → now pure garbage. Re-buffer
-            // A and collect so the array + block are reclaimed (B + D leak-safe).
+            // A and collect so ALL FOUR nodes are reclaimed (§3.5-part2 cascade:
+            // A + B + C + D).
             crate::v2::typed_array::release_v2_typed_array(c.arr as *mut u8); // A.rc = 1
             gc_buffer_possible_root(c.arr as *mut u8, HeapKind::TypedArray);
-            assert_eq!(collect_cycles(), 2, "the now-garbage cycle is reclaimed");
+            assert_eq!(collect_cycles(), 4, "the now-garbage cycle is fully reclaimed");
         }
         clear_candidate_buffer();
     }
