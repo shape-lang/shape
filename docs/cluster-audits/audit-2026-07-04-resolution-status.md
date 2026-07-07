@@ -29,12 +29,12 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | 10 | async let zero concurrency | ✅ **REAL overlap — MERGED `b6518d9b`**: zero-arg scalar-return user async fns overlap (2×1s=1.18s vs 2.17s serial; join race first-wins+cancel) via isolated per-task VM. **Regression caught+fixed by supervisor differential** (heap-return async-let → NotImplemented; now gated to scalar-return, heap keeps eager path) + **regression test added** (`async_let_heap_return_async_fn_keeps_eager_path`) · **Opus-indep differential vs main**. Caveats v0.4: arg-bearing/unit-return serial; join-all materialization | WF-2D-fu |
 | 11 | stdlib calls uncompilable in async fns | ✅ **not-a-bug** (was a missing `use` import, not a registration bug) — re-confirmed `b6518d9b` | WF-2D-fu |
 | 12 | top-level `await time::sleep` panics | ✅ **works** (exit 0, no block_in_place panic) — re-confirmed `b6518d9b` | WF-2D-fu |
-| 13 | http segfaults every call | ✅ claimed (WF-2E) | verify in WF-4 |
+| 13 | http segfaults every call | ✅ **VERIFIED at HEAD** (`d5dd8aae`, Opus-indep from-scratch, vm+jit): `http::get(url, {})` — empty & populated `HashMap` options — marshals cleanly (exit 0); awaited request against a doomed port fails **gracefully** (`Runtime error: http.get() failed: error sending request…`, exit 1); NO SIGSEGV/abort in any form. Original "SIGSEGV every call before any request" is gone. Minor follow-up (not #13): awaited-request `Err` surfaces as top-level runtime error instead of binding a `match` `Err(e)` arm | verified WF-13/18-reverify |
 | 14 | `xml::stringify` dumps core | 🟡 SIGSEGV+id-41 gone (M1); crash root is `op_new_array(0)` → **V3-S5 empty-array construction stub** (deferred; refuse-on-sight to band-aid) | → V3-S5 lane |
 | 15 | `std::finance` unusable | ✅ **compiler stack-overflow ROOT-FIXED — MERGED `37aa861d`** (WF-6): the earlier "M1-fixed/no-repro" was WRONG — `from std::finance::backtest::engine use {backtest}` overflowed (exit 134) via a **missing occurs-check** (`occurs_in` hardcoded `false` for `Type::Concrete` → cyclic `X↦Concrete(…X…)` bindings looped the unifier). Fixed with a real Robinson occurs-check (general type-system win); revert-differential proven; recursive-type regression-differential clean; 5 tests · **Opus-indep**. **Survivor = finance-stdlib-source defects** (let-as-mutable, missing `signal`/`is_signal`, object-field Float64 subtraction) → **stdlib-source-sweep** (separate, not a compiler bug) | WF-6 ✅ / source sweep |
 | 16 | json module mostly dead | ✅ **navigation FIXED** (marshalled-Json `Ok(v)=>v.get/is_null` via Result-payload inference) — **MERGED `aba8c444`** · 19 regression tests · **Opus-indep** | WF-3A-tail |
 | 17 | msgpack 100% stubbed | ✅ **decode+navigate FIXED** (shared json root) — **MERGED `aba8c444`** · 8 regression tests · **Opus-indep** | WF-3A-tail |
-| 18 | time module broken | ✅ claimed (WF-2E) | verify in WF-4 |
+| 18 | time module broken | 🟡 **PARTIAL — over-claim corrected** (Opus-indep at `d5dd8aae`, vm+jit): `now()`/`.elapsed()`, `stopwatch()`, `millis()`, `sleep_sync()` all work (exit 0). **But `time::benchmark(cb, n)` still HARD-CRASHES** — `panic!` exit 101 `Missing field '__variant' while materializing typed object` (`type_schema/mod.rs:336`), reproduces in **pure `--mode=vm`** too. A `BenchmarkResult` **struct** return resolves to an **enum** schema (one expecting `__variant`) via `invoke_module_fn_id_stub → project_typed_return (modules.rs:562) → typed_object_from_concrete_pairs (modules.rs:535)`. Schema-id-collision *signature* — but **NOT subsumed by WF-3A M1** (content-derived identity already merged `1f9b05be` and this still crashes) → distinct module-fn-typed-return residual, own diagnose+root-fix lane. Repro: `use std::core::time; fn work(){}; let r=time::benchmark(work,5); print(r.iterations)` | → time-benchmark-schema lane |
 | 19 | JIT double-execution | ✅ prints once | WF-1A · **Fable** |
 | 20 | Tiered compilation inert | ✅ **inert machinery DELETED** (user-ruled) — **MERGED `48c1bc36`**: enable_tiered_compilation/register_jit_function/set_backend + NotImplemented promote-stub + cascade dead code (120 deletions); live tiering path (T1@100/T2@10k, osr) intact · **Opus-indep** | WF-4 D4 |
 | 21 | HashMap.filter garbage under JIT | ✅ vm==jit | WF-1A · **Fable** |
@@ -61,13 +61,14 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 
 ## Tallies (of the 32 §6 rows)
 
-- ✅ RESOLVED: **18** (11 Fable-verified) · 🟡 PARTIAL: **8** · 🔵 IN-FLIGHT (WF-3E): **2** · ⏳ QUEUED (WF-3A/B/C): **5** · ⏸ DEFERRED: **1**
+- **Updated 2026-07-07:** ✅ RESOLVED: **26** · 🟡 PARTIAL: **5** (#3 JIT-foreign native path, #6 annotation-hooks-under-JIT native path, #14 xml empty-array→V3-S5, #18 `time::benchmark` schema crash, #29 bigint feature-scale) · 🏗 IN-FLIGHT: **1** (#31 real GC, behind default-off `gc`)
+- _(superseded)_ prior line: ✅ 18 · 🟡 8 · 🔵 2 (WF-3E) · ⏳ 5 · ⏸ 1 — stale before WF-3E/3A/3C merges
 
 ## Open verification gaps (things claimed-but-not-independently-verified)
 
 1. **Async (§4.5, #10–12)** — WF-2D reported fixed; Fable never checked it; recon says VM-works/no-JIT/no-book-examples. **Meta-audit REFUTED the green: user-defined async fns still serial (2×1s = 2005ms).** → **WF-2D-fu async-real-concurrency**. Highest-priority unverified-claim correction.
 2. **Stdlib serialization** (#14/16/17) — WF-2E "green" but recon found live bugs (`msgpack::decode`, `json`/`xml` navigation) → WF-3A + WF-4 re-verify.
-3. **http/time** (#13/18) — WF-2E claimed; not re-run at HEAD.
+3. ~~**http/time** (#13/18) — WF-2E claimed; not re-run at HEAD.~~ **CLOSED 2026-07-07** (Opus-indep re-run at HEAD `d5dd8aae`): #13 genuinely works (graceful, no SIGSEGV) ✅; #18 partial — `time::benchmark` still crashes (schema `__variant` mismatch), demoted to 🟡, routed to time-benchmark-schema lane.
 
 ## Meta-audit fold-in (2026-07-06, workflow `wf_189aa86e-6d5`, 12-lane independent)
 
@@ -87,8 +88,9 @@ Companion to `audit-2026-07-04-claimed-vs-real.md` (v0.3.2 @ `1fb805b3`). Tracks
 | DOC | Book teaches retired `__original__(args)` ×5; `json.mdx` non-existent `as?` cast | WF-4 | ⏳ |
 | HIGH | **Float/number array index accepted (strict hole, `reliableonly_strict_bypass` class)** — `arr[1.5]`, `arr[n:number]`, `arr[time::millis()]` all COMPILE; a `number` (or unbound-var) index used as an int index → wrong element / garbage index / OOB. | → **index-type lane** | ✅ **FIXED — MERGED `5067dea7`**: `require_int_index_constraint` across all 6 index arms (non-int index = compile error "add explicit `as int`"; unresolved var hard-unified to int); no coercion; blast delta 0; 6 tests · **Opus-indep** |
 
-### WF-3E actual state (corrected 2026-07-06)
-Branch `wave3/distributed-composition-fix` @ `0efa7561` has **4 wip commits, 982 insertions/13 files** (fixAB transfer+receiver-init, fixC remote-call-Result, fixDE perms+ffi, repair D1 arity + D7 namespace-snapshot + serve extension-double-load; new `remote_builtins.rs` +334). **The workflow process DIED before its finisher gates + Fable re-proof ran → these fixes are UNVERIFIED. Do NOT merge until the independent 9-cell re-proof + D5-perms-over-wire confirmation pass** (§6quaterdecies gate).
+### WF-3E actual state (corrected 2026-07-06) — ⚠️ SUPERSEDED by "WF-3E close (merged `800fb6b9`)" below
+_This "Do NOT merge until re-proof" snapshot was written mid-flight; the re-proof subsequently ran and WF-3E merged as `800fb6b9` (see the WF-3E close block). Kept for history only — the authoritative state is: MERGED + doubly-verified._
+Branch `wave3/distributed-composition-fix` @ `0efa7561` had **4 wip commits, 982 insertions/13 files** (fixAB transfer+receiver-init, fixC remote-call-Result, fixDE perms+ffi, repair D1 arity + D7 namespace-snapshot + serve extension-double-load; new `remote_builtins.rs` +334). **The workflow process DIED before its finisher gates + Fable re-proof ran → these fixes are UNVERIFIED. Do NOT merge until the independent 9-cell re-proof + D5-perms-over-wire confirmation pass** (§6quaterdecies gate).
 
 ### Rulings applied (2026-07-06): SIGINT=release-blocking · D3=real GC · D4=delete · WF-3A=split · D2=implement · async=re-route.
 
