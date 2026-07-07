@@ -2326,9 +2326,27 @@ impl BytecodeCompiler {
             }
         }
 
-        let schema =
-            shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());
-        self.type_tracker.schema_registry_mut().register(schema);
+        // WF-3A M1 residual fix: mint the enum's handle by interning its
+        // content id in the SAME registry it is stored in (the compiler's
+        // type-tracker registry), exactly as struct registration does via
+        // `TypeSchemaBuilder::register` -> `intern_content`. The previous
+        // `TypeSchema::new_enum` path interned against the *ambient*
+        // `current_registry()` (a different intern table), then stored the
+        // externally-minted handle through the id-PRESERVING `register()`
+        // path. Because the ambient and compiler registries run independent
+        // dense counters, both could hand out the same numeric id for
+        // structurally-distinct schemas (e.g. `std::core::time::BenchmarkResult`
+        // and `std::core::remote::RemoteError` both landing on id 32),
+        // colliding in the compiler registry's `by_id` map — so a
+        // struct-typed module return (`time::benchmark`) re-dereferenced to
+        // the enum schema and panicked materializing a phantom `__variant`
+        // field. Interning against the storing registry gives each distinct
+        // (nominal) content its own handle. Content ids fold in the name, so
+        // the qualified and bare-name registrations intern to distinct
+        // handles.
+        self.type_tracker
+            .schema_registry_mut()
+            .register_enum_scoped(&enum_def.name, variants.clone());
 
         // Also register under bare name if the qualified name contains "::"
         // so runtime code that uses bare enum names (e.g., "Snapshot") can find the schema.
@@ -2336,11 +2354,9 @@ impl BytecodeCompiler {
             if basename != enum_def.name
                 && self.type_tracker.schema_registry().get(basename).is_none()
             {
-                let alias_schema =
-                    shape_runtime::type_schema::TypeSchema::new_enum(basename, variants);
                 self.type_tracker
                     .schema_registry_mut()
-                    .register(alias_schema);
+                    .register_enum_scoped(basename, variants);
             }
         }
         Ok(())
