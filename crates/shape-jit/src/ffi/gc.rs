@@ -108,8 +108,12 @@ mod gc_barrier_tests {
             jit_write_barrier(obj as u64, 0, tag);
             assert_eq!(gc::candidate_buffer_snapshot(), vec![obj as usize]);
 
-            v2_release(&(*obj).header); // rc = 1
-            v2_release(&(*obj).header); // rc = 0 → freed
+            v2_release(&(*obj).header); // rc = 2 → 1 (decrement-only primitive)
+            // Last share: route through the production release FFI, which
+            // decrements AND deallocates on zero (`release_elem`). The raw
+            // `v2_release` primitive is decrement-only ("caller must dealloc"),
+            // so freeing the `_new` carrier must use this path.
+            crate::ffi::v2::jit_v2_typed_object_release(obj as *const u8); // rc = 1 → 0, freed
         }
         gc::clear_candidate_buffer();
     }
@@ -243,7 +247,10 @@ mod gc_barrier_tests {
 
             // Drop external roots. a has next=null now (no heap child) ⇒ frees at
             // zero cleanly. x drops to its self-edge only (rc 1) — pure garbage.
-            v2_release(&(*a).header); // a.rc: 1 → 0, freed
+            // `a` reaches zero here, so route through the production release FFI
+            // that decrements AND deallocates (`release_elem`); the raw
+            // `v2_release` primitive is decrement-only.
+            crate::ffi::v2::jit_v2_typed_object_release(a as *const u8); // a.rc: 1 → 0, freed
             v2_release(&(*x).header); // x.rc: 2 → 1 (only the self-edge remains)
 
             // CollectCycles reclaims the self-cycle x (memory-only), proving the

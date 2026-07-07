@@ -2183,3 +2183,100 @@ a ** b + 2
         10,
     );
 }
+
+// ===========================================================================
+// Wave-7 jit-typed-pointer-migration — gc-off carrier-uniformity regression
+// ===========================================================================
+//
+// After the migration EVERY live JIT TypedObject producer + consumer is on
+// the single v2-raw `*mut TypedObjectStorage` carrier (repr(C) HeapHeader@0,
+// out-of-line slot buffer at storage+16). These programs exercise the
+// previously-MIXED consumer/producer paths — hot-loop field write+read,
+// object spread, heap-object-field overwrite (share transfer), and objects
+// flowing through an Array element slot — and assert VM==JIT parity on the
+// DEFAULT gc-off path. A residual old-inline-cell carrier at any of these
+// sites would read a HeapHeader/field at the wrong offset and corrupt the
+// result; parity here proves no mixed path survives. See ADR-006 §2.3
+// (Wave-7 amendment) and `docs/cluster-audits/w17-jit-typed-object-arc-
+// storage-migration-audit.md`.
+
+/// Migrated inline set + get consumers (`inline_typed_field_set` /
+/// `jit_typed_object_get_field`) on the v2 carrier: a JIT-hot-loop scalar
+/// field read-modify-write settles to the same value the interpreter
+/// produces (100).
+#[test]
+fn w7_carrier_hot_loop_field_mutate_matches_vm() {
+    jit_expect_int(
+        r#"
+type Counter { n: int }
+let mut c = Counter { n: 0 }
+let mut i = 0
+while i < 100 {
+    c.n = c.n + 1
+    i = i + 1
+}
+c.n
+"#,
+        100,
+    );
+}
+
+/// Object-spread producer path on the v2 carrier: `{ ...base, z }` copies the
+/// inherited slots and appends the new one; reading both inherited (`x`,`y`)
+/// and own (`z`) fields matches VM (10+20+3 = 33). Complements
+/// `aggregate_object_spread_simple_baseline` (own-field only).
+#[test]
+fn w7_carrier_object_spread_reads_inherited_and_own_fields() {
+    jit_expect_int(
+        r#"
+let base = { x: 10, y: 20 }
+let ext = { ...base, z: 3 }
+ext.x + ext.y + ext.z
+"#,
+        33,
+    );
+}
+
+/// Objects as Array elements: each element is read back out of the array slot
+/// and its fields summed inside a JIT loop, exercising the field-read consumer
+/// on a carrier that reached the access site through an `Array<Rec>` element
+/// rather than a direct struct binding. VM==JIT = 1+2+3+4+5+6 = 21.
+#[test]
+fn w7_carrier_array_of_objects_field_sum_matches_vm() {
+    jit_expect_int(
+        r#"
+type Rec { a: int, b: int }
+let xs = [Rec { a: 1, b: 2 }, Rec { a: 3, b: 4 }, Rec { a: 5, b: 6 }]
+let mut total = 0
+let mut i = 0
+while i < 3 {
+    let r = xs[i]
+    total = total + r.a + r.b
+    i = i + 1
+}
+total
+"#,
+        21,
+    );
+}
+
+/// Heap-object-field OVERWRITE on the v2 carrier — the gc-off twin of the 3c
+/// sink. Reassigning `bx.inner` (an `Object`-typed, heap field) drops the
+/// prior occupant's share and stores the new object's; reading the new field
+/// back matches VM (10+20 = 30). Under the `gc` feature this same store site
+/// additionally fires the compile-time-kinded write barrier (see
+/// `gc::jit_set_field_overwrite_barrier_buffers_and_collects_object_cycle`);
+/// gc-off it is a byte-identical single store.
+#[test]
+fn w7_carrier_heap_object_field_overwrite_matches_vm() {
+    jit_expect_int(
+        r#"
+type Box { inner: Rec }
+type Rec { a: int, b: int }
+let mut bx = Box { inner: Rec { a: 1, b: 2 } }
+bx.inner = Rec { a: 10, b: 20 }
+bx.inner.a + bx.inner.b
+"#,
+        30,
+    );
+}

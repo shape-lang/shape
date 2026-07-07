@@ -373,6 +373,119 @@ remains the discriminator; the payload SHAPE changes from
 close + supervisor 2026-05-14 Path B ratification (refused Path A
 manual `HeapValue` impls + raw `*const T`).
 
+##### §2.3 amendment (Wave 7 jit-typed-pointer-migration, 2026-07-07): single cross-crate v2 carrier for JIT TypedObject — JIT-private struct DELETED
+
+**Disposition of the W17 audit.** `docs/cluster-audits/w17-jit-typed-object-
+arc-storage-migration-audit.md` surfaced-and-stopped on the JIT-side
+TypedObject carrier: the JIT-private `#[repr(C)]` `TypedObject` struct
+(manual `u32` refcount at offset +4, inline field cells, `UnifiedValue`-
+wrapped, 64-byte-aligned) was structurally divergent from the VM-tier
+`TypedObjectStorage`, and the audit routed the reconciliation to ADR-006
+§2.3 amendment territory (its Options β.1 / β.2 / β.3). This amendment
+ratifies **Option β.3 as evolved by Wave-2 D1/D4**: the JIT tier adopts the
+VM tier's canonical v2-raw carrier and the JIT-private struct is deleted.
+There is now exactly ONE in-memory TypedObject representation across
+`shape-vm`, `shape-runtime`, and `shape-jit`.
+
+**The single carrier.** The canonical JIT TypedObject carrier is the v2-raw
+`*mut TypedObjectStorage` the VM already produces (post Wave-2 D1/D2/D4):
+`#[repr(C)]` with `HeapHeader` at offset 0 (refcount `AtomicU32`@0 /
+kind `u16`@4 = `HEAP_KIND_V2_TYPED_OBJECT` / flags`@6), `schema_id`@8, an
+**out-of-line** boxed slot buffer (fat pointer @16), `heap_mask`@32, and
+`field_kinds: Arc<[NativeKind]>`@40. Allocated by `TypedObjectStorage::_new`,
+freed by `_drop`, refcounted by `v2_retain` / `v2_release` on the offset-0
+header. This is NOT a literal `Arc<TypedObjectStorage>` (its real Arc
+refcount would sit at −16 and the GC barrier's `cycle_capable_direct_header`
+/ `for_each_heap_child` walk misreads the offset-0 header) — it is the
+bare v2-raw pointer whose offset-0 `HeapHeader` the barrier reads directly.
+
+**Field addressing (hot path stays two loads).** The slot buffer is
+out-of-line: `storage_ptr` → load slot-buffer base at `storage+16`
+(`JIT_OFFSET_SLOT_DATA`) → field at `[slot_data + idx*8]`. No
+`UNIFIED_PTR_MASK`, no NaN-box unwrap, no inline-cell offset. This is the
+same two-load shape the deleted JIT-private struct had, so the documented
+inline-data performance contract is preserved (the audit's β.3 performance
+concern does not materialize — `TypedObjectStorage` was already redesigned
+to a HeapHeader-fronted, out-of-line-slot layout by Wave-2 D1).
+
+**What was migrated + deleted (Phases 1 / B / C).**
+
+- Producers: the sole live producer `jit_typed_object_alloc` emits the v2
+  carrier (Phase 1). The secondary producers `jit_typed_merge_object`,
+  `jit_typed_object_from_hashmap`, and `jit_new_typed_object` were confirmed
+  DEAD (no `FuncRef` resolved in `compiler/ffi_builder`, never emitted by
+  `MirToIR`) and **deleted** rather than migrated — deleting a dead producer
+  is the strongest no-mixed-carrier guarantee, since it can never emit a
+  wrong-shape object a migrated consumer would misread. `merge_ops.rs` and
+  `ffi_exports.rs` are gone.
+- Consumers: `property_access.rs` (dynamic `jit_get_prop`), `data.rs`
+  (`jit_get_field_typed` / `jit_set_field_typed`), the `field_access.rs`
+  get/set FFIs, and the inline `mir_compiler/places.rs` field-access hot
+  path all read/write via `slots()` / `write_slot_in_place` on
+  `*const TypedObjectStorage`. No consumer reads the old inline-cell layout.
+- Ownership: the manual split-counter `jit_typed_object_inc_ref` /
+  `dec_ref` are deleted; retain/release route through `v2_retain` /
+  `v2_release` on the offset-0 `HeapHeader`.
+- Deleted symbols: `struct TypedObject` + its impl, `TYPED_OBJECT_HEADER_
+  SIZE` / `TYPED_OBJECT_ALIGNMENT`, `box_typed_object` / `unbox_typed_object`
+  / `is_typed_object`, and the dead `jit_v2_retain/release_typed_object`.
+
+**3c object-field write-barrier completed (Phase C).** Because the carrier is
+now the real v2 `HeapHeader`, the JIT store sites (`inline_typed_field_set`
+in `places.rs` + the `field_access` / `data.rs` set FFIs) thread the
+overwritten slot's kind as the compile-time constant
+`gc_jit_kind_tag(field_kind)` — read from the object's own producer-stamped
+`field_kinds[idx]` (§2.7.5), NEVER a runtime bit-decode. This closes the 3c
+write-barrier gap (`docs/design/real-gc-cycle-collection.md`) for
+object-field sink #2: a JIT-hot-loop store that overwrites a live
+self-referential object field now buffers the surviving prior occupant so
+`collect_cycles` reclaims it. The barrier emission is `#[cfg(feature =
+"gc")]`-gated; gc-off codegen at every store site is byte-identical to
+pre-Phase-C (a single store; `old_kind_tag` == 0 makes the FFI a no-op ret).
+
+**Why the flip had to be total (no partition is safe).** The carrier change
+is the always-on JIT representation, NOT gated behind the `gc` feature.
+TypedObjects are fungible across access paths, so a single residual legacy
+producer feeding a migrated consumer (or vice versa) would deref a
+HeapHeader/field at the wrong offset = UB / heap corruption on the DEFAULT
+gc-off path. Every producer and every consumer therefore had to land on the
+v2 carrier in the same wave.
+
+**Forbidden under this amendment** (extends the Wave-2 §2.3 forbidden block
++ §Renames-to-refuse-on-sight):
+
+- Reintroducing the JIT-private inline-cell `TypedObject` struct (or any
+  per-crate TypedObject carrier shape) under `NativeKind::Ptr(HeapKind::
+  TypedObject)`. The audit's Option β.2 (per-crate carrier divergence with a
+  boundary translation) is REFUSED — it is exactly the carrier-shape-drift
+  defection-attractor §2.7.10 / Q11 eliminated for method dispatch. One
+  kind label = one carrier shape, cross-crate.
+- Any "JIT-format" vs "VM-format" TypedObject duality, "kind-injection
+  bridge", "dual carrier", or bridge/probe/helper/hop/translator/adapter/
+  shim framing at the JIT↔VM TypedObject boundary (broader-family regex).
+- A runtime decode of the overwritten-slot kind at the write barrier. The
+  kind is the compile-time `gc_jit_kind_tag(field_kinds[idx])` constant or
+  the producer-stamped field read — never `heap_kind(bits)` / a tag probe.
+- Resurrecting `box_typed_object` / `unbox_typed_object` / `is_typed_object`
+  / `jit_typed_object_inc_ref` / `dec_ref` under any rename.
+
+**Non-refuting note.** `jit_get_prop`'s v2 branch disambiguates a bare
+heap-pointer carrier from the legacy `UnifiedValue` carriers via a safe,
+in-bounds `HeapHeader.kind`@4 == `HEAP_KIND_V2_TYPED_OBJECT` read — a
+producer-placed self-describing field-load per §2.7.5 ("not tag-bit
+dispatch — a field-load from a heap-resident struct that the producing call
+placed there"), NOT a NaN-box tag probe. No UB (the read is bounds-safe on
+any non-null heap pointer; a non-match falls through to the legacy
+`heap_kind` dispatch).
+
+**Authority:** Wave 7 jit-typed-pointer-migration (branch
+`wave7/jit-typed-pointer-migration`); phases validated 2ea5887a / 143d59d9
+(carrier POC + GC-barrier soundness), e9b619bc (Phase B consumers), 80b0b0da
+(Phase C producers + 3c barrier + struct deletion), independently verified
+(from-scratch VM==JIT parity + valgrind clean, gc-off + gc-on cycle
+collection). Ratifies the W17 audit's Option β.3 as evolved by the Wave-2
+D1/D4 `TypedObjectStorage` HeapHeader redesign.
+
 ### 2.4 ValueSlot per-FieldType constructors
 
 ```rust
