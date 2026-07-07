@@ -2255,4 +2255,403 @@ match r {{
         );
         let _ = std::fs::remove_file(&target);
     }
+
+    // =====================================================================
+    // Polyglot × distributed: `fn python` / `fn typescript` @remote-transfer
+    // =====================================================================
+    //
+    // The extern-C composition above runs the serve node IN-PROCESS because
+    // libffi links libc with no dlopen of a poisoning runtime. A `fn python`
+    // / `fn typescript` serve node MUST dlopen CPython / deno_core V8, whose
+    // pthread-TLS destructors SIGSEGV at tokio-worker-thread teardown when
+    // loaded into THIS test binary (`__nptl_deallocate_tsd`). So — unlike the
+    // extern-C test — these drive the REAL `shape serve` + `shape run`
+    // binaries as SUBPROCESSES; the crash-prone runtime lives in a child
+    // process and never touches the harness. The assertion shape still mirrors
+    // `test_remote_foreign_extern_c_transfer_over_tcp`: the foreign body
+    // executes ON the serve node (proved by the serve-side
+    // `blobs=2 foreign_entries=1` genuineness log + the matrix return value),
+    // under BOTH vm and jit sender modes, and a client whose language is NOT
+    // opted in server-side cannot produce the value.
+    //
+    // GATING (close the CI-coverage gap without an #[ignore] that silently
+    // runs nothing): these SKIP CLEANLY — a `println!` note + early return —
+    // when the language `.so` is absent, so the default gate on a machine with
+    // no built extensions stays green, and they RUN (never skip silently)
+    // whenever the extension IS present (`just build-extensions` /
+    // `SHAPE_FFI_EXT_DIR`). This is the exact `py/ts × @remote` regression that
+    // the WF-2F close matrix exercised only by hand.
+
+    /// Serialize the heavy polyglot subprocess launches (each child spins a
+    /// Tokio runtime and embeds CPython / V8). One-at-a-time keeps a resource
+    /// spike in one child from destabilizing a sibling.
+    fn polyglot_process_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Resolve the freshly-built `shape` binary from the running unit-test
+    /// harness path (`target/<profile>/deps/<hash>` → `target/<profile>/shape`).
+    /// Avoids the deprecated `assert_cmd::cargo::cargo_bin` (whose macro form
+    /// needs `CARGO_BIN_EXE_shape`, unset for a bin's own unit tests).
+    fn shape_binary() -> std::path::PathBuf {
+        let mut p = std::env::current_exe().expect("current_exe");
+        p.pop(); // drop the test-harness filename → .../deps
+        if p.ends_with("deps") {
+            p.pop(); // → .../<profile>
+        }
+        p.push(if cfg!(windows) { "shape.exe" } else { "shape" });
+        assert!(
+            p.is_file(),
+            "resolved `shape` binary does not exist at {} — build it first",
+            p.display()
+        );
+        p
+    }
+
+    /// Locate the built `libshape_ext_<lang>.so`. Search order: `$SHAPE_FFI_EXT_DIR`,
+    /// the workspace `extensions/` dir (where `just build-extensions` copies them),
+    /// then `target/{debug,release}/`. Returns `None` (→ the test skips cleanly)
+    /// when the extension has not been built.
+    fn language_ext_so(lang: &str) -> Option<std::path::PathBuf> {
+        let file = format!("libshape_ext_{lang}.so");
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(d) = std::env::var_os("SHAPE_FFI_EXT_DIR") {
+            dirs.push(std::path::PathBuf::from(d));
+        }
+        // CARGO_MANIFEST_DIR = <workspace>/bin/shape-cli
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+        if let Some(ws) = workspace {
+            dirs.push(ws.join("extensions"));
+            dirs.push(ws.join("target").join("debug"));
+            dirs.push(ws.join("target").join("release"));
+        }
+        dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+    }
+
+    /// A `shape serve` subprocess bound to a random loopback port, killed on drop.
+    struct PolyglotServeNode {
+        child: std::process::Child,
+        addr: String,
+        stderr_path: std::path::PathBuf,
+        _cfg: tempfile::TempDir,
+        _extdir: tempfile::TempDir,
+    }
+
+    impl Drop for PolyglotServeNode {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// Start a real `shape serve` node loading exactly the one language runtime
+    /// at `so`, opting in the languages in `ffi_languages` (empty string = the
+    /// strict-refusal node). `SHAPE_CONFIG_DIR` points at an empty tempdir so no
+    /// stale `~/.shape/extensions` is auto-scanned — the node loads precisely the
+    /// `.so` we symlink in. Blocks until the accept loop is up (extension load
+    /// happens BEFORE `bind`, so an accepted connection means the runtime is
+    /// ready).
+    fn start_polyglot_serve(
+        shape_bin: &std::path::Path,
+        so: &std::path::Path,
+        ffi_languages: &str,
+    ) -> PolyglotServeNode {
+        let cfg = tempfile::tempdir().expect("serve cfg tempdir");
+        let extdir = tempfile::tempdir().expect("serve ext tempdir");
+        let filename = so.file_name().expect("extension .so filename");
+        std::os::unix::fs::symlink(so, extdir.path().join(filename)).expect("symlink extension .so");
+
+        // Free ephemeral port (bind-then-drop). The small race window before the
+        // child re-binds is acceptable in a test harness.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            l.local_addr().expect("local_addr").port()
+        };
+        let addr = format!("127.0.0.1:{port}");
+
+        let stderr_path = cfg.path().join("serve.stderr");
+        let stderr_file = std::fs::File::create(&stderr_path).expect("create serve stderr file");
+
+        let mut cmd = std::process::Command::new(shape_bin);
+        cmd.args(["serve", "--address", &addr, "--sandbox", "none"]);
+        if !ffi_languages.is_empty() {
+            cmd.args(["--ffi-languages", ffi_languages]);
+        }
+        cmd.arg("--extension-dir")
+            .arg(extdir.path())
+            .env("SHAPE_CONFIG_DIR", cfg.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(stderr_file));
+        let child = cmd.spawn().expect("spawn `shape serve`");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if std::net::TcpStream::connect(&addr).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "`shape serve` did not become ready at {addr} within 60s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        PolyglotServeNode {
+            child,
+            addr,
+            stderr_path,
+            _cfg: cfg,
+            _extdir: extdir,
+        }
+    }
+
+    /// Run `program` through `shape run --mode <mode>` as a subprocess.
+    /// `SHAPE_CONFIG_DIR` is an empty tempdir so the CLIENT never auto-loads an
+    /// extension (the foreign body runs server-side; loading CPython/V8 client
+    /// side would only re-introduce the teardown crash). Returns the completed
+    /// `Output`.
+    fn run_remote_client(shape_bin: &std::path::Path, program: &str, mode: &str) -> std::process::Output {
+        let dir = tempfile::tempdir().expect("client script tempdir");
+        let script = dir.path().join("remote.shape");
+        std::fs::write(&script, program).expect("write client script");
+        let cfg = tempfile::tempdir().expect("client cfg tempdir");
+
+        let mut cmd = assert_cmd::Command::new(shape_bin);
+        cmd.args(["run", "--mode", mode])
+            .arg(&script)
+            .env("SHAPE_CONFIG_DIR", cfg.path())
+            .timeout(std::time::Duration::from_secs(120));
+        cmd.output().expect("client subprocess output")
+    }
+
+    /// WF-2F / WF-3E — `fn python` @remote transfer over TCP. A `@remote` fn
+    /// whose body calls an inline `fn python` returning `Result<int>` transfers
+    /// to a serve node that has opted the python runtime in, executes THERE, and
+    /// returns the matrix value `105` (`padd(100) = 100 + 5`) to the vm AND jit
+    /// sender. Genuineness: the serve node logs `blobs=2 foreign_entries=1` (the
+    /// foreign stub blob travelled alongside the `@remote` wrapper), and a strict
+    /// node (python NOT opted in) refuses the identical program server-side — it
+    /// never yields `105`. Skips cleanly when `libshape_ext_python.so` is absent.
+    #[test]
+    fn test_remote_foreign_python_transfer_over_tcp() {
+        let _guard = polyglot_process_lock().lock().expect("polyglot process lock");
+        let Some(so) = language_ext_so("python") else {
+            println!(
+                "SKIP test_remote_foreign_python_transfer_over_tcp: libshape_ext_python.so \
+                 not found (build via `just build-extensions` or set $SHAPE_FFI_EXT_DIR). \
+                 Default CI gate stays green."
+            );
+            return;
+        };
+        let shape_bin = shape_binary();
+
+        // --- opted-in node: the foreign body executes server-side ---
+        let node = start_polyglot_serve(&shape_bin, &so, "python");
+        let program = format!(
+            r#"
+use std::core::remote
+
+fn python padd(x: int) -> Result<int> {{
+    return x + 5
+}}
+
+@remote("{addr}")
+fn remote_py(x: int) -> int {{
+    match padd(x) {{
+        Ok(v) => v
+        Err(e) => 0 - 1
+    }}
+}}
+
+print(remote_py(100))
+"#,
+            addr = node.addr
+        );
+
+        for mode in ["vm", "jit"] {
+            let out = run_remote_client(&shape_bin, &program, mode);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "python @remote {mode} sender must exit 0; stdout={stdout:?} stderr={}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                stdout.contains("105"),
+                "python @remote {mode}: padd(100) must return 105 server-side (WF-2F matrix cell), \
+                 got stdout={stdout:?}"
+            );
+        }
+
+        // Genuineness: the transferred content-addressed Call carried the
+        // foreign stub (blobs=2) and one foreign entry, and landed on THIS node.
+        let serve_err = std::fs::read_to_string(&node.stderr_path).unwrap_or_default();
+        assert!(
+            serve_err.contains("blobs=2") && serve_err.contains("foreign_entries=1"),
+            "serve node must log the inbound Call carrying the foreign stub \
+             (blobs=2 foreign_entries=1); serve stderr:\n{serve_err}"
+        );
+        drop(node);
+
+        // --- client-cannot-reproduce: a strict node refuses server-side ---
+        let strict = start_polyglot_serve(&shape_bin, &so, "");
+        let refused = format!(
+            r#"
+use std::core::remote
+
+fn python padd(x: int) -> Result<int> {{
+    return x + 5
+}}
+
+@remote("{addr}")
+fn remote_py(x: int) -> int {{
+    match padd(x) {{
+        Ok(v) => v
+        Err(e) => 0 - 1
+    }}
+}}
+
+print(remote_py(100))
+"#,
+            addr = strict.addr
+        );
+        let out = run_remote_client(&shape_bin, &refused, "vm");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success() && !combined.contains("105"),
+            "a strict node (no --ffi-languages) must REFUSE the python foreign call \
+             server-side and never yield 105; got success={} combined={combined:?}",
+            out.status.success()
+        );
+        assert!(
+            combined.contains("has not opted into the 'python'")
+                || combined.to_lowercase().contains("python"),
+            "the refusal must name the un-opted-in language; got {combined:?}"
+        );
+        let strict_err = std::fs::read_to_string(&strict.stderr_path).unwrap_or_default();
+        assert!(
+            strict_err.contains("blobs=2") && strict_err.contains("foreign_entries=1"),
+            "even the refusing node received the transferred stub — proving the SERVE node \
+             made the gating decision (not a client-side fallback); serve stderr:\n{strict_err}"
+        );
+    }
+
+    /// WF-2F / WF-3E — `fn typescript` @remote transfer over TCP. Sibling of the
+    /// python test via deno_core V8: `tadd(20) = 20 + 1 = 21` (the matrix cell),
+    /// vm AND jit sender, same `blobs=2 foreign_entries=1` genuineness log, same
+    /// strict-node server-side refusal. Skips cleanly when
+    /// `libshape_ext_typescript.so` is absent.
+    #[test]
+    fn test_remote_foreign_typescript_transfer_over_tcp() {
+        let _guard = polyglot_process_lock().lock().expect("polyglot process lock");
+        let Some(so) = language_ext_so("typescript") else {
+            println!(
+                "SKIP test_remote_foreign_typescript_transfer_over_tcp: \
+                 libshape_ext_typescript.so not found (build via `just build-extensions` or \
+                 set $SHAPE_FFI_EXT_DIR). Default CI gate stays green."
+            );
+            return;
+        };
+        let shape_bin = shape_binary();
+
+        // --- opted-in node ---
+        let node = start_polyglot_serve(&shape_bin, &so, "typescript");
+        let program = format!(
+            r#"
+use std::core::remote
+
+fn typescript tadd(x: int) -> Result<int> {{
+    return x + 1;
+}}
+
+@remote("{addr}")
+fn remote_ts(x: int) -> int {{
+    match tadd(x) {{
+        Ok(v) => v
+        Err(e) => 0 - 1
+    }}
+}}
+
+print(remote_ts(20))
+"#,
+            addr = node.addr
+        );
+
+        for mode in ["vm", "jit"] {
+            let out = run_remote_client(&shape_bin, &program, mode);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "typescript @remote {mode} sender must exit 0; stdout={stdout:?} stderr={}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                stdout.contains("21"),
+                "typescript @remote {mode}: tadd(20) must return 21 server-side (WF-2F matrix cell), \
+                 got stdout={stdout:?}"
+            );
+        }
+
+        let serve_err = std::fs::read_to_string(&node.stderr_path).unwrap_or_default();
+        assert!(
+            serve_err.contains("blobs=2") && serve_err.contains("foreign_entries=1"),
+            "serve node must log the inbound Call carrying the foreign stub \
+             (blobs=2 foreign_entries=1); serve stderr:\n{serve_err}"
+        );
+        drop(node);
+
+        // --- client-cannot-reproduce ---
+        let strict = start_polyglot_serve(&shape_bin, &so, "");
+        let refused = format!(
+            r#"
+use std::core::remote
+
+fn typescript tadd(x: int) -> Result<int> {{
+    return x + 1;
+}}
+
+@remote("{addr}")
+fn remote_ts(x: int) -> int {{
+    match tadd(x) {{
+        Ok(v) => v
+        Err(e) => 0 - 1
+    }}
+}}
+
+print(remote_ts(20))
+"#,
+            addr = strict.addr
+        );
+        let out = run_remote_client(&shape_bin, &refused, "vm");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success() && !combined.contains("21"),
+            "a strict node (no --ffi-languages) must REFUSE the typescript foreign call \
+             server-side and never yield 21; got success={} combined={combined:?}",
+            out.status.success()
+        );
+        assert!(
+            combined.contains("has not opted into the 'typescript'")
+                || combined.to_lowercase().contains("typescript"),
+            "the refusal must name the un-opted-in language; got {combined:?}"
+        );
+        let strict_err = std::fs::read_to_string(&strict.stderr_path).unwrap_or_default();
+        assert!(
+            strict_err.contains("blobs=2") && strict_err.contains("foreign_entries=1"),
+            "even the refusing node received the transferred stub — proving the SERVE node \
+             made the gating decision (not a client-side fallback); serve stderr:\n{strict_err}"
+        );
+    }
 }
