@@ -15,16 +15,6 @@ use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
 /// ADR-006 §2.7.4 / §2.7.7 surface marker for the closure-call /
 /// extern-FFI / JIT-dispatch paths in this module that still depended on
-/// the deleted ValueWord / tag_bits / as_heap_ref / vmarray_from_vec
-/// surfaces. The B11-control-flow-heap sub-cluster migrates the
-/// arg-slicing / typed return / jump-condition paths to the kinded API
-/// (ADR-006 §2.7.7 / Q9); the closure-construction + indirect-callee
-/// dispatch + extern-C / foreign-runtime invoke paths cross the
-/// `KindedSlot` / `ValueWord`-extension-contract boundary (§2.7.5) and
-/// are deferred to phase-2c per §2.7.4.
-const PHASE_2C_CALL_REBUILD_SURFACE: &str =
-    "phase-2c — closure / call / extern-FFI rebuild (ADR-006 §2.7.4 / §2.7.5)";
-
 /// Glob match for `ffi_libraries` / `ffi_symbols` scope patterns
 /// (ffi-rebuild §4.8.2). Mirrors the `allowed_paths` prefix-glob style used by
 /// `module_exports::check_fs_permission`: a pattern ending in `*` / `**`
@@ -289,33 +279,6 @@ impl VirtualMachine {
         crate::executor::vm_impl::stack::drop_with_kind(arg_count_bits, arg_count_kind);
 
         if let Some(Operand::Function(func_id)) = instruction.operand {
-            // ADR-006 §2.7.4 / §2.7.5 SURFACE: the JIT dispatch fast path
-            // marshalled VM stack slots through `jit_abi::marshal_arg_to_jit`
-            // which takes `&ValueWord`; the JIT context buffer ABI is raw
-            // bits on the JIT side per §2.7.5 cross-crate policy. The
-            // conversion shape — `stack_slice_raw` → `&[ValueWord]` → JIT
-            // context — plus the deopt-recovery and `unmarshal_jit_result`
-            // path cross the VM↔JIT FFI boundary and are out of B11
-            // territory. The rebuild is tracked under phase-2c per §2.7.4
-            // (cross-crate ABI consumer-side migration). Surface so the
-            // VM↔JIT bridge is rebuilt under the kinded-stack API rather
-            // than papered over.
-            #[cfg(feature = "jit")]
-            {
-                let jit_fn_present = self.jit_dispatch_table.contains_key(&func_id.0)
-                    || self
-                        .tier_manager
-                        .as_ref()
-                        .and_then(|mgr| mgr.get_native_code(func_id.0))
-                        .is_some();
-                if jit_fn_present {
-                    return Err(VMError::NotImplemented(format!(
-                        "op_call JIT dispatch (func_id={}): {}",
-                        func_id.0, PHASE_2C_CALL_REBUILD_SURFACE
-                    )));
-                }
-            }
-
             // ---- Tier promotion ----
             // Record the call and check if promotion threshold is crossed.
             // This is a no-op when tier_manager is None.
