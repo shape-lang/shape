@@ -43,9 +43,9 @@ pub fn parse_pipe_lambda(pair: Pair<Rule>) -> Result<Expr> {
 
     for part in inner {
         match part.as_rule() {
-            Rule::function_params => {
+            Rule::closure_params => {
                 for param_pair in part.into_inner() {
-                    if param_pair.as_rule() == Rule::function_param {
+                    if param_pair.as_rule() == Rule::closure_param {
                         params.push(crate::parser::functions::parse_function_param(param_pair)?);
                     }
                 }

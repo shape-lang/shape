@@ -462,6 +462,29 @@ function_param = {
     param_const_keyword? ~ param_ref_keyword? ~ param_out_keyword? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ expression)?
 }
 
+// Closure params (pipe_lambda only). Structurally identical to function_param
+// EXCEPT the type is `closure_type_annotation` (intersection_type, NOT the
+// top-level union_type). Rationale: pipe_lambda is delimited by a bare `|`, and
+// PEG `*` in union_type is greedy + non-backtracking, so a top-level union type
+// after `x:` would swallow the closure-closing `|` (reading `int | x` in
+// `|x: int| x + 1`). Scoping the closure param type to intersection_type makes a
+// bare `|` after the param type the closure terminator, not a union operator. A
+// union-typed closure param must be parenthesized — `|x: (int | str)|` — which
+// re-enters full union support via non_array_type's `"(" ~ type_annotation ~ ")"`.
+// The shared function_param + type_annotation are left UNCHANGED: real fn
+// signatures are `(...)`-delimited so their union types stay unambiguous.
+closure_params = {
+    closure_param ~ ("," ~ closure_param)*
+}
+
+closure_param = {
+    param_const_keyword? ~ param_ref_keyword? ~ param_out_keyword? ~ destructure_pattern ~ (":" ~ closure_type_annotation)? ~ ("=" ~ expression)?
+}
+
+closure_type_annotation = {
+    intersection_type
+}
+
 param_const_keyword = { "const" }
 param_ref_keyword = { "&" ~ param_mut_keyword? }
 param_out_keyword = @{ "out" ~ !(ASCII_ALPHANUMERIC | "_") }
@@ -490,7 +513,7 @@ function_expr = {
 // Unambiguous with bitwise OR because | followed by ident (or |) at primary_expr
 // position cannot be a binary operator (no left operand).
 pipe_lambda = {
-    "|" ~ function_params? ~ "|" ~ (expression | "{" ~ function_body ~ "}")
+    "|" ~ closure_params? ~ "|" ~ (expression | "{" ~ function_body ~ "}")
 }
 
 // ===== Statements =====

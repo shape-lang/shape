@@ -93,7 +93,7 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
             Rule::destructure_pattern => {
                 pattern = Some(super::items::parse_pattern(inner_pair)?);
             }
-            Rule::type_annotation => {
+            Rule::type_annotation | Rule::closure_type_annotation => {
                 type_annotation = Some(parse_type_annotation(inner_pair)?);
             }
             Rule::expression => {
