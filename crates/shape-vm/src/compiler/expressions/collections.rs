@@ -486,6 +486,21 @@ impl BytecodeCompiler {
             // reinterpretation.
             self.pending_variable_typed_array_kind = Some(TypedArrayKind::Callable);
             Some(TypedArrayKind::Callable)
+        } else if elements.is_empty() && self.pending_empty_array_canonical_instantiate {
+            // Empty-in-context element-type inference (issue #14, user-ratified
+            // CANONICAL-INSTANTIATE 2026-07-07): a context-free empty array `[]`
+            // reaching an UNCONSTRAINED monomorphic sink (a polymorphic `_` /
+            // `PolymorphicArg` param, or the object-graph marshal boundary)
+            // instantiates its generalized `∀T. Array<T>` element at the
+            // canonical unit `T = int` and lowers to the monomorphic
+            // `TypedArray<int>` empty allocator (`NewTypedArrayI64(0)`). SOUND:
+            // the array is empty and never pushed to at this sink, so its
+            // element type is provably UNOBSERVED — no real `T` is discarded.
+            // This is a concrete monomorphic carrier, NOT an untyped/any/
+            // Bool-default array. `pending_variable_typed_array_kind` is left
+            // untouched: the canonical is a leaf-sink instantiation, never a
+            // binding capture that a downstream push could later contradict.
+            Some(TypedArrayKind::I64)
         } else {
             None
         };
@@ -875,11 +890,49 @@ impl BytecodeCompiler {
         // Build combined field list for NewTypedObject field_count
         let all_field_names: Vec<&str> = typed_fields.iter().map(|(n, _)| *n).collect();
 
-        // Compile each explicit field value (in order)
+        // Compile each explicit field value (in order).
+        //
+        // Empty-in-context element-type inference (issue #14): thread the
+        // object's EXPECTED type (from the enclosing binding / param / nested-
+        // field annotation, carried by `pending_expected_call_return_type`)
+        // into each field so a field whose value is a bare empty array `[]`
+        // resolves its element kind from the field's DECLARED `Array<T>` type
+        // (`let n: Node = { kids: [] }`, `count({ kids: [] })`), and a field
+        // whose value is itself an object literal recurses with the nested
+        // struct's type as ITS expected type (`{ inner: { xs: [] } }`). Mirrors
+        // the working named-struct-literal empty-array threading in
+        // `compile_struct_literal`. The declared field type is authoritative —
+        // the checker already validated field-vs-declared compatibility — and a
+        // field with no declared context falls back to the existing behavior
+        // (bare empty-array fields at a marshal/polymorphic sink then
+        // canonical-instantiate; all others surface-and-stop unchanged).
+        let expected_obj_type = self.pending_expected_call_return_type.clone();
         for entry in entries {
-            if let ObjectEntry::Field { value, .. } = entry {
+            if let ObjectEntry::Field { key, value, .. } = entry {
                 self.plan_flexible_binding_escape_from_expr(value);
-                self.compile_expr_as_value_or_placeholder(value)?;
+                let field_ann = expected_obj_type
+                    .as_ref()
+                    .and_then(|exp| self.expected_object_field_annotation(exp, key));
+                let saved_ta_kind = self.pending_variable_typed_array_kind;
+                let saved_trait = self.pending_trait_object_array_trait.clone();
+                let saved_expected = self.pending_expected_call_return_type.clone();
+                match value {
+                    Expr::Array(elems, _) if elems.is_empty() => {
+                        if let Some(ann) = field_ann.as_ref() {
+                            self.pending_variable_typed_array_kind =
+                                self.resolve_typed_array_kind_and_record_trait(ann);
+                        }
+                    }
+                    Expr::Object(..) if field_ann.is_some() => {
+                        self.pending_expected_call_return_type = field_ann.clone();
+                    }
+                    _ => {}
+                }
+                let r = self.compile_expr_as_value_or_placeholder(value);
+                self.pending_variable_typed_array_kind = saved_ta_kind;
+                self.pending_trait_object_array_trait = saved_trait;
+                self.pending_expected_call_return_type = saved_expected;
+                r?;
             }
         }
 
@@ -928,6 +981,37 @@ impl BytecodeCompiler {
         ));
 
         Ok(())
+    }
+
+    /// Empty-in-context element-type inference (issue #14). Resolve the declared
+    /// `TypeAnnotation` of field `field_name` from an object literal's EXPECTED
+    /// type `expected` (a binding / param / nested-field annotation). A nominal
+    /// struct name is resolved through `struct_generic_info.runtime_field_types`;
+    /// a structural `Object` annotation is read directly. Returns `None` when the
+    /// expected type does not declare the field, so the caller falls back to the
+    /// existing no-context behavior (never mis-threading an unrelated type).
+    fn expected_object_field_annotation(
+        &self,
+        expected: &shape_ast::ast::TypeAnnotation,
+        field_name: &str,
+    ) -> Option<shape_ast::ast::TypeAnnotation> {
+        use shape_ast::ast::TypeAnnotation;
+        match expected {
+            TypeAnnotation::Object(fields) => fields
+                .iter()
+                .find(|f| f.name == field_name)
+                .map(|f| f.type_annotation.clone()),
+            TypeAnnotation::Reference(_) | TypeAnnotation::Basic(_) => {
+                let name = expected.as_type_name_str()?;
+                let resolved = self.resolve_type_name(name);
+                self.struct_generic_info
+                    .get(resolved.as_str())
+                    .or_else(|| self.struct_generic_info.get(name))
+                    .and_then(|info| info.runtime_field_types.get(field_name))
+                    .cloned()
+            }
+            _ => None,
+        }
     }
 
     /// Compile an object with spread operators (dynamic path)

@@ -1318,6 +1318,25 @@ pub struct BytecodeCompiler {
     /// annotated, or otherwise resolved a kind directly.
     pub(crate) pending_empty_array_alloc_idx: Option<usize>,
 
+    /// Empty-in-context element-type inference (issue #14, user-ratified
+    /// 2026-07-07 CANONICAL-INSTANTIATE). When `true`, a context-free empty
+    /// array literal `[]` — one that resolves NO element-type kind from any
+    /// annotation / sibling / push — that is compiled at an UNCONSTRAINED
+    /// monomorphic sink (a polymorphic `_`/`PolymorphicArg` param or the
+    /// object-graph marshal boundary) lowers to the canonical monomorphic
+    /// `TypedArray<int>` empty array (`NewTypedArrayI64(0)`) instead of the
+    /// untyped `NewArray(0)` placeholder that SURFACEs at runtime. Sound
+    /// because such an empty, never-pushed array's element type is provably
+    /// UNOBSERVED at the sink (HM instantiation of `∀T. Array<T>` at a
+    /// canonical unit `T`). This is NOT an untyped/any/Bool-default carrier —
+    /// it is a concrete monomorphic `TypedArray<int>`. The flag is scoped
+    /// (save/restore) to exactly the marshal/polymorphic-sink argument
+    /// subtree; a context-bound empty array (binding/param/struct-field/return
+    /// annotation) still resolves + gets its real element type, and a
+    /// context-free empty array OUTSIDE such a sink (`let xs = []`) still
+    /// surface-and-stops with the clean un-resolvable-element compile error.
+    pub(crate) pending_empty_array_canonical_instantiate: bool,
+
     /// strict-flip S1 (array-destructure element-kind, 2026-06-22): the proven
     /// element type NAME (`"int"` / `"number"` / `"string"` / …) of the array
     /// being destructured by the enclosing `let [a, b] = <Array<T>>`. Set from

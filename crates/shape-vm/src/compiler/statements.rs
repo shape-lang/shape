@@ -6089,12 +6089,33 @@ impl BytecodeCompiler {
                     let saved_expected_call_return_type =
                         self.pending_expected_call_return_type.clone();
                     self.pending_expected_call_return_type = return_type_annotation.clone();
+                    // Empty-in-context element-type inference (issue #14): a bare
+                    // empty-array explicit return (`return []` in a
+                    // `-> Array<int>` function) gets its element kind from the
+                    // declared return annotation, so it lowers to the typed
+                    // `NewTypedArray*(0)` allocator instead of the `NewArray(0)`
+                    // placeholder that SURFACEs at runtime. Save/restore the
+                    // typed-array-kind + trait channels so the hand-off does not
+                    // leak into a sibling expression.
+                    let saved_ret_ta_kind = self.pending_variable_typed_array_kind;
+                    let saved_ret_trait = self.pending_trait_object_array_trait.clone();
+                    if matches!(
+                        return_expr,
+                        Expr::Array(elems, _) if elems.is_empty()
+                    ) {
+                        if let Some(ann) = return_type_annotation.as_ref() {
+                            self.pending_variable_typed_array_kind =
+                                self.resolve_typed_array_kind_and_record_trait(ann);
+                        }
+                    }
                     let compile_result = if self.current_function_return_reference_summary.is_some()
                     {
                         self.compile_expr_preserving_refs(return_expr)
                     } else {
                         self.compile_expr(return_expr)
                     };
+                    self.pending_variable_typed_array_kind = saved_ret_ta_kind;
+                    self.pending_trait_object_array_trait = saved_ret_trait;
                     self.pending_expected_call_return_type = saved_expected_call_return_type;
                     self.pending_callable_hint_name = saved_pending_callable_hint_name;
                     compile_result?;
