@@ -11,8 +11,8 @@ from std::finance::annotations::warmup use { @warmup }
 /// @see std::finance::indicators::volatility::atr
 pub @warmup(period + 1) fn atr_candle(period = 14) {
     // Calculate True Range for each candle
-    let tr_values = []
-    
+    let mut tr_values = []
+
     // Calculate true range for the period
     for i in range(period) {
         let high = candle[-i].high
@@ -38,7 +38,7 @@ pub @warmup(period + 1) fn atr_candle(period = 14) {
     }
     
     // Use Wilder's smoothing method (similar to EMA)
-    let atr_value = avg(slice(tr_values, 0, period))  // Initial ATR
+    let mut atr_value = avg(slice(tr_values, 0, period))  // Initial ATR
     
     for i in range(period, length(tr_values)) {
         atr_value = ((atr_value * (period - 1)) + tr_values[i]) / period

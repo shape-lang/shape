@@ -40,7 +40,7 @@ pub fn default_config() {
 
 /// Calculate position size based on config and current state
 pub fn calculate_position_size(state, price, config) {
-    let size = 0.0;
+    let mut size = 0.0;
 
     if config.position_sizing == "fixed" {
         size = config.fixed_size;
@@ -72,6 +72,7 @@ pub fn calculate_position_size(state, price, config) {
 /// Process a buy signal
 /// Updates state and returns { state, result } for simulation
 pub fn process_buy(candle, state, config) {
+    let mut state = state;
     // Skip if already long
     if state.position > 0 {
         return state;
@@ -185,8 +186,8 @@ pub fn close_position(candle, state, config) {
     };
 
     // Update win/loss counters
-    let new_wins = state.wins;
-    let new_losses = state.losses;
+    let mut new_wins = state.wins;
+    let mut new_losses = state.losses;
     if pnl > 0 {
         new_wins = new_wins + 1;
     } else {
@@ -205,8 +206,8 @@ pub fn close_position(candle, state, config) {
     let new_equity = new_cash;
 
     // Update peak and drawdown
-    let new_peak = state.peak_equity;
-    let new_dd = state.max_drawdown;
+    let mut new_peak = state.peak_equity;
+    let mut new_dd = state.max_drawdown;
     if new_equity > new_peak {
         new_peak = new_equity;
     }
@@ -246,8 +247,8 @@ pub fn update_equity(candle, state) {
     let new_equity = state.cash + current_value;
 
     // Update peak and drawdown
-    let new_peak = state.peak_equity;
-    let new_dd = state.max_drawdown;
+    let mut new_peak = state.peak_equity;
+    let mut new_dd = state.max_drawdown;
     if new_equity > new_peak {
         new_peak = new_equity;
     }
@@ -389,9 +390,9 @@ pub fn backtest_correlated(series_map, strategy, config = None) {
         |ctx, state, idx| {
             let strat_result = strategy(ctx, state, idx);
 
-            let signal = strat_result;
-            let asset = if state.asset != None { state.asset } else { default_asset };
-            let price_override = None;
+            let mut signal = strat_result;
+            let mut asset = if state.asset != None { state.asset } else { default_asset };
+            let mut price_override = None;
 
             if strat_result != None && is_object(strat_result) {
                 if strat_result.signal != None { signal = strat_result.signal; }

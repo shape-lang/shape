@@ -13,3 +13,4 @@
 //! program must compile and run to completion.
 
 mod regression;
+mod sweep;
