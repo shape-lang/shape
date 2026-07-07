@@ -347,6 +347,62 @@ pub unsafe fn retain_typed_closure(ptr: *const u8) {
     unsafe { (*(ptr as *const HeapHeader)).retain() };
 }
 
+/// **Shared** per-capture heap-child edge accessor — the single source of
+/// truth for *which* closure captures are header-carrier GC-visible heap
+/// children, and their `(bits, kind)` (real-gc-cycle-collection.md §3.4).
+///
+/// If capture `i` is an **immutable heap (Ptr) capture** — the only closure
+/// capture family that is a header-carrier heap-child edge — return its raw
+/// slot `bits` and the capture's construction-time `NativeKind`; otherwise
+/// return `None`. Dispatch is on the layout's own construction-time capture
+/// tracks (`capture_storage_kind` + `heap_capture_mask` + `capture_native_kind`)
+/// — no `is_heap()` probe, no tag decode, no bits inspection to ask "is this a
+/// pointer?".
+///
+/// This is the ONE accessor both the destructive `release_typed_closure`
+/// (which releases the edge via `drop_with_kind`, preserving per-index order)
+/// and the read-only GC cycle visitor
+/// (`crate::gc_visit::for_each_closure_heap_child`, `gc` feature, which traces
+/// the edge) consume, so the Drop walk and the collector's trace cannot drift
+/// on the closure's heap-child edge set. It yields the edge for every immutable
+/// heap capture (no zero filter) so the release walk it powers stays
+/// byte-identical to the pre-extraction inline read; the GC visitor applies its
+/// own null skip.
+///
+/// ## Scope boundary (§3.5 deferral — documented, not silent)
+///
+/// The `OwnedMutable` (`Box` cell) and `Shared` (`SharedCell`) capture
+/// families are header-less interior-mutable carriers; their GC edge
+/// enumeration belongs to the Phase 3.5 side-table mechanism (§3.5) and is a
+/// known deferral. They are not heap-child edges here and yield `None`
+/// (`release_typed_closure` still retires them for Drop correctness via their
+/// own per-capture helpers).
+///
+/// # Safety
+/// `ptr` must point to a live `TypedClosureHeader` block whose layout is
+/// `layout`; `i` must be `< layout.capture_count()`. When `Some`, the returned
+/// `bits` are one `Arc<T>` strong-count share for the `T` matching the returned
+/// kind (the caller retires exactly that share, once).
+#[inline]
+pub(crate) unsafe fn closure_immutable_heap_capture_edge(
+    ptr: *const u8,
+    layout: &ClosureLayout,
+    i: usize,
+) -> Option<(u64, NativeKind)> {
+    use crate::v2::closure_layout::CaptureKind;
+    if !matches!(layout.capture_storage_kind(i), CaptureKind::Immutable) {
+        return None;
+    }
+    if !layout.is_heap_capture(i) {
+        return None;
+    }
+    let off = layout.heap_capture_offset(i);
+    // SAFETY: heap_capture_mask bits are only set for Ptr-shaped 8-byte slots;
+    // the read is in-bounds per the caller contract. Read-only copy.
+    let bits = unsafe { std::ptr::read(ptr.add(off) as *const u64) };
+    Some((bits, layout.capture_native_kind(i)))
+}
+
 /// Release one refcount share of a `TypedClosureHeader` block. If the
 /// refcount reaches zero, this function walks all three per-capture masks
 /// to release each mutable-cell and heap-typed capture, then frees the
@@ -412,35 +468,44 @@ pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
     for i in 0..layout.capture_count() {
         match layout.capture_storage_kind(i) {
             CaptureKind::Immutable => {
-                // Immutable captures: only Ptr slots own a refcount share
-                // (tracked by `heap_capture_mask`). Non-Ptr immutable
-                // slots are pure value carriers — releasing them is a
-                // no-op.
-                if layout.is_heap_capture(i) {
-                    let off = layout.heap_capture_offset(i);
-                    // SAFETY: heap_capture_mask bits are only set for
-                    // Ptr-shaped 8-byte slots; the read is in-bounds.
-                    let bits = unsafe { std::ptr::read(ptr.add(off) as *const u64) };
-                    // ADR-006 §2.7.8 / Q10: per-capture kind-aware drop.
-                    // The slot's `NativeKind` lives in the layout's
-                    // `capture_native_kinds[i]` companion track (set at
-                    // construction per §2.7.8); routing through
-                    // `drop_with_kind(bits, kind)` retires the matching
-                    // `Arc<T>` strong-count share via the canonical
-                    // `KindedSlot::Drop` table. This replaces the
-                    // forbidden `Arc<HeapValue>` blanket decrement
-                    // (the deleted `release_raw_heap_share` shape) and
-                    // the forbidden `vw_drop(bits)` (§2.7.7 #8).
-                    let kind = layout.capture_native_kind(i);
-                    // SAFETY: `is_heap_capture(i)` confirms FieldKind::Ptr;
-                    // the slot bits are one `Arc<T>` strong-count share
-                    // for the `T` corresponding to `kind` (per the
-                    // construction-side contract on `write_capture_typed`
-                    // / `make_closure` initialisers).
+                // Immutable Ptr captures are the closure's only header-carrier
+                // GC-visible heap-child edges. Enumerate this capture's edge via
+                // the SHARED [`closure_immutable_heap_capture_edge`] accessor —
+                // the very accessor the read-only GC cycle visitor
+                // (`crate::gc_visit::for_each_closure_heap_child`) consumes — so
+                // the Drop walk and the collector's trace cannot drift on
+                // *which* captures are heap children (real-gc-cycle-collection.md
+                // §3.4). Non-Ptr immutable slots are pure value carriers (the
+                // accessor returns `None`), releasing them is a no-op.
+                //
+                // ADR-006 §2.7.8 / Q10: the released edge routes through
+                // `drop_with_kind(bits, kind)` (the canonical `KindedSlot::Drop`
+                // table), retiring the matching `Arc<T>` strong-count share.
+                // This replaces the forbidden `Arc<HeapValue>` blanket decrement
+                // (the deleted `release_raw_heap_share` shape) and the forbidden
+                // `vw_drop(bits)` (§2.7.7 #8). Read-here / release-there over one
+                // accessor keeps the per-element release (and its Miri
+                // provenance) byte-identical to the pre-extraction inline read.
+                if let Some((bits, kind)) =
+                    unsafe { closure_immutable_heap_capture_edge(ptr as *const u8, layout, i) }
+                {
+                    // SAFETY: `is_heap_capture(i)` (checked inside the accessor)
+                    // confirms FieldKind::Ptr; the slot bits are one `Arc<T>`
+                    // strong-count share for the `T` corresponding to `kind`
+                    // (per the construction-side contract on
+                    // `write_capture_typed` / `make_closure` initialisers).
                     unsafe { drop_with_kind(bits, kind) };
                 }
             }
             CaptureKind::OwnedMutable => {
+                // §3.5 SCOPE BOUNDARY (documented, not silent): `OwnedMutable`
+                // captures are header-less `Box`-cell interior-mutable carriers.
+                // Their GC edge enumeration (the interior payload's heap share,
+                // if any) belongs to the Phase 3.5 side-table mechanism (§3.5)
+                // and is a known deferral — the GC visitor does NOT trace them.
+                // Drop still retires them here (per-index order preserved) for
+                // reference-counting correctness.
+                //
                 // SAFETY: OwnedMutable slots hold typed `*mut T` from
                 // `alloc_owned_mutable_<kind>`. `drop_owned_mutable_capture`
                 // dispatches on `capture_inner_kind(i)` to reconstruct the
@@ -450,6 +515,14 @@ pub unsafe fn release_typed_closure(ptr: *mut u8, layout: &ClosureLayout) {
                 unsafe { drop_owned_mutable_capture(layout, ptr, i) };
             }
             CaptureKind::Shared => {
+                // §3.5 SCOPE BOUNDARY (documented, not silent): `Shared`
+                // captures are header-less `SharedCell` (`Arc`-wrapped)
+                // interior-mutable carriers. Their GC edge enumeration belongs
+                // to the Phase 3.5 side-table mechanism (§3.5) and is a known
+                // deferral — the GC visitor does NOT trace them. Drop still
+                // retires them here (per-index order preserved) for
+                // reference-counting correctness.
+                //
                 // SAFETY: Shared slots hold `*const SharedCell` from
                 // `Arc::into_raw`. `drop_shared_capture` releases any
                 // heap-refcount share encoded in the cell's payload (for

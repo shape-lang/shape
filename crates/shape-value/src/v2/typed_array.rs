@@ -314,6 +314,60 @@ impl<T: Copy> TypedArray<T> {
     }
 }
 
+/// **Shared** read-only element-pointer enumeration for a heap-element
+/// `TypedArray` — the single source of truth for *which* elements are the
+/// array's heap children (real-gc-cycle-collection.md §3.4).
+///
+/// Walks `data[0..len]` through the 8-byte pointer view. Every heap-element
+/// monomorphization (`*const StringObj` / `*const DecimalObj` /
+/// `*const TypedObjectStorage` / `*const TraitObjectStorage` /
+/// `*const TypedArrayElem`) is layout-identical to `TypedArray<*const u8>`
+/// (repr(C): header @0, data @8 = one 8-byte pointer regardless of `T`,
+/// len @16, cap @20), so one non-generic walk serves them all. Yields each
+/// stored element pointer as raw bits, in slot order, for **every** element in
+/// `0..len` (no null/zero filter) so the destructive release walk it powers
+/// (`drop_array_heap`) stays byte-identical to its pre-extraction form —
+/// consumers apply their own per-edge filter (the GC visitor skips null).
+///
+/// This is the ONE enumeration both the destructive `Drop` path
+/// (`drop_array_heap`, which releases each yielded element via the
+/// monomorphized `T::release_elem`) and the read-only GC cycle visitor
+/// (`crate::gc_visit::for_each_typed_array_heap_child`, `gc` feature, which
+/// traces each yielded element) consume, so the collector's trace and the Drop
+/// walk cannot drift on the array's heap-child edge set.
+///
+/// ## Scope boundary (§3.5 deferral — documented, not silent)
+///
+/// The 16-byte `CallableArrayElem` carrier is NOT a uniform 8-byte pointer
+/// element (it packs inline function/module ids beside closure `Arc` shares);
+/// it is walked by its own `drop_array_callable` and is **not** enumerated
+/// here. Its GC edge set — like container-internal edges (HashMap/HashSet/
+/// Deque values) and the header-less closure `OwnedMutable`/`Shared` interior
+/// captures — belongs to the Phase 3.5 side-table mechanism (§3.5) and is a
+/// known deferral, not a parity gap.
+///
+/// # Safety
+/// `ptr` must point to a live `TypedArray<*const T>` whose element type is a
+/// HeapHeader-equipped pointer carrier (`T: HeapElement`) — i.e. its stamped
+/// `_pad` discriminant is one of the heap-element discriminants. The yielded
+/// bits are borrowed views; this function performs no refcount work.
+pub(crate) unsafe fn for_each_typed_array_elem_ptr<F>(ptr: *const u8, mut f: F)
+where
+    F: FnMut(*const u8),
+{
+    // SAFETY: every pointer-element monomorphization shares this layout.
+    let arr = unsafe { &*(ptr as *const TypedArray<*const u8>) };
+    if arr.data.is_null() {
+        return;
+    }
+    for i in 0..arr.len {
+        // SAFETY: `i < len <= cap` and `data` is non-null ⇒ in-bounds read of
+        // a stored element pointer. Pointers are `Copy`; no ownership moves.
+        let elem = unsafe { *arr.data.add(i as usize) };
+        f(elem);
+    }
+}
+
 /// Heap-element-aware drop dispatch for `TypedArray<*const T>` where `T:
 /// HeapElement`.
 ///
@@ -331,6 +385,15 @@ impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
     /// Deallocate the array, releasing per-element shares via
     /// `T::release_elem`, then freeing the data buffer + the struct.
     ///
+    /// The destructive element walk **enumerates through the shared
+    /// [`for_each_typed_array_elem_ptr`] primitive** — the very enumeration the
+    /// read-only GC cycle visitor consumes — and releases each yielded element
+    /// via the monomorphized `T::release_elem`. Read-here / release-there over
+    /// one primitive ⇒ the Drop walk and the collector's trace cannot drift
+    /// (real-gc-cycle-collection.md §3.4). Only the enumeration moved to the
+    /// shared primitive; the per-element release (and its Miri provenance) is
+    /// unchanged, so Drop semantics stay byte-identical.
+    ///
     /// # Safety
     /// `ptr` must point to a `TypedArray<*const T>` that was allocated by
     /// this module. Each stored `*const T` must be a valid pointer to a
@@ -340,11 +403,14 @@ impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
         unsafe {
             let arr = &*ptr;
             if arr.cap > 0 && !arr.data.is_null() {
-                // Walk element buffer; release per-element shares.
-                for i in 0..arr.len {
-                    let elem_ptr = ptr::read(arr.data.add(i as usize));
-                    T::release_elem(elem_ptr);
-                }
+                // Enumerate the element buffer via the SHARED primitive (the
+                // same one the read-only GC visitor consumes, §3.4) and release
+                // each yielded element share via the monomorphized
+                // `T::release_elem`. Same 0..len order, same per-element
+                // release, byte-identical to the pre-extraction inline walk.
+                for_each_typed_array_elem_ptr(ptr as *const u8, |elem_ptr| {
+                    T::release_elem(elem_ptr as *const T);
+                });
                 // Free the data buffer.
                 let data_layout =
                     Layout::array::<*const T>(arr.cap as usize).expect("invalid array layout");

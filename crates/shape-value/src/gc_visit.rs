@@ -40,7 +40,7 @@
 
 use crate::heap_value::{HeapKind, TypedObjectStorage};
 use crate::native_kind::NativeKind;
-use crate::v2::closure_layout::{CaptureKind, ClosureLayout};
+use crate::v2::closure_layout::ClosureLayout;
 use crate::v2::typed_array::{
     self, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY,
     ELEM_TYPE_TYPED_OBJECT,
@@ -109,28 +109,26 @@ where
         ELEM_TYPE_TYPED_OBJECT => NativeKind::Ptr(HeapKind::TypedObject),
         ELEM_TYPE_TRAIT_OBJECT => NativeKind::Ptr(HeapKind::TraitObject),
         ELEM_TYPE_TYPED_ARRAY => NativeKind::Ptr(HeapKind::TypedArray),
-        // POD element arrays (and the deferred Callable carrier) release no
-        // per-element share on Drop ⇒ no heap-child edges.
+        // POD element arrays (and the deferred Callable carrier, §3.5) release
+        // no per-element share on Drop ⇒ no heap-child edges.
         _ => return,
     };
-    // Every heap element is a pointer (8 bytes), so all heap-element
-    // monomorphizations share `TypedArray<*const u8>`'s layout (repr(C):
-    // header @0, data @8, len @16, cap @20). Read `data` + `len` through that
-    // view to walk the element buffer without knowing the exact `T`.
-    // SAFETY: layout-identical view of a pointer-element TypedArray.
-    let arr = unsafe { &*(ptr as *const typed_array::TypedArray<*const u8>) };
-    if arr.data.is_null() {
-        return;
-    }
-    for i in 0..arr.len {
-        // SAFETY: `i < len <= cap` and `data` is non-null ⇒ in-bounds read of a
-        // live element pointer. Read-only copy; no ownership transfer.
-        let elem = unsafe { *arr.data.add(i as usize) };
-        let bits = elem as u64;
-        if bits == 0 {
-            continue;
-        }
-        f(bits, child_kind);
+    // Enumerate the element buffer via the SAME shared primitive the
+    // destructive `drop_array_heap` release path walks
+    // (`typed_array::for_each_typed_array_elem_ptr`) — one enumeration, so the
+    // collector's trace and the Drop walk cannot drift on the array's
+    // heap-child edge set (real-gc-cycle-collection.md §3.4). The primitive
+    // yields every element in `0..len`; skip null here (the collector must not
+    // trace a null child), a read-only per-edge filter that leaves the
+    // destructive walk it shares byte-identical.
+    // SAFETY: `ptr` is a live heap-element TypedArray per the caller contract.
+    unsafe {
+        typed_array::for_each_typed_array_elem_ptr(ptr, |elem| {
+            let bits = elem as u64;
+            if bits != 0 {
+                f(bits, child_kind);
+            }
+        });
     }
 }
 
@@ -153,20 +151,21 @@ where
     F: FnMut(u64, NativeKind),
 {
     for i in 0..layout.capture_count() {
-        if !matches!(layout.capture_storage_kind(i), CaptureKind::Immutable) {
-            continue;
+        // Enumerate each capture's heap-child edge via the SAME shared accessor
+        // the destructive `release_typed_closure` path consumes
+        // (`closure_raw::closure_immutable_heap_capture_edge`) — one accessor,
+        // so the collector's trace and the Drop walk cannot drift on the
+        // closure's heap-child edge set (real-gc-cycle-collection.md §3.4). The
+        // `OwnedMutable` / `Shared` interior captures yield `None` here (their
+        // GC edges are deferred to the §3.5 side table). Skip null: a read-only
+        // per-edge filter that leaves the destructive walk byte-identical.
+        // SAFETY: `ptr` is a live closure block whose layout is `layout`.
+        if let Some((bits, kind)) =
+            unsafe { crate::v2::closure_raw::closure_immutable_heap_capture_edge(ptr, layout, i) }
+            && bits != 0
+        {
+            f(bits, kind);
         }
-        if !layout.is_heap_capture(i) {
-            continue;
-        }
-        let off = layout.heap_capture_offset(i);
-        // SAFETY: heap_capture_mask bits are only set for Ptr-shaped 8-byte
-        // slots; the read is in-bounds. Read-only copy — no share retired.
-        let bits = unsafe { std::ptr::read(ptr.add(off) as *const u64) };
-        if bits == 0 {
-            continue;
-        }
-        f(bits, layout.capture_native_kind(i));
     }
 }
 
@@ -174,6 +173,7 @@ where
 mod tests {
     use super::*;
     use crate::slot::ValueSlot;
+    use crate::v2::closure_layout::CaptureKind;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
@@ -403,6 +403,56 @@ mod tests {
             // Clean up witnesses.
             crate::v2::refcount::v2_release(&(*e0).header);
             crate::v2::refcount::v2_release(&(*e1).header);
+        }
+    }
+
+    /// A heap-element (`StringV2`) array: the read-only visitor's edge set (via
+    /// the shared `for_each_typed_array_elem_ptr` primitive) equals the set the
+    /// destructive `release_v2_typed_array` retires — one share per element,
+    /// exactly the visited pointers. Second carrier proving the array walk and
+    /// the Drop walk share one enumeration and cannot drift (§3.4).
+    #[test]
+    fn typed_array_string_elements_edge_parity() {
+        use crate::v2::string_obj::StringObj;
+        use crate::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, stamp_elem_type};
+        unsafe {
+            // Two StringObj carriers, each with a witness share held here.
+            let s0 = StringObj::new("child0");
+            let s1 = StringObj::new("child1");
+            crate::v2::refcount::v2_retain(&(*s0).header); // witness
+            crate::v2::refcount::v2_retain(&(*s1).header); // witness
+            assert_eq!((*s0).header.refcount.load(Ordering::SeqCst), 2);
+            assert_eq!((*s1).header.refcount.load(Ordering::SeqCst), 2);
+
+            // TypedArray<*const StringObj> owning one share each.
+            let arr = TypedArray::<*const StringObj>::with_capacity(2);
+            TypedArray::<*const StringObj>::push(arr, s0 as *const _);
+            TypedArray::<*const StringObj>::push(arr, s1 as *const _);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+
+            // Collect the visitor's edge set (read-only: refcounts unchanged).
+            let mut visited: Vec<(u64, NativeKind)> = Vec::new();
+            for_each_heap_child(arr as *const u8, HeapKind::TypedArray, |bits, kind| {
+                visited.push((bits, kind))
+            });
+            assert_eq!(
+                visited,
+                vec![
+                    (s0 as u64, NativeKind::StringV2),
+                    (s1 as u64, NativeKind::StringV2),
+                ]
+            );
+            assert_eq!((*s0).header.refcount.load(Ordering::SeqCst), 2);
+            assert_eq!((*s1).header.refcount.load(Ordering::SeqCst), 2);
+
+            // Destructive release retires exactly the visited element shares.
+            typed_array::release_v2_typed_array(arr as *mut u8);
+            assert_eq!((*s0).header.refcount.load(Ordering::SeqCst), 1);
+            assert_eq!((*s1).header.refcount.load(Ordering::SeqCst), 1);
+
+            // Clean up witnesses.
+            StringObj::drop(s0 as *mut StringObj);
+            StringObj::drop(s1 as *mut StringObj);
         }
     }
 
