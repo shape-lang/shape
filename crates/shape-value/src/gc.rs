@@ -1507,4 +1507,80 @@ mod tests {
         }
         clear_candidate_buffer();
     }
+
+    /// **A cycle member skips `Drop` (memory-only reclaim, §0 ratification #1).**
+    /// A cycle member's exclusively-owned `Arc<String>` field models a droppable
+    /// owned resource. `CollectWhite` frees cycle members MEMORY-ONLY — no
+    /// `drop_fields` heap-child walk — so that owned share is NOT released
+    /// (identical to a leaked Rust `Rc`/`Arc` cycle). Contrasted head-to-head
+    /// against the normal `_drop` path, which DOES release it: the same object
+    /// shape proves Drop runs on RC reclaim and is skipped on cycle reclaim.
+    #[test]
+    fn cycle_member_skips_drop_of_owned_field() {
+        clear_candidate_buffer();
+        unsafe {
+            // A [Ptr(TypedObject) edge, Arc<String> owned-resource] object that
+            // takes one share of the witness string `s`.
+            let two_field_obj = |schema: u64,
+                                 field0: *const TypedObjectStorage,
+                                 s: &Arc<String>|
+             -> *mut TypedObjectStorage {
+                let kinds: Arc<[NativeKind]> =
+                    Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject), NativeKind::String]);
+                TypedObjectStorage::_new(
+                    schema,
+                    vec![
+                        ValueSlot::from_typed_object_raw(field0),
+                        ValueSlot::from_string_arc(Arc::clone(s)),
+                    ]
+                    .into_boxed_slice(),
+                    0b11, // both fields are heap edges
+                    kinds,
+                )
+            };
+
+            // ── Contrast: the normal `_drop` path RUNS Drop (releases the field
+            //    share). The witness strong count returns to 1.
+            let live = Arc::new("owned".to_string());
+            assert_eq!(Arc::strong_count(&live), 1);
+            let solo = two_field_obj(200, std::ptr::null(), &live);
+            assert_eq!(Arc::strong_count(&live), 2, "solo.field1 owns a share");
+            TypedObjectStorage::_drop(solo);
+            assert_eq!(
+                Arc::strong_count(&live),
+                1,
+                "_drop released the field share — Drop RAN on the RC path"
+            );
+
+            // ── The GC memory-only path SKIPS Drop. A 2-node object cycle where
+            //    `a` owns a witnessed Arc<String>; both roots buffer; collect.
+            let owned = Arc::new("cycle-owned".to_string());
+            assert_eq!(Arc::strong_count(&owned), 1);
+            let a = two_field_obj(201, std::ptr::null(), &owned);
+            let b = mk_ref_obj(202);
+            assert_eq!(Arc::strong_count(&owned), 2, "a.field1 owns a share");
+
+            link_obj(a, b); // b.rc = 2
+            link_obj(b, a); // a.rc = 2
+            drop_external_and_buffer(a as usize, HeapKind::TypedObject); // a.rc = 1
+            drop_external_and_buffer(b as usize, HeapKind::TypedObject); // b.rc = 1
+
+            let freed = collect_cycles();
+            assert_eq!(freed, 2, "the garbage cycle is reclaimed");
+            // Drop was SKIPPED: `a`'s owned Arc<String> share was never released,
+            // so the witness strong count is unchanged (memory-only reclaim —
+            // Rust-cycle semantics, a Drop impl on a cycle member does not run).
+            assert_eq!(
+                Arc::strong_count(&owned),
+                2,
+                "cycle member SKIPPED Drop — owned field share not released"
+            );
+
+            // Reclaim the leaked share (the freed cycle member's un-run Drop) so
+            // the test itself leaks nothing; `owned` then drops normally.
+            Arc::decrement_strong_count(Arc::as_ptr(&owned));
+            assert_eq!(Arc::strong_count(&owned), 1);
+        }
+        clear_candidate_buffer();
+    }
 }
