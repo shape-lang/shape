@@ -1179,3 +1179,74 @@ r
         other => panic!("Expected Integer(2385), got {other:?}"),
     }
 }
+
+// -- WF-3A M1 residual: module-fn named-struct return schema identity ---------
+//
+// Regression for the `time::benchmark` crash "Missing field '__variant' while
+// materializing typed object". The stdlib enum `std::core::remote::RemoteError`
+// (materialized shape `[__variant, __payload_0, __payload_1]`) and the struct
+// `std::core::time::BenchmarkResult` (`[elapsed_ms, iterations, avg_ms]`) both
+// received schema id 32 in the program registry, because enum registration
+// interned its content id against the *ambient* registry while struct
+// registration interned against the *compiler* registry — two independent
+// dense counters handing out the same numeric handle for distinct structures.
+// The colliding handle made the benchmark's struct return re-dereference to
+// the enum schema at both construction and field-access time. The fix mints
+// enum handles from the storing registry's content-intern table, de-colliding
+// the handle so a Named-struct return resolves to its own schema.
+
+/// `time::benchmark(cb, n)` must return a well-formed `BenchmarkResult`
+/// (iterations == n, all fields readable) without crashing — VM and JIT.
+#[test]
+fn time_benchmark_named_struct_return_resolves_to_struct_schema_vm_and_jit() {
+    // iterations field == n
+    jit_expect_numeric(
+        r#"
+use std::core::time
+fn work() {}
+let r = time::benchmark(work, 5)
+r.iterations
+"#,
+        5.0,
+    );
+
+    // elapsed_ms and avg_ms are readable numeric fields (>= 0), not an enum's
+    // phantom __variant discriminant. Reading them at all proves the object
+    // carries the BenchmarkResult schema, not RemoteError.
+    let elapsed_ok = assert_jit_matches_vm(
+        r#"
+use std::core::time
+fn work() { let x = 1 + 1 }
+let r = time::benchmark(work, 3)
+r.elapsed_ms >= 0.0 && r.avg_ms >= 0.0 && r.iterations == 3
+"#,
+    );
+    assert_eq!(
+        elapsed_ok,
+        WireValue::Bool(true),
+        "all BenchmarkResult fields must read back correctly"
+    );
+}
+
+/// Guard: even when a user program also declares a struct-payload enum (whose
+/// materialized shape is `[__variant, __payload_0, ...]`, the exact shape that
+/// used to shadow BenchmarkResult), the Named-struct return from
+/// `time::benchmark` must still resolve to the STRUCT schema and expose its
+/// declared fields — never the enum's __variant field.
+#[test]
+fn named_struct_return_not_shadowed_by_field_overlapping_enum_vm_and_jit() {
+    jit_expect_numeric(
+        r#"
+use std::core::time
+enum Payload {
+    A { message: string },
+    B { code: int, detail: string }
+}
+fn work() {}
+let p = Payload::A { message: "hi" }
+let r = time::benchmark(work, 9)
+r.iterations
+"#,
+        9.0,
+    );
+}
