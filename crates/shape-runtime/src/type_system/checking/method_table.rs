@@ -376,6 +376,14 @@ impl MethodTable {
         let vec_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
             ("first", 0, vec![], E::ReceiverParam(0)),
             ("last", 0, vec![], E::ReceiverParam(0)),
+            // Bounds-safe indexed accessor: `get(i: int) -> Option<T>`
+            // (book C4). Some(elem) in-range, None OOB — the safe
+            // complement to `arr[i]` (checked direct index) and the
+            // `E::ReceiverParam(0)`-typed `.first()` / `.last()`. Mirrors
+            // the HashMap `get(K) -> Option<V>` (`opt_of`) contract; the
+            // runtime handler `array_basic::handle_get_v2` returns the
+            // canonical `Arc<OptionData>` carrier.
+            ("get", 0, vec![int()], opt_of(E::ReceiverParam(0))),
             // Wave-1b SEAM A: `iter()` produces a lazy `Iterator<T>`. The
             // Iterator receiver itself carries the adapter/terminal sigs
             // (`register_iterator_methods` below). Mirrors the W13 lazy-iterator

@@ -651,3 +651,123 @@ test()"#,
     )
     .expect_number(3.0);
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// `.get(i: int) -> Option<T>` — bounds-safe accessor (wave7/collection-get,
+// book C4). Some(elem) when 0 <= i < len, None otherwise (i < 0 OR i >= len).
+// Each case is asserted in BOTH the interpreter (default) and JIT
+// (`.with_jit()`) modes, since the method is delegated to the VM handler
+// from the JIT dispatch shell.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `.get(i)` in-bounds yields `Some(elem)` — unwrapped via `match`.
+#[test]
+fn test_array_get_in_bounds_some() {
+    ShapeTest::new(
+        r#"function test() { match [10, 20, 30].get(1) { Some(v) => v, None => 0 - 1 } }
+test()"#,
+    )
+    .expect_number(20.0);
+}
+
+#[test]
+fn test_array_get_in_bounds_some_jit() {
+    ShapeTest::new(
+        r#"function test() { match [10, 20, 30].get(1) { Some(v) => v, None => 0 - 1 } }
+test()"#,
+    )
+    .with_jit()
+    .expect_number(20.0);
+}
+
+/// `.get(i)` past the end (i >= len) yields `None`.
+#[test]
+fn test_array_get_out_of_bounds_high_none() {
+    ShapeTest::new(
+        r#"function test() { match [10, 20, 30].get(5) { Some(v) => v, None => 0 - 1 } }
+test()"#,
+    )
+    .expect_number(-1.0);
+}
+
+#[test]
+fn test_array_get_out_of_bounds_high_none_jit() {
+    ShapeTest::new(
+        r#"function test() { match [10, 20, 30].get(5) { Some(v) => v, None => 0 - 1 } }
+test()"#,
+    )
+    .with_jit()
+    .expect_number(-1.0);
+}
+
+/// `.get(i)` with a negative index yields `None` (the chosen OOB rule).
+#[test]
+fn test_array_get_negative_index_none() {
+    ShapeTest::new(
+        r#"function test() { match [10, 20, 30].get(0 - 1) { Some(v) => v, None => 0 - 1 } }
+test()"#,
+    )
+    .expect_number(-1.0);
+}
+
+#[test]
+fn test_array_get_negative_index_none_jit() {
+    ShapeTest::new(
+        r#"function test() { match [10, 20, 30].get(0 - 1) { Some(v) => v, None => 0 - 1 } }
+test()"#,
+    )
+    .with_jit()
+    .expect_number(-1.0);
+}
+
+/// Boundary index 0 and the last valid index both resolve to `Some`.
+#[test]
+fn test_array_get_boundaries() {
+    ShapeTest::new(
+        r#"function test() {
+    let a = [10, 20, 30]
+    let lo = match a.get(0) { Some(v) => v, None => 0 - 1 }
+    let hi = match a.get(2) { Some(v) => v, None => 0 - 1 }
+    lo + hi
+}
+test()"#,
+    )
+    .expect_number(40.0);
+}
+
+/// `.get(i) == Some(x)` — the returned carrier compares equal to a `Some`
+/// value (heap Option-TypedObject equality). The `Some(20)` is bound through
+/// an annotated `Option<int>` local because a bare `Some(x)` literal as a
+/// direct `==` operand infers as `unknown` inside a strict `function` body
+/// (a pre-existing `Some`-literal inference gap, unrelated to `.get`).
+#[test]
+fn test_array_get_eq_some_value() {
+    ShapeTest::new(
+        r#"function test() {
+    let e: Option<int> = Some(20)
+    [10, 20, 30].get(1) == e
+}
+test()"#,
+    )
+    .expect_bool(true);
+}
+
+/// `.get(i) == None` — the OOB result compares equal to the `None` literal.
+#[test]
+fn test_array_get_eq_none_literal() {
+    ShapeTest::new(
+        r#"function test() { [10, 20, 30].get(5) == None }
+test()"#,
+    )
+    .expect_bool(true);
+}
+
+/// Kind-generic over the element type: string arrays return `Some(string)`.
+#[test]
+fn test_array_get_string_element() {
+    ShapeTest::new(
+        r#"function test() { match ["a", "b", "c"].get(2) { Some(v) => v, None => "none" } }
+test()"#,
+    )
+    .expect_string("c");
+}
