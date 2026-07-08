@@ -4,9 +4,121 @@
 //! Currently handles LINQ-style from queries → method chains.
 
 use crate::ast::{
-    DestructurePattern, Expr, FromQueryExpr, FunctionParameter, Item, Literal, ObjectEntry,
-    OwnershipModifier, Program, QueryClause, Span, Spanned, Statement, VariableDecl,
+    DestructurePattern, Expr, FromQueryExpr, FunctionParameter, Item, Literal, MatchArm, MatchExpr,
+    ObjectEntry, OwnershipModifier, Pattern, PatternConstructorFields, Program, QueryClause, Span,
+    Spanned, Statement, VariableDecl,
 };
+
+/// Monotonic counter for synthesizing hygienic binder names in the optional
+/// chaining lowering. Each `?.` link binds its own fresh `v`, so nested chains
+/// and repeated `?.` sites never collide.
+static OPTCHAIN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn fresh_optchain_binder() -> String {
+    let n = OPTCHAIN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("__optchain_v{n}")
+}
+
+/// Build `match <scrutinee> { Some(v) => Some(<some_body>), None => None }`,
+/// where `<some_body>` is expressed in terms of the freshly-bound `binder`
+/// (`v`). The result is an `Option<proptype>`: present -> `Some(proptype)`,
+/// absent -> `None`. This is the canonical lowering of a single `?.` link.
+fn build_optchain_match(scrutinee: Expr, binder: String, some_body: Expr, span: Span) -> Expr {
+    let some_pattern = Pattern::Constructor {
+        enum_name: None,
+        variant: "Some".to_string(),
+        fields: PatternConstructorFields::Tuple(vec![Pattern::synthetic_identifier(binder)]),
+    };
+    let none_pattern = Pattern::Constructor {
+        enum_name: None,
+        variant: "None".to_string(),
+        fields: PatternConstructorFields::Unit,
+    };
+    // Rewrap the accessed value as `Some(...)` so the whole `?.` link is itself
+    // an `Option`, letting chains nest and `??` compose.
+    let some_arm_body = Expr::FunctionCall {
+        name: "Some".to_string(),
+        const_args: vec![],
+        args: vec![some_body],
+        named_args: vec![],
+        span,
+    };
+    let none_arm_body = Expr::Literal(Literal::None, span);
+    Expr::Match(
+        Box::new(MatchExpr {
+            scrutinee: Box::new(scrutinee),
+            arms: vec![
+                MatchArm {
+                    pattern: some_pattern,
+                    guard: None,
+                    body: Box::new(some_arm_body),
+                    pattern_span: Some(span),
+                },
+                MatchArm {
+                    pattern: none_pattern,
+                    guard: None,
+                    body: Box::new(none_arm_body),
+                    pattern_span: Some(span),
+                },
+            ],
+        }),
+        span,
+    )
+}
+
+/// Rewrite an already-child-desugared `Expr::PropertyAccess { optional: true }`
+/// in place into its `match` lowering.
+fn lower_optional_property_access(expr: &mut Expr) {
+    let taken = std::mem::replace(expr, Expr::Unit(Span::DUMMY));
+    if let Expr::PropertyAccess {
+        object,
+        property,
+        span,
+        ..
+    } = taken
+    {
+        let binder = fresh_optchain_binder();
+        let some_body = Expr::PropertyAccess {
+            object: Box::new(Expr::Identifier(binder.clone(), span)),
+            property,
+            optional: false,
+            span,
+        };
+        *expr = build_optchain_match(*object, binder, some_body, span);
+    } else {
+        // Only ever called from the PropertyAccess arm; restore on the
+        // impossible path rather than panicking.
+        *expr = taken;
+    }
+}
+
+/// Rewrite an already-child-desugared `Expr::MethodCall { optional: true }` in
+/// place into its `match` lowering.
+fn lower_optional_method_call(expr: &mut Expr) {
+    let taken = std::mem::replace(expr, Expr::Unit(Span::DUMMY));
+    if let Expr::MethodCall {
+        receiver,
+        method,
+        args,
+        named_args,
+        span,
+        ..
+    } = taken
+    {
+        let binder = fresh_optchain_binder();
+        let some_body = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier(binder.clone(), span)),
+            method,
+            args,
+            named_args,
+            optional: false,
+            span,
+        };
+        *expr = build_optchain_match(*receiver, binder, some_body, span);
+    } else {
+        *expr = taken;
+    }
+}
 
 /// Desugar all high-level syntax in a program.
 /// This should be called before compilation.
@@ -189,8 +301,24 @@ fn desugar_expr(expr: &mut Expr) {
             let desugared = desugar_from_query(from_query, *span);
             *expr = desugared;
         }
-        // Recursively handle all other expression types
-        Expr::PropertyAccess { object, .. } => desugar_expr(object),
+        // Recursively handle all other expression types.
+        //
+        // Optional chaining (`expr?.prop`) lowers to a `match` on the Option
+        // receiver: `match expr { Some(v) => Some(v.prop), None => None }`. This
+        // reuses the proven Option pattern-match machinery (both the
+        // `Arc<OptionData>` `SomeCtor` carrier and null-coding `Some(x) ≡ x` are
+        // handled by `read_option` / `UnwrapOption` in the pattern compiler),
+        // the flow-narrowing that binds `v` to the unwrapped `T`, and the
+        // `Some(...)` reconstruction that rewraps as `Option<proptype>` — so a
+        // chain (`a?.b?.c`) nests left-to-right and composes with `??` for free.
+        // Strictness falls out: a non-Option receiver fails the `Some`/`None`
+        // arm type-check.
+        Expr::PropertyAccess { object, optional, .. } => {
+            desugar_expr(object);
+            if *optional {
+                lower_optional_property_access(expr);
+            }
+        }
         Expr::IndexAccess {
             object,
             index,
@@ -248,6 +376,7 @@ fn desugar_expr(expr: &mut Expr) {
             receiver,
             args,
             named_args,
+            optional,
             ..
         } => {
             desugar_expr(receiver);
@@ -256,6 +385,12 @@ fn desugar_expr(expr: &mut Expr) {
             }
             for (_, val) in named_args {
                 desugar_expr(val);
+            }
+            // Optional method call (`expr?.method(args)`) lowers the same way as
+            // optional property access: `match expr { Some(v) => Some(v.method(args)),
+            // None => None }`.
+            if *optional {
+                lower_optional_method_call(expr);
             }
         }
         Expr::Conditional {
