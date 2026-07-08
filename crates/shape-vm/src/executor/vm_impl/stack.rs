@@ -1423,9 +1423,16 @@ mod gc_barrier_wiring_tests {
             assert_eq!((*obj).header.refcount.load(Ordering::SeqCst), 1);
             assert_eq!(gc::candidate_buffer_snapshot(), vec![obj as usize]);
 
-            // Final drop hits zero ⇒ RC fast path frees; NOT re-buffered.
+            // Final drop hits zero ⇒ RC fast path frees. `gc_note_object_freed`
+            // (Phase-3a stale-entry guard) then REMOVES the buffered entry so a
+            // freed pointer can never linger in the candidate buffer (UAF
+            // prevention) — the buffer returns to empty, not merely un-re-buffered.
             drop_with_kind(obj as u64, NativeKind::Ptr(HeapKind::TypedObject));
-            assert_eq!(gc::candidate_buffer_len(), 1, "rc→0 free is not a candidate");
+            assert_eq!(
+                gc::candidate_buffer_len(),
+                0,
+                "rc→0 free removes the stale candidate entry (gc_note_object_freed)"
+            );
         }
         gc::clear_candidate_buffer();
     }

@@ -726,6 +726,43 @@ impl Drop for VirtualMachine {
             if cell_ptr.is_null() {
                 continue;
             }
+            // GC Phase 4 (real-gc-cycle-collection.md §5 / Phase 4): the raw
+            // `Arc::from_raw` drop below bypasses `drop_with_kind`, so a
+            // module-scope `SharedCell`'s interior payload never reaches the
+            // Phase-2 decrement barrier. That is the Finding #82 leak surface:
+            // `var arr = []; arr.push(|| arr.len())` promotes `arr` to a module
+            // `SharedCell` (D) whose `TypedArray` payload (A) closes the
+            // closure-capture cycle A→B(closure value)→C(block)→D→A. When this
+            // cell still has another live share (the closure's capture of D),
+            // dropping the module share leaves A pinned solely by the cycle's
+            // internal edges — an unreachable garbage cycle nothing would ever
+            // reclaim. Buffer A as a Purple possible-root here (BEFORE the raw
+            // drop) so the teardown sweep below sees and reclaims it. Guarded on
+            // `strong > 1` so we buffer only when this drop is NOT the cell's
+            // last share: if it IS the last share, the raw drop runs
+            // `SharedCell::Drop`, which releases the payload through the normal
+            // RC free path (no dangling candidate), and a single-holder cell
+            // cannot be a live cycle intermediary anyway. Memory-only, gc-gated;
+            // feature-off this whole block is absent (teardown byte-identical).
+            #[cfg(feature = "gc")]
+            {
+                // SAFETY: `cell_ptr` is a live `Arc::into_raw(Arc<SharedCell>)`
+                // share (checked non-null above). Reconstruct-read-forget to
+                // read the strong count and the interior edge without perturbing
+                // the count. Teardown is a single-thread GC-quiescent point, so
+                // `gc_payload_edge`'s lock-free payload read is exclusive.
+                let cell_arc = unsafe { std::sync::Arc::from_raw(cell_ptr) };
+                let strong = std::sync::Arc::strong_count(&cell_arc);
+                let payload = unsafe { cell_arc.gc_payload_edge() };
+                let _ = std::sync::Arc::into_raw(cell_arc);
+                if strong > 1 {
+                    if let Some((ptr, hk)) =
+                        shape_value::gc::cycle_capable_direct_header(payload.0, payload.1)
+                    {
+                        shape_value::gc::gc_buffer_possible_root(ptr, hk);
+                    }
+                }
+            }
             // SAFETY: `cell_ptr` was produced by
             // `Arc::into_raw(Arc::new(...))` in
             // `op_alloc_shared_module_binding` and this is the unique
@@ -808,6 +845,36 @@ impl Drop for VirtualMachine {
         // extension this Drop is part of.
         for slot in self.module_bindings[bound..].iter_mut() {
             *slot = Self::NONE_BITS;
+        }
+
+        // GC Phase 4 — end-of-program teardown sweep
+        // (real-gc-cycle-collection.md §5 / Phase 4). Every VM-owned external
+        // root has now been released: the shared-module-binding `Arc<SharedCell>`
+        // shares (loop above), the live stack window, and the kinded
+        // module-binding slots. A module-scope self-referential cycle (Finding
+        // #82 / ADR-006 §2.7.30.4) becomes unreachable only *here* — its members
+        // are pinned solely by their own internal edges, exactly like a Rust
+        // `Rc` cycle at program end — so the mid-run safepoint collector
+        // (`dispatch.rs`) never observed it becoming garbage. Run one final
+        // CollectCycles over the candidate buffer, which now holds the surviving
+        // header roots the release loops buffered through the decrement barrier
+        // plus the `SharedCell` interior payloads buffered above. Genuinely
+        // still-reachable values keep a refcount residue > 0 (another live
+        // holder) and are `ScanBlack`-restored — never freed (the
+        // `live_cycle_with_external_ref_is_not_collected` invariant), so there is
+        // no premature free; the release loops only decrement surviving members
+        // (never free them), so there is no double-free. Memory-only per §0 (no
+        // user `Drop` on cycle members — matching Rust `Rc`-cycle semantics).
+        // Runs under the Phase-3b rendezvous discipline (`collect_under_stop`);
+        // at teardown this is typically the sole live thread. Finally clear the
+        // thread-local buffer so a VM later reusing this OS thread (isolated
+        // async task VMs share the `thread_local!` buffer) starts clean and can
+        // never dereference a stale entry. gc-gated: feature-off this whole block
+        // is absent, so teardown is byte-identical and zero-cost without `gc`.
+        #[cfg(feature = "gc")]
+        {
+            shape_value::gc_coordinator::collect_under_stop(shape_value::gc::collect_cycles);
+            shape_value::gc::clear_candidate_buffer();
         }
     }
 }
