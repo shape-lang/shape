@@ -5134,4 +5134,124 @@ mod gc_phase5_identity_tests {
             "expected a clean version-refusal, got: {msg}"
         );
     }
+
+    /// (b-mutual, independent adversarial 2026-07-08) A TWO-NODE mutual cycle
+    /// (`A.next = B`, `B.next = A` across DISTINCT objects) round-trips with
+    /// identity: restored `A'` and `B'` point at each other (A'->B'->A'), two
+    /// distinct allocations forming ONE cycle, no duplication, no infinite
+    /// recursion. Exercises interning a FORWARD child (B nested inside A's
+    /// field) followed by a back-edge to an already-interned ANCESTOR (A) —
+    /// the canonical cross-object cycle the self-loop case does not fully
+    /// cover, and the shape that would infinite-recurse if the serialize ctx
+    /// were forked per field instead of threaded.
+    #[test]
+    fn two_node_mutual_cycle_roundtrips_with_identity() {
+        let (_tmp, st) = store();
+        let mk = |seed: i64| -> *mut TypedObjectStorage {
+            let slots =
+                vec![ValueSlot::from_int(seed), ValueSlot::from_raw(0)].into_boxed_slice();
+            let field_kinds: Arc<[NativeKind]> =
+                vec![NativeKind::Int64, NativeKind::Ptr(HeapKind::TypedObject)].into();
+            TypedObjectStorage::_new(9, slots, 0, field_kinds)
+        };
+        let a = mk(1); // rc 1 (holder)
+        let b = mk(2); // rc 1 (holder)
+        unsafe {
+            // A.next = B (B's forward-edge share) ; B.next = A (A's back-edge share)
+            v2_retain(b as *const HeapHeader);
+            let _ = TypedObjectStorage::write_slot_in_place(a, 1, b as u64);
+            *std::ptr::addr_of_mut!((*a).heap_mask) = 1 << 1;
+            v2_retain(a as *const HeapHeader);
+            let _ = TypedObjectStorage::write_slot_in_place(b, 1, a as u64);
+            *std::ptr::addr_of_mut!((*b).heap_mask) = 1 << 1;
+        }
+
+        // SERIALIZE from A — must terminate.
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv = slot_to_serializable_ctx(
+            a as u64,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut ictx,
+        )
+        .expect("serialize mutual cycle (no infinite recursion)");
+        // HeapNode(hA){TO{Int(1), HeapNode(hB){TO{Int(2), HeapRef(hA)}}}}
+        let h_a = match &sv {
+            SV::HeapNode { handle, body } => match &**body {
+                SV::TypedObject { slot_data, .. } => {
+                    match &slot_data[1] {
+                        SV::HeapNode { body: bb, .. } => match &**bb {
+                            SV::TypedObject { slot_data: sd_b, .. } => match &sd_b[1] {
+                                SV::HeapRef { handle: hb } => assert_eq!(
+                                    hb, handle,
+                                    "B.next back-edges to A's handle (mutual cycle broken)"
+                                ),
+                                other => panic!("expected HeapRef to A, got {other:?}"),
+                            },
+                            other => panic!("expected nested TypedObject(B), got {other:?}"),
+                        },
+                        other => panic!("expected nested HeapNode(B), got {other:?}"),
+                    }
+                    *handle
+                }
+                other => panic!("expected TypedObject body, got {other:?}"),
+            },
+            other => panic!("expected HeapNode, got {other:?}"),
+        };
+        let _ = h_a;
+
+        // RESTORE via the two-pass driver.
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv, &st, &mut link).expect("pass 1");
+        let (ra, rkind) = serializable_to_slot_ctx(
+            &sv,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut link,
+        )
+        .expect("pass 2");
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedObject));
+
+        // IDENTITY: A'->B'->A', two distinct allocations, one cycle.
+        let ra_ptr = ra as *const TypedObjectStorage;
+        let rb = unsafe { (*ra_ptr).slots()[1].raw() };
+        let rb_ptr = rb as *const TypedObjectStorage;
+        assert_ne!(ra, rb, "A' and B' are distinct allocations (no collapse)");
+        let rb_next = unsafe { (*rb_ptr).slots()[1].raw() };
+        assert_eq!(
+            rb_next, ra,
+            "B'.next aliases A' — the mutual cycle's identity is preserved"
+        );
+        assert_eq!(unsafe { (*ra_ptr).slots()[0].raw() }, 1, "A' scalar survives");
+        assert_eq!(unsafe { (*rb_ptr).slots()[0].raw() }, 2, "B' scalar survives");
+
+        link.release_base_shares();
+        // A' rc2 {external ra, B'->A' back-edge}; B' rc1 {A'->B' forward-edge}.
+        assert_eq!(rc(ra), 2, "A': external slot + B's back-edge");
+        assert_eq!(rc(rb), 1, "B': A's forward-edge only (base released)");
+
+        // Teardown: break every edge first (heap_mask->0, next->0) so no drop
+        // walk touches a freed peer, then retire shares to 0. Counts gated by
+        // the rc asserts above, so a miscount fails an assert, never crashes.
+        unsafe {
+            let rap = ra as *mut TypedObjectStorage;
+            let rbp = rb as *mut TypedObjectStorage;
+            *std::ptr::addr_of_mut!((*rap).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(rap, 1, 0);
+            *std::ptr::addr_of_mut!((*rbp).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(rbp, 1, 0);
+            TypedObjectStorage::release_elem(ra_ptr);
+            TypedObjectStorage::release_elem(ra_ptr);
+            TypedObjectStorage::release_elem(rb_ptr);
+
+            *std::ptr::addr_of_mut!((*a).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(a, 1, 0);
+            *std::ptr::addr_of_mut!((*b).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(b, 1, 0);
+            TypedObjectStorage::release_elem(a);
+            TypedObjectStorage::release_elem(a);
+            TypedObjectStorage::release_elem(b);
+            TypedObjectStorage::release_elem(b);
+        }
+    }
 }

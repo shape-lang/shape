@@ -2097,6 +2097,132 @@ mod tests {
         );
     }
 
+    /// GC Phase 5 (snapshot v7) — END-TO-END whole-VM object-cycle identity
+    /// round-trip (independent adversarial regression, 2026-07-08). Builds a
+    /// self-linked `type Node { first: int, next: Node? }` object on the VM
+    /// stack and drives the FULL `snapshot()` -> `from_snapshot()` path (the
+    /// same shared-ctx two-pass the slot-tier tests exercise piecewise, but
+    /// here through the real VM driver that threads ONE `SerializeIdentityCtx`
+    /// across the stack and a single `RestoreLinkCtx` across Pass 1 + Pass 2).
+    ///
+    /// Asserts: (i) serialize does NOT infinite-recurse (both snapshots
+    /// return); (ii) the restored node's `next` field aliases the restored
+    /// node ITSELF (identity preserved, one allocation, not two copies); and
+    /// (iii) re-snapshotting the restored VM re-derives a `HeapRef` self-edge
+    /// (a duplicated node would instead re-emit a nested `HeapNode` body), so
+    /// the restored graph is a genuine one-allocation cycle.
+    #[test]
+    fn gc_phase5_vm_object_cycle_roundtrips_end_to_end() {
+        use crate::bytecode::BytecodeProgram;
+        use shape_runtime::snapshot::{SerializableVMValue as SV, SnapshotStore};
+        use shape_value::heap_value::TypedObjectStorage;
+        use shape_value::v2::heap_element::HeapElement;
+        use shape_value::v2::heap_header::HeapHeader;
+        use shape_value::v2::refcount::v2_retain;
+        use shape_value::{HeapKind, NativeKind, ValueSlot};
+        use std::sync::Arc;
+
+        // Build `Node { first: int = 77, next: Node? = self }`. field 1 is a
+        // Ptr(TypedObject) to the node itself; the self-edge owns one share
+        // (rc 2 = {VM-stack holder, self-edge}) — the runtime shape of
+        // `let mut n = Node(...); n.next = n`.
+        let slots: Box<[ValueSlot]> =
+            vec![ValueSlot::from_int(77), ValueSlot::from_raw(0)].into_boxed_slice();
+        let field_kinds: Arc<[NativeKind]> =
+            vec![NativeKind::Int64, NativeKind::Ptr(HeapKind::TypedObject)].into();
+        let o = TypedObjectStorage::_new(9, slots, 0, field_kinds); // rc 1
+        unsafe {
+            v2_retain(o as *const HeapHeader); // self-edge share -> rc 2
+            let _ = TypedObjectStorage::write_slot_in_place(o, 1, o as u64);
+            *std::ptr::addr_of_mut!((*o).heap_mask) = 1 << 1;
+        }
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.push_kinded(o as u64, NativeKind::Ptr(HeapKind::TypedObject))
+            .expect("push self-cyclic object");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        // SERIALIZE — must terminate (pre-v7 this infinite-recursed).
+        let snap = vm.snapshot(&store).expect("snapshot self-cyclic object");
+        assert_eq!(snap.stack.len(), 1);
+        let handle = match &snap.stack[0] {
+            SV::HeapNode { handle, body } => {
+                match &**body {
+                    SV::TypedObject {
+                        slot_data,
+                        heap_mask,
+                        ..
+                    } => {
+                        assert_eq!(*heap_mask, 1 << 1, "field 1 (next) is the heap self-edge");
+                        assert!(matches!(slot_data[0], SV::Int(77)));
+                        match &slot_data[1] {
+                            SV::HeapRef { handle: h2 } => {
+                                assert_eq!(h2, handle, "serialized next is a self back-edge")
+                            }
+                            other => panic!("expected HeapRef self-edge, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected TypedObject body, got {other:?}"),
+                }
+                *handle
+            }
+            other => panic!("expected HeapNode, got {other:?}"),
+        };
+        let _ = handle;
+
+        // RESTORE — full VM two-pass driver.
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("from_snapshot self-cyclic object");
+        assert_eq!(restored.sp, 1);
+        assert_eq!(restored.kinds[0], NativeKind::Ptr(HeapKind::TypedObject));
+
+        // IDENTITY: the restored node's `next` slot aliases the restored node
+        // itself — one allocation, a real cycle, not two copies.
+        let rbits = restored.stack[0];
+        let rptr = rbits as *const TypedObjectStorage;
+        let next_bits = unsafe { (*rptr).slots()[1].raw() };
+        assert_eq!(
+            next_bits, rbits,
+            "restored Node.next aliases the SAME restored node (identity preserved, no duplication)"
+        );
+        assert_eq!(unsafe { (*rptr).slots()[0].raw() }, 77, "scalar field survives");
+
+        // Re-snapshot re-derives the self-edge (a duplicated node would emit a
+        // nested HeapNode body instead).
+        let re = restored.snapshot(&store).expect("re-snapshot restored");
+        match &re.stack[0] {
+            SV::HeapNode { handle, body } => match &**body {
+                SV::TypedObject { slot_data, .. } => match &slot_data[1] {
+                    SV::HeapRef { handle: h2 } => {
+                        assert_eq!(h2, handle, "re-snapshot next is a self back-edge (no dup)")
+                    }
+                    other => panic!("expected HeapRef on re-snapshot, got {other:?}"),
+                },
+                other => panic!("expected TypedObject body on re-snapshot, got {other:?}"),
+            },
+            other => panic!("expected HeapNode on re-snapshot, got {other:?}"),
+        }
+
+        // Teardown: break both self-cycles (heap_mask -> 0, next -> 0 so the
+        // drop walk never touches a freed peer) and retire the orphaned
+        // self-edge share on each; the VMs release the remaining stack-slot
+        // share on drop (rc -> 0, freed). Balanced, double-free-free.
+        unsafe {
+            let rp = rbits as *mut TypedObjectStorage;
+            *std::ptr::addr_of_mut!((*rp).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(rp, 1, 0);
+            TypedObjectStorage::release_elem(rp as *const TypedObjectStorage);
+
+            *std::ptr::addr_of_mut!((*o).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(o, 1, 0);
+            TypedObjectStorage::release_elem(o as *const TypedObjectStorage);
+        }
+        drop(restored);
+        drop(vm);
+    }
+
     /// W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12):
     /// VmStateSnapshot accessor surface for an empty VM round-trips
     /// cleanly (no panics; FrameInfo accessors return empty / None).
