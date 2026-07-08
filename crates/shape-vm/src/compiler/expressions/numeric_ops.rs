@@ -74,6 +74,34 @@ pub(super) fn is_function_type(ty: &Type) -> bool {
     matches!(ty, Type::Function { .. })
 }
 
+/// Whether `ty` is a builtin primitive scalar whose operator-trait impl is a
+/// *no-op bound-check registration* (`environment/mod.rs:757` registers
+/// `Add`/`Sub`/`Mul`/`Div`/`Mod`/`Neg` for the numeric primitives and
+/// `Eq`/`Ord` for `bool`/`string` purely so `<T: Add>` bound checking
+/// succeeds — the impls carry no dispatchable method body).
+///
+/// These types NEVER dispatch an operator through `CallMethod`: their
+/// arithmetic and comparison are serviced by typed opcodes (`SubNumber`,
+/// `GtInt`, …) emitted earlier when the compiler proves the operand kind.
+/// A binop over such a type reaches operator-trait dispatch ONLY when that
+/// proof failed (unprovable `NativeKind`). Faking a `CallMethod("sub")` there
+/// lowers to a runtime "no method 'sub' on receiver kind Float64" — a
+/// dynamic-dispatch fallback that violates strict typing. Excluding these
+/// types from trait dispatch lets the strict-typing compile error fire
+/// instead. (Non-primitive user types with a real `impl Sub for T` are not
+/// matched here and dispatch normally.)
+pub(super) fn is_operator_trait_noop_primitive(ty: &Type) -> bool {
+    if is_type_numeric(ty) {
+        return true;
+    }
+    let name = match ty {
+        Type::Concrete(TypeAnnotation::Basic(name)) => Some(name.as_str()),
+        Type::Concrete(TypeAnnotation::Reference(name)) => Some(name.as_str()),
+        _ => None,
+    };
+    matches!(name, Some("bool" | "string" | "char"))
+}
+
 /// U4-4: a numeric LITERAL's `NumericType`, read directly from its AST node.
 /// A literal's kind is statically known with no inference; this is the kind the
 /// deleted `last_expr_numeric_type` register stamped at `compile_expr_literal`

@@ -465,6 +465,47 @@ impl BytecodeCompiler {
                     location: Some(self.span_to_source_location(span)),
                 });
             }
+            // wave7 finance-field-arith-gap: refuse taking an *uninstantiated
+            // implicit-generic* function whose body needs a proven concrete
+            // parameter type (e.g. `fn candle_range(row) { row.high - row.low }`,
+            // `fn add(a, b) { a + b }`) as a first-class VALUE. A direct call
+            // `candle_range(bar)` monomorphizes the body with proven kinds; but a
+            // value-capture (`let f = candle_range`, or passing it as a HOF
+            // argument) can never be monomorphized — the captured template blob
+            // would run its deferred, unproven-kind body and either silently drop
+            // an operand or dynamic-dispatch a nonexistent operator method. Under
+            // strict typing that is a compile error: annotate the parameter(s).
+            //
+            // Scope: only user-space MAIN compilation (`module_scope_stack`
+            // empty — the same discriminator `function_calls.rs` uses for the
+            // W17-marshal-residual gate). Dependency-module compilation
+            // (importing stdlib, `module_scope_stack` non-empty) is skipped: an
+            // imported module's functions are re-monomorphized soundly at the
+            // importer's direct call sites (verified: `body(bar)` / `candle_range
+            // (bar)` through a `from … use` import compute the full arithmetic),
+            // and rejecting the dependency's own internal function-value wiring
+            // would break every import of a module that merely DEFINES such a
+            // helper. The user-facing value-capture surface is what this guards.
+            if self.module_scope_stack.is_empty()
+                && let Some(def) = self
+                    .function_defs
+                    .get(&resolved_name)
+                    .or_else(|| self.function_defs.get(name))
+                && self.is_uninstantiated_implicit_generic(def)
+                && self.implicit_generic_body_requires_concrete_emission(def)
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot use implicit-generic function '{}' as a value: its body performs \
+                         arithmetic (or other kind-dependent operations) on an unannotated \
+                         parameter, so its type cannot be proven when it is captured or passed \
+                         indirectly (only a direct call can monomorphize it). Annotate the \
+                         parameter type(s) to use it as a value.",
+                        name
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
             let const_idx = self
                 .program
                 .add_constant(Constant::Function(func_idx as u16));

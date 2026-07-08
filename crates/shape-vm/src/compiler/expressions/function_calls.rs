@@ -6763,7 +6763,7 @@ impl BytecodeCompiler {
         Ok(Some(specialized_idx))
     }
 
-    fn implicit_generic_body_requires_concrete_emission(
+    pub(super) fn implicit_generic_body_requires_concrete_emission(
         &self,
         func_def: &shape_ast::ast::FunctionDef,
     ) -> bool {
@@ -7063,6 +7063,26 @@ impl BytecodeCompiler {
             | Expr::Await(operand, _)
             | Expr::AsyncScope(operand, _)
             | Expr::Spread(operand, _) => Self::expr_mentions_any_name(operand, names),
+            // wave7 finance-field-arith-gap: a field / index read on a param
+            // (`row.high`, `bars[i]`) MENTIONS that param. Without these arms
+            // object-field arithmetic (`row.high - row.low`) evaded
+            // `implicit_generic_body_requires_concrete_emission`, so the
+            // guards keyed on it did not see that the body needs a proven
+            // concrete param type — the root of the untyped-param field-arith
+            // strict-typing bypass.
+            Expr::PropertyAccess { object, .. } => Self::expr_mentions_any_name(object, names),
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                Self::expr_mentions_any_name(object, names)
+                    || Self::expr_mentions_any_name(index, names)
+                    || end_index
+                        .as_ref()
+                        .is_some_and(|e| Self::expr_mentions_any_name(e, names))
+            }
             Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => args
                 .iter()
                 .any(|arg| Self::expr_mentions_any_name(arg, names)),
