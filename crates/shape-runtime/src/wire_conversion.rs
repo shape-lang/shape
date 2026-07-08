@@ -401,10 +401,10 @@ where
 fn v2_typed_array_to_wire(bits: u64, ctx: &Context) -> WireValue {
     use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
     use shape_value::v2::typed_array::{
-        ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
-        ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
-        ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8,
-        ELEM_TYPE_U16, ELEM_TYPE_U32, TypedArray, TypedArrayElem, read_elem_type,
+        CallableArrayElem, ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL,
+        ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
+        ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT,
+        ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, TypedArray, TypedArrayElem, read_elem_type,
     };
     use shape_value::v2::{decimal_obj::DecimalObj, string_obj::StringObj};
 
@@ -503,6 +503,21 @@ fn v2_typed_array_to_wire(bits: u64, ctx: &Context) -> WireValue {
                 let elem = TypedArray::<*const TypedArrayElem>::get_unchecked(arr, index);
                 v2_typed_array_to_wire(elem as u64, ctx)
             },
+            // `Array<Function<...>>` — the CALLABLE carrier stores 16-byte
+            // `CallableArrayElem` descriptors, not `HeapHeader` pointers.
+            // Callables have no wire-stable representation (a closure captures
+            // live VM state; a function id is meaningful only within its own
+            // program image), so — exactly like the scalar
+            // `HeapValue::ClosureRaw` / `HeapValue::ModuleFn` arms in
+            // `heap_to_wire` — this projects each element to its display
+            // placeholder string. This is the host-boundary DISPLAY path
+            // (`slot_to_envelope` → `ProgramExecutorResult.wire_value`), NOT a
+            // round-trip transport encoder; closures are not reconstructible
+            // via `wire_to_slot` at either the scalar or the array level.
+            ELEM_TYPE_CALLABLE => unsafe {
+                let arr = ptr as *const TypedArray<CallableArrayElem>;
+                callable_elem_to_wire(TypedArray::<CallableArrayElem>::get_unchecked(arr, index))
+            },
             other => {
                 panic!(
                     "TypedArray wire conversion requires a known producer-side \
@@ -514,6 +529,23 @@ fn v2_typed_array_to_wire(bits: u64, ctx: &Context) -> WireValue {
     }
 
     WireValue::Array(values)
+}
+
+/// Host-boundary DISPLAY projection of one `CallableArrayElem` (an element of a
+/// CALLABLE-stamped `TypedArray`, i.e. `Array<Function<...>>`).
+///
+/// Mirrors the scalar callable arms in [`heap_to_wire`]: `HeapValue::ClosureRaw`
+/// projects to `"<closure>"` and `HeapValue::ModuleFn(id)` to
+/// `"<module_fn:{id}>"`. Callables are display placeholders here — they have no
+/// wire-stable / round-trippable representation and `wire_to_slot` cannot
+/// reconstruct one. The bits are never dereferenced.
+fn callable_elem_to_wire(elem: shape_value::v2::typed_array::CallableArrayElem) -> WireValue {
+    use shape_value::v2::typed_array::CallableArrayElemKind;
+    match elem.kind {
+        CallableArrayElemKind::Closure => WireValue::String("<closure>".to_string()),
+        CallableArrayElemKind::FunctionId => WireValue::String(format!("<function:{}>", elem.bits)),
+        CallableArrayElemKind::ModuleFn => WireValue::String(format!("<module_fn:{}>", elem.bits)),
+    }
 }
 
 fn typed_object_result_option_to_wire(
@@ -1278,6 +1310,69 @@ mod typed_array_wire_tests {
             ])
         );
 
+        unsafe { release_v2_typed_array(arr as *mut u8) };
+    }
+
+    // Regression: a program whose final displayed value is (or contains) a
+    // callable array — e.g. the Finding #31 flagship `let mut arr:
+    // Array<() -> int> = []; arr.push(|| arr.len())` — must project cleanly to
+    // the host boundary instead of panicking at `v2_typed_array_to_wire`'s
+    // `other =>` arm (the pre-fix teardown `exit 101`). Each callable element
+    // renders to its display placeholder, mirroring the scalar closure /
+    // module-fn arms in `heap_to_wire`.
+    #[test]
+    fn v2_callable_typed_array_projects_to_display_placeholders() {
+        use shape_value::HeapValue;
+        use shape_value::v2::typed_array::{
+            CallableArrayElem, CallableArrayElemKind, ELEM_TYPE_CALLABLE,
+        };
+        use std::sync::Arc;
+
+        let ctx = ExecutionContext::new_empty();
+
+        // One of each element shape: a real closure share (owned
+        // `Arc<HeapValue>`), an inline named-function id, and an inline
+        // module-fn id.
+        let arr = TypedArray::<CallableArrayElem>::with_capacity(3);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_CALLABLE) };
+
+        let closure_share = Arc::into_raw(Arc::new(HeapValue::BigInt(Arc::new(7i64))));
+        unsafe {
+            TypedArray::<CallableArrayElem>::push(
+                arr,
+                CallableArrayElem {
+                    bits: closure_share as u64,
+                    kind: CallableArrayElemKind::Closure,
+                },
+            );
+            TypedArray::<CallableArrayElem>::push(
+                arr,
+                CallableArrayElem {
+                    bits: 42,
+                    kind: CallableArrayElemKind::FunctionId,
+                },
+            );
+            TypedArray::<CallableArrayElem>::push(
+                arr,
+                CallableArrayElem {
+                    bits: 99,
+                    kind: CallableArrayElemKind::ModuleFn,
+                },
+            );
+        }
+
+        let wire = slot_to_wire(arr as u64, NativeKind::Ptr(HeapKind::TypedArray), &ctx);
+        assert_eq!(
+            wire,
+            WireValue::Array(vec![
+                WireValue::String("<closure>".to_string()),
+                WireValue::String("<function:42>".to_string()),
+                WireValue::String("<module_fn:99>".to_string()),
+            ])
+        );
+
+        // Releasing the array drops the one owned closure share, balancing the
+        // `Arc::into_raw` above (inline ids no-op on release).
         unsafe { release_v2_typed_array(arr as *mut u8) };
     }
 }

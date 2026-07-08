@@ -37,6 +37,60 @@ None of the four blocks the flip; all are documented in §7.
 
 ---
 
+## UPDATE 2026-07-08 — FLIP APPLIED + CAVEAT 1 FIXED (user go decision)
+
+The user gave the GO. Two changes landed on top of this VALIDATE:
+
+1. **The flip is applied — and it is TWO-part, not one.** The report's §8
+   "single edit" was INCOMPLETE: `shape-vm/gc` covers only the interpreter tier.
+   `shape-jit` has its OWN `gc` feature gating the JIT-tier hooks
+   (`jit_write_barrier` decrement-candidate logic, `jit_gc_safepoint` STW park),
+   and Cargo features do not forward across the shape-vm→shape-jit boundary, so
+   the shipped JIT-on binary would have run gc-ON interpreter + gc-OFF JIT —
+   leaking cycles mutated on JIT-native field-store paths. (The report's own
+   validation command had to pass `--features gc` to `-p shape-jit` explicitly,
+   an implicit admission of the second feature.) The completed flip:
+   - `crates/shape-vm/Cargo.toml:54` → `default = ["jit", "gc"]` (interpreter
+     tier + every shape-vm consumer + the default `cargo test` suite).
+   - `bin/shape-cli/Cargo.toml` → `default = ["jit", "gc"]` with a NEW
+     `gc = ["shape-vm/gc", "shape-jit?/gc"]` feature, ORTHOGONAL to `jit`. The
+     `shape-jit?/gc` weak-dep enables the JIT-tier barriers in the shipped
+     binary. `cargo tree` confirms: default build → `shape-jit ... default,gc`;
+     `--no-default-features --features jit` → `shape-jit ... default` (no gc, so
+     the jit-WITHOUT-gc barrier-cost build is preserved).
+   JIT-tier proof: the `shape-jit --features gc` suite is green (496/0/20-ign)
+   including `jit_set_field_overwrite_barrier_buffers_and_collects_object_cycle`,
+   `jit_produced_typed_object_cycle_is_collected`, and
+   `jit_write_barrier_buffers_surviving_typed_object`.
+   `just check-clean` (full workspace + all targets, now with shape-jit/gc
+   unified) and `just check-no-dynamic` are both EXIT 0; `cargo check -p shape-vm
+   --no-default-features --features jit` still builds (gc-off remains
+   expressible — all gc code stays `#[cfg(feature="gc")]`-gated).
+   NOTE: the separate `../shape-app` workspace (playground/notebook server) is
+   not covered by this repo's build graph; if it embeds the VM to run untrusted
+   code, it needs its own gc enablement — verify separately.
+2. **Caveat 1 (the teardown panic) is fixed.** The trailing callable-array is
+   now wire-serializable: `crates/shape-runtime/src/wire_conversion.rs`
+   `v2_typed_array_to_wire` gained an `ELEM_TYPE_CALLABLE` arm that projects
+   each `CallableArrayElem` to a display placeholder (`<closure>` /
+   `<function:{id}>` / `<module_fn:{id}>`), mirroring the pre-existing scalar
+   `HeapValue::ClosureRaw` → `"<closure>"` and `HeapValue::ModuleFn(id)` →
+   `"<module_fn:{id}>"` arms in `heap_to_wire`. This is the host-boundary
+   DISPLAY projection (`slot_to_envelope` → `ProgramExecutorResult.wire_value`,
+   printed by the CLI via `serde_json`), NOT a round-trip transport encoder, so
+   the placeholder cannot corrupt a genuine wire round-trip (closures were never
+   reconstructible via `wire_to_slot` at either the scalar or array level).
+   The leak-only repro (`f31_50000.shape`) now exits **0** (was exit 101); the
+   REPL projects a callable array to `[<closure>, <closure>]`. Covered by the
+   regression test `v2_callable_typed_array_projects_to_display_placeholders`.
+
+Caveats 2–6 are unchanged (orthogonal: the bare-untyped-form runtime SURFACE,
+the JIT-fallback of the closure-push opcode, the not-gc-gated snapshot v7, the
+opt-in perf cost, and the Phase-6 cross-thread-cycle deferral all remain as
+documented).
+
+---
+
 ## 1. Build
 
 | Build | Command | Result |
@@ -174,6 +228,8 @@ two thread-local borrows (`ensure_registered`, `candidate_buffer_len`).
 ## 7. Residual risk
 
 1. **CAVEAT (VERIFY) — the flagship program panics at teardown, not a clean exit.**
+   **[RESOLVED 2026-07-08 — see UPDATE block above; the callable-array wire arm
+   now projects to a display placeholder and the repro exits 0.]**
    `for i in 0..N { leak() }` (the leak-only form) exits **101 with a panic** at
    `crates/shape-runtime/src/wire_conversion.rs:507` — the trailing callable-array is not
    wire-serializable (`panic!("TypedArray wire conversion requires a known producer-side
@@ -214,7 +270,7 @@ two thread-local borrows (`ensure_registered`, `candidate_buffer_len`).
    out of v1 scope per the design (`docs/design/real-gc-cycle-collection.md` §Phase 6) and
    is **NOT collected**.
 
-## 8. The exact one-line flip mechanism (for the user go/no-go — NOT done in this lane)
+## 8. The exact one-line flip mechanism (APPLIED 2026-07-08 — see UPDATE block above)
 
 Add `gc` to the shipped VM's default features. Single edit in
 `crates/shape-vm/Cargo.toml` line 54:

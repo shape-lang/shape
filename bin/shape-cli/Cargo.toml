@@ -10,8 +10,20 @@ description = "CLI and REPL for the Shape programming language"
 
 
 [features]
-default = ["jit"]
+default = ["jit", "gc"]
 jit = ["shape-jit", "shape-vm/jit"]  # Enable JIT in both the JIT crate and VM tiered compilation
+# Cycle-collecting GC (real-gc-cycle-collection.md), shipped by default. Kept
+# ORTHOGONAL to `jit`: `gc` turns on the collector in BOTH execution tiers —
+# the interpreter (`shape-vm/gc` → `shape-value/gc`: RC barriers + safepoint +
+# teardown sweep) AND the JIT (`shape-jit?/gc`: the real `jit_write_barrier`
+# decrement-candidate logic + `jit_gc_safepoint` STW park). The `shape-jit?/gc`
+# weak-dep form only fires when `jit` has pulled shape-jit in, so
+# `--no-default-features --features jit` remains a valid jit-WITHOUT-gc build
+# (e.g. for barrier-cost measurement) and `--features gc` alone is a valid
+# interpreter-only gc build. Without `shape-jit/gc` the shipped JIT-on binary
+# would run gc-on interpreter + gc-OFF JIT, leaking cycles mutated on
+# JIT-native field-store paths (jit_write_barrier compiles to a no-op).
+gc = ["shape-vm/gc", "shape-jit?/gc"]
 # Cluster-2 closure-wave-F (2026-05-16): when enabled, the `--trace-jit`
 # CLI flag installs a tracing-subscriber filtering on `shape_jit` /
 # `shape_jit::*` targets. Feature-off builds compile away both the

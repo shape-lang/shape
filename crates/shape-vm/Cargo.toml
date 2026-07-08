@@ -51,7 +51,7 @@ tempfile = "3.8"
 tracing = { version = "0.1", default-features = false }
 
 [features]
-default = ["jit"]
+default = ["jit", "gc"]
 deep-tests = []
 # Enables preserved Phase-2c exception refcount regression tests.
 phase-2c-exception-rebuild = []
