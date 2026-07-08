@@ -15,12 +15,14 @@ use crate::context::JITContext;
 ///
 /// This function is called at every loop back-edge in JIT-compiled code.
 ///
-/// GC Phase 2 (real-gc-cycle-collection.md §3.2): a real safepoint poll —
-/// branch on the safepoint flag. The flag stays unraised this phase (no
-/// collection yet), so the raised branch is an empty placeholder for the
-/// Phase-3 stop-the-world trial-deletion rendezvous. Null-safe: with no flag
-/// pointer wired (or the `gc` feature off) this is a no-op return, exactly as
-/// before.
+/// GC Phase 3b (real-gc-cycle-collection.md R1-RESOLVED): the JIT back-edge half
+/// of the cross-worker stop-the-world rendezvous. Emitted at every loop
+/// back-edge, it polls the safepoint flag byte — which Phase 3b points at the
+/// coordinator's `stop_requested` `AtomicBool` (`JITContext::default`) — and,
+/// when a global stop is in progress, **parks** this thread on the coordinator
+/// until the collection resumes. Null-safe: with no flag pointer wired (or the
+/// `gc` feature off) this is a no-op return, exactly as before, so the gc-off
+/// hot path is unchanged.
 ///
 /// # Safety
 /// `ctx` must point to a valid JITContext.
@@ -41,9 +43,10 @@ pub extern "C" fn jit_gc_safepoint(ctx: *mut JITContext) {
     let flag = unsafe { *ctx.gc_safepoint_flag_ptr };
     #[cfg(feature = "gc")]
     if flag != 0 {
-        // Safepoint reached. Phase 3 runs CollectCycles here at the
-        // stop-the-world rendezvous; Phase 2 has no collector, so the flag is
-        // never raised and this branch is unreachable in practice.
+        // A global stop is in progress on another thread. Park at this JIT
+        // safepoint (register idempotently — the JIT runs inline on the VM
+        // thread — then wait on the coordinator until the stop clears).
+        shape_value::gc_coordinator::jit_safepoint_park();
     }
     let _ = flag;
 }
