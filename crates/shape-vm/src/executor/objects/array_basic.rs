@@ -42,6 +42,7 @@ use crate::executor::v2_handlers::v2_array_detect::{
     V2TypedArrayView, as_v2_typed_array, clone_array, pop_element, push_element, read_element,
     reverse_array, write_element,
 };
+use crate::executor::result_option_carrier::build_some;
 use shape_runtime::context::ExecutionContext;
 use shape_value::v2::heap_header::HEAP_KIND_V2_TYPED_ARRAY;
 use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray};
@@ -421,11 +422,26 @@ pub(crate) fn handle_clone_v2(
     ))
 }
 
-/// `arr.get(i)` — element at index `i`, error if out of bounds.
-/// Kind-generic via `v2_array_detect::read_element`; result kind is the
-/// per-element kind from the view.
+/// `arr.get(i: int) -> Option<T>` — bounds-safe element accessor.
+///
+/// Returns `Some(elem)` when `0 <= i < len`, `None` otherwise (index `< 0`
+/// OR `>= len`). This is the safe complement to `arr[i]` (checked direct
+/// index, which errors OOB) and to `.first()` / `.last()`. Kind-generic via
+/// `v2_array_detect::read_element`; the `Some` payload carries the element
+/// with its per-element kind from the view.
+///
+/// Result representation matches the bytecode interpreter's `Option<T>`
+/// carrier exactly, so `match` and `==` behave: `Some(x)` is the non-null
+/// fixed-layout TypedObject carrier from `result_option_carrier::build_some`
+/// (`__variant` at field 0, payload at field 1, schema
+/// `vm.builtin_schemas.option`); `None` is the **null sentinel**
+/// (`KindedSlot::none()`). This split is the interpreter's own contract —
+/// the `Some(v)` pattern check tests `IsNull` first (None = null) and only
+/// then `UnwrapOption`s the non-null Some carrier
+/// (`compiler/patterns/checking.rs`), and the `None` source literal lowers
+/// to the same null sentinel.
 pub(crate) fn handle_get_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
@@ -444,17 +460,17 @@ pub(crate) fn handle_get_v2(
             args[1].kind
         ))
     })?;
-    if idx < 0 || (idx as u32) >= view.len {
-        return Err(VMError::RuntimeError(format!(
-            "Array.get: index {} out of bounds (len={})",
-            idx, view.len
-        )));
+    // Bounds-safe accessor: OOB (idx < 0 OR idx >= len) yields `None` (the
+    // null sentinel), never an error. The `idx as u64` widening is safe
+    // because this branch only treats a non-negative `idx` as in-range, and
+    // comparing as u64 avoids the `as u32` truncation hazard for indices
+    // above `u32::MAX`.
+    if idx < 0 || (idx as u64) >= (view.len as u64) {
+        return Ok(KindedSlot::none());
     }
     match read_element(&view, idx as u32) {
-        Some(pair) => Ok(pair_to_slot(pair)),
-        None => Err(VMError::RuntimeError(
-            "Array.get: read_element returned None".into(),
-        )),
+        Some(pair) => Ok(build_some(&vm.builtin_schemas, pair_to_slot(pair))),
+        None => Ok(KindedSlot::none()),
     }
 }
 
