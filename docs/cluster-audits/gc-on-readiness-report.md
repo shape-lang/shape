@@ -8,15 +8,32 @@ hot-loop overhead. **This lane does NOT flip the default** (that is the user go/
 
 ---
 
-## VERDICT: **GO** (with one honest caveat + one perf note, below)
+## VERDICT: **GO-WITH-CAVEATS** (independently verified; four caveats in §7, none a NO-GO trigger)
 
 gc-on demonstrably fixes the Finding #31 leak end-to-end: the real closure-in-array
 cycle (`var arr = []; arr.push(|| arr.len())`, expressed with the required element-type
 annotation) has **BOUNDED RSS with gc-on** and **linearly-GROWING (unbounded) RSS with
 gc-off**, corroborated by valgrind (0 definitely/indirectly-lost with gc-on vs
 606 KB lost with gc-off at N=4000). The full `--features gc` suite is green with **zero
-regressions** vs the gc-off baseline. gc-off is a compile-time no-op (all GC code is
+regressions** vs the gc-off baseline (integration failure sets byte-identical). gc-off is a
+compile-time no-op for the hot path (all GC barrier/safepoint/teardown code is
 `#[cfg(feature = "gc")]`-gated). The safepoint poll is unmeasurable on a tight loop.
+
+This VALIDATE was checked by an independent from-scratch VERIFY pass (own builds, own
+RSS sweep, own valgrind, own suite runs) that **reproduced every load-bearing number** and
+**confirmed the flip is not done**. It downgraded the verdict from a bare GO to
+GO-WITH-CAVEATS on four honest caveats the first draft under-disclosed:
+(1) the flagship `for i in 0..N { leak() }` program **panics at teardown**
+(`wire_conversion.rs:507` — a callable-array is not wire-serializable, exit 101), present
+**identically in gc-off** and only *after* the measured loop, so the RSS/leak proof is
+unaffected — but it is a panic, not a clean exit; (2) collection overhead on **pathological
+all-garbage cycle-churn is ~15–17%**, higher than the ~7–8% the allocation-saturated row
+below shows (the safepoint poll and RC barrier remain ~0% on compute-bound and
+normal-allocation code); (3) the **snapshot v6→v7 identity-map change is NOT gc-gated**, so
+it already ships in the default build regardless of the flip; (4) the bare untyped `var arr
+= []` form fails via a **runtime `op_new_array(0)` SURFACE**, not the clean compile error the
+draft described — only the annotated `Array<() -> int>` form is collectable end-to-end.
+None of the four blocks the flip; all are documented in §7.
 
 ---
 
@@ -141,37 +158,61 @@ two thread-local borrows (`ensure_registered`, `candidate_buffer_len`).
 | Tight arithmetic loop, 100 M iters (default JIT) | ~10.03 s | ~9.86 s | **none measurable** |
 | Heap-alloc-saturated loop, 5 M array allocs (interpreter) | ~1.85 s | ~2.00 s | **~7–8%** |
 | Heap-alloc-saturated loop, 5 M array allocs (default JIT) | ~1.87 s | ~2.00 s | **~7%** |
+| Pathological all-garbage cycle-churn (#31 N=500k, quiescent, VERIFY) | ~0.36 s | ~0.42 s | **~15–17%** |
 
 - **The safepoint poll itself is unmeasurable** on a tight loop — a single relaxed load,
   amortized 1/1024 instructions. (An early 4% reading was pure CPU contention from a
-  concurrent test suite; it vanished under a quiescent re-measure.)
+  concurrent test suite; it vanished under a quiescent re-measure. VERIFY independently
+  confirmed ~0% on tight interpreter, tight JIT, and rc-1 allocation loops.)
 - The measurable cost is the **RC increment/decrement barrier** (`gc_increment_barrier` /
   `gc_decrement_precheck`) that fires on every heap refcount op for cycle-capable kinds:
-  **~7–8% on allocation-saturated code**, near-zero on compute-bound code. This is the
-  intrinsic price of cycle collection and only affects opt-in gc-on builds.
+  **~7–8% on allocation-saturated code**, near-zero on compute-bound code, and — when the
+  workload is *nothing but* dead cycles being collected every safepoint (the #31 pathology
+  itself) — **~15–17%** (the collection work, not just the barrier). This is the intrinsic
+  price of cycle collection and only affects opt-in gc-on builds.
 
 ## 7. Residual risk
 
-1. **CAVEAT — the bare untyped #31 source form does not compile (type system, not GC).**
-   `var arr = []; arr.push(|| arr.len())` is rejected by strict typing: an empty array's
-   element type must be inferable, and a closure element pushed to a bare `[]` is not
-   resolvable. The form compiles and runs with the explicit annotation
-   `let mut arr: Array<() -> int> = []`. **The annotated form is the identical 4-node
-   cycle topology and is fully collected** (proven above), so **#31 is collectable
-   end-to-end** — but a user writing the bare form gets a compile error, not a running
-   leak. This is a type-system ergonomics gap, orthogonal to GC.
-2. **The closure-push opcode JIT-falls-back to the interpreter** (`TypedArrayPushCallable`
+1. **CAVEAT (VERIFY) — the flagship program panics at teardown, not a clean exit.**
+   `for i in 0..N { leak() }` (the leak-only form) exits **101 with a panic** at
+   `crates/shape-runtime/src/wire_conversion.rs:507` — the trailing callable-array is not
+   wire-serializable (`panic!("TypedArray wire conversion requires a known producer-side
+   element stamp")`). This is present **byte-identically in gc-off** (it is not gc-gated
+   code) and fires **only after** the measured loop completes, so it does **not** affect the
+   RSS-bounded or valgrind proof (both sample during/at the steady-state loop). A
+   trailing-scalar variant of the repro exits 0. Disclosed here because the VALIDATE draft
+   said the program "runs" without naming the panic. Orthogonal to GC; a wire-serialization
+   gap, not a leak.
+2. **CAVEAT (VERIFY) — the bare untyped #31 source form fails at RUNTIME, not compile.**
+   `var arr = []; arr.push(|| arr.len())` surfaces a **runtime `op_new_array(0)` SURFACE**
+   (empty-array element kind unresolved at the new-array opcode), not the clean compile
+   error the VALIDATE draft described. The form works with the explicit annotation
+   `let mut arr: Array<() -> int> = []`. **The annotated form is the identical 4-node cycle
+   topology and is fully collected** (proven above), so **#31 is collectable end-to-end** —
+   but only the annotated form; the bare form never reaches a running leak. Type/opcode
+   ergonomics gap, orthogonal to GC.
+3. **The closure-push opcode JIT-falls-back to the interpreter** (`TypedArrayPushCallable`
    has no FrameDescriptor — a separate pre-existing JIT SURFACE, v0.4). The GC still bounds
    the workload because the safepoint lives in the interpreter dispatch loop that executes
    the fallback. Not a GC concern, but the #31 cycle is currently collected on the
    interpreter path, not a JIT-native one.
-3. **Perf: ~7–8% on allocation-saturated workloads** (RC barrier), §6. Acceptable for
-   opt-in; would warrant a barrier-fast-path review before making gc unconditional.
-4. **Cross-thread `SharedAtomic` cycles are the documented Phase-6 deferral.** The
+4. **Perf: ~7–8% on allocation-saturated workloads, ~15–17% on all-garbage cycle-churn**
+   (RC barrier + collection), §6; ~0% on compute-bound and normal-allocation code.
+   Acceptable for opt-in; would warrant a barrier-fast-path review before making gc
+   unconditional.
+5. **The snapshot v6→v7 identity-map change is NOT gc-gated — it already ships in the
+   default build.** GC Phase 5 generalized the snapshot identity-map to all cycle-capable
+   HeapKinds and bumped the format v6→v7; this code carries **zero** `#[cfg(feature="gc")]`
+   gating (which is *why* the 3 snapshot integration failures are identical gc-on/gc-off).
+   Consequence: the snapshot behavior/format change is live in the default `shape` binary
+   regardless of whether the gc feature is flipped. Not a regression (baseline is
+   byte-identical), but the reader should know it is not toggled by the flip.
+6. **Cross-thread `SharedAtomic` cycles are the documented Phase-6 deferral.** The
    validated proof is single-VM-task cycles (Finding #31). Phase-3b cross-worker
    stop-the-world rendezvous IS merged (the coordinator can stop other workers), but a
    cycle whose edges span async-worker / JIT threads via `SharedAtomicMut` is explicitly
-   out of v1 scope per the design (`docs/design/real-gc-cycle-collection.md` §Phase 6).
+   out of v1 scope per the design (`docs/design/real-gc-cycle-collection.md` §Phase 6) and
+   is **NOT collected**.
 
 ## 8. The exact one-line flip mechanism (for the user go/no-go — NOT done in this lane)
 
