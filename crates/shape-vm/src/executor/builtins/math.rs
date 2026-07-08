@@ -406,7 +406,10 @@ use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_elem
 /// decoded to `f64` via a fresh `KindedSlot` + `coerce_to_f64`. Returns a
 /// runtime error if the argument is not a numeric typed array, or if any
 /// element is non-numeric.
-fn collect_number_series(name: &str, slot: &KindedSlot) -> Result<Vec<f64>, VMError> {
+pub(in crate::executor) fn collect_number_series(
+    name: &str,
+    slot: &KindedSlot,
+) -> Result<Vec<f64>, VMError> {
     if slot.kind != NativeKind::Ptr(shape_value::HeapKind::TypedArray) {
         return Err(type_error(format!("{name}() argument must be an array")));
     }
@@ -454,6 +457,26 @@ pub(in crate::executor) fn builtin_mean(args: &[KindedSlot]) -> Result<KindedSlo
     Ok(KindedSlot::from_number(
         data.iter().sum::<f64>() / data.len() as f64,
     ))
+}
+
+/// `__intrinsic_median(series)` — median (50th percentile) of a numeric typed
+/// array. Returns a `number` (`Float64`); empty input ⇒ NaN. Mirrors the
+/// runtime typed body at `intrinsics/statistical.rs`: sort a copy, then take
+/// the midpoint (average of the two central elements for even length).
+pub(in crate::executor) fn builtin_median(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "median")?;
+    let mut data = collect_number_series("median", &args[0])?;
+    if data.is_empty() {
+        return Ok(KindedSlot::from_number(f64::NAN));
+    }
+    data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = data.len();
+    let result = if n % 2 == 0 {
+        (data[n / 2 - 1] + data[n / 2]) / 2.0
+    } else {
+        data[n / 2]
+    };
+    Ok(KindedSlot::from_number(result))
 }
 
 /// `__intrinsic_variance(series)` — population variance of a numeric typed

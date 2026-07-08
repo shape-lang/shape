@@ -28,6 +28,7 @@ mod auto_drop;
 mod channel_ops;
 mod decimal_ops;
 mod deque_ops;
+mod intrinsic_kinded_migration;
 mod io_integration;
 mod jit_abi_tests;
 // Strict-typing defection sentinel — scans the source tree for the
