@@ -984,70 +984,31 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     .ins()
                                     .call(self.ffi.print_str, &[self.ctx_ptr, widened]);
                             }
-                            // ── TypedObject SURFACE-and-stop (residual) ──
-                            // The JIT-internal TypedObject path
-                            // (`box_typed_object` at `value_ffi.rs:516-518`
-                            // returning `unified_box(HK_TYPED_OBJECT, *const
-                            // u8)` over a JIT-owned `TypedObject` struct, NOT
-                            // the VM-side `Arc<TypedObjectStorage>`) cannot
-                            // be reused unchanged for `jit_print_typed_object`
-                            // — that body expects an `Arc::into_raw(Arc<
-                            // TypedObjectStorage>) as u64` carrier (a
-                            // different Rust type with different layout).
-                            // Migrating the JIT-side TypedObject to the VM-
-                            // side `Arc<TypedObjectStorage>` is a larger
-                            // surgery (W11 TypedArray family invariant + 17+
-                            // JIT-internal consumers in `typed_object/`,
-                            // `data.rs`, `property_access.rs`, etc.).
-                            //
-                            // Per W12-jit-string-carrier-unification surface-
-                            // and-stop discipline (round dispatch §"Surface-
-                            // and-stop expected"): "If the TypedObject
-                            // migration scope exceeds the budget OR breaks
-                            // the W11-jit-new-array TypedArray<T> shape ...
-                            // STOP and surface to disambiguate." This arm
-                            // stays SURFACE; cluster-1 absorbs the
-                            // TypedObject producer migration via a separate
-                            // sub-cluster.
+                            // ── TypedObject print (Wave-7 jit-typed-pointer-
+                            //    migration: SURFACE-and-stop RESOLVED) ──
+                            // The producer (`jit_typed_object_alloc`) now emits
+                            // the SAME v2-raw `*mut TypedObjectStorage` carrier
+                            // the VM produces and `jit_print_typed_object` reads
+                            // (via `ValueSlot::from_raw(bits)` +
+                            // `format_kinded` — bits ARE the storage pointer).
+                            // No carrier mismatch remains: route the operand
+                            // (widened to the I64 ABI slot) + `ctx_ptr` (for
+                            // schema-backed field-name resolution) to
+                            // `jit_print_typed_object`, mirroring the String
+                            // arm's `print_str` call.
                             Some(NativeKind::Ptr(HeapKind::TypedObject)) => {
-                                tracing::debug!(
-                                    target: "shape_jit",
-                                    "jit-mir print: SURFACE \u{a7}2.7.5 \
-                                     carrier-mismatch \u{2014} operand \
-                                     NativeKind Ptr(TypedObject) stamped but \
-                                     the JIT-side `box_typed_object` producer \
-                                     at `value_ffi.rs:516-518` emits a \
-                                     JIT-internal `TypedObject` struct under \
-                                     NaN-box wrap, NOT the VM-side \
-                                     `Arc<TypedObjectStorage>` the \
-                                     `jit_print_typed_object` body expects. \
-                                     Migrating the JIT TypedObject to \
-                                     `Arc<TypedObjectStorage>` is out of W12 \
-                                     T2/T3 scope per the round's surface-and-\
-                                     stop discipline (round dispatch text). \
-                                     Cluster-1 follow-up: W17 jit-typed-object-\
-                                     arc-storage-migration.",
+                                let val_ty = self.builder.func.dfg.value_type(val);
+                                let widened = if val_ty == types::I64 {
+                                    val
+                                } else if val_ty == types::F64 {
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                self.builder.ins().call(
+                                    self.ffi.print_typed_object,
+                                    &[self.ctx_ptr, widened],
                                 );
-                                return Err(format!(
-                                    "Route A surface-and-stop: SURFACE \
-                                     §2.7.5 carrier-mismatch — `print` \
-                                     Call-terminator operand NativeKind \
-                                     Ptr(TypedObject); the JIT-side \
-                                     `box_typed_object` at \
-                                     `ffi/value_ffi.rs:516-518` emits a \
-                                     JIT-internal `TypedObject` struct under \
-                                     NaN-box wrap (a JIT-owned type, NOT the \
-                                     VM-side `Arc<TypedObjectStorage>` the \
-                                     `jit_print_typed_object` body reads). \
-                                     Migrating the JIT TypedObject to \
-                                     `Arc<TypedObjectStorage>` is out of \
-                                     W12 T2/T3 scope per the round's \
-                                     surface-and-stop discipline. Tracked \
-                                     for cluster-1 follow-up \
-                                     W17-jit-typed-object-arc-storage-\
-                                     migration. kind_hint={:?}",
-                                    kind_hint,
-                                ));
                             }
                             // ── Phase 3 cluster-2 Round 3 cw-D-fam12
                             //    Scalar Char (Family 1) arm ─────────────

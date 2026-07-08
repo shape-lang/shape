@@ -7,44 +7,13 @@
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use super::conversion::format_value_word;
-use super::typed_object::TypedObject;
 
-// ============================================================================
-// Retain / Release — operate on raw heap pointers
-// ============================================================================
-
-/// Increment the reference count on a TypedObject (legacy v1 TypedObject path).
-///
-/// Note: `#[no_mangle]` removed — the symbol names `jit_v2_retain` and
-/// `jit_v2_release` are owned by `v2/mod.rs` which uses HeapHeader-based
-/// refcounting. This TypedObject-based version is kept as a Rust-only helper.
-///
-/// # Safety
-/// `ptr` must point to a valid, live `TypedObject` or be null (no-op on null).
-pub extern "C" fn jit_v2_retain_typed_object(ptr: *const u8) {
-    if ptr.is_null() {
-        return;
-    }
-    let obj = ptr as *mut TypedObject;
-    unsafe {
-        (*obj).inc_ref();
-    }
-}
-
-/// Decrement the reference count on a TypedObject (legacy v1 TypedObject path).
-/// Does NOT free the object — the caller (or a separate destructor) handles deallocation.
-///
-/// # Safety
-/// `ptr` must point to a valid, live `TypedObject` or be null (no-op on null).
-pub extern "C" fn jit_v2_release_typed_object(ptr: *const u8) {
-    if ptr.is_null() {
-        return;
-    }
-    let obj = ptr as *mut TypedObject;
-    unsafe {
-        (*obj).dec_ref();
-    }
-}
+// Wave-7 jit-typed-pointer-migration Phase C: the dead `jit_v2_retain_typed_object`
+// / `jit_v2_release_typed_object` helpers (never `#[no_mangle]`, never registered,
+// never called) operated on the deleted JIT-private inline-cell `TypedObject`
+// struct via its manual `inc_ref`/`dec_ref` split counter. Deleted with the
+// struct — a v2-raw `*mut TypedObjectStorage` refcounts through the offset-0
+// `HeapHeader` (`jit_v2_typed_object_retain`/`_release` in `ffi/v2`).
 
 // ============================================================================
 // Typed Print — no NaN-boxing tag dispatch
@@ -155,13 +124,6 @@ pub extern "C" fn jit_v2_print_typed_native(value_bits: u64, type_tag: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_v2_retain_release_null_is_noop() {
-        // Should not crash
-        jit_v2_retain_typed_object(std::ptr::null());
-        jit_v2_release_typed_object(std::ptr::null());
-    }
 
     #[test]
     fn test_v2_print_typed_int() {

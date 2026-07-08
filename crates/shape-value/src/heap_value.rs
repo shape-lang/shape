@@ -4100,6 +4100,19 @@ impl TypedObjectStorage {
         unsafe { Box::from_raw(raw) }
     }
 
+    /// JIT codegen offset (Wave-7 jit-typed-pointer-migration): byte offset of
+    /// `schema_id` within the `#[repr(C)]` layout — immediately after the 8-byte
+    /// `HeapHeader` at offset 0. JIT-emitted `receiver_type_name` / schema reads
+    /// load `u64` at `[storage_ptr + JIT_OFFSET_SCHEMA_ID]`.
+    pub const JIT_OFFSET_SCHEMA_ID: usize = 8;
+    /// JIT codegen offset (Wave-7 jit-typed-pointer-migration): byte offset of the
+    /// `slot_cells` `Box<[UnsafeCell<ValueSlot>]>` fat-pointer's DATA word (the
+    /// base of the OUT-OF-LINE slot buffer). JIT-emitted inline field access loads
+    /// this word once (`slot_data = [storage_ptr + JIT_OFFSET_SLOT_DATA]`) then
+    /// addresses field `i` at `[slot_data + i*8]` — the same two-load hot path the
+    /// VM tier's `slots()` accessor resolves. Pinned by `jit_offset_constants_hold`.
+    pub const JIT_OFFSET_SLOT_DATA: usize = 16;
+
     /// Shared read view of the slots as `&[ValueSlot]`.
     ///
     /// SAFETY of the cast: `UnsafeCell<ValueSlot>` is `repr(transparent)`
@@ -5725,6 +5738,45 @@ mod typed_object_storage_drop {
     use crate::native_kind::NativeKind;
     use crate::slot::ValueSlot;
     use std::sync::Arc;
+
+    /// Wave-7 jit-typed-pointer-migration: pin the `#[repr(C)]` field offsets the
+    /// JIT hot path hardcodes. `HeapHeader` at 0, `schema_id` at 8, `slot_cells`
+    /// fat-pointer DATA word at 16. A struct reorder that moved these would
+    /// silently corrupt every JIT-emitted TypedObject field access; this test
+    /// converts that into a compile-visible failure. The runtime check also
+    /// confirms the Box fat-pointer stores the DATA word first (the layout the
+    /// JIT's `[storage_ptr + 16]` load relies on).
+    #[test]
+    fn jit_offset_constants_hold() {
+        assert_eq!(std::mem::offset_of!(TypedObjectStorage, header), 0);
+        assert_eq!(
+            std::mem::offset_of!(TypedObjectStorage, schema_id),
+            TypedObjectStorage::JIT_OFFSET_SCHEMA_ID,
+        );
+        assert_eq!(
+            std::mem::offset_of!(TypedObjectStorage, slot_cells),
+            TypedObjectStorage::JIT_OFFSET_SLOT_DATA,
+        );
+
+        // Runtime confirmation that the word at JIT_OFFSET_SLOT_DATA is the
+        // out-of-line slot buffer's base pointer (== slots().as_ptr()).
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Float64, NativeKind::Float64]);
+        let ptr = TypedObjectStorage::_new(
+            7,
+            vec![ValueSlot::from_raw(0), ValueSlot::from_raw(0)].into_boxed_slice(),
+            0,
+            kinds,
+        );
+        unsafe {
+            let slot_data_word =
+                *((ptr as *const u8).add(TypedObjectStorage::JIT_OFFSET_SLOT_DATA) as *const usize);
+            assert_eq!(slot_data_word, (*ptr).slots().as_ptr() as usize);
+            let schema_word =
+                *((ptr as *const u8).add(TypedObjectStorage::JIT_OFFSET_SCHEMA_ID) as *const u64);
+            assert_eq!(schema_word, 7);
+            TypedObjectStorage::_drop(ptr);
+        }
+    }
 
     #[test]
     fn drop_decrements_arc_string_for_heap_string_slot() {

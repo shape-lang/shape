@@ -516,10 +516,17 @@ pub extern "C" fn jit_print_str(ctx_ptr: *const crate::context::JITContext, bits
 /// fallback empty registry renders positional placeholders (`_0`, `_1`,
 /// ...) per `format_typed_object`'s documented schema-less render path.
 ///
-/// SAFETY: `bits` must be `Arc::into_raw(Arc<TypedObjectStorage>) as u64`
-/// per the producer-site contract on every `KindedSlot::from_typed_object`-
-/// shaped producer (VM-side `op_new_object_*` typed-object allocator,
-/// JIT-side `box_typed_object`).
+/// SAFETY (Wave-7 jit-typed-pointer-migration): `bits` must be the v2-raw
+/// `*mut TypedObjectStorage as u64` carrier — the SAME carrier the VM
+/// (`op_new_typed_object`) and the migrated JIT producer (`jit_typed_object_alloc`
+/// → `TypedObjectStorage::_new`) both emit. `print_kinded_inner` only BORROWS
+/// the carrier (`ValueSlot::from_raw(bits)` + `std::mem::forget`, and the
+/// formatter's `HeapKind::TypedObject` arm reads through `&*(bits as *const
+/// TypedObjectStorage)`) — no `Arc::from_raw`, no refcount bump, no free — so it
+/// is sound on the `_new`-allocated pointer (whose real refcount is the
+/// offset-0 `HeapHeader`, not an Arc control block). The pre-Wave-7 JIT producer
+/// emitted a `UnifiedValue`-wrapped inline-cell struct; routing that carrier here
+/// was the carrier-mismatch that kept this a SURFACE-and-stop arm.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_print_typed_object(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;

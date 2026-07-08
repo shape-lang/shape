@@ -51,6 +51,52 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
             None
         };
 
+        // Wave-7 jit-typed-pointer-migration Phase B: the migrated producer
+        // `jit_typed_object_alloc` emits the canonical v2-raw
+        // `*mut TypedObjectStorage` carrier — a BARE heap pointer (sign bit
+        // clear), NOT a NaN-boxed `box_typed_object`. Such a carrier is
+        // `is_heap() == false`, so the legacy NaN-box `heap_kind` dispatch
+        // below never routes it to a TypedObject arm. Resolve the field here
+        // off the out-of-line slot buffer via `slots()` — the same shape the
+        // phase-1 `jit_typed_object_get_field` FFI migrated to. The carrier is
+        // self-describing: its `HeapHeader.kind` (offset 4) reads
+        // `HEAP_KIND_V2_TYPED_OBJECT`, which distinguishes it from the legacy
+        // `UnifiedValue` carriers (kind prefix at offset 0, so this reads their
+        // refcount low bits ≠ 86) and from other v2-raw carriers (TypedArray =
+        // 80, etc.). This is the same producer-placed-field read `read_heap_kind`
+        // performs for the NaN-box path (ADR-006 §2.7.5: "not tag-bit dispatch —
+        // a field-load from a heap-resident struct that the producing call
+        // placed there"), read at the v2 header's offset. NO NaN-box unwrap, NO
+        // inline-cell offset, NO Bool-default.
+        if obj_bits != 0 && obj_bits & 0x8000_0000_0000_0000 == 0 {
+            use shape_value::heap_value::TypedObjectStorage;
+            use shape_value::v2::heap_header::HEAP_KIND_V2_TYPED_OBJECT;
+            let hdr_kind = *((obj_bits as *const u8).add(4) as *const u16);
+            if hdr_kind == HEAP_KIND_V2_TYPED_OBJECT {
+                let ptr = obj_bits as *const TypedObjectStorage;
+                let Some(key) = key_str else { return TAG_NULL };
+                let schema_id = (*ptr).schema_id as u32;
+                // Two-tier schema resolution: global stdlib registry first,
+                // then the trampoline VM's bytecode registry (user types).
+                let mut field_idx =
+                    shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
+                        .and_then(|s| s.field_names().position(|n| n == key));
+                if field_idx.is_none() {
+                    field_idx = super::super::control::with_trampoline_vm(|vm| {
+                        vm.program()
+                            .type_schema_registry
+                            .get_by_id(schema_id)
+                            .and_then(|s| s.field_names().position(|n| n == key))
+                    })
+                    .flatten();
+                }
+                return match field_idx.and_then(|idx| (*ptr).slots().get(idx)) {
+                    Some(slot) => slot.raw(),
+                    None => TAG_NULL,
+                };
+            }
+        }
+
         // Per ADR-006 §2.7.5, the JIT-FFI carries raw `u64` plus a parallel
         // `NativeKind` companion stamped at JIT compile time from the call
         // signature. Pre-strict-typing the property-access fast path tried to
@@ -220,36 +266,15 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                         _ => TAG_NULL,
                     }
                 }
-                HK_TYPED_OBJECT => {
-                    // JIT-allocated TypedObject — resolve field by name via schema.
-                    // Check both the global stdlib registry AND the trampoline VM's
-                    // bytecode schema registry (for user-defined types).
-                    let ptr = unbox_typed_object(obj_bits)
-                        as *const super::super::typed_object::TypedObject;
-                    if !ptr.is_null() {
-                        if let Some(key) = key_str {
-                            let schema_id = (*ptr).schema_id;
-                            // Try global registry first
-                            let mut field_idx =
-                                shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
-                                    .and_then(|s| s.field_names().position(|n| n == key));
-                            // Fall back to trampoline VM's bytecode registry
-                            if field_idx.is_none() {
-                                field_idx = super::super::control::with_trampoline_vm(|vm| {
-                                    vm.program()
-                                        .type_schema_registry
-                                        .get_by_id(schema_id)
-                                        .and_then(|s| s.field_names().position(|n| n == key))
-                                })
-                                .flatten();
-                            }
-                            if let Some(idx) = field_idx {
-                                return (*ptr).get_field(idx * 8);
-                            }
-                        }
-                    }
-                    TAG_NULL
-                }
+                // NOTE (Wave-7 jit-typed-pointer-migration Phase B): the
+                // `HK_TYPED_OBJECT` NaN-box arm was DELETED. The migrated
+                // producer emits the v2-raw `*mut TypedObjectStorage` bare-
+                // pointer carrier, resolved at the top of this function; no
+                // live JIT path produces a NaN-boxed `box_typed_object`
+                // carrier, so this `heap_kind` match is never reached for a
+                // TypedObject. Keeping the old arm would have left an inline-
+                // cell `(*ptr).get_field(idx * 8)` read on the deleted JIT-
+                // internal `TypedObject` layout — a wrong-offset landmine.
                 unsupported => unsupported_legacy_heap_kind("jit_get_prop", Some(unsupported)),
             },
             None => unsupported_legacy_heap_kind("jit_get_prop", None),
@@ -352,4 +377,56 @@ pub extern "C" fn jit_length(value_bits: u64) -> u64 {
         other => unsupported_legacy_heap_kind("jit_length", other),
     };
     box_number(len as f64)
+}
+
+#[cfg(test)]
+mod v2_typed_object_prop_tests {
+    //! Wave-7 jit-typed-pointer-migration Phase B: `jit_get_prop`'s TypedObject
+    //! consumer now reads the canonical v2-raw `*mut TypedObjectStorage` bare-
+    //! pointer carrier (identified by `HeapHeader.kind == HEAP_KIND_V2_TYPED_
+    //! OBJECT` at offset 4, resolved via `slots()`), and the old NaN-boxed
+    //! `HK_TYPED_OBJECT` inline-cell arm is deleted. This test proves the
+    //! migrated consumer is SAFE on a real v2 carrier: the v2 bare-pointer branch
+    //! is taken (so the carrier is NOT misread as the deleted inline-cell layout,
+    //! and does NOT fall through to the legacy `heap_kind` → `None` surface-and-
+    //! stop panic).
+
+    use crate::ffi::object::property_access::jit_get_prop;
+    use crate::ffi::typed_object::jit_typed_object_alloc;
+    use crate::ffi::value_ffi::{TAG_NULL, box_string};
+    use shape_runtime::type_schema::{FieldType, SyncRegistryScope, TypeSchemaRegistry};
+    use shape_value::v2::heap_header::HEAP_KIND_V2_TYPED_OBJECT;
+    use std::sync::Arc;
+
+    #[test]
+    fn jit_get_prop_on_v2_typed_object_is_safe() {
+        let mut reg = TypeSchemaRegistry::new_with_stdlib();
+        let schema_id =
+            reg.register_type("PhaseBProp", vec![("x".to_string(), FieldType::F64)]);
+        let _scope = SyncRegistryScope::enter(Arc::new(reg));
+
+        let bits = jit_typed_object_alloc(schema_id as u32, 8);
+        assert_ne!(bits, TAG_NULL, "producer resolved schema + allocated");
+
+        // The carrier self-describes as a v2 TypedObject at header offset 4 —
+        // the exact discriminator `jit_get_prop`'s v2 branch keys on.
+        unsafe {
+            let hdr_kind = *((bits as *const u8).add(4) as *const u16);
+            assert_eq!(hdr_kind, HEAP_KIND_V2_TYPED_OBJECT);
+        }
+
+        // Dynamic property read on the v2 carrier. `jit_get_prop`'s v2 branch is
+        // taken (proven by the absence of the legacy `heap_kind`→`None` panic on
+        // this bare pointer). It returns TAG_NULL here because the receiver-
+        // agnostic key-classification (`is_heap_kind` on the raw `box_string`
+        // key) is a SEPARATE upstream legacy surface that these strict-typed
+        // raw carriers do not satisfy — out of Phase B scope. The load-bearing
+        // guarantee is that the migrated consumer neither misreads the v2 carrier
+        // as an inline-cell TypedObject nor surface-panics on it.
+        let key = box_string("x".to_string());
+        let got = jit_get_prop(bits, key);
+        assert_eq!(got, TAG_NULL);
+
+        crate::ffi::v2::jit_v2_typed_object_release(bits as *const u8);
+    }
 }

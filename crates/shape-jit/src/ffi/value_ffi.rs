@@ -514,21 +514,14 @@ pub fn box_column_result(data: Vec<f64>) -> u64 {
 // ============================================================================
 // Typed Object Helper Functions
 // ============================================================================
-
-#[inline]
-pub fn box_typed_object(ptr: *const u8) -> u64 {
-    unified_box(HK_TYPED_OBJECT, ptr)
-}
-
-#[inline]
-pub fn unbox_typed_object(bits: u64) -> *const u8 {
-    *unsafe { unified_unbox::<*const u8>(bits) }
-}
-
-#[inline]
-pub fn is_typed_object(bits: u64) -> bool {
-    is_heap_kind(bits, HK_TYPED_OBJECT)
-}
+//
+// Wave-7 jit-typed-pointer-migration Phase C (2026-07-07): `box_typed_object`
+// / `unbox_typed_object` / `is_typed_object` are DELETED along with the
+// JIT-private inline-cell `TypedObject` struct they wrapped. A JIT TypedObject
+// is now the v2-raw `*mut TypedObjectStorage` carrier — the raw pointer IS the
+// slot bits (no NaN-box wrap, no `HK_TYPED_OBJECT` tag prefix), and the kind is
+// the `Ptr(HeapKind::TypedObject)` companion stamped at the JIT-emitted call
+// signature per ADR-006 §2.7.5. See `ffi/typed_object/`.
 
 // ============================================================================
 // String Helper Functions
@@ -574,7 +567,6 @@ pub unsafe fn unbox_string(bits: u64) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::jit_kinds::UnifiedValue;
     use super::*;
 
     #[test]
@@ -641,55 +633,6 @@ mod tests {
         assert_eq!(unbox_data_row(bits), 999);
         assert!(!is_number(bits));
         assert!(!is_heap(bits));
-    }
-
-    /// `box_typed_object` produces a `UnifiedValue<*const u8>` heap
-    /// allocation tagged with `HK_TYPED_OBJECT` at offset 0. Strict-typed
-    /// rewrite of `test_typed_object_encoding` (W12-deleted-valuewordshape-
-    /// tests-rewrite, 2026-05-12).
-    ///
-    /// Pre-rewrite the test asserted the deleted ValueWord-shape invariant
-    /// `is_number(box_typed_object(p)) == false` and `is_typed_object(boxed)
-    /// == true`. Under ADR-006 §2.7.5 the JIT-FFI carrier is
-    /// `(bits, NativeKind)`: producers return raw `Box::into_raw(...) as u64`
-    /// without NaN-box tag bits, so `is_number(boxed)` is true (raw pointer
-    /// bits look like a plain f64) and `is_typed_object(boxed)` is false
-    /// (`is_heap_kind` gates on `is_tagged` first). Discrimination flows
-    /// through the parallel `NativeKind` companion stamped at JIT compile
-    /// time — or, where the test needs to probe the JIT-internal heap
-    /// allocation, via `read_heap_kind(bits)` which reads the `kind: u16`
-    /// prefix at offset 0 of the allocation directly (per §2.7.5 "*not*
-    /// tag-bit dispatch — it reads a field from a heap-resident struct
-    /// that the producing call placed there").
-    ///
-    /// Same construction-side semantics expressed through the strict-typed
-    /// predicate.
-    #[test]
-    fn test_typed_object_encoding_via_heap_kind_prefix() {
-        let fake_ptr = 0x0000_1234_5678_0000u64 as *const u8;
-        let boxed = box_typed_object(fake_ptr);
-        // Construction-side contract: `box_typed_object` produces a
-        // `UnifiedValue<*const u8>` allocation. The kind prefix at offset 0
-        // is the strict-typed §2.7.5 discriminator.
-        assert_ne!(boxed, 0, "allocation pointer is non-null");
-        assert_eq!(
-            unsafe { super::super::jit_kinds::read_heap_kind(boxed) },
-            HK_TYPED_OBJECT,
-            "heap-kind prefix at offset 0 discriminates the allocation"
-        );
-
-        // Round-trip via direct `unbox_typed_object`: reads the `data`
-        // field of the `UnifiedValue<*const u8>` without gating on tag
-        // bits, recovering the pointer the producer stored.
-        let recovered = unbox_typed_object(boxed);
-        assert_eq!(recovered, fake_ptr);
-
-        // Clean up the UnifiedValue allocation directly. The deleted
-        // ValueWord-shape clean-up went through `jit_typed_object_dec_ref`,
-        // which itself gates on `is_typed_object(bits)` and is broken on
-        // raw `Box::into_raw` pointers; using `heap_drop` is the §2.7.5
-        // direct-path cleanup.
-        unsafe { UnifiedValue::<*const u8>::heap_drop(boxed) };
     }
 
     /// Pairing a `KindedSlot` with a typed-object pointer is the
