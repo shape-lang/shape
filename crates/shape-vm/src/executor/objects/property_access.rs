@@ -276,7 +276,36 @@ impl VirtualMachine {
                 }
             }
 
-            // ── HashMap, NativeView, Temporal, TableView,
+            // ── DateTime property access (Temporal) ──────────────────────
+            //
+            // ADR-006 §2.7.9 kinded GetProp. `dt.year`, `dt.month`, … read an
+            // integer component via the same borrowed-`&TemporalData` path as
+            // the `v2_*` component methods (`datetime_methods.rs`). The bits
+            // are `Arc::into_raw::<TemporalData>` (§2.3); we borrow read-only
+            // for the field read — no `Arc::from_raw`, no `as_heap_value`, no
+            // refcount touch. The popped share is retired by `drop_with_kind`
+            // in `op_get_prop` after dispatch.
+            NativeKind::Ptr(HeapKind::Temporal) => {
+                let ks = key_str.ok_or_else(|| VMError::TypeError {
+                    expected: "string property name",
+                    got: "non-string key",
+                })?;
+                if obj_bits == 0 {
+                    return Err(VMError::RuntimeError(
+                        "GetProp on null DateTime".to_string(),
+                    ));
+                }
+                // SAFETY: mirrors `recv_temporal` in `datetime_methods.rs` —
+                // the slot bits are a live `Arc::into_raw::<TemporalData>`
+                // pointer; the borrow lives only for this component read.
+                let td = unsafe {
+                    &*(obj_bits as *const shape_value::heap_value::TemporalData)
+                };
+                let value = temporal_property_i64(td, ks)?;
+                self.push_kinded_slot(KindedSlot::from_int(value))
+            }
+
+            // ── HashMap, NativeView, TableView,
             //    DataTable, Decimal, BigInt, etc. ─────────────────────────
             NativeKind::Ptr(
                 HeapKind::Closure
@@ -285,7 +314,6 @@ impl VirtualMachine {
                 | HeapKind::DataTable
                 | HeapKind::Future
                 | HeapKind::TaskGroup
-                | HeapKind::Temporal
                 | HeapKind::TableView
                 | HeapKind::Content
                 | HeapKind::Instant
@@ -1019,6 +1047,43 @@ fn string_key_slot_as_str(slot: &KindedSlot) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+/// Read an integer `DateTime` component for the kinded GetProp path
+/// (`dt.year`, `dt.month`, …). Mirrors the `v2_*` component methods in
+/// `objects/datetime_methods.rs`, returning an `Int64`. `TimeSpan` (non-
+/// `DateTime`) receivers error; an unknown key surfaces `UndefinedProperty`.
+fn temporal_property_i64(
+    td: &shape_value::heap_value::TemporalData,
+    key: &str,
+) -> Result<i64, VMError> {
+    use chrono::{Datelike, Timelike};
+    use shape_value::heap_value::TemporalData;
+    let dt = match td {
+        TemporalData::DateTime(dt) => dt,
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "property '{}' access requires a DateTime receiver, got {}",
+                key,
+                other.type_name()
+            )));
+        }
+    };
+    let value: i64 = match key {
+        "year" => dt.year() as i64,
+        "month" => dt.month() as i64,
+        "day" => dt.day() as i64,
+        "hour" => dt.hour() as i64,
+        "minute" => dt.minute() as i64,
+        "second" => dt.second() as i64,
+        "millisecond" => (dt.nanosecond() / 1_000_000) as i64,
+        "microsecond" => (dt.nanosecond() / 1_000) as i64,
+        "day_of_week" => dt.weekday().num_days_from_monday() as i64,
+        "day_of_year" => dt.ordinal() as i64,
+        "week_of_year" => dt.iso_week().week() as i64,
+        _ => return Err(VMError::UndefinedProperty(key.to_string())),
+    };
+    Ok(value)
 }
 
 #[cfg(test)]

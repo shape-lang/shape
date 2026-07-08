@@ -697,10 +697,45 @@ impl VirtualMachine {
                     let r = vm_random_intrinsic_slot(builtin, &args)?;
                     self.push_kinded_slot(r)?;
                 }
+                // ── Migrated to the KindedSlot ABI (ADR-006 §2.7.10):
+                // stats/dist/rolling intrinsics that share the same kinded
+                // carrier path as the already-migrated Mean/Std/Variance
+                // arm above. Bodies read the numeric typed-array argument
+                // through the kind-generic v2 view; scalar args via
+                // kind_coerce; array returns via `random_array_number_slot`
+                // (v2-raw `TypedArray<f64>`). No is_heap probe, no raw-u64
+                // slice, no Bool-default.
+                BuiltinFunction::IntrinsicMin => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_min(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicMax => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_max(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicMedian => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_median(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicRollingMean => {
+                    let args = self.pop_builtin_args()?;
+                    let r = vm_rolling_mean_intrinsic_slot(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicLinearRecurrence => {
+                    let args = self.pop_builtin_args()?;
+                    let r = vm_linear_recurrence_intrinsic_slot(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicDistUniform => {
+                    let args = self.pop_builtin_args()?;
+                    let r = vm_dist_uniform_intrinsic_slot(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
                 BuiltinFunction::IntrinsicBspline2_3dBatch
-                | BuiltinFunction::IntrinsicMin
-                | BuiltinFunction::IntrinsicMax
-                | BuiltinFunction::IntrinsicDistUniform
                 | BuiltinFunction::IntrinsicDistLognormal
                 | BuiltinFunction::IntrinsicDistExponential
                 | BuiltinFunction::IntrinsicDistPoisson
@@ -710,12 +745,10 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicOuProcess
                 | BuiltinFunction::IntrinsicRandomWalk
                 | BuiltinFunction::IntrinsicRollingSum
-                | BuiltinFunction::IntrinsicRollingMean
                 | BuiltinFunction::IntrinsicRollingStd
                 | BuiltinFunction::IntrinsicRollingMin
                 | BuiltinFunction::IntrinsicRollingMax
                 | BuiltinFunction::IntrinsicEma
-                | BuiltinFunction::IntrinsicLinearRecurrence
                 | BuiltinFunction::IntrinsicShift
                 | BuiltinFunction::IntrinsicDiff
                 | BuiltinFunction::IntrinsicPctChange
@@ -726,7 +759,6 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicCorrelation
                 | BuiltinFunction::IntrinsicCovariance
                 | BuiltinFunction::IntrinsicPercentile
-                | BuiltinFunction::IntrinsicMedian
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries => {
@@ -1944,6 +1976,128 @@ fn random_array_number_slot(values: Vec<f64>) -> KindedSlot {
         ValueSlot::from_u64(ptr as u64),
         NativeKind::Ptr(HeapKind::TypedArray),
     )
+}
+
+/// `__intrinsic_rolling_mean(series, period)` — windowed arithmetic mean.
+///
+/// Reads the numeric typed-array `series` through the kind-generic v2 view
+/// (`collect_number_series`, same primitive as the migrated Mean/Std/Variance
+/// arm) and the `period` window via `kind_coerce::int_operand`. Delegates the
+/// windowed math to `shape_runtime::simd_rolling::rolling_mean` and returns a
+/// v2-raw `TypedArray<f64>` (`Ptr(HeapKind::TypedArray)`). No is_heap probe,
+/// no raw-u64 slice, no Bool-default.
+fn vm_rolling_mean_intrinsic_slot(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "__intrinsic_rolling_mean expects 2 arguments (series, period), got {}",
+            args.len()
+        )));
+    }
+    let data = crate::executor::builtins::math::collect_number_series("rolling_mean", &args[0])?;
+    let window = crate::executor::builtins::kind_coerce::int_operand(&args[1]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "__intrinsic_rolling_mean: period must be int (got kind {:?})",
+            args[1].kind
+        ))
+    })?;
+    if window <= 0 {
+        return Err(VMError::RuntimeError(format!(
+            "__intrinsic_rolling_mean: period ({}) must be positive",
+            window
+        )));
+    }
+    let out = shape_runtime::simd_rolling::rolling_mean(&data, window as usize);
+    Ok(random_array_number_slot(out))
+}
+
+/// `__intrinsic_linear_recurrence(input, decay, initial_value)` — first-order
+/// linear recurrence `y[t] = y[t-1] * decay + input[t]`.
+///
+/// `input` is read via the kind-generic v2 view; `decay` via
+/// `kind_coerce::number_operand`. `initial_value` is an optional `number`:
+/// when the slot kind is `Null`/`Unit` (the stdlib `null` default), `y[0] =
+/// input[0]`; otherwise `y[0] = init * decay + input[0]`. Returns a v2-raw
+/// `TypedArray<f64>`. Mirrors the runtime typed body at
+/// `intrinsics/recurrence.rs`.
+fn vm_linear_recurrence_intrinsic_slot(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    if args.len() != 3 {
+        return Err(VMError::RuntimeError(format!(
+            "__intrinsic_linear_recurrence expects 3 arguments (input, decay, initial_value), got {}",
+            args.len()
+        )));
+    }
+    let data = crate::executor::builtins::math::collect_number_series("linear_recurrence", &args[0])?;
+    let decay = crate::executor::builtins::kind_coerce::number_operand(&args[1]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "__intrinsic_linear_recurrence: decay must be a number (got kind {:?})",
+            args[1].kind
+        ))
+    })?;
+    let initial_value: Option<f64> = match args[2].kind {
+        NativeKind::Null => None,
+        _ => Some(
+            crate::executor::builtins::kind_coerce::number_operand(&args[2]).map_err(|_| {
+                VMError::RuntimeError(format!(
+                    "__intrinsic_linear_recurrence: initial_value must be a number or null (got kind {:?})",
+                    args[2].kind
+                ))
+            })?,
+        ),
+    };
+
+    if data.is_empty() {
+        return Ok(random_array_number_slot(Vec::new()));
+    }
+    let mut result = Vec::with_capacity(data.len());
+    let mut prev = match initial_value {
+        Some(init) => init * decay + data[0],
+        None => data[0],
+    };
+    result.push(prev);
+    for &val in &data[1..] {
+        let curr = prev * decay + val;
+        result.push(curr);
+        prev = curr;
+    }
+    Ok(random_array_number_slot(result))
+}
+
+/// `__intrinsic_dist_uniform(lo, hi)` — sample from a uniform distribution
+/// `[lo, hi)`.
+///
+/// Both bounds read via `kind_coerce::number_operand`. Samples from the shared
+/// thread-local RNG (`shape_runtime::intrinsics::random::with_rng`) using the
+/// same `lo + (hi - lo) * u` formula as the runtime typed body at
+/// `intrinsics/distributions.rs`. Returns a `number` (`Float64`).
+fn vm_dist_uniform_intrinsic_slot(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    use rand::Rng as _;
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "__intrinsic_dist_uniform expects 2 arguments (lo, hi), got {}",
+            args.len()
+        )));
+    }
+    let lo = crate::executor::builtins::kind_coerce::number_operand(&args[0]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "__intrinsic_dist_uniform: lo must be a number (got kind {:?})",
+            args[0].kind
+        ))
+    })?;
+    let hi = crate::executor::builtins::kind_coerce::number_operand(&args[1]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "__intrinsic_dist_uniform: hi must be a number (got kind {:?})",
+            args[1].kind
+        ))
+    })?;
+    if lo >= hi {
+        return Err(VMError::RuntimeError(format!(
+            "__intrinsic_dist_uniform: lo ({}) must be < hi ({})",
+            lo, hi
+        )));
+    }
+    let value =
+        shape_runtime::intrinsics::random::with_rng(|rng| lo + (hi - lo) * rng.r#gen::<f64>());
+    Ok(KindedSlot::from_number(value))
 }
 
 fn vm_random_intrinsic_slot(
