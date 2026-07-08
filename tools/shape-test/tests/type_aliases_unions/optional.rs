@@ -242,3 +242,82 @@ fn optchain_method_call_none_jit() {
         .with_jit()
         .expect_output("none");
 }
+
+// =========================================================================
+// Optional chaining (`?.`) — independent adversarial regression pass
+// (wave7/optional-chaining finalize). Locks the receiver-must-be-Option
+// strictness, the element-typed result, the nullable `T?` sugar receiver,
+// and confirms plain `??`/Option behaviour is unregressed. VM + JIT.
+// =========================================================================
+
+// Nullable `T?` sugar (not the explicit `Option<T>` form) as the `?.`
+// receiver: present unwraps, absent short-circuits, `??` supplies default.
+const OPTCHAIN_NULLABLE_SUGAR: &str = r#"
+    type Server { port: int }
+    let present: Server? = Some(Server { port: 5 })
+    let absent: Server? = None
+    print(present?.port ?? 99)
+    print(absent?.port ?? 99)
+"#;
+
+#[test]
+fn optchain_nullable_sugar_receiver_vm() {
+    ShapeTest::new(OPTCHAIN_NULLABLE_SUGAR).expect_output("5\n99");
+}
+
+#[test]
+fn optchain_nullable_sugar_receiver_jit() {
+    ShapeTest::new(OPTCHAIN_NULLABLE_SUGAR)
+        .with_jit()
+        .expect_output("5\n99");
+}
+
+// The `?.` result is a proven, element-typed `Option<int>`: the unwrapped
+// binder participates in `int` arithmetic (would fail to type-check if the
+// result element were untyped / `any`).
+const OPTCHAIN_ELEMENT_TYPED: &str = r#"
+    type Server { port: int }
+    let s: Option<Server> = Some(Server { port: 5 })
+    match s?.port { Some(v) => print(v + 100), None => print(-1) }
+"#;
+
+#[test]
+fn optchain_result_is_element_typed_vm() {
+    ShapeTest::new(OPTCHAIN_ELEMENT_TYPED).expect_output("105");
+}
+
+#[test]
+fn optchain_result_is_element_typed_jit() {
+    ShapeTest::new(OPTCHAIN_ELEMENT_TYPED)
+        .with_jit()
+        .expect_output("105");
+}
+
+// Strictness: `?.` on a non-Option receiver does NOT silently pass — it is a
+// compile error (the Some/None arm type-check rejects the concrete receiver).
+#[test]
+fn optchain_on_non_option_receiver_is_error() {
+    ShapeTest::new(
+        r#"
+        type Server { port: int }
+        let s: Server = Server { port: 5 }
+        let p = s?.port
+        print(p)
+    "#,
+    )
+    .expect_run_err();
+}
+
+// Regression: plain `??` on a bare Option (no `?.`) is unchanged.
+#[test]
+fn plain_coalesce_unregressed_vm() {
+    ShapeTest::new(
+        r#"
+        let none_v: Option<int> = None
+        let some_v: Option<int> = Some(3)
+        print(none_v ?? 7)
+        print(some_v ?? 7)
+    "#,
+    )
+    .expect_output("7\n3");
+}
