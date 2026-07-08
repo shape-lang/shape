@@ -156,3 +156,34 @@ fn comprehension_number_element() {
     )
     .expect_number(9.0); // 3.0 + 6.0
 }
+
+// Independent reviewer regression (wave7 list-comprehension-elem): a
+// string-element comprehension binds to a typed `Array<string>` that is
+// usable downstream via indexing + `.map` (proves the result is element-typed,
+// not an untyped/any array).
+#[test]
+fn comprehension_string_element_usable_downstream() {
+    ShapeTest::new(
+        r#"
+        let tags = [s + "!" for s in ["a", "b", "c"]]
+        let shouted = tags.map(|t| t.toUpperCase())
+        shouted[0] + shouted[2]
+    "#,
+    )
+    .expect_string("A!C!");
+}
+
+// Independent reviewer regression: the int-element carrier survives object
+// construction earlier in the same program (guards against a stale
+// `last_expr_schema` misclassifying a scalar element as a TypedObject carrier).
+#[test]
+fn comprehension_int_element_after_object_literal() {
+    ShapeTest::new(
+        r#"
+        let seed = { a: 1, b: 2 }
+        let evens = [x * 2 for x in [10, 20, 30]]
+        evens[0] + evens[1] + evens[2]
+    "#,
+    )
+    .expect_number(120.0);
+}
