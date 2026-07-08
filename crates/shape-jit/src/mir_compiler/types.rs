@@ -1139,9 +1139,17 @@ fn parametric_method_return_kind_from_receiver(
         ("sum" | "min" | "max", ConcreteType::Array(elem)) => {
             native_kind_from_concrete_type(elem)
         }
-        // `Array.get(i)` — returns element T directly (the VM-side
-        // bounds-checked accessor; non-Option return).
-        ("get", ConcreteType::Array(elem)) => native_kind_from_concrete_type(elem),
+        // `Array.get(i) -> Option<T>` — bounds-safe accessor (book C4).
+        // The VM-side `array_basic::handle_get_v2` returns the canonical
+        // fixed-layout `Option<T>` carrier built by
+        // `result_option_carrier::build_some` / `build_none` — a TypedObject
+        // (schema id `builtin_schemas.option`, `__variant` + payload),
+        // Some(elem) in-range / None OOB. The producer-stamped carrier kind
+        // is therefore `Ptr(HeapKind::TypedObject)` (L5 Option carrier shape),
+        // NOT `Ptr(HeapKind::Option)`. Match/`==` deopt to the interpreter
+        // (EnumPayload §2.7.17 soundness gap), which reads this TypedObject
+        // via `read_option`.
+        ("get", ConcreteType::Array(_)) => Some(NativeKind::Ptr(HeapKind::TypedObject)),
         // `Array.first() / .last() / .pop()` — return the bare element
         // kind directly. Phase 4b Round 4 W15 LANG-9-spin-3-first JIT
         // fix (ADR-006 §2.7.5 producer-side stamp).

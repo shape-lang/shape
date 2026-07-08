@@ -1265,9 +1265,16 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                                     "sum" | "mean" | "min" | "max",
                                     shape_value::v2::ConcreteType::Array(elem),
                                 ) => Some((**elem).clone()),
-                                ("get", shape_value::v2::ConcreteType::Array(elem)) => {
-                                    Some((**elem).clone())
-                                }
+                                // `Array.get(i) -> Option<T>` (book C4,
+                                // bounds-safe accessor). The result slot's
+                                // concrete type is `Option<elem>`, matching
+                                // the VM handler's `Arc<OptionData>` carrier
+                                // and the JIT return-kind arm
+                                // (`parametric_method_return_kind_from_receiver`:
+                                // `("get", Array) => Ptr(HeapKind::Option)`).
+                                ("get", shape_value::v2::ConcreteType::Array(elem)) => Some(
+                                    shape_value::v2::ConcreteType::Option(Box::new((**elem).clone())),
+                                ),
                                 _ => None,
                             };
                             if let Some(ct) = inferred {
