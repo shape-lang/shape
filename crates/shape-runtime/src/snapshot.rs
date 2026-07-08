@@ -99,7 +99,21 @@ fn resolve_module_fn_id(name: &str) -> Option<u64> {
 ///   envelope fields (CodeManifest blob-graph persistence, design §4.3).
 ///   The bincode wire encoding is non-self-describing, so this is a hard
 ///   version bump: older snapshots refuse cleanly, never Bool-default.
-pub const SNAPSHOT_VERSION: u32 = 6;
+/// - v7 (current, GC Phase 5 — real-gc-cycle-collection.md §0 #4 /
+///   §6): the snapshot identity-map is GENERALIZED from
+///   `SharedCell`/`Reference` to EVERY cycle-capable `HeapKind`
+///   (TypedObject, heap-element TypedArray, TypedObject-valued HashMap)
+///   via the new `SerializableVMValue::HeapNode { handle, body }` +
+///   `HeapRef { handle }` wire arms. The FIRST slot to reach a node's
+///   allocation ptr emits `HeapNode` (the body); every later reach emits
+///   `HeapRef` — breaking object/array/map reference cycles (which
+///   previously INFINITE-RECURSED the structural serializer) and deduping
+///   shared identity (which previously DUPLICATED the node on resume). The
+///   new interned-body / back-reference variants change the non-self-
+///   describing bincode layout, so this is a hard version bump: a v6
+///   snapshot version-REFUSES cleanly at the load guard
+///   (`SnapshotStore::get_snapshot`), never misparses, never Bool-defaults.
+pub const SNAPSHOT_VERSION: u32 = 7;
 
 pub(crate) const DEFAULT_CHUNK_LEN: usize = 4096;
 pub(crate) const BYTE_CHUNK_LEN: usize = 256 * 1024;
@@ -183,7 +197,26 @@ impl SnapshotStore {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         let decompressed = zstd::stream::decode_all(&buf[..])?;
-        Ok(bincode::deserialize(&decompressed)?)
+        let snapshot: ExecutionSnapshot = bincode::deserialize(&decompressed)?;
+        // GC Phase 5 (v6→v7): explicit version-equality guard. The bincode
+        // wire encoding is non-self-describing, so a v6 blob whose
+        // referenced `VmSnapshot` uses the pre-generalization layout must be
+        // caught HERE — before the `VmSnapshot`/`ContextSnapshot` sub-objects
+        // are trusted — rather than misparsed against the v7 `HeapNode` /
+        // `HeapRef` arms. The `ExecutionSnapshot` envelope's `version` field
+        // is stable across the bump (its own layout is unchanged), so it
+        // deserializes cleanly and we refuse on the value, never Bool-default.
+        if snapshot.version != SNAPSHOT_VERSION {
+            anyhow::bail!(
+                "unsupported snapshot version {} (this build reads version {}). \
+                 The snapshot wire format changed at v6→v7 (GC Phase 5 identity-map \
+                 generalization); older snapshots are refused cleanly rather than \
+                 misparsed. Re-capture the snapshot with a matching build.",
+                snapshot.version,
+                SNAPSHOT_VERSION,
+            );
+        }
+        Ok(snapshot)
     }
 
     /// List all snapshots in the store, returning (hash, snapshot) pairs.
@@ -833,6 +866,45 @@ pub enum SerializableVMValue {
         handle: u64,
     },
 
+    /// GC Phase 5 (snapshot v7, real-gc-cycle-collection.md §0 #4 / §6):
+    /// a cycle-capable heap NODE tagged with an identity `handle`.
+    ///
+    /// `body` is the node's ordinary serialized shape — `TypedObject`,
+    /// `Array` (heap-element TypedArray), or `HashMap` (TypedObject-valued).
+    /// The FIRST slot to reach the node's allocation ptr during the shared
+    /// [`SerializeIdentityCtx`] walk emits this BODY; every later reach emits
+    /// a [`SerializableVMValue::HeapRef`] back-reference carrying the same
+    /// `handle`. This is what breaks an object/array/map reference CYCLE (a
+    /// self-linked `type Node { var next: Node? }` previously infinite-
+    /// recursed the serializer) and DEDUPS a shared node (two carriers
+    /// previously produced two copies on resume, losing identity).
+    ///
+    /// On restore, Pass 1 ([`materialize_cell_bodies`]) materializes each
+    /// `HeapNode` into EXACTLY ONE heap allocation per handle (recorded in
+    /// the restore identity-map with a base share on the abort-ledger);
+    /// forward children and back-references resolve to that one allocation
+    /// via the per-`HeapKind` retain primitive. This generalizes the
+    /// `SharedCell`/`Reference` identity machinery — it does NOT replace it.
+    HeapNode {
+        handle: u64,
+        body: Box<SerializableVMValue>,
+    },
+
+    /// GC Phase 5 (snapshot v7): a back-reference to a previously-emitted
+    /// [`SerializableVMValue::HeapNode`].
+    ///
+    /// Emitted whenever the serialize walk re-reaches a node's allocation
+    /// ptr already interned in [`SerializeIdentityCtx`] — an ancestor (the
+    /// cycle case) or a completed sibling subtree (the dedup case). On
+    /// restore it resolves against the identity-map (materialized in Pass 1)
+    /// and hands out one additional retained share for the referencing slot.
+    /// It carries no kind — restore resolves the node's `NativeKind` from the
+    /// identity-map entry recorded at materialization, never fabricated from
+    /// bits (ADR-006 §2.7.7).
+    HeapRef {
+        handle: u64,
+    },
+
     /// `HeapKind::FilterExpr` — query-DSL AST tree (Wave-γ §2.7.9).
     /// Carries `Arc<FilterNode>` whose `And/Or/Not` branches recurse
     /// into other `FilterExpr` shares — round-tripping requires a
@@ -1214,17 +1286,29 @@ impl SerializeIdentityCtx {
 pub struct RestoreLinkCtx {
     /// handle → materialized `*const SharedCell` (one base share held).
     identity_map: std::collections::HashMap<u64, u64>,
+    /// GC Phase 5 (v7): handle → materialized cycle-capable heap NODE, as
+    /// `(allocation ptr as u64, node NativeKind)`. Populated by Pass-1
+    /// `materialize_cell_bodies` for every `SV::HeapNode` (TypedObject /
+    /// heap-element TypedArray / TypedObject-valued HashMap); resolved by
+    /// forward children, `SV::HeapRef` back-references, and Pass-2 top-level
+    /// slots to the ONE allocation per handle. The kind is the identity-map
+    /// entry's canonical `NativeKind::Ptr(HeapKind::*)` — recorded at
+    /// materialization, never fabricated from bits (no parallel discriminator:
+    /// this is the same `(bits, kind)` pair the slot ABI uses, ADR-006
+    /// §2.7.7). Separate from `identity_map` so the `SharedCell`/`Reference`
+    /// path is untouched (handles are unique across the shared counter).
+    heap_node_map: std::collections::HashMap<u64, (u64, NativeKind)>,
     /// Pass-1 cycle guard: handles whose body is mid-materialization.
     in_progress: std::collections::HashSet<u64>,
-    /// Abort-ledger: every share handed out, in claim order. Reverse-walk
-    /// (LIFO) to release on `Err`.
-    retained: Vec<RetainedShare>,
-}
-
-/// One abort-ledger entry: a strong-count share to release on abort.
-enum RetainedShare {
-    /// An `Arc<SharedCell>` share at this raw ptr.
-    SharedCell(u64),
+    /// Abort-ledger: every BASE materialization share handed out, as
+    /// `(allocation ptr, node NativeKind)`, in claim order. Reverse-walk
+    /// (LIFO) to release on abort OR restore-finish. Generalized (GC Phase 5,
+    /// v7) from `SharedCell`-only to every cycle-capable heap NODE carrier —
+    /// the per-`HeapKind` release primitive is selected by dispatching on the
+    /// recorded `NativeKind` (ADR-005 §1 single-discriminator: no parallel
+    /// ledger sum-type projecting 1:1 to `HeapKind`; the canonical slot-ABI
+    /// kind IS the discriminator).
+    retained: Vec<(u64, NativeKind)>,
 }
 
 impl RestoreLinkCtx {
@@ -1254,15 +1338,42 @@ impl RestoreLinkCtx {
     ///
     /// Idempotent: `retained` is drained, so a second call is a no-op.
     pub fn release_base_shares(&mut self) {
+        use shape_value::heap_value::{HashMapKindedRef, TypedObjectStorage};
         use shape_value::v2::closure_layout::SharedCell;
-        while let Some(entry) = self.retained.pop() {
-            match entry {
-                RetainedShare::SharedCell(ptr) => unsafe {
+        use shape_value::v2::heap_element::HeapElement;
+        use shape_value::v2::typed_array::release_v2_typed_array;
+        // LIFO reverse-walk: children were materialized (and their bases
+        // pushed) AFTER their parents, so releasing bottom-up means a
+        // parent's memory-decrement never dereferences an already-freed
+        // child. Each release is a single decrement-and-maybe-free
+        // (`release_elem` / `release_v2_typed_array` / `Arc::decrement`) —
+        // never an unconditional free — so a node still referenced by a real
+        // (Pass-2-installed) slot survives; only the surplus scaffolding
+        // share is retired. Balances on both abort and success (§2.7.30.5).
+        while let Some((ptr, kind)) = self.retained.pop() {
+            match kind {
+                NativeKind::Ptr(HeapKind::SharedCell) => unsafe {
                     Arc::decrement_strong_count(ptr as *const SharedCell);
                 },
+                NativeKind::Ptr(HeapKind::TypedObject) => unsafe {
+                    TypedObjectStorage::release_elem(ptr as *const TypedObjectStorage);
+                },
+                NativeKind::Ptr(HeapKind::TypedArray) => unsafe {
+                    release_v2_typed_array(ptr as *mut u8);
+                },
+                NativeKind::Ptr(HeapKind::HashMap) => unsafe {
+                    Arc::decrement_strong_count(ptr as *const HashMapKindedRef);
+                },
+                other => debug_assert!(
+                    false,
+                    "release_base_shares: unexpected ledger kind {other:?} — only \
+                     SharedCell / TypedObject / TypedArray / HashMap base shares \
+                     are recorded"
+                ),
             }
         }
         self.identity_map.clear();
+        self.heap_node_map.clear();
         self.in_progress.clear();
     }
 }
@@ -1445,6 +1556,44 @@ pub fn slot_to_serializable(
 /// (WF-2G GAP B). Each field recurses through `slot_to_serializable_ctx` on the
 /// per-field parallel `field_kinds` track (ADR-006 §2.5 / §2.3 / §2.7.7 — no
 /// kind fabricated from bits, no Bool-default).
+/// GC Phase 5 (snapshot v7): intern a cycle-capable heap node's allocation
+/// ptr into the shared identity ctx, emitting a [`SerializableVMValue::HeapNode`]
+/// BODY on the first reach and a [`SerializableVMValue::HeapRef`] back-reference
+/// on every later reach.
+///
+/// This is the general-`HeapKind` analogue of [`emit_or_backedge_cell`] (which
+/// remains the dedicated `SharedCell`/`Reference` path). `node_ptr` is the
+/// node's allocation address used ONLY as a `HashMap` key (never dereferenced
+/// for the key role) — the same raw-provenance-pointer identity discipline as
+/// the cell path. Insert-before-recurse: the handle is recorded in `handle_of`
+/// BEFORE `build_body` recurses, so a payload that reaches back into the same
+/// node (the cycle case) finds the handle already present and emits a back-edge
+/// rather than recursing forever. NO `ValueWord` shape, NO tag/kind decode: the
+/// handle is a plain `u64` counter and identity is the raw ptr alone.
+fn intern_or_backedge(
+    node_ptr: *const (),
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+    build_body: impl FnOnce(
+        &SnapshotStore,
+        &mut SerializeIdentityCtx,
+    ) -> std::result::Result<SerializableVMValue, String>,
+) -> std::result::Result<SerializableVMValue, String> {
+    if let Some(&handle) = ctx.handle_of.get(&node_ptr) {
+        // Already interned — an ancestor mid-recurse (cycle) or a completed
+        // sibling subtree (dedup). Emit the back-reference; do NOT recurse.
+        return Ok(SerializableVMValue::HeapRef { handle });
+    }
+    let handle = ctx.next_handle;
+    ctx.next_handle += 1;
+    ctx.handle_of.insert(node_ptr, handle);
+    let body = build_body(store, ctx)?;
+    Ok(SerializableVMValue::HeapNode {
+        handle,
+        body: Box::new(body),
+    })
+}
+
 fn typed_object_storage_to_serializable(
     storage: &shape_value::heap_value::TypedObjectStorage,
     store: &SnapshotStore,
@@ -1683,9 +1832,19 @@ fn slot_heap_to_serializable(
             // SAFETY: per the slot construction contract the bits point
             // to a live `TypedObjectStorage`; the borrow is valid for the
             // duration of the field reads (the slot keeps its share).
-            let storage: &shape_value::heap_value::TypedObjectStorage =
-                unsafe { &*(bits as *const shape_value::heap_value::TypedObjectStorage) };
-            typed_object_storage_to_serializable(storage, store, ctx)
+            //
+            // GC Phase 5 (v7): intern the storage ptr for identity so a
+            // TypedObject reached from ≥2 slots (or a `var`-field cycle back
+            // into itself) emits ONE `HeapNode` body + `HeapRef` back-edges
+            // instead of duplicating / infinite-recursing (§0 #4 / §6).
+            intern_or_backedge(bits as *const (), store, ctx, move |store, ctx| {
+                // SAFETY: per the slot construction contract the bits point
+                // to a live `TypedObjectStorage`; the borrow is valid for the
+                // duration of the field reads (the slot keeps its share).
+                let storage: &shape_value::heap_value::TypedObjectStorage =
+                    unsafe { &*(bits as *const shape_value::heap_value::TypedObjectStorage) };
+                typed_object_storage_to_serializable(storage, store, ctx)
+            })
         }
         HeapKind::TypedArray => {
             // v2-raw flat-struct monomorphic carrier (`docs/runtime-v2-spec.md`):
@@ -1707,6 +1866,45 @@ fn slot_heap_to_serializable(
             // SAFETY: the slot construction contract guarantees a live,
             // element-type-stamped TypedArray carrier at `bits`.
             let elem = unsafe { read_elem_type(ptr) };
+            // GC Phase 5 (v7): a TypedObject-element array is the only
+            // cycle-capable TypedArray shape (its elements can be shared /
+            // reference back into a containing object). Intern the array ptr
+            // for identity AND each element storage ptr, so a shared/cyclic
+            // element emits ONE body + back-edges rather than duplicating /
+            // infinite-recursing (§0 #4 / §6). Scalar + String/Decimal-element
+            // arrays hold only leaves — no identity needed; they keep the
+            // pre-v7 un-wrapped `SV::Array` wire shape below.
+            if elem == ELEM_TYPE_TYPED_OBJECT {
+                return intern_or_backedge(ptr as *const (), store, ctx, move |store, ctx| {
+                    use shape_value::heap_value::TypedObjectStorage;
+                    // SAFETY: element-type stamp is TYPED_OBJECT ⇒ the buffer
+                    // holds `*const TypedObjectStorage` owning pointers.
+                    let slice = unsafe {
+                        TypedArray::<*const TypedObjectStorage>::as_slice(
+                            ptr as *const TypedArray<*const TypedObjectStorage>,
+                        )
+                    };
+                    let mut out: Vec<SerializableVMValue> = Vec::with_capacity(slice.len());
+                    for &p in slice.iter() {
+                        // Intern each element TypedObject: a node shared with
+                        // another element (or a containing object) dedupes to
+                        // one handle; a self-referential element cycle-breaks.
+                        let sv = intern_or_backedge(
+                            p as *const (),
+                            store,
+                            ctx,
+                            move |store, ctx| {
+                                // SAFETY: `p` is a live element storage owned by
+                                // the array; borrow-read, take no share.
+                                let storage: &TypedObjectStorage = unsafe { &*p };
+                                typed_object_storage_to_serializable(storage, store, ctx)
+                            },
+                        )?;
+                        out.push(sv);
+                    }
+                    Ok(SV::Array(out))
+                });
+            }
             let elems: Vec<SerializableVMValue> = unsafe {
                 match elem {
                     ELEM_TYPE_F64 => TypedArray::<f64>::as_slice(ptr as *const TypedArray<f64>)
@@ -1781,25 +1979,9 @@ fn slot_heap_to_serializable(
                         .map(|&p| SV::Decimal(DecimalObj::value(p)))
                         .collect()
                     }
-                    ELEM_TYPE_TYPED_OBJECT => {
-                        let slice = TypedArray::<
-                            *const shape_value::heap_value::TypedObjectStorage,
-                        >::as_slice(
-                            ptr as *const TypedArray<
-                                *const shape_value::heap_value::TypedObjectStorage,
-                            >,
-                        );
-                        let mut out: Vec<SerializableVMValue> = Vec::with_capacity(slice.len());
-                        for &p in slice.iter() {
-                            // Read the element storage through a borrow (the
-                            // array owns the share; we take none). The nested
-                            // projection recurses on each field's own kind
-                            // track — ADR-006 §2.5.
-                            let storage: &shape_value::heap_value::TypedObjectStorage = &*p;
-                            out.push(typed_object_storage_to_serializable(storage, store, ctx)?);
-                        }
-                        out
-                    }
+                    // ELEM_TYPE_TYPED_OBJECT is handled by the interned
+                    // early-return above (GC Phase 5, v7) and never reaches
+                    // this scalar/leaf match.
                     other_elem => {
                         return Err(format!(
                             "slot_to_serializable: W17-snapshot-roundtrip surface — \
@@ -1854,11 +2036,56 @@ fn slot_heap_to_serializable(
                     }
                     Ok(SV::HashMap { keys, values })
                 }
+                // GC Phase 5 (v7): a `HashMap<string, TypedObject>` can hold
+                // shared/cyclic nodes. Intern the map ptr for identity and
+                // route each value TypedObject through the shared ctx so a
+                // node shared across two keys (or cyclic) dedupes / cycle-
+                // breaks. Keys are strings (§2.7.15 string-only keyspace);
+                // values are `HeapNode`/`HeapRef`. The map is emitted as a
+                // `HeapNode` body wrapping `SV::HashMap { keys, values }`.
+                HashMapKindedRef::TypedObject(map_arc) => {
+                    use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
+                    use shape_value::v2::string_obj::StringObj;
+                    use shape_value::v2::typed_array::TypedArray;
+                    intern_or_backedge(bits as *const (), store, ctx, move |store, ctx| {
+                        let n = map_arc.len();
+                        let mut keys: Vec<SerializableVMValue> = Vec::with_capacity(n);
+                        let mut values: Vec<SerializableVMValue> = Vec::with_capacity(n);
+                        for i in 0..n {
+                            // SAFETY: keys buffer holds `*const StringObj`;
+                            // values buffer holds `TypedObjectPtr` — both live
+                            // for `map_arc`'s lifetime. Borrow-read the value
+                            // ptr (no share taken; `TypedObjectPtr` has a Drop,
+                            // so we take `&TypedObjectPtr` and read `.as_ptr()`
+                            // rather than moving it).
+                            let (kstr, vptr) = unsafe {
+                                let kp = TypedArray::get_unchecked(map_arc.keys, i as u32);
+                                let vref: &TypedObjectPtr = &*(*map_arc.values).data.add(i);
+                                (StringObj::as_str(kp).to_owned(), vref.as_ptr())
+                            };
+                            keys.push(SV::String(kstr));
+                            let vsv = intern_or_backedge(
+                                vptr as *const (),
+                                store,
+                                ctx,
+                                move |store, ctx| {
+                                    // SAFETY: `vptr` is a live element storage
+                                    // owned by the map; borrow-read, take none.
+                                    let storage: &TypedObjectStorage = unsafe { &*vptr };
+                                    typed_object_storage_to_serializable(storage, store, ctx)
+                                },
+                            )?;
+                            values.push(vsv);
+                        }
+                        Ok(SV::HashMap { keys, values })
+                    })
+                }
                 other_v => Err(format!(
                     "slot_to_serializable: W17-snapshot-roundtrip surface — \
                      HashMap value-monomorphization {} is K3 (the heap-value \
                      kinded-track amendment); only HashMap<string,string> \
-                     round-trips at this scope. ADR-006 §2.7.5.1.",
+                     and HashMap<string,TypedObject> round-trip at this scope. \
+                     ADR-006 §2.7.5.1.",
                     hashmap_kinded_ref_arm_name(other_v),
                 )),
             }
@@ -2142,10 +2369,24 @@ pub fn materialize_cell_bodies(
             let cell = Arc::new(SharedCell::new(value_bits, value_kind));
             let ptr = Arc::into_raw(cell) as u64;
             ctx.identity_map.insert(*handle, ptr);
-            ctx.retained.push(RetainedShare::SharedCell(ptr));
+            ctx.retained
+                .push((ptr, NativeKind::Ptr(HeapKind::SharedCell)));
             ctx.in_progress.remove(handle);
             Ok(())
         }
+        // GC Phase 5 (v7): a cycle-capable heap NODE. Materialize it into
+        // exactly ONE allocation per handle (recorded in `heap_node_map` with
+        // a base share on the abort-ledger); forward children + back-edges
+        // resolve to it. Idempotent on a repeat handle (dedup across slots).
+        SV::HeapNode { handle, body } => {
+            if ctx.heap_node_map.contains_key(handle) {
+                return Ok(());
+            }
+            materialize_node_base(*handle, body, store, ctx)
+        }
+        // A back-reference materializes nothing — it resolves in
+        // `resolve_child` / Pass-2 against the already-materialized node.
+        SV::HeapRef { .. } => Ok(()),
         // Recurse into compound arms that can carry a nested body.
         SV::TypedObject { slot_data, .. } => {
             for f in slot_data {
@@ -2155,6 +2396,307 @@ pub fn materialize_cell_bodies(
         }
         // Back-edges + leaf arms hold no body to materialize.
         _ => Ok(()),
+    }
+}
+
+/// GC Phase 5 (v7): materialize a single `SV::HeapNode` body into exactly one
+/// heap allocation per handle, recording `handle → (ptr, kind)` in
+/// `ctx.heap_node_map` and pushing the base materialization share onto the
+/// abort-ledger. Dispatches on the body shape (TypedObject / heap-element
+/// Array / TypedObject-valued HashMap). This is the general-`HeapKind`
+/// analogue of the `SV::SharedCell` body materialization in
+/// [`materialize_cell_bodies`].
+///
+/// The node is recorded in `heap_node_map` BEFORE its children are filled
+/// (for TypedObject / TypedArray, via record-before-fill), so a child that
+/// references back into this node (the CYCLE case) resolves to the one
+/// allocation instead of duplicating or infinite-recursing. Every child edge
+/// is materialized through [`resolve_child`], which hands the parent slot ONE
+/// retained share; a genuine cycle therefore round-trips as a real cycle
+/// (later reclaimed by the GC), preserving identity exactly (§0 #4 / §6).
+fn materialize_node_base(
+    handle: u64,
+    body: &SerializableVMValue,
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(), String> {
+    use SerializableVMValue as SV;
+    match body {
+        SV::TypedObject {
+            schema_id,
+            slot_data,
+            heap_mask,
+        } => materialize_typed_object_node(handle, *schema_id, slot_data, *heap_mask, store, ctx),
+        SV::Array(elems) => materialize_typed_object_array_node(handle, elems, store, ctx),
+        SV::HashMap { keys, values } => {
+            materialize_typed_object_hashmap_node(handle, keys, values, store, ctx)
+        }
+        other => Err(format!(
+            "materialize_node_base: GC-Phase-5 surface — HeapNode body arm {} \
+             is not a cycle-capable node shape (expected TypedObject / Array / \
+             HashMap). Malformed v7 wire shape. ADR-006 §2.7.5.1 / §2.7.30.5.",
+            serializable_arm_name(other),
+        )),
+    }
+}
+
+/// GC Phase 5 (v7): materialize a `HeapNode{TypedObject}` with record-before-
+/// fill so a `var`-field cycle back into the object round-trips.
+///
+/// Allocates a SHELL (all slots placeholder-zero, `field_kinds` all `Null`,
+/// `heap_mask = 0` so the shell is safe to drop before it is filled), records
+/// `handle → (ptr, Ptr(TypedObject))` and the base share, then fills each
+/// field via [`resolve_child`] (a self-reference resolves to this very ptr).
+/// After all fields are filled the real per-field `NativeKind` track and the
+/// (wire) `heap_mask` are installed so `Drop` releases exactly the heap fields.
+fn materialize_typed_object_node(
+    handle: u64,
+    schema_id: u64,
+    slot_data: &[SerializableVMValue],
+    heap_mask: u64,
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(), String> {
+    use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::{NativeKind, ValueSlot};
+    let n = slot_data.len();
+    // Shell: placeholder slots + Null field_kinds + heap_mask 0 (drop-safe).
+    let placeholder_slots: Box<[ValueSlot]> =
+        (0..n).map(|_| ValueSlot::from_raw(0)).collect::<Vec<_>>().into_boxed_slice();
+    let placeholder_kinds: Arc<[NativeKind]> =
+        (0..n).map(|_| NativeKind::Null).collect::<Vec<_>>().into();
+    let ptr = TypedObjectStorage::_new(schema_id, placeholder_slots, 0, placeholder_kinds);
+    // Record identity + base BEFORE filling, so a self-referential field
+    // resolves to this ptr (the cycle case).
+    ctx.heap_node_map
+        .insert(handle, (ptr as u64, NativeKind::Ptr(HeapKind::TypedObject)));
+    ctx.retained
+        .push((ptr as u64, NativeKind::Ptr(HeapKind::TypedObject)));
+    // Fill fields, collecting the real per-field kinds.
+    let mut real_kinds: Vec<NativeKind> = Vec::with_capacity(n);
+    for (i, fsv) in slot_data.iter().enumerate() {
+        let (fbits, fkind) = resolve_child(fsv, store, ctx).map_err(|msg| {
+            format!("materialize_typed_object_node: field[{i}] (schema_id={schema_id}): {msg}")
+        })?;
+        // SAFETY: `ptr` is a live `_new`-allocated shell; `i` is in-bounds; the
+        // single-word slot write goes through the raw interior-mutable cell
+        // (no `&TypedObjectStorage` formed — see `write_slot_in_place`). The
+        // prior placeholder bits (0) own no share, so we discard the return.
+        let _prior = unsafe { TypedObjectStorage::write_slot_in_place(ptr, i, fbits) };
+        real_kinds.push(fkind);
+    }
+    // Install the real field-kind track + heap_mask (from the wire, which was
+    // read off the original storage). Raw place-writes: no `&mut Self` formed.
+    // SAFETY: `ptr` live; the fields are POD-owning after fill; assigning
+    // `field_kinds` drops the placeholder `Arc<[Null]>` exactly once.
+    unsafe {
+        *std::ptr::addr_of_mut!((*ptr).field_kinds) = real_kinds.into();
+        *std::ptr::addr_of_mut!((*ptr).heap_mask) = heap_mask;
+    }
+    Ok(())
+}
+
+/// GC Phase 5 (v7): materialize a `HeapNode{Array}` as a heap-element
+/// `TypedArray<*const TypedObjectStorage>` (`ELEM_TYPE_TYPED_OBJECT` — the
+/// only cycle-capable array shape; scalar / String / Decimal arrays are not
+/// interned). Record-before-push: the array ptr is recorded before elements
+/// are pushed, so an element that references back into this array resolves to
+/// the one allocation. Each element is materialized via [`resolve_child`].
+fn materialize_typed_object_array_node(
+    handle: u64,
+    elems: &[SerializableVMValue],
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(), String> {
+    use shape_value::NativeKind;
+    use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray, stamp_elem_type};
+    let out = TypedArray::<*const TypedObjectStorage>::with_capacity(elems.len() as u32);
+    // SAFETY: fresh carrier from this module's allocator; stamp the element
+    // discriminant before any push / drop reads it.
+    unsafe { stamp_elem_type(out as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
+    ctx.heap_node_map
+        .insert(handle, (out as u64, NativeKind::Ptr(HeapKind::TypedArray)));
+    ctx.retained
+        .push((out as u64, NativeKind::Ptr(HeapKind::TypedArray)));
+    for (i, esv) in elems.iter().enumerate() {
+        let (ebits, ekind) = resolve_child(esv, store, ctx)
+            .map_err(|msg| format!("materialize_typed_object_array_node: elem[{i}]: {msg}"))?;
+        if ekind != NativeKind::Ptr(HeapKind::TypedObject) {
+            return Err(format!(
+                "materialize_typed_object_array_node: elem[{i}] resolved to {ekind:?}, \
+                 expected Ptr(TypedObject) — a HeapNode-wrapped array is TypedObject-\
+                 element only. Malformed v7 wire shape. ADR-006 §2.7.5.1."
+            ));
+        }
+        // SAFETY: `out` is a live TYPED_OBJECT-stamped carrier; `ebits` is a
+        // `*const TypedObjectStorage` owning one share (from `resolve_child`),
+        // transferred into the array by `push`.
+        unsafe {
+            TypedArray::<*const TypedObjectStorage>::push(out, ebits as *const TypedObjectStorage);
+        }
+    }
+    Ok(())
+}
+
+/// GC Phase 5 (v7): materialize a `HeapNode{HashMap}` as a
+/// `HashMap<string, TypedObject>` (`HashMapKindedRef::TypedObject`). Values
+/// are materialized (dedup / cycle-break) via [`resolve_child`]. Record-after:
+/// the `Arc<HashMapKindedRef>` identity ptr only exists once built, so a cycle
+/// that routes back THROUGH the map is not representable here (map values that
+/// reference the map are out-of-scope, surfacing cleanly) — but a map holding
+/// a shared or self-cyclic node round-trips (the node's identity is recorded
+/// during its own materialization, before the map closes over it).
+fn materialize_typed_object_hashmap_node(
+    handle: u64,
+    keys: &[SerializableVMValue],
+    values: &[SerializableVMValue],
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(), String> {
+    use SerializableVMValue as SV;
+    use shape_value::NativeKind;
+    use shape_value::heap_value::{HashMapData, HashMapKindedRef, TypedObjectPtr};
+    if keys.len() != values.len() {
+        return Err(format!(
+            "materialize_typed_object_hashmap_node: keys/values length mismatch \
+             (keys={}, values={}). Malformed v7 wire shape. ADR-006 §2.7.5.1.",
+            keys.len(),
+            values.len(),
+        ));
+    }
+    // Build incrementally; on error the local `data` drops, releasing every
+    // inserted value share (HashMapData<TypedObjectPtr> Drop) — no leak.
+    let mut data: HashMapData<TypedObjectPtr> = HashMapData::new();
+    for (k, v) in keys.iter().zip(values.iter()) {
+        let key_str = match k {
+            SV::String(s) => s,
+            _ => {
+                return Err(
+                    "materialize_typed_object_hashmap_node: non-String key — the \
+                     §2.7.15 keyspace is string-only. ADR-006 §2.7.5.1."
+                        .to_string(),
+                );
+            }
+        };
+        let (vbits, vkind) = resolve_child(v, store, ctx)
+            .map_err(|msg| format!("materialize_typed_object_hashmap_node: value: {msg}"))?;
+        if vkind != NativeKind::Ptr(HeapKind::TypedObject) {
+            // Release the just-materialized value share before surfacing.
+            retain_release_one_node(vbits, vkind);
+            return Err(format!(
+                "materialize_typed_object_hashmap_node: value resolved to {vkind:?}, \
+                 expected Ptr(TypedObject) — a HeapNode-wrapped map is TypedObject-\
+                 valued only. ADR-006 §2.7.5.1."
+            ));
+        }
+        // `insert` transfers the one value share into the map (the map's Drop
+        // retires it). `TypedObjectPtr::new` takes ownership without a bump.
+        unsafe {
+            data.insert(
+                key_str.as_str(),
+                TypedObjectPtr::new(vbits as *const _),
+            );
+        }
+    }
+    let kref = Arc::new(HashMapKindedRef::TypedObject(Arc::new(data)));
+    let ptr = Arc::into_raw(kref) as u64;
+    ctx.heap_node_map
+        .insert(handle, (ptr, NativeKind::Ptr(HeapKind::HashMap)));
+    ctx.retained.push((ptr, NativeKind::Ptr(HeapKind::HashMap)));
+    Ok(())
+}
+
+/// GC Phase 5 (v7): materialize a child edge (a TypedObject field, an array
+/// element, or a map value), transferring ONE share to the caller's slot.
+///
+/// - `HeapNode`: if not yet materialized, materialize it (records identity +
+///   base share); then bump one share for the caller. Handles forward
+///   children (deep) and dedup (already-recorded → just bump).
+/// - `HeapRef`: resolve the handle against `heap_node_map` (recorded earlier
+///   in the sequential fill — a HeapRef only ever points at an already-visited
+///   node) and bump one share. This is the cycle / dedup back-edge.
+/// - leaf / scalar / string / SharedCell-family: delegate to the ctx-free
+///   `serializable_to_slot` (fresh alloc owning one share). SharedCell /
+///   Reference field values surface cleanly there (they are the dedicated
+///   two-pass path, out of the generalized node scope).
+fn resolve_child(
+    sv: &SerializableVMValue,
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(u64, NativeKind), String> {
+    use SerializableVMValue as SV;
+    match sv {
+        SV::HeapNode { handle, body } => {
+            if !ctx.heap_node_map.contains_key(handle) {
+                materialize_node_base(*handle, body, store, ctx)?;
+            }
+            let (ptr, kind) = *ctx.heap_node_map.get(handle).ok_or_else(|| {
+                format!("resolve_child: HeapNode handle {handle} not materialized")
+            })?;
+            retain_one_node(ptr, kind);
+            Ok((ptr, kind))
+        }
+        SV::HeapRef { handle } => {
+            let (ptr, kind) = *ctx.heap_node_map.get(handle).ok_or_else(|| {
+                format!(
+                    "resolve_child: GC-Phase-5 surface — HeapRef handle {handle} has no \
+                     materialized node (Pass-1 body missing or a cycle routes back \
+                     through a record-after container, out of round-trip scope). \
+                     ADR-006 §2.7.30.5."
+                )
+            })?;
+            retain_one_node(ptr, kind);
+            Ok((ptr, kind))
+        }
+        leaf => {
+            let expected = expected_heap_field_kind(leaf);
+            serializable_to_slot(leaf, expected, store)
+        }
+    }
+}
+
+/// GC Phase 5 (v7): bump ONE refcount share on a materialized heap node, via
+/// the per-`HeapKind` retain primitive. Identity-map dispatch on the recorded
+/// `NativeKind::Ptr(HeapKind::*)` — no `is_heap()` probe, no bits decode.
+fn retain_one_node(ptr: u64, kind: NativeKind) {
+    match kind {
+        NativeKind::Ptr(HeapKind::TypedObject) => unsafe {
+            shape_value::v2::refcount::v2_retain(ptr as *const shape_value::v2::heap_header::HeapHeader);
+        },
+        NativeKind::Ptr(HeapKind::TypedArray) => unsafe {
+            shape_value::v2::typed_array::retain_v2_typed_array(ptr as *mut u8);
+        },
+        NativeKind::Ptr(HeapKind::HashMap) => unsafe {
+            Arc::increment_strong_count(ptr as *const shape_value::heap_value::HashMapKindedRef);
+        },
+        _ => {
+            debug_assert!(
+                false,
+                "retain_one_node: non-node kind {kind:?} — heap_node_map only \
+                 records TypedObject / TypedArray / HashMap identities"
+            );
+        }
+    }
+}
+
+/// GC Phase 5 (v7): retire ONE share on a materialized heap node (the error-
+/// path inverse of [`retain_one_node`], decrement-and-maybe-free per kind).
+fn retain_release_one_node(ptr: u64, kind: NativeKind) {
+    use shape_value::heap_value::{HashMapKindedRef, TypedObjectStorage};
+    use shape_value::v2::heap_element::HeapElement;
+    use shape_value::v2::typed_array::release_v2_typed_array;
+    match kind {
+        NativeKind::Ptr(HeapKind::TypedObject) => unsafe {
+            TypedObjectStorage::release_elem(ptr as *const TypedObjectStorage);
+        },
+        NativeKind::Ptr(HeapKind::TypedArray) => unsafe {
+            release_v2_typed_array(ptr as *mut u8);
+        },
+        NativeKind::Ptr(HeapKind::HashMap) => unsafe {
+            Arc::decrement_strong_count(ptr as *const HashMapKindedRef);
+        },
+        _ => {}
     }
 }
 
@@ -2202,6 +2744,22 @@ pub fn serializable_to_slot_ctx(
         (SV::SharedCell { handle, .. }, NativeKind::Ptr(HeapKind::SharedCell))
         | (SV::SharedCellRef { handle }, NativeKind::Ptr(HeapKind::SharedCell)) => {
             link_shared_cell(*handle, ctx)
+        }
+        // GC Phase 5 (v7): a top-level slot holding a cycle-capable node (body
+        // or back-edge) resolves to the ONE Pass-1-materialized allocation and
+        // takes one owned share. `expected_kind` is ignored — the identity-map
+        // entry carries the authoritative recorded `NativeKind` (never
+        // fabricated from bits). Pass 1 (`materialize_cell_bodies`) already
+        // ran over every top-level slot, so the handle is present.
+        (SV::HeapNode { handle, .. }, _) | (SV::HeapRef { handle }, _) => {
+            let (ptr, kind) = *ctx.heap_node_map.get(handle).ok_or_else(|| {
+                format!(
+                    "serializable_to_slot_ctx: GC-Phase-5 surface — heap node handle \
+                     {handle} has no Pass-1 materialization. ADR-006 §2.7.30.5."
+                )
+            })?;
+            retain_one_node(ptr, kind);
+            Ok((ptr, kind))
         }
         // Everything else — ctx-free.
         _ => serializable_to_slot(sv, expected_kind, store),
@@ -2339,6 +2897,27 @@ pub fn serializable_to_slot(
     store: &SnapshotStore,
 ) -> std::result::Result<(u64, NativeKind), String> {
     use SerializableVMValue as SV;
+    // GC Phase 5 (v7): a standalone (ctx-free) single-value restore of a
+    // cycle-capable node. The symmetric `slot_to_serializable` owns a fresh
+    // `SerializeIdentityCtx`, so a lone TypedObject / heap-element array /
+    // TypedObject-valued map is emitted HeapNode-wrapped (and a self-cyclic
+    // value carries an internal HeapRef). Spin a matching local two-pass
+    // `RestoreLinkCtx` so the value round-trips with its internal identity /
+    // cycles intact — the same machinery the whole-VM driver threads across
+    // slots, scoped here to one value. (Recursive field/element restores never
+    // reach here as a HeapNode — `resolve_child` intercepts those under the
+    // shared ctx, so this only fires at a genuine standalone top level.)
+    if matches!(sv, SV::HeapNode { .. } | SV::HeapRef { .. }) {
+        let mut ctx = RestoreLinkCtx::new();
+        let result = (|| {
+            materialize_cell_bodies(sv, store, &mut ctx)?;
+            serializable_to_slot_ctx(sv, expected_kind, store, &mut ctx)
+        })();
+        // Base shares are scaffolding; the returned slot owns its own Pass-2
+        // share. Release on both success and error (LIFO, balanced).
+        ctx.release_base_shares();
+        return result;
+    }
     // Scalar projections — discriminator must match `expected_kind`'s
     // family (signed/unsigned/float/bool/string/heap).
     match (sv, expected_kind) {
@@ -3102,6 +3681,8 @@ fn serializable_arm_name(sv: &SerializableVMValue) -> &'static str {
         SV::LazyOpaque { .. } => "LazyOpaque",
         SV::Char(_) => "Char",
         SV::BigInt(_) => "BigInt",
+        SV::HeapNode { .. } => "HeapNode",
+        SV::HeapRef { .. } => "HeapRef",
     }
 }
 
@@ -3207,7 +3788,15 @@ mod l5_typed_object_result_option_snapshot_tests {
         );
 
         let sv = slot_to_serializable(none.raw(), none.kind(), &store).expect("serialize none");
-        match &sv {
+        // GC Phase 5 (v7): TypedObjects are identity-interned, so the snapshot
+        // is a `HeapNode` body wrapping `SV::TypedObject`. Unwrap for the shape
+        // assertion; the round-trip (via `serializable_to_slot`, which spins a
+        // local two-pass for a standalone HeapNode) is unchanged.
+        let body = match &sv {
+            SV::HeapNode { body, .. } => &**body,
+            other => panic!("expected HeapNode(TypedObject), got {other:?}"),
+        };
+        match body {
             SV::TypedObject {
                 schema_id,
                 slot_data,
@@ -3404,15 +3993,23 @@ mod l5_typed_object_result_option_snapshot_tests {
         let some_sv =
             slot_to_serializable(some.raw(), some.kind(), &store).expect("serialize some");
 
+        // GC Phase 5 (v7): TypedObjects are identity-interned → `HeapNode`-
+        // wrapped. Unwrap the body before asserting the schema.
+        let unwrap = |sv: &SV| -> SV {
+            match sv {
+                SV::HeapNode { body, .. } => (**body).clone(),
+                other => panic!("expected HeapNode(TypedObject), got {other:?}"),
+            }
+        };
         assert!(matches!(
-            ok_sv,
+            unwrap(&ok_sv),
             SV::TypedObject {
                 schema_id,
                 ..
             } if schema_id == schemas.result as u64
         ));
         assert!(matches!(
-            some_sv,
+            unwrap(&some_sv),
             SV::TypedObject {
                 schema_id,
                 ..
@@ -3584,29 +4181,40 @@ mod wf2g_gap_b_heap_element_array_tests {
 
         let sv = slot_to_serializable(bits, NativeKind::Ptr(HeapKind::TypedArray), &store)
             .expect("project Array<TypedObject>");
-        match &sv {
+        // GC Phase 5 (v7): a TypedObject-element array is now identity-interned,
+        // so it projects as a `HeapNode` body wrapping `SV::Array`, and each
+        // element TypedObject is itself a `HeapNode`. Unwrap both levels; the
+        // round-trip identity is unchanged.
+        let array_body = match &sv {
+            SV::HeapNode { body, .. } => &**body,
+            other => panic!("expected HeapNode(Array), got {other:?}"),
+        };
+        match array_body {
             SV::Array(elems) => {
                 assert_eq!(elems.len(), 2);
                 let got: Vec<(u64, i64)> = elems
                     .iter()
                     .map(|e| match e {
-                        SV::TypedObject {
-                            schema_id,
-                            slot_data,
-                            ..
-                        } => {
-                            let v = match &slot_data[0] {
-                                SV::Int(i) => *i,
-                                other => panic!("expected SV::Int field, got {other:?}"),
-                            };
-                            (*schema_id, v)
-                        }
-                        other => panic!("expected SV::TypedObject, got {other:?}"),
+                        SV::HeapNode { body, .. } => match &**body {
+                            SV::TypedObject {
+                                schema_id,
+                                slot_data,
+                                ..
+                            } => {
+                                let v = match &slot_data[0] {
+                                    SV::Int(i) => *i,
+                                    other => panic!("expected SV::Int field, got {other:?}"),
+                                };
+                                (*schema_id, v)
+                            }
+                            other => panic!("expected HeapNode(TypedObject), got {other:?}"),
+                        },
+                        other => panic!("expected HeapNode element, got {other:?}"),
                     })
                     .collect();
                 assert_eq!(got, vec![(4242, 10), (4242, 20)]);
             }
-            other => panic!("expected SV::Array, got {other:?}"),
+            other => panic!("expected SV::Array body, got {other:?}"),
         }
 
         let (rbits, rkind) =
@@ -4116,5 +4724,534 @@ mod opaque_disposition_tests {
             before, 0,
             "no base share was committed for the cycle-aborted body"
         );
+    }
+}
+
+/// GC Phase 5 (snapshot v7, real-gc-cycle-collection.md §0 #4 / §6):
+/// the identity-map is generalized from `SharedCell`/`Reference` to every
+/// cycle-capable `HeapKind`. These tests exercise the new `HeapNode` /
+/// `HeapRef` wire arms at the slot/ctx level (the same tier as the STAGE-R5
+/// SharedCell round-trip tests above): an OBJECT cycle round-trips with
+/// identity, containers holding shared/cyclic nodes round-trip, a doubly-
+/// referenced acyclic object dedups to one node, and a v6 snapshot is
+/// version-refused.
+#[cfg(test)]
+mod gc_phase5_identity_tests {
+    use super::{
+        RestoreLinkCtx, SerializableVMValue as SV, SerializeIdentityCtx, SnapshotStore,
+        materialize_cell_bodies, serializable_to_slot_ctx, slot_to_serializable_ctx,
+    };
+    use shape_value::heap_value::{
+        HashMapData, HashMapKindedRef, TypedObjectPtr, TypedObjectStorage,
+    };
+    use shape_value::v2::heap_element::HeapElement;
+    use shape_value::v2::heap_header::HeapHeader;
+    use shape_value::v2::refcount::{v2_get_refcount, v2_retain};
+    use shape_value::v2::typed_array::{
+        ELEM_TYPE_TYPED_OBJECT, TypedArray, release_v2_typed_array, stamp_elem_type,
+    };
+    use shape_value::{HeapKind, NativeKind, ValueSlot};
+    use std::sync::Arc;
+
+    fn store() -> (tempfile::TempDir, SnapshotStore) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let st = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        (tmp, st)
+    }
+
+    /// Read a v2-header refcount off any header-carrier ptr (header @ offset 0).
+    fn rc(ptr: u64) -> u32 {
+        unsafe { v2_get_refcount(ptr as *const HeapHeader) }
+    }
+
+    /// Build a fresh single-`int`-field TypedObject (acyclic, refcount 1).
+    fn make_int_object(int_val: i64) -> *mut TypedObjectStorage {
+        let slots = vec![ValueSlot::from_int(int_val)].into_boxed_slice();
+        let field_kinds: Arc<[NativeKind]> = vec![NativeKind::Int64].into();
+        TypedObjectStorage::_new(42, slots, 0, field_kinds)
+    }
+
+    /// Build a self-linked `type Node { first: int, next: Node? }` object:
+    /// field 0 = `Int(seed)`, field 1 = a `Ptr(TypedObject)` pointing at the
+    /// node itself. Returns a ptr with refcount 2 = {caller holder, self-edge}
+    /// — exactly the runtime shape of `let n = Node(...); n.next = n`.
+    fn make_self_cyclic_object(seed: i64) -> *mut TypedObjectStorage {
+        let slots = vec![ValueSlot::from_int(seed), ValueSlot::from_raw(0)].into_boxed_slice();
+        let field_kinds: Arc<[NativeKind]> =
+            vec![NativeKind::Int64, NativeKind::Ptr(HeapKind::TypedObject)].into();
+        // heap_mask 0 initially: field 1 is a null placeholder (drop-safe).
+        let ptr = TypedObjectStorage::_new(9, slots, 0, field_kinds);
+        unsafe {
+            // n.next = n : the self-edge owns one share.
+            v2_retain(ptr as *const HeapHeader);
+            let _ = TypedObjectStorage::write_slot_in_place(ptr, 1, ptr as u64);
+            *std::ptr::addr_of_mut!((*ptr).heap_mask) = 1 << 1;
+        }
+        ptr
+    }
+
+    /// Break a self-cyclic object's `next` self-edge (heap_mask→0 so the drop
+    /// walk never touches a freed peer) and retire `count` shares. Safe,
+    /// double-free-free teardown for the tests' hand-built cyclic graphs.
+    unsafe fn dismantle(ptr: *mut TypedObjectStorage, count: u32) {
+        unsafe {
+            *std::ptr::addr_of_mut!((*ptr).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(ptr, 1, 0);
+            for _ in 0..count {
+                TypedObjectStorage::release_elem(ptr);
+            }
+        }
+    }
+
+    /// (a) An OBJECT cycle (`type Node { var next: Node? }` self-linked)
+    /// round-trips: the restored node's `next` field aliases the restored node
+    /// ITSELF (identity preserved), with no infinite recursion and no
+    /// duplication. Pre-v7 this INFINITE-RECURSED the serializer.
+    #[test]
+    fn object_cycle_roundtrips_with_identity() {
+        let (_tmp, st) = store();
+        let o = make_self_cyclic_object(42);
+
+        // SERIALIZE through one shared ctx.
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv = slot_to_serializable_ctx(
+            o as u64,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut ictx,
+        )
+        .expect("serialize self-cyclic object (no infinite recursion)");
+
+        // Wire shape: HeapNode body whose `next` field is a HeapRef back to
+        // the SAME handle (the cycle broken by identity).
+        match &sv {
+            SV::HeapNode { handle, body } => match &**body {
+                SV::TypedObject {
+                    slot_data,
+                    heap_mask,
+                    ..
+                } => {
+                    assert_eq!(*heap_mask, 1 << 1, "field 1 (next) is the heap self-edge");
+                    assert!(matches!(slot_data[0], SV::Int(42)));
+                    match &slot_data[1] {
+                        SV::HeapRef { handle: h2 } => {
+                            assert_eq!(h2, handle, "next is a back-edge to the node itself")
+                        }
+                        other => panic!("expected HeapRef self-edge, got {other:?}"),
+                    }
+                }
+                other => panic!("expected TypedObject body, got {other:?}"),
+            },
+            other => panic!("expected HeapNode, got {other:?}"),
+        }
+
+        // RESTORE via the two-pass driver.
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv, &st, &mut link).expect("pass 1");
+        let (rbits, rkind) = serializable_to_slot_ctx(
+            &sv,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut link,
+        )
+        .expect("pass 2");
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedObject));
+
+        // IDENTITY: the restored node's `next` slot points at the restored
+        // node itself — one allocation, a real cycle, not two copies.
+        let ro = rbits as *const TypedObjectStorage;
+        let next_bits = unsafe { (*ro).slots()[1].raw() };
+        assert_eq!(
+            next_bits, rbits,
+            "restored Node.next aliases the SAME restored node (identity preserved, no duplication)"
+        );
+        assert_eq!(unsafe { (*ro).slots()[0].raw() }, 42, "scalar field survives");
+
+        // Refcount after base-share release = {Pass-2 external slot, self-edge}.
+        link.release_base_shares();
+        assert_eq!(rc(rbits), 2, "external slot + one self-edge — no leaked/extra share");
+
+        // Teardown (both restored + original cyclic graphs).
+        unsafe {
+            dismantle(rbits as *mut TypedObjectStorage, 2);
+            dismantle(o, 2);
+        }
+    }
+
+    /// (c) A doubly-referenced (shared, ACYCLIC) object resumes as ONE node:
+    /// two slots holding the same object dedupe to a single restored
+    /// allocation (pre-v7 they duplicated into two).
+    #[test]
+    fn shared_acyclic_object_dedupes_to_one_node() {
+        let (_tmp, st) = store();
+        let a = make_int_object(7);
+        // Two slots share `a` (two owning shares).
+        unsafe { v2_retain(a as *const HeapHeader) };
+        let slot0 = a as u64;
+        let slot1 = a as u64;
+
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv0 = slot_to_serializable_ctx(
+            slot0,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut ictx,
+        )
+        .unwrap();
+        let sv1 = slot_to_serializable_ctx(
+            slot1,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut ictx,
+        )
+        .unwrap();
+        // First carrier = body; second = back-edge to the same handle.
+        let h = match (&sv0, &sv1) {
+            (SV::HeapNode { handle, .. }, SV::HeapRef { handle: h2 }) => {
+                assert_eq!(handle, h2, "both carriers share one identity handle");
+                *handle
+            }
+            other => panic!("expected body + back-edge, got {other:?}"),
+        };
+        let _ = h;
+
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv0, &st, &mut link).unwrap();
+        materialize_cell_bodies(&sv1, &st, &mut link).unwrap();
+        let (r0, _) = serializable_to_slot_ctx(
+            &sv0,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        let (r1, _) = serializable_to_slot_ctx(
+            &sv1,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        assert_eq!(r0, r1, "two carriers of one shared object dedupe to ONE restored node");
+        link.release_base_shares();
+        assert_eq!(rc(r0), 2, "exactly two slot shares on the one deduped node");
+
+        // Teardown: restored node (2 slot shares) + original (2 shares).
+        unsafe {
+            TypedObjectStorage::release_elem(r0 as *const TypedObjectStorage);
+            TypedObjectStorage::release_elem(r0 as *const TypedObjectStorage);
+            TypedObjectStorage::release_elem(a);
+            TypedObjectStorage::release_elem(a);
+        }
+    }
+
+    /// (b-array) A TypedArray holding a self-cyclic node round-trips with
+    /// identity: the restored array's element is a node whose `next` aliases
+    /// itself, and the array holds exactly that one allocation.
+    #[test]
+    fn typed_array_holding_cyclic_node_roundtrips() {
+        let (_tmp, st) = store();
+        let o = make_self_cyclic_object(5); // rc 2 {holder, self-edge}
+        let arr = TypedArray::<*const TypedObjectStorage>::with_capacity(1);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+            v2_retain(o as *const HeapHeader); // array's element share
+            TypedArray::<*const TypedObjectStorage>::push(arr, o as *const TypedObjectStorage);
+        }
+
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv = slot_to_serializable_ctx(
+            arr as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+            &st,
+            &mut ictx,
+        )
+        .expect("serialize array-of-cyclic-object (no infinite recursion)");
+        // HeapNode{Array([HeapNode{TypedObject...}])}
+        match &sv {
+            SV::HeapNode { body, .. } => match &**body {
+                SV::Array(elems) => {
+                    assert_eq!(elems.len(), 1);
+                    assert!(matches!(elems[0], SV::HeapNode { .. }));
+                }
+                other => panic!("expected Array body, got {other:?}"),
+            },
+            other => panic!("expected HeapNode, got {other:?}"),
+        }
+
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv, &st, &mut link).unwrap();
+        let (rbits, rkind) = serializable_to_slot_ctx(
+            &sv,
+            NativeKind::Ptr(HeapKind::TypedArray),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedArray));
+
+        // The restored array's element 0 is a node whose `next` aliases itself.
+        let elem0 = unsafe {
+            TypedArray::<*const TypedObjectStorage>::get_unchecked(
+                rbits as *const TypedArray<*const TypedObjectStorage>,
+                0,
+            )
+        };
+        let elem_next = unsafe { (*elem0).slots()[1].raw() };
+        assert_eq!(
+            elem_next, elem0 as u64,
+            "restored array element's next aliases the element itself (cyclic identity preserved)"
+        );
+
+        link.release_base_shares();
+
+        // Teardown. Restored: arr' rc 1 (external), elem0 rc 2 {array edge, self}.
+        unsafe {
+            *std::ptr::addr_of_mut!((*(elem0 as *mut TypedObjectStorage)).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(elem0 as *mut TypedObjectStorage, 1, 0);
+            release_v2_typed_array(rbits as *mut u8); // frees arr', releases one elem edge
+            TypedObjectStorage::release_elem(elem0); // retire the orphaned self-edge
+            // Original serialize-side graph.
+            *std::ptr::addr_of_mut!((*o).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(o, 1, 0);
+            release_v2_typed_array(arr as *mut u8); // frees orig arr, releases one o edge
+            TypedObjectStorage::release_elem(o); // holder
+            TypedObjectStorage::release_elem(o); // orphaned self-edge
+        }
+    }
+
+    /// (b-hashmap) A `HashMap<string, TypedObject>` holding a shared node
+    /// round-trips with identity: two keys mapping to the SAME object dedupe
+    /// to one restored allocation.
+    #[test]
+    fn hashmap_holding_shared_node_roundtrips() {
+        let (_tmp, st) = store();
+        let a = make_int_object(11); // rc 1
+        let mut data: HashMapData<TypedObjectPtr> = HashMapData::new();
+        unsafe {
+            // Two keys share `a` (two owning shares held by the map).
+            v2_retain(a as *const HeapHeader);
+            v2_retain(a as *const HeapHeader);
+            data.insert("x", TypedObjectPtr::new(a));
+            data.insert("y", TypedObjectPtr::new(a));
+        }
+        let kref = Arc::new(HashMapKindedRef::TypedObject(Arc::new(data)));
+        let map_bits = Arc::into_raw(kref) as u64;
+
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv = slot_to_serializable_ctx(
+            map_bits,
+            NativeKind::Ptr(HeapKind::HashMap),
+            &st,
+            &mut ictx,
+        )
+        .expect("serialize map-of-shared-object");
+        // HeapNode{HashMap{keys:[x,y], values:[HeapNode, HeapRef]}}
+        match &sv {
+            SV::HeapNode { body, .. } => match &**body {
+                SV::HashMap { keys, values } => {
+                    assert_eq!(keys.len(), 2);
+                    assert!(matches!(values[0], SV::HeapNode { .. }));
+                    assert!(matches!(values[1], SV::HeapRef { .. }));
+                }
+                other => panic!("expected HashMap body, got {other:?}"),
+            },
+            other => panic!("expected HeapNode, got {other:?}"),
+        }
+
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv, &st, &mut link).unwrap();
+        let (rbits, rkind) = serializable_to_slot_ctx(
+            &sv,
+            NativeKind::Ptr(HeapKind::HashMap),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::HashMap));
+
+        // Both restored values alias ONE node (dedup).
+        let restored = unsafe { Arc::<HashMapKindedRef>::from_raw(rbits as *const HashMapKindedRef) };
+        match &*restored {
+            HashMapKindedRef::TypedObject(map_arc) => {
+                assert_eq!(map_arc.len(), 2);
+                let (v0, v1) = unsafe {
+                    let v0: &TypedObjectPtr = &*(*map_arc.values).data.add(0);
+                    let v1: &TypedObjectPtr = &*(*map_arc.values).data.add(1);
+                    (v0.as_ptr(), v1.as_ptr())
+                };
+                assert_eq!(v0, v1, "both map values dedupe to ONE restored node");
+                assert_eq!(unsafe { (*v0).slots()[0].raw() }, 11, "shared node value survives");
+            }
+            _ => panic!("expected TypedObject-valued map"),
+        }
+        let _ = Arc::into_raw(restored); // restore the slot share
+
+        link.release_base_shares();
+        // Teardown.
+        unsafe {
+            Arc::decrement_strong_count(rbits as *const HashMapKindedRef); // restored map
+            Arc::decrement_strong_count(map_bits as *const HashMapKindedRef); // original map
+        }
+    }
+
+    /// (d) A plain scalar round-trip is UNAFFECTED by the generalization
+    /// (no HeapNode wrapping for non-cycle-capable values).
+    #[test]
+    fn scalar_slot_roundtrip_unwrapped() {
+        let (_tmp, st) = store();
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv = slot_to_serializable_ctx(99u64, NativeKind::Int64, &st, &mut ictx).unwrap();
+        assert!(matches!(sv, SV::Int(99)), "scalars are never HeapNode-wrapped");
+    }
+
+    /// (e) A v6 snapshot is version-REFUSED cleanly at v7 — never misparsed,
+    /// never Bool-defaulted.
+    #[test]
+    fn v6_snapshot_is_version_refused() {
+        use super::{ExecutionSnapshot, SNAPSHOT_VERSION};
+        use crate::hashing::HashDigest;
+        let (_tmp, st) = store();
+        assert_eq!(SNAPSHOT_VERSION, 7, "this build reads v7");
+        let stale = ExecutionSnapshot {
+            version: 6,
+            created_at_ms: 0,
+            semantic_hash: HashDigest::from_hex(&"0".repeat(64)),
+            context_hash: HashDigest::from_hex(&"0".repeat(64)),
+            vm_hash: None,
+            bytecode_hash: None,
+            code_manifest: None,
+            script_path: None,
+            label: None,
+        };
+        let hash = st.put_snapshot(&stale).expect("write v6 envelope");
+        let err = st
+            .get_snapshot(&hash)
+            .expect_err("a v6 snapshot must be refused at v7");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unsupported snapshot version 6") && msg.contains("v6→v7"),
+            "expected a clean version-refusal, got: {msg}"
+        );
+    }
+
+    /// (b-mutual, independent adversarial 2026-07-08) A TWO-NODE mutual cycle
+    /// (`A.next = B`, `B.next = A` across DISTINCT objects) round-trips with
+    /// identity: restored `A'` and `B'` point at each other (A'->B'->A'), two
+    /// distinct allocations forming ONE cycle, no duplication, no infinite
+    /// recursion. Exercises interning a FORWARD child (B nested inside A's
+    /// field) followed by a back-edge to an already-interned ANCESTOR (A) —
+    /// the canonical cross-object cycle the self-loop case does not fully
+    /// cover, and the shape that would infinite-recurse if the serialize ctx
+    /// were forked per field instead of threaded.
+    #[test]
+    fn two_node_mutual_cycle_roundtrips_with_identity() {
+        let (_tmp, st) = store();
+        let mk = |seed: i64| -> *mut TypedObjectStorage {
+            let slots =
+                vec![ValueSlot::from_int(seed), ValueSlot::from_raw(0)].into_boxed_slice();
+            let field_kinds: Arc<[NativeKind]> =
+                vec![NativeKind::Int64, NativeKind::Ptr(HeapKind::TypedObject)].into();
+            TypedObjectStorage::_new(9, slots, 0, field_kinds)
+        };
+        let a = mk(1); // rc 1 (holder)
+        let b = mk(2); // rc 1 (holder)
+        unsafe {
+            // A.next = B (B's forward-edge share) ; B.next = A (A's back-edge share)
+            v2_retain(b as *const HeapHeader);
+            let _ = TypedObjectStorage::write_slot_in_place(a, 1, b as u64);
+            *std::ptr::addr_of_mut!((*a).heap_mask) = 1 << 1;
+            v2_retain(a as *const HeapHeader);
+            let _ = TypedObjectStorage::write_slot_in_place(b, 1, a as u64);
+            *std::ptr::addr_of_mut!((*b).heap_mask) = 1 << 1;
+        }
+
+        // SERIALIZE from A — must terminate.
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv = slot_to_serializable_ctx(
+            a as u64,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut ictx,
+        )
+        .expect("serialize mutual cycle (no infinite recursion)");
+        // HeapNode(hA){TO{Int(1), HeapNode(hB){TO{Int(2), HeapRef(hA)}}}}
+        let h_a = match &sv {
+            SV::HeapNode { handle, body } => match &**body {
+                SV::TypedObject { slot_data, .. } => {
+                    match &slot_data[1] {
+                        SV::HeapNode { body: bb, .. } => match &**bb {
+                            SV::TypedObject { slot_data: sd_b, .. } => match &sd_b[1] {
+                                SV::HeapRef { handle: hb } => assert_eq!(
+                                    hb, handle,
+                                    "B.next back-edges to A's handle (mutual cycle broken)"
+                                ),
+                                other => panic!("expected HeapRef to A, got {other:?}"),
+                            },
+                            other => panic!("expected nested TypedObject(B), got {other:?}"),
+                        },
+                        other => panic!("expected nested HeapNode(B), got {other:?}"),
+                    }
+                    *handle
+                }
+                other => panic!("expected TypedObject body, got {other:?}"),
+            },
+            other => panic!("expected HeapNode, got {other:?}"),
+        };
+        let _ = h_a;
+
+        // RESTORE via the two-pass driver.
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv, &st, &mut link).expect("pass 1");
+        let (ra, rkind) = serializable_to_slot_ctx(
+            &sv,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut link,
+        )
+        .expect("pass 2");
+        assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedObject));
+
+        // IDENTITY: A'->B'->A', two distinct allocations, one cycle.
+        let ra_ptr = ra as *const TypedObjectStorage;
+        let rb = unsafe { (*ra_ptr).slots()[1].raw() };
+        let rb_ptr = rb as *const TypedObjectStorage;
+        assert_ne!(ra, rb, "A' and B' are distinct allocations (no collapse)");
+        let rb_next = unsafe { (*rb_ptr).slots()[1].raw() };
+        assert_eq!(
+            rb_next, ra,
+            "B'.next aliases A' — the mutual cycle's identity is preserved"
+        );
+        assert_eq!(unsafe { (*ra_ptr).slots()[0].raw() }, 1, "A' scalar survives");
+        assert_eq!(unsafe { (*rb_ptr).slots()[0].raw() }, 2, "B' scalar survives");
+
+        link.release_base_shares();
+        // A' rc2 {external ra, B'->A' back-edge}; B' rc1 {A'->B' forward-edge}.
+        assert_eq!(rc(ra), 2, "A': external slot + B's back-edge");
+        assert_eq!(rc(rb), 1, "B': A's forward-edge only (base released)");
+
+        // Teardown: break every edge first (heap_mask->0, next->0) so no drop
+        // walk touches a freed peer, then retire shares to 0. Counts gated by
+        // the rc asserts above, so a miscount fails an assert, never crashes.
+        unsafe {
+            let rap = ra as *mut TypedObjectStorage;
+            let rbp = rb as *mut TypedObjectStorage;
+            *std::ptr::addr_of_mut!((*rap).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(rap, 1, 0);
+            *std::ptr::addr_of_mut!((*rbp).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(rbp, 1, 0);
+            TypedObjectStorage::release_elem(ra_ptr);
+            TypedObjectStorage::release_elem(ra_ptr);
+            TypedObjectStorage::release_elem(rb_ptr);
+
+            *std::ptr::addr_of_mut!((*a).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(a, 1, 0);
+            *std::ptr::addr_of_mut!((*b).heap_mask) = 0;
+            let _ = TypedObjectStorage::write_slot_in_place(b, 1, 0);
+            TypedObjectStorage::release_elem(a);
+            TypedObjectStorage::release_elem(a);
+            TypedObjectStorage::release_elem(b);
+            TypedObjectStorage::release_elem(b);
+        }
     }
 }
