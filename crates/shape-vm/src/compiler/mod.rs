@@ -1730,6 +1730,21 @@ pub struct BytecodeCompiler {
     /// numeric proof-gap.
     pub(crate) deferring_uninstantiated_template_body: bool,
 
+    /// wave7 finance-field-arith-gap (repair): nesting depth of
+    /// call-/method-argument compilation. Non-zero while an argument
+    /// expression is being lowered for a function or method call.
+    ///
+    /// The implicit-generic function-as-value guard in
+    /// `compile_expr_identifier` (which refuses capturing a
+    /// `fn f(row) { row.high - row.low }`-shaped template as a first-class
+    /// value, since the un-monomorphized template blob would silently drop an
+    /// operand / dynamic-dispatch) must NOT fire when the function identifier
+    /// is passed DIRECTLY as a call/HOF argument (`[1,2,3].map(double)`). A
+    /// bare `let f = double` capture (depth 0) still errors — that is the
+    /// genuinely-unsound reachability the guard keeps closed — but a direct
+    /// HOF-consumer argument (depth > 0) is exempt so it compiles and runs.
+    pub(crate) call_argument_depth: u32,
+
     /// Package-scoped native library resolutions for the current host.
     pub(crate) native_resolution_context:
         Option<shape_runtime::native_resolution::NativeResolutionSet>,

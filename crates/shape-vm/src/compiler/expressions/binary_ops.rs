@@ -10,8 +10,9 @@ use shape_runtime::type_schema::{FieldType, SchemaId};
 use super::super::BytecodeCompiler;
 use super::numeric_ops::{
     CoercionPlan, apply_coercion, inferred_type_to_numeric, is_function_type,
-    is_ordered_comparison, is_strict_arithmetic, is_strict_bitwise, is_type_numeric,
-    literal_numeric_type, plan_coercion, type_display_name, typed_opcode_for,
+    is_operator_trait_noop_primitive, is_ordered_comparison, is_strict_arithmetic,
+    is_strict_bitwise, is_type_numeric, literal_numeric_type, plan_coercion, type_display_name,
+    typed_opcode_for,
 };
 
 /// Map a BinaryOp to its operator trait name, if one exists.
@@ -133,6 +134,16 @@ fn try_emit_trait_dispatch(
         });
     let has_trait = has_trait_via_schema
         || compiler.infer_expr_type(left_expr).ok().is_some_and(|ty| {
+            // A builtin primitive scalar (int/number/…/bool/string) carries a
+            // no-op operator-trait registration for `<T: Add>` bound checking
+            // only — it has no dispatchable operator method. Reaching here for
+            // such a type means the typed-opcode kind proof failed; emitting a
+            // `CallMethod("sub")` would be a runtime dynamic-dispatch fallback
+            // ("no method 'sub' on receiver kind Float64"). Decline so the
+            // strict-typing compile error fires instead of the dynamic path.
+            if is_operator_trait_noop_primitive(&ty) {
+                return false;
+            }
             let name = type_display_name(&ty);
             compiler
                 .type_inference
@@ -337,26 +348,28 @@ impl BytecodeCompiler {
     // turns into the strict `strict_typing_binop_error` surface-and-stop. The
     // strictness the guard provided is preserved by the single source.
 
-    /// A-final ROOT-C: deferred-template numeric-binop placeholder.
+    /// Deferred-template numeric-binop placeholder.
     ///
     /// Returns `true` (and emits a stack-balancing `Pop`) when this binop is
     /// being compiled inside the body of an *uninstantiated implicit-generic*
-    /// function (`fn add(a, b) { a + b }`, never called, params stay
-    /// unresolved type variables — see `is_uninstantiated_implicit_generic`).
-    /// Such a body is a deferred template whose bytecode is DEAD (re-emitted
-    /// with proven kinds per concrete call site), so the polymorphic-numeric
-    /// proof-gap (no proven `NativeKind` on the operands) must NOT abort
-    /// compilation with a typed-opcode / strict-typing error.
+    /// function (`fn add(a, b) { a + b }`, params stay unresolved type
+    /// variables — see `is_uninstantiated_implicit_generic`). Such a body is a
+    /// deferred TEMPLATE whose bytecode is DEAD: a concrete direct call site
+    /// re-emits a monomorphized specialization with proven kinds, and every
+    /// path that would make the template blob itself LIVE — taking the function
+    /// as a value / an indirect call, the only reachability the
+    /// wave7 finance-field-arith-gap diagnosis found for this blob — is now
+    /// refused at compile time (the function-as-value guard in
+    /// `compile_expr_identifier` + the direct-call guard in `function_calls.rs`,
+    /// both keyed on `implicit_generic_body_requires_concrete_emission`, which
+    /// the `PropertyAccess`/`IndexAccess` fix to `expr_mentions_any_name` now
+    /// sees object-field arithmetic through). The placeholder therefore never
+    /// runs — it is not a silent operand-drop of live code — and it stamps NO
+    /// fabricated typed numeric opcode / default kind.
     ///
     /// Both operand values are already on the stack at every binop terminal
-    /// that calls this (compiled before the numeric-emit decision), so a single
-    /// `Pop` (2 → 1) keeps the dead blob stack-balanced. NO fabricated typed
-    /// numeric opcode, no default kind, no int-VALUE->number widening is
-    /// emitted — and the blob never runs. STRUCTURAL/schema body checks
-    /// (object-spread-without-known-schema, etc.) are unaffected: they
-    /// `return Err` from their own emit paths and never reach this numeric-only
-    /// deferral. This narrows the prior whole-body skip so a genuine structural
-    /// error is no longer suppressed alongside the benign numeric proof-gap.
+    /// that calls this, so a single `Pop` (2 → 1) keeps the dead blob
+    /// stack-balanced.
     fn defer_template_numeric_binop(&mut self) -> bool {
         if !self.deferring_uninstantiated_template_body {
             return false;
@@ -2147,9 +2160,13 @@ impl BytecodeCompiler {
                                 left,
                                 op_span,
                             ) {
-                                // A-final ROOT-C: defer the dead deferred-template
-                                // body's unprovable-kind `a + b` (emit Pop, no
-                                // typed opcode) instead of the strict-typing error.
+                                // Dead deferred-template body: emit the Pop
+                                // placeholder (see `defer_template_numeric_binop`
+                                // — the blob is compile-time-unreachable). A LIVE
+                                // unprovable numeric `a + b` never reaches here:
+                                // its function-as-value / indirect reachability is
+                                // refused at compile time, and its concrete direct
+                                // call monomorphizes. Otherwise surface-and-stop.
                                 if self.defer_template_numeric_binop() {
                                     return Ok(());
                                 }
@@ -2767,7 +2784,8 @@ impl BytecodeCompiler {
                         // Strict-typing sweep (Phase 1): the historical
                         // dynamic-opcode fallback is now a hard compile error.
                         if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
-                            // A-final ROOT-C: defer dead-template numeric binop.
+                            // Dead deferred-template body Pop placeholder; a LIVE
+                            // unprovable binop is refused at compile time upstream.
                             if self.defer_template_numeric_binop() {
                                 return Ok(());
                             }
@@ -2790,7 +2808,8 @@ impl BytecodeCompiler {
                                 // Strict-typing sweep (Phase 1): the historical
                                 // dynamic-opcode fallback is now a hard compile error.
                                 if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
-                                    // A-final ROOT-C: defer dead-template numeric binop.
+                                    // Dead deferred-template body Pop placeholder;
+                                    // a LIVE unprovable binop is refused upstream.
                                     if self.defer_template_numeric_binop() {
                                         return Ok(());
                                     }
@@ -4479,6 +4498,162 @@ mod w28_enum_field_equality_static_proof_tests {
             msg.contains("A is not compatible with B")
                 || msg.contains("Cannot infer types for binary operation"),
             "unexpected cross-enum equality diagnostic: {msg}"
+        );
+    }
+}
+
+/// wave7 finance-field-arith-gap (reliableonly_strict_bypass class).
+///
+/// NON-FINANCE regression cover for the general strict-typing gap where
+/// arithmetic on an object field of an *untyped / implicit-generic parameter*
+/// did not error: pre-fix it either silently DROPPED an operand
+/// (`fn candle_range(row) { row.high - row.low }` captured indirectly returned
+/// `row.high` = 12.0, not 7.0) or lowered to a runtime DYNAMIC `sub` dispatch
+/// (`abs(row.close - row.open)` → "no method 'sub' on receiver kind Float64").
+/// Both are silent-wrong / crash-shaped violations of strict typing.
+///
+/// The fix keeps such a body a deferrable monomorphization TEMPLATE (so a
+/// direct concrete call still compiles the full arithmetic) but refuses the one
+/// reachability that would run the un-monomorphized template blob live —
+/// capturing the implicit-generic function as a value — as a clean compile
+/// error. The remedy is to annotate the parameter.
+#[cfg(test)]
+mod wave7_finance_field_arith_gap_tests {
+    use crate::test_utils::{compile_with_prelude, eval_typed_bool, eval_typed_f64};
+
+    fn compile_err_msg(code: &str) -> String {
+        match compile_with_prelude(code) {
+            Ok(_) => panic!("expected a strict-typing compile error, but compilation succeeded"),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
+    /// (i) Silent-operand-drop shape: an untyped-param object-field subtraction
+    /// captured as a value is a CLEAN COMPILE ERROR — no silent drop, no crash.
+    #[test]
+    fn untyped_param_field_subtraction_value_capture_is_compile_error() {
+        let msg = compile_err_msg(
+            "type P { high: number, low: number }\n\
+             fn candle_range(row) { row.high - row.low }\n\
+             let f = candle_range\n\
+             let p = P { high: 12.0, low: 5.0 }\n\
+             print(f(p))\n",
+        );
+        assert!(
+            msg.contains("implicit-generic function") && msg.contains("candle_range"),
+            "expected the clean strict-typing value-capture error, got: {msg}"
+        );
+    }
+
+    /// (ii) Dynamic-`sub` shape: `abs(row.close - row.open)` on an untyped param
+    /// captured as a value is a COMPILE ERROR, not a runtime "no method 'sub'".
+    #[test]
+    fn untyped_param_field_subtraction_inside_call_value_capture_is_compile_error() {
+        let msg = compile_err_msg(
+            "type P { close: number, open: number }\n\
+             fn body(row) { abs(row.close - row.open) }\n\
+             let f = body\n\
+             let p = P { close: 12.0, open: 5.0 }\n\
+             print(f(p))\n",
+        );
+        assert!(
+            msg.contains("implicit-generic function") && msg.contains("body"),
+            "expected the clean strict-typing value-capture error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("no method 'sub'"),
+            "must NOT be a runtime dynamic-sub dispatch: {msg}"
+        );
+    }
+
+    /// The bare-scalar form proves the defect is general (not object-field
+    /// specific): `fn add(a, b) { a + b }` captured as a value is a compile
+    /// error too.
+    #[test]
+    fn untyped_param_scalar_addition_value_capture_is_compile_error() {
+        let msg = compile_err_msg(
+            "fn add(a, b) { a + b }\n\
+             let f = add\n\
+             print(f(3.0, 4.0))\n",
+        );
+        assert!(
+            msg.contains("implicit-generic function") && msg.contains("add"),
+            "expected the clean strict-typing value-capture error, got: {msg}"
+        );
+    }
+
+    /// Annotating the parameter compiles AND computes the FULL arithmetic — the
+    /// operand is NOT dropped (7.0, not 12.0) even when the function is captured
+    /// and called indirectly.
+    #[test]
+    fn annotated_param_field_subtraction_computes_full_arithmetic_when_captured() {
+        let v = eval_typed_f64(
+            "type P { high: number, low: number }\n\
+             fn candle_range(row: P) -> number { row.high - row.low }\n\
+             let f = candle_range\n\
+             let p = P { high: 12.0, low: 5.0 }\n\
+             f(p)\n",
+        );
+        assert_eq!(
+            v, 7.0,
+            "annotated field subtraction must compute high - low, not drop the second operand"
+        );
+    }
+
+    /// A same-module DIRECT concrete call of the SAME untyped-param function
+    /// monomorphizes and computes the full arithmetic — the fix does not
+    /// over-reject provable call sites (only the un-monomorphizable value
+    /// capture is refused).
+    #[test]
+    fn direct_call_of_untyped_param_field_subtraction_monomorphizes_to_full_arithmetic() {
+        let v = eval_typed_f64(
+            "type P { high: number, low: number }\n\
+             fn candle_range(row) { row.high - row.low }\n\
+             let p = P { high: 12.0, low: 5.0 }\n\
+             candle_range(p)\n",
+        );
+        assert_eq!(v, 7.0);
+    }
+
+    /// REPAIR (over-rejection 1): a named implicit-generic function passed
+    /// DIRECTLY as a HOF argument (`arr.map(double)`) must COMPILE and RUN — the
+    /// value-capture guard's call-argument exemption. `double`'s `x * 2` body is
+    /// still an implicit-generic arithmetic template (a bare `let f = double`
+    /// capture is refused), but the direct HOF-consumer argument is allowed. The
+    /// full arithmetic runs: the first mapped element is `1 * 2 == 2`, NOT the
+    /// undoubled `1`.
+    #[test]
+    fn named_implicit_generic_fn_as_map_argument_compiles_and_runs_full_arithmetic() {
+        let v = eval_typed_f64(
+            "fn double(x) { x * 2 }\n\
+             let doubled = [1, 2, 3].map(double)\n\
+             doubled[0]\n",
+        );
+        assert_eq!(
+            v, 2.0,
+            "a named implicit-generic fn passed to map must run (2 = 1*2), not be rejected \
+             as a value-capture nor drop the operand"
+        );
+    }
+
+    /// REPAIR (over-rejection 2): an untyped-param predicate whose body performs
+    /// only NON-arithmetic field operations (null comparison + logical `and`,
+    /// the `is_ohlcv` shape) does NOT need a proven numeric kind, so a direct
+    /// call with an anonymous object must COMPILE and RUN — it must NOT be
+    /// swept up by the "requires concrete emission" predicate (which is now
+    /// scoped to arithmetic / bitwise / ordered operators only). Non-finance
+    /// cover for the finance `is_ohlcv(candle)` regression.
+    #[test]
+    fn untyped_param_field_null_predicate_direct_anonymous_object_compiles_and_runs() {
+        let v = eval_typed_bool(
+            "fn has_ab(row) { row.a != None and row.b != None }\n\
+             let obj = { a: 1.0, b: 2.0 }\n\
+             has_ab(obj)\n",
+        );
+        assert!(
+            v,
+            "a non-arithmetic null-comparison field predicate must compile and run, not be \
+             rejected as unprovable-arithmetic"
         );
     }
 }
