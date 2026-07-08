@@ -1224,11 +1224,23 @@ impl BytecodeCompiler {
     ///      case (a comparison result stamps `StorageHint::Bool`).
     ///   3. `concrete_type_for_expr` on the element AST — covers a bare
     ///      identifier loop variable bound by a generic-iterator clause
-    ///      (`[x for x in src]`), where the kind lives in the type tracker.
+    ///      (`[x for x in src]`), string / decimal / callable / struct-typed
+    ///      identifiers where the kind lives in the type tracker.
+    ///   4. `last_expr_schema` — the TypedObject carrier for an object /
+    ///      struct / enum LITERAL element (`[{ i: i } for ...]`). Such
+    ///      literals have no `concrete_type_for_expr` arm (their schema is
+    ///      only minted while compiling the element body), but the object /
+    ///      struct-literal / enum-constructor compilers stamp
+    ///      `last_expr_schema` with the freshly-registered schema id
+    ///      (`collections.rs:971`) — the producer-side proof that the element
+    ///      just pushed a `Ptr(HeapKind::TypedObject)` value. Every such
+    ///      element maps to the shared `TypedArrayKind::TypedObject` carrier
+    ///      (same mapping `should_use_typed_array` gives `ConcreteType::Struct`
+    ///      / `Enum`); the concrete schema id is irrelevant to the carrier.
     ///
     /// Per ADR-006 §2.7.5 every signal is a producer-side type proof (or a
     /// structural type-tracker fact) — never fabricated, never decoded from
-    /// runtime bits. Returns `None` when no scalar kind is proven; the caller
+    /// runtime bits. Returns `None` when no element kind is proven; the caller
     /// surfaces a clean compile error.
     fn resolve_pushed_element_typed_array_kind(
         &mut self,
@@ -1247,8 +1259,27 @@ impl BytecodeCompiler {
             }
         }
         // Structural fallback — a bare identifier whose tracked type is a
-        // scalar (the generic-iterator loop variable case).
-        concrete_type_for_expr(self, element).and_then(|ct| should_use_typed_array(&ct))
+        // scalar / string / decimal / callable / struct (the generic-iterator
+        // loop variable case).
+        if let Some(kind) =
+            concrete_type_for_expr(self, element).and_then(|ct| should_use_typed_array(&ct))
+        {
+            return Some(kind);
+        }
+        // Object / struct-literal / enum-constructor element. `compile_expr`
+        // for the element has already run at the call site, so
+        // `last_expr_schema` carries the just-stamped inline-object /
+        // struct / enum schema id — the producer-side proof (ADR-006 §2.7.5)
+        // that the element pushed a `Ptr(HeapKind::TypedObject)` value. Route
+        // it to the shared TypedObject element carrier (mirrors the
+        // `ConcreteType::Struct(_)` / `Enum(_)` arms of
+        // `should_use_typed_array`). No schema id is fabricated — an element
+        // that compiled to a non-object value leaves `last_expr_schema` unset
+        // and falls through to the clean compile error below.
+        if self.last_expr_schema.is_some() {
+            return Some(TypedArrayKind::TypedObject);
+        }
+        None
     }
 
     pub(super) fn compile_list_comprehension(
@@ -1316,10 +1347,10 @@ impl BytecodeCompiler {
                     message: "list comprehension element type could not be \
                               determined at compile time. Strict typing \
                               requires the element expression to have a \
-                              proven scalar type (int / number / bool / \
-                              decimal / sized integer). Annotate the \
-                              comprehension's source so the element type \
-                              resolves."
+                              proven type (int / number / bool / decimal / \
+                              sized integer / string / object / struct / \
+                              enum / callable). Annotate the comprehension's \
+                              source so the element type resolves."
                         .to_string(),
                     location: None,
                 });
