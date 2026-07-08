@@ -4861,9 +4861,15 @@ impl BytecodeCompiler {
             };
             self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
 
+            // wave7 finance-field-arith-gap (repair): call-argument position.
+            self.call_argument_depth += 1;
             for arg in args {
-                self.compile_expr_as_value_or_placeholder(arg)?;
+                if let Err(err) = self.compile_expr_as_value_or_placeholder(arg) {
+                    self.call_argument_depth -= 1;
+                    return Err(err);
+                }
             }
+            self.call_argument_depth -= 1;
 
             let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(
@@ -4897,6 +4903,10 @@ impl BytecodeCompiler {
         // through the same `pending_variable_typed_array_kind` hand-off used by
         // annotated empty arrays so the literal lowers to `NewTypedArray*(0)`
         // instead of the deleted untyped `NewArray(0)` placeholder.
+        // wave7 finance-field-arith-gap (repair): mark call-argument position so
+        // a bare implicit-generic function identifier passed as a HOF argument
+        // (`arr.map(double)`) is exempt from the function-as-value capture guard.
+        self.call_argument_depth += 1;
         for (idx, arg) in args.iter().enumerate() {
             let contextual_empty_array_kind = if prefer_native_array_method
                 && method == "concat"
@@ -4909,16 +4919,21 @@ impl BytecodeCompiler {
             } else {
                 None
             };
-            if let Some(kind) = contextual_empty_array_kind {
+            let result = if let Some(kind) = contextual_empty_array_kind {
                 let saved = self.pending_variable_typed_array_kind;
                 self.pending_variable_typed_array_kind = Some(kind);
                 let result = self.compile_expr_as_value_or_placeholder(arg);
                 self.pending_variable_typed_array_kind = saved;
-                result?;
+                result
             } else {
-                self.compile_expr_as_value_or_placeholder(arg)?;
+                self.compile_expr_as_value_or_placeholder(arg)
+            };
+            if let Err(err) = result {
+                self.call_argument_depth -= 1;
+                return Err(err);
             }
         }
+        self.call_argument_depth -= 1;
 
         // Clear closure_row_schema after compiling args (in case it wasn't consumed)
         self.closure_row_schema = None;
@@ -6910,9 +6925,30 @@ impl BytecodeCompiler {
         visiting: &mut BTreeSet<String>,
     ) -> bool {
         match expr {
-            Expr::BinaryOp { left, right, .. } => {
-                Self::expr_mentions_any_name(left, param_names)
-                    || Self::expr_mentions_any_name(right, param_names)
+            Expr::BinaryOp {
+                op, left, right, ..
+            } => {
+                // wave7 finance-field-arith-gap: only an operator that lowers to
+                // a typed numeric/bitwise/ordered opcode (and so needs a proven
+                // operand kind) makes an unannotated-param body un-emittable. An
+                // equality (`row.x != None`) or logical (`and`) binop compiles
+                // fine in the deferred template, so it must NOT force concrete
+                // emission (else an object-predicate like `is_ohlcv` over an
+                // anonymous object is mis-flagged). A flagged op nested inside an
+                // excluded one (`(row.a - row.b) != 0`) is still caught by the
+                // recursion below.
+                if super::numeric_ops::op_requires_proven_operand_kind(op)
+                    && (Self::expr_mentions_any_name(left, param_names)
+                        || Self::expr_mentions_any_name(right, param_names))
+                {
+                    return true;
+                }
+                self.implicit_generic_expr_requires_concrete_emission(left, param_names, visiting)
+                    || self.implicit_generic_expr_requires_concrete_emission(
+                        right,
+                        param_names,
+                        visiting,
+                    )
             }
             Expr::FunctionCall { name, args, .. } => {
                 let args_require = args.iter().any(|arg| {

@@ -54,6 +54,36 @@ pub(super) fn is_ordered_comparison(op: &BinaryOp) -> bool {
     )
 }
 
+/// wave7 finance-field-arith-gap: does this operator lower to a *typed* numeric
+/// / bitwise / ordered opcode, and therefore need a PROVEN concrete operand
+/// kind at compile time?
+///
+/// Such an operator, applied to an operand whose kind the compiler cannot prove
+/// (an unannotated implicit-generic param, or an object field of one), is the
+/// operation that either silently drops an operand (the deferred-template
+/// `Pop` placeholder) or lowers to a runtime dynamic operator dispatch. It is
+/// what makes an implicit-generic body un-emittable without monomorphization.
+///
+/// `Add` is included even though `is_strict_arithmetic` excludes it (Add also
+/// serves string-concat / object-merge / array-concat): an unprovable-kind
+/// `a + b` silently drops its right operand exactly like `a - b`, so it must
+/// force concrete emission too.
+///
+/// Equality (`==` / `!=`, including `row.x != None`), the fuzzy comparisons,
+/// and the logical/null/pipe operators are DELIBERATELY excluded: they do not
+/// need a numeric kind proof and compile correctly in the deferred template
+/// (`==` on two unprovable operands already surfaces its own strict "cannot
+/// infer types for binary operation" error at emission, so it never silently
+/// drops), so they must not force concrete emission — otherwise an
+/// object-predicate like `is_ohlcv(row) { row.open != None and ... }` over an
+/// anonymous object would be mis-flagged and wrongly rejected.
+pub(super) fn op_requires_proven_operand_kind(op: &BinaryOp) -> bool {
+    matches!(op, BinaryOp::Add)
+        || is_strict_arithmetic(op)
+        || is_strict_bitwise(op)
+        || is_ordered_comparison(op)
+}
+
 /// Check if a Type from the inference engine is numeric.
 pub(super) fn is_type_numeric(ty: &Type) -> bool {
     let name = match ty {

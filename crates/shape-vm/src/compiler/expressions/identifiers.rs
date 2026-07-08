@@ -465,28 +465,37 @@ impl BytecodeCompiler {
                     location: Some(self.span_to_source_location(span)),
                 });
             }
-            // wave7 finance-field-arith-gap: refuse taking an *uninstantiated
+            // wave7 finance-field-arith-gap: refuse CAPTURING an *uninstantiated
             // implicit-generic* function whose body needs a proven concrete
             // parameter type (e.g. `fn candle_range(row) { row.high - row.low }`,
-            // `fn add(a, b) { a + b }`) as a first-class VALUE. A direct call
-            // `candle_range(bar)` monomorphizes the body with proven kinds; but a
-            // value-capture (`let f = candle_range`, or passing it as a HOF
-            // argument) can never be monomorphized — the captured template blob
-            // would run its deferred, unproven-kind body and either silently drop
-            // an operand or dynamic-dispatch a nonexistent operator method. Under
-            // strict typing that is a compile error: annotate the parameter(s).
+            // `fn add(a, b) { a + b }`) as a first-class VALUE into a binding /
+            // general value position. A direct call `candle_range(bar)`
+            // monomorphizes the body with proven kinds; but a value-capture
+            // (`let f = candle_range`) followed by an indirect call `f(bar)` runs
+            // the captured template blob's deferred, unproven-kind body and either
+            // silently drops an operand or dynamic-dispatches a nonexistent
+            // operator method. Under strict typing that is a compile error:
+            // annotate the parameter(s).
+            //
+            // REPAIR (call-argument exemption): a function-value passed DIRECTLY
+            // as a call/HOF argument (`[1,2,3].map(double)`) is NOT guarded
+            // (`call_argument_depth > 0`). Shape's collection HOFs run the passed
+            // function's blob exactly as the pre-existing (baseline) behavior did
+            // — the guard here must not newly reject that consumer flow. The
+            // genuinely-unsound reachability the guard keeps closed is the bare
+            // binding capture (`let f = fn`), which escapes into storage and is
+            // later called indirectly with un-monomorphizable args.
             //
             // Scope: only user-space MAIN compilation (`module_scope_stack`
             // empty — the same discriminator `function_calls.rs` uses for the
             // W17-marshal-residual gate). Dependency-module compilation
             // (importing stdlib, `module_scope_stack` non-empty) is skipped: an
             // imported module's functions are re-monomorphized soundly at the
-            // importer's direct call sites (verified: `body(bar)` / `candle_range
-            // (bar)` through a `from … use` import compute the full arithmetic),
-            // and rejecting the dependency's own internal function-value wiring
-            // would break every import of a module that merely DEFINES such a
-            // helper. The user-facing value-capture surface is what this guards.
-            if self.module_scope_stack.is_empty()
+            // importer's direct call sites, and rejecting the dependency's own
+            // internal function-value wiring would break every import of a module
+            // that merely DEFINES such a helper.
+            if self.call_argument_depth == 0
+                && self.module_scope_stack.is_empty()
                 && let Some(def) = self
                     .function_defs
                     .get(&resolved_name)

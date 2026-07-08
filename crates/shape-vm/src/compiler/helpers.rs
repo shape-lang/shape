@@ -3214,6 +3214,11 @@ impl BytecodeCompiler {
     ) -> Result<Vec<(u16, u16)>> {
         self.call_arg_module_binding_ref_writebacks.push(Vec::new());
 
+        // wave7 finance-field-arith-gap (repair): mark call-argument position so
+        // a bare implicit-generic function identifier passed directly as a call
+        // argument is exempt from the function-as-value capture guard (a bare
+        // `let f = fn` binding capture, at depth 0, still errors).
+        self.call_argument_depth += 1;
         let mut first_error: Option<ShapeError> = None;
         for (idx, arg) in args.iter().enumerate() {
             let pass_mode = expected_param_modes
@@ -3317,6 +3322,7 @@ impl BytecodeCompiler {
                 break;
             }
         }
+        self.call_argument_depth -= 1;
 
         let writebacks = self
             .call_arg_module_binding_ref_writebacks

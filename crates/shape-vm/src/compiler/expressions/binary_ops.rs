@@ -4519,7 +4519,7 @@ mod w28_enum_field_equality_static_proof_tests {
 /// error. The remedy is to annotate the parameter.
 #[cfg(test)]
 mod wave7_finance_field_arith_gap_tests {
-    use crate::test_utils::{compile_with_prelude, eval_typed_f64};
+    use crate::test_utils::{compile_with_prelude, eval_typed_bool, eval_typed_f64};
 
     fn compile_err_msg(code: &str) -> String {
         match compile_with_prelude(code) {
@@ -4613,5 +4613,47 @@ mod wave7_finance_field_arith_gap_tests {
              candle_range(p)\n",
         );
         assert_eq!(v, 7.0);
+    }
+
+    /// REPAIR (over-rejection 1): a named implicit-generic function passed
+    /// DIRECTLY as a HOF argument (`arr.map(double)`) must COMPILE and RUN — the
+    /// value-capture guard's call-argument exemption. `double`'s `x * 2` body is
+    /// still an implicit-generic arithmetic template (a bare `let f = double`
+    /// capture is refused), but the direct HOF-consumer argument is allowed. The
+    /// full arithmetic runs: the first mapped element is `1 * 2 == 2`, NOT the
+    /// undoubled `1`.
+    #[test]
+    fn named_implicit_generic_fn_as_map_argument_compiles_and_runs_full_arithmetic() {
+        let v = eval_typed_f64(
+            "fn double(x) { x * 2 }\n\
+             let doubled = [1, 2, 3].map(double)\n\
+             doubled[0]\n",
+        );
+        assert_eq!(
+            v, 2.0,
+            "a named implicit-generic fn passed to map must run (2 = 1*2), not be rejected \
+             as a value-capture nor drop the operand"
+        );
+    }
+
+    /// REPAIR (over-rejection 2): an untyped-param predicate whose body performs
+    /// only NON-arithmetic field operations (null comparison + logical `and`,
+    /// the `is_ohlcv` shape) does NOT need a proven numeric kind, so a direct
+    /// call with an anonymous object must COMPILE and RUN — it must NOT be
+    /// swept up by the "requires concrete emission" predicate (which is now
+    /// scoped to arithmetic / bitwise / ordered operators only). Non-finance
+    /// cover for the finance `is_ohlcv(candle)` regression.
+    #[test]
+    fn untyped_param_field_null_predicate_direct_anonymous_object_compiles_and_runs() {
+        let v = eval_typed_bool(
+            "fn has_ab(row) { row.a != None and row.b != None }\n\
+             let obj = { a: 1.0, b: 2.0 }\n\
+             has_ab(obj)\n",
+        );
+        assert!(
+            v,
+            "a non-arithmetic null-comparison field predicate must compile and run, not be \
+             rejected as unprovable-arithmetic"
+        );
     }
 }
