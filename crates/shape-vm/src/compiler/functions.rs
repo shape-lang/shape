@@ -2371,12 +2371,34 @@ impl BytecodeCompiler {
                         let saved_expected_call_return_type =
                             self.pending_expected_call_return_type.clone();
                         self.pending_expected_call_return_type = func_def.return_type.clone();
+                        // Empty-in-context element-type inference (issue #14): a
+                        // bare empty-array tail-return (`fn empty() -> Array<int>
+                        // { [] }`) gets its element kind from the function's
+                        // declared `Array<T>` return annotation, so it lowers to
+                        // the typed `NewTypedArray*(0)` allocator instead of the
+                        // `NewArray(0)` placeholder that SURFACEs at runtime.
+                        // Mirrors the binding-annotation threading. Save/restore
+                        // the typed-array-kind + trait channels so the hand-off
+                        // does not leak into a sibling expression.
+                        let saved_tail_ta_kind = self.pending_variable_typed_array_kind;
+                        let saved_tail_trait = self.pending_trait_object_array_trait.clone();
+                        if matches!(
+                            return_expr,
+                            shape_ast::ast::Expr::Array(elems, _) if elems.is_empty()
+                        ) {
+                            if let Some(ann) = func_def.return_type.as_ref() {
+                                self.pending_variable_typed_array_kind =
+                                    self.resolve_typed_array_kind_and_record_trait(ann);
+                            }
+                        }
                         let compile_result =
                             if self.current_function_return_reference_summary.is_some() {
                                 self.compile_expr_preserving_refs(return_expr)
                             } else {
                                 self.compile_expr(return_expr)
                             };
+                        self.pending_variable_typed_array_kind = saved_tail_ta_kind;
+                        self.pending_trait_object_array_trait = saved_tail_trait;
                         self.pending_expected_call_return_type = saved_expected_call_return_type;
                         self.pending_callable_hint_name = saved_pending_callable_hint_name;
                         compile_result?;

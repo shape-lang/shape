@@ -5901,8 +5901,29 @@ impl BytecodeCompiler {
         };
         self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
 
+        // Empty-in-context element-type inference (issue #14, user-ratified
+        // CANONICAL-INSTANTIATE 2026-07-07): a native module export marshals its
+        // arguments through the object-graph boundary (`FromSlot`/`to_json_value`),
+        // an UNCONSTRAINED monomorphic sink — the declared param is the polymorphic
+        // `PolymorphicArg` (`value: _`). A context-free empty array `[]` reaching
+        // this sink (a bare `[]` arg, or a `children: []` field of an object-literal
+        // arg, e.g. `xml::stringify({ children: [] })`) has a provably-unobserved
+        // element type; instantiate it at the canonical unit `int` so it lowers to
+        // the monomorphic `TypedArray<int>` empty allocator (marshals to an empty
+        // array) instead of the `NewArray(0)` placeholder that SURFACEs at runtime.
+        // Scoped (save/restore) to exactly this call's argument subtree.
+        let saved_canonical_instantiate = self.pending_empty_array_canonical_instantiate;
+        self.pending_empty_array_canonical_instantiate = true;
+        let mut arg_err: Option<ShapeError> = None;
         for arg in args {
-            self.compile_expr_as_value_or_placeholder(arg)?;
+            if let Err(e) = self.compile_expr_as_value_or_placeholder(arg) {
+                arg_err = Some(e);
+                break;
+            }
+        }
+        self.pending_empty_array_canonical_instantiate = saved_canonical_instantiate;
+        if let Some(e) = arg_err {
+            return Err(e);
         }
 
         let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));

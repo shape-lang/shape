@@ -1040,6 +1040,49 @@ impl TypeInferenceEngine {
                                             returns: Box::new(conv(returns)),
                                         }
                                     }
+                                    // An array field whose element type is still
+                                    // an unresolved variable (canonical case: an
+                                    // empty array literal `[]` → `Array<'a>`).
+                                    // Preserve the element var as a `tyvar` marker
+                                    // (mirroring the Variable / Function arms
+                                    // above) instead of collapsing to the lossy
+                                    // `Array<unknown>` via `to_annotation`. This
+                                    // lets the object-vs-struct compatibility check
+                                    // accept the field against a declared
+                                    // `Array<int>` (a free element var unifies with
+                                    // any concrete element per HM), and the codegen
+                                    // path resolves the concrete element type from
+                                    // the target declaration. Empty-in-context
+                                    // element-type inference (issue #14).
+                                    Type::Generic { base, args }
+                                        if args.len() == 1
+                                            && matches!(
+                                                base.as_ref(),
+                                                Type::Concrete(base_ann)
+                                                    if matches!(
+                                                        base_ann.as_type_name_str(),
+                                                        Some("Array") | Some("Vec")
+                                                    )
+                                            ) =>
+                                    {
+                                        match self
+                                            .solver
+                                            .unifier()
+                                            .apply_substitutions(&args[0])
+                                        {
+                                            Type::Variable(var) => TypeAnnotation::Array(
+                                                Box::new(tyvar_to_annotation(&var)),
+                                            ),
+                                            Type::Constrained { var, .. } => {
+                                                TypeAnnotation::Array(Box::new(
+                                                    tyvar_to_annotation(&var),
+                                                ))
+                                            }
+                                            _ => resolved.to_annotation().unwrap_or_else(
+                                                || TypeAnnotation::Basic("unknown".to_string()),
+                                            ),
+                                        }
+                                    }
                                     _ => resolved.to_annotation().unwrap_or_else(|| {
                                         TypeAnnotation::Basic("unknown".to_string())
                                     }),

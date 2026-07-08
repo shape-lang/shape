@@ -343,3 +343,47 @@ fn test_crypto_ed25519_roundtrip() {
     "#
     ));
 }
+
+// === XML Module — empty-in-context array (issue #14) ===
+
+/// Empty-in-context element-type inference (issue #14, user-ratified
+/// CANONICAL-INSTANTIATE 2026-07-07): `xml.stringify` accepts a node whose
+/// `children` is an empty array `[]` and whose `attributes` is an empty object
+/// `{}`. The empty `children: []` field flows into the polymorphic marshal
+/// sink (`stringify(value: _)`) with no element-type context, so it
+/// canonical-instantiates to a monomorphic `TypedArray<int>` empty array
+/// (marshals to an empty child list) instead of SURFACEing `op_new_array(0)`.
+/// Serializes to a self-closing element.
+#[test]
+fn test_xml_stringify_empty_children_and_attributes() {
+    init_runtime();
+    let out = eval_to_string(
+        r#"
+        use std::core::xml
+        let r = xml::stringify({ name: "root", attributes: {}, children: [] })
+        match r {
+            Ok(s) => s
+            Err(e) => f"stringify error: {e}"
+        }
+    "#,
+    );
+    assert_eq!(out, "<root/>");
+}
+
+/// Sibling coverage: an empty `children: []` alongside a non-empty `text`
+/// serializes the text content into the element (empty child list is elided).
+#[test]
+fn test_xml_stringify_empty_children_with_text() {
+    init_runtime();
+    let out = eval_to_string(
+        r#"
+        use std::core::xml
+        let r = xml::stringify({ name: "root", attributes: {}, children: [], text: "hi" })
+        match r {
+            Ok(s) => s
+            Err(e) => f"stringify error: {e}"
+        }
+    "#,
+    );
+    assert_eq!(out, "<root>hi</root>");
+}
