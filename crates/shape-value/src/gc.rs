@@ -1237,13 +1237,37 @@ pub fn collect_cycles() -> usize {
     reclaimed
 }
 
-/// Safepoint trigger (§R2 / R4 3a): run [`collect_cycles`] when the candidate
-/// buffer has grown past `threshold`. Wired into the VM dispatch safepoint under
-/// the `gc` feature. Returns the number of nodes freed (0 if not triggered).
+/// Safepoint trigger (§R2 / R4 3a + 3b): the VM dispatch safepoint entry.
+///
+/// Phase 3b (real-gc-cycle-collection.md R1-RESOLVED) turns this into the
+/// cross-worker stop-the-world rendezvous poll while keeping the hot path a
+/// single relaxed atomic load:
+///
+/// 1. Register this thread as a GC mutator on its first safepoint (idempotent).
+/// 2. Poll the global stop flag (one relaxed load). If a collection is in
+///    progress on another thread, **park** here until it finishes, then return —
+///    do not also collect (defer to our own next safepoint).
+/// 3. Otherwise, if this thread's candidate buffer has grown past `threshold`,
+///    become the **initiator**: stop every other registered mutator, run the
+///    unchanged [`collect_cycles`] under the global stop, then resume all.
+///
+/// Returns the number of nodes freed (0 if parked, not triggered, or the
+/// collection was serialized out / aborted).
 #[inline]
 pub fn maybe_collect(threshold: usize) -> usize {
+    // Register on first safepoint; cheap thread-local check after that.
+    crate::gc_coordinator::ensure_registered();
+
+    // Rendezvous poll (single relaxed load). A raised flag ⇒ another thread is
+    // collecting ⇒ park until it resumes, then defer our own collection.
+    if crate::gc_coordinator::stop_requested() {
+        crate::gc_coordinator::park_at_safepoint();
+        return 0;
+    }
+
     if candidate_buffer_len() > threshold {
-        collect_cycles()
+        // Become the initiator: collect under a global stop-the-world.
+        crate::gc_coordinator::collect_under_stop(collect_cycles)
     } else {
         0
     }
