@@ -101,3 +101,89 @@ fn comprehension_string_transform() {
     )
     .expect_string("ALICE");
 }
+
+// Regression (wave7 list-comprehension-elem, book C15): the result element
+// type is inferred as `int` from the yielded `x * 2` expression, and the
+// typed `Array<int>` is usable downstream via `.map`.
+#[test]
+fn comprehension_int_element_usable_via_map() {
+    ShapeTest::new(
+        r#"
+        let doubled = [x * 2 for x in [1, 2, 3]]
+        let bumped = doubled.map(|v| v + 1)
+        bumped[0] + bumped[1] + bumped[2]
+    "#,
+    )
+    .expect_number(15.0); // (2+1)+(4+1)+(6+1)
+}
+
+// Regression: object-literal element comprehension (the objects-arrays.mdx
+// `pairs` fence). The element type resolves to a TypedObject carrier; the
+// pushed objects render with their fields intact.
+#[test]
+fn comprehension_object_element_infers_typed_object() {
+    ShapeTest::new(
+        r#"
+        let pairs = [{ i: i, j: j } for i in 0..3 for j in 0..3 if i != j]
+        print(pairs[0])
+    "#,
+    )
+    .expect_output_contains("i: 0"); // first pair is { i: 0, j: 1 }
+}
+
+// Regression: object-element comprehension produces the full expected set
+// (6 of the 9 (i,j) pairs survive the `i != j` filter).
+#[test]
+fn comprehension_object_element_count() {
+    ShapeTest::new(
+        r#"
+        let pairs = [{ i: i, j: j } for i in 0..3 for j in 0..3 if i != j]
+        pairs.length
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+// Regression: a comprehension yielding a `number` element is typed distinctly
+// from `int` (int / number never unify per CLAUDE.md type-system rules).
+#[test]
+fn comprehension_number_element() {
+    ShapeTest::new(
+        r#"
+        let scaled = [v * 1.5 for v in [2.0, 4.0]]
+        scaled[0] + scaled[1]
+    "#,
+    )
+    .expect_number(9.0); // 3.0 + 6.0
+}
+
+// Independent reviewer regression (wave7 list-comprehension-elem): a
+// string-element comprehension binds to a typed `Array<string>` that is
+// usable downstream via indexing + `.map` (proves the result is element-typed,
+// not an untyped/any array).
+#[test]
+fn comprehension_string_element_usable_downstream() {
+    ShapeTest::new(
+        r#"
+        let tags = [s + "!" for s in ["a", "b", "c"]]
+        let shouted = tags.map(|t| t.toUpperCase())
+        shouted[0] + shouted[2]
+    "#,
+    )
+    .expect_string("A!C!");
+}
+
+// Independent reviewer regression: the int-element carrier survives object
+// construction earlier in the same program (guards against a stale
+// `last_expr_schema` misclassifying a scalar element as a TypedObject carrier).
+#[test]
+fn comprehension_int_element_after_object_literal() {
+    ShapeTest::new(
+        r#"
+        let seed = { a: 1, b: 2 }
+        let evens = [x * 2 for x in [10, 20, 30]]
+        evens[0] + evens[1] + evens[2]
+    "#,
+    )
+    .expect_number(120.0);
+}
