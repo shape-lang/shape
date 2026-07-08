@@ -1421,4 +1421,41 @@ mod tests {
             ""
         );
     }
+
+    // ── DateTime kinded GetProp (temporal_property_i64) ─────────────────────
+
+    fn sample_datetime() -> shape_value::heap_value::TemporalData {
+        use shape_value::heap_value::TemporalData;
+        let dt = chrono::DateTime::parse_from_rfc3339("2024-03-15T10:20:30+00:00").expect("parse");
+        TemporalData::DateTime(dt)
+    }
+
+    #[test]
+    fn temporal_property_returns_int_components() {
+        let td = sample_datetime();
+        assert_eq!(temporal_property_i64(&td, "year").unwrap(), 2024);
+        assert_eq!(temporal_property_i64(&td, "month").unwrap(), 3);
+        assert_eq!(temporal_property_i64(&td, "day").unwrap(), 15);
+        assert_eq!(temporal_property_i64(&td, "hour").unwrap(), 10);
+        assert_eq!(temporal_property_i64(&td, "minute").unwrap(), 20);
+        assert_eq!(temporal_property_i64(&td, "second").unwrap(), 30);
+        // 2024-03-15 is a Friday (num_days_from_monday == 4).
+        assert_eq!(temporal_property_i64(&td, "day_of_week").unwrap(), 4);
+    }
+
+    #[test]
+    fn temporal_property_unknown_key_surfaces_undefined() {
+        let td = sample_datetime();
+        match temporal_property_i64(&td, "not_a_component") {
+            Err(VMError::UndefinedProperty(k)) => assert_eq!(k, "not_a_component"),
+            other => panic!("expected UndefinedProperty, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn temporal_property_non_datetime_receiver_errors() {
+        use shape_value::heap_value::TemporalData;
+        let td = TemporalData::TimeSpan(chrono::Duration::seconds(42));
+        assert!(temporal_property_i64(&td, "year").is_err());
+    }
 }
