@@ -771,3 +771,84 @@ test()"#,
     )
     .expect_string("c");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Independent-reviewer strengthening (wave7/collection-get finalize):
+// element-typing coverage the original 10 lacked — number (f64), bool, and
+// the empty-array None path — each in vm + jit.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Number (f64) element: `Some(v)` carries the float kind through `match`.
+#[test]
+fn test_array_get_number_element() {
+    ShapeTest::new(
+        r#"function test() { match [1.5, 2.5, 3.5].get(1) { Some(v) => v + 0.5, None => 0.0 } }
+test()"#,
+    )
+    .expect_number(3.0);
+}
+
+#[test]
+fn test_array_get_number_element_jit() {
+    ShapeTest::new(
+        r#"function test() { match [1.5, 2.5, 3.5].get(1) { Some(v) => v + 0.5, None => 0.0 } }
+test()"#,
+    )
+    .with_jit()
+    .expect_number(3.0);
+}
+
+/// Bool element: in-range `Some(true)` and OOB `None` both resolve correctly.
+#[test]
+fn test_array_get_bool_element() {
+    ShapeTest::new(
+        r#"function test() { match [true, false, true].get(0) { Some(v) => v, None => false } }
+test()"#,
+    )
+    .expect_bool(true);
+}
+
+#[test]
+fn test_array_get_bool_element_oob_none() {
+    ShapeTest::new(
+        r#"function test() { match [true, false, true].get(9) { Some(v) => v, None => false } }
+test()"#,
+    )
+    .expect_bool(false);
+}
+
+#[test]
+fn test_array_get_bool_element_jit() {
+    ShapeTest::new(
+        r#"function test() { match [true, false, true].get(0) { Some(v) => v, None => false } }
+test()"#,
+    )
+    .with_jit()
+    .expect_bool(true);
+}
+
+/// Empty array: any index is OOB → `None`.
+#[test]
+fn test_array_get_empty_array_none() {
+    ShapeTest::new(
+        r#"function test() {
+    let empty: Array<int> = []
+    match empty.get(0) { Some(v) => v, None => 0 - 99 }
+}
+test()"#,
+    )
+    .expect_number(-99.0);
+}
+
+#[test]
+fn test_array_get_empty_array_none_jit() {
+    ShapeTest::new(
+        r#"function test() {
+    let empty: Array<int> = []
+    match empty.get(0) { Some(v) => v, None => 0 - 99 }
+}
+test()"#,
+    )
+    .with_jit()
+    .expect_number(-99.0);
+}
