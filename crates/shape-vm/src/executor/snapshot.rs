@@ -1081,6 +1081,20 @@ fn expected_kind_from_serializable(
 mod tests {
     use super::*;
 
+    /// GC Phase 5 (snapshot v7): a cycle-capable heap node (TypedObject /
+    /// heap-element array / TypedObject-valued map) now projects as a
+    /// `HeapNode { handle, body }` identity wrapper. These white-box tests
+    /// assert the inner body shape, so unwrap one HeapNode layer; a non-node
+    /// arm passes through unchanged.
+    fn unwrap_node(
+        sv: &shape_runtime::snapshot::SerializableVMValue,
+    ) -> &shape_runtime::snapshot::SerializableVMValue {
+        match sv {
+            shape_runtime::snapshot::SerializableVMValue::HeapNode { body, .. } => body,
+            other => other,
+        }
+    }
+
     /// Create a minimal Function with just a name (other fields defaulted).
     fn make_function(name: &str) -> Function {
         Function {
@@ -1577,7 +1591,7 @@ mod tests {
         let restored_snap = restored.snapshot(&store).expect("re-snapshot");
         assert_eq!(restored_snap.stack.len(), 3);
         assert!(matches!(
-            &restored_snap.stack[0],
+            unwrap_node(&restored_snap.stack[0]),
             SV::TypedObject {
                 schema_id,
                 slot_data,
@@ -1587,7 +1601,7 @@ mod tests {
                 && matches!(slot_data.get(1), Some(SV::Int(42)))
         ));
         assert!(matches!(
-            &restored_snap.stack[1],
+            unwrap_node(&restored_snap.stack[1]),
             SV::TypedObject {
                 schema_id,
                 slot_data,
@@ -1597,7 +1611,7 @@ mod tests {
                 && matches!(slot_data.get(1), Some(SV::String(s)) if s == "hello")
         ));
         assert!(matches!(
-            &restored_snap.stack[2],
+            unwrap_node(&restored_snap.stack[2]),
             SV::TypedObject {
                 schema_id,
                 slot_data,
@@ -1637,7 +1651,7 @@ mod tests {
         let restored_snap = restored.snapshot(&store).expect("re-snapshot restored");
         assert_eq!(restored_snap.stack.len(), 2);
         assert!(matches!(
-            &restored_snap.stack[0],
+            unwrap_node(&restored_snap.stack[0]),
             SV::TypedObject {
                 schema_id,
                 slot_data,
@@ -1647,7 +1661,7 @@ mod tests {
                 && matches!(slot_data.get(1), Some(SV::Int(42)))
         ));
         assert!(matches!(
-            &restored_snap.stack[1],
+            unwrap_node(&restored_snap.stack[1]),
             SV::TypedObject {
                 schema_id,
                 slot_data,
@@ -2059,7 +2073,7 @@ mod tests {
             snap.stack[2]
         );
         assert!(
-            matches!(&snap.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
+            matches!(unwrap_node(&snap.stack[3]), SV::TypedObject { schema_id: 42, slot_data, .. }
                 if slot_data.len() == 2
                 && matches!(slot_data[0], SV::Int(5))
                 && matches!(slot_data[1], SV::Number(f) if (f - 1.5).abs() < 1e-9)),
@@ -2078,7 +2092,7 @@ mod tests {
         assert!(matches!(&re.stack[2], SV::HashMap { values, .. }
             if matches!(&values[0], SV::String(v) if v == "v")));
         assert!(
-            matches!(&re.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
+            matches!(unwrap_node(&re.stack[3]), SV::TypedObject { schema_id: 42, slot_data, .. }
             if matches!(slot_data[0], SV::Int(5)))
         );
     }
