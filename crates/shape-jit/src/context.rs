@@ -707,7 +707,13 @@ impl Default for JITContext {
             simulation_mode: 0,
             simulation_state_ptr: std::ptr::null_mut(),
             simulation_state_size: 0,
-            // GC integration
+            // GC integration. Phase 3b: point the JIT back-edge safepoint poll
+            // at the coordinator's `stop_requested` flag byte so JIT loops
+            // observe a cross-worker stop-the-world (`jit_gc_safepoint`). gc-off
+            // this stays null (byte-identical to the pre-3b build).
+            #[cfg(feature = "gc")]
+            gc_safepoint_flag_ptr: shape_value::gc_coordinator::stop_flag_ptr(),
+            #[cfg(not(feature = "gc"))]
             gc_safepoint_flag_ptr: std::ptr::null(),
             gc_heap_ptr: std::ptr::null_mut(),
             foreign_bridge_ptr: std::ptr::null(),

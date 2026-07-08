@@ -21,6 +21,12 @@ pub mod datatable;
 /// default-off `gc` Cargo feature; feature-off is a strict no-op.
 #[cfg(feature = "gc")]
 pub mod gc;
+/// Cross-worker stop-the-world safepoint rendezvous (Phase 3b) — thread
+/// registry + stop-request flag + safepoint-ack barrier wrapping the unchanged
+/// single-thread `collect_cycles`. Gated behind the default-off `gc` Cargo
+/// feature; feature-off is a strict no-op.
+#[cfg(feature = "gc")]
+pub mod gc_coordinator;
 /// Read-only heap-child edge visitor (Phase 1) — consumes the SAME edge
 /// enumeration primitive the destructive Drop path uses, so the collector's
 /// trace and the Drop walk cannot drift (real-gc-cycle-collection.md §3.4).
