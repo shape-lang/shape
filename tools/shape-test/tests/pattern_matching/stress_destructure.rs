@@ -855,3 +855,153 @@ fn t100_param_destructure_used_in_condition() {
     )
     .expect_bool(true);
 }
+
+// ============================================================================
+// wave7/result-variant-pattern regression tests
+//
+// The variant-pattern checker must recognize the built-in Result<T,E> /
+// Option<T> enums as enum-typed scrutinees — including when the scrutinee is a
+// Result returned from a module function (the shape of the book
+// stdlib/core/remote fence). Each variant payload must bind with the correct
+// T/E type. VM + JIT.
+// ============================================================================
+
+const RESULT_MODULE_FN_SRC: &str = r#"
+fn get_result(x: int) -> Result<int, string> {
+    if x > 0 { Ok(x) } else { Err("neg") }
+}
+fn main() -> int {
+    return match get_result(42) { Ok(v) => v, Err(e) => 0 }
+}
+main()
+"#;
+
+/// A module-fn-returned Result<int,string> matched Ok/Err binds the Ok payload
+/// as `int`. This is the shape that previously errored with "variant pattern
+/// requires an enum-typed value".
+#[test]
+fn result_module_fn_return_ok_branch_vm() {
+    ShapeTest::new(RESULT_MODULE_FN_SRC).expect_number(42.0);
+}
+
+#[test]
+fn result_module_fn_return_ok_branch_jit() {
+    ShapeTest::new(RESULT_MODULE_FN_SRC)
+        .with_jit()
+        .expect_number(42.0);
+}
+
+const RESULT_MODULE_FN_ERR_SRC: &str = r#"
+fn get_result(x: int) -> Result<int, string> {
+    if x > 0 { Ok(x) } else { Err("neg") }
+}
+fn main() -> int {
+    return match get_result(-1) { Ok(v) => v, Err(e) => -99 }
+}
+main()
+"#;
+
+/// The Err branch of a module-fn-returned Result is selected at runtime.
+#[test]
+fn result_module_fn_return_err_branch_vm() {
+    ShapeTest::new(RESULT_MODULE_FN_ERR_SRC).expect_number(-99.0);
+}
+
+#[test]
+fn result_module_fn_return_err_branch_jit() {
+    ShapeTest::new(RESULT_MODULE_FN_ERR_SRC)
+        .with_jit()
+        .expect_number(-99.0);
+}
+
+/// The Err payload of a module-fn-returned Result<int,string> binds as `string`
+/// — it can flow to a string sink, proving the payload is typed as E, not raw
+/// reinterpreted bits.
+#[test]
+fn result_module_fn_err_payload_binds_string_vm() {
+    ShapeTest::new(
+        r#"
+        fn get_result(x: int) -> Result<int, string> {
+            if x > 0 { Ok(x) } else { Err("bad-input") }
+        }
+        fn main() -> string {
+            return match get_result(-1) { Ok(v) => "ok", Err(e) => e }
+        }
+        main()
+    "#,
+    )
+    .expect_string("bad-input");
+}
+
+/// A module-fn-returned Option<int> matches Some/None with the Some payload
+/// bound as `int`.
+#[test]
+fn option_module_fn_return_some_vm() {
+    ShapeTest::new(
+        r#"
+        fn find(x: int) -> Option<int> {
+            if x > 0 { Some(x) } else { None }
+        }
+        fn main() -> int {
+            return match find(7) { Some(v) => v, None => 0 }
+        }
+        main()
+    "#,
+    )
+    .expect_number(7.0);
+}
+
+#[test]
+fn option_module_fn_return_none_jit() {
+    ShapeTest::new(
+        r#"
+        fn find(x: int) -> Option<int> {
+            if x > 0 { Some(x) } else { None }
+        }
+        fn main() -> int {
+            return match find(-3) { Some(v) => v, None => -1 }
+        }
+        main()
+    "#,
+    )
+    .with_jit()
+    .expect_number(-1.0);
+}
+
+/// A foreign variant on a Result scrutinee is rejected — the checker knows the
+/// owned-variant set of the built-in enum, so `Some` on a `Result` is a compile
+/// error, not a silent reinterpret.
+#[test]
+fn result_scrutinee_rejects_foreign_variant() {
+    ShapeTest::new(
+        r#"
+        fn get_result(x: int) -> Result<int, string> {
+            if x > 0 { Ok(x) } else { Err("neg") }
+        }
+        fn main() -> int {
+            return match get_result(1) { Some(x) => x, None => 0 }
+        }
+        main()
+    "#,
+    )
+    .expect_run_err_contains("does not belong to scrutinee type 'Result'");
+}
+
+/// The Err payload of a Result<int,string> is typed as `string`, so using it in
+/// integer arithmetic is a strict-typing compile error — the payload is not
+/// coerced to `int`.
+#[test]
+fn result_err_payload_is_not_int() {
+    ShapeTest::new(
+        r#"
+        fn get_result(x: int) -> Result<int, string> {
+            if x > 0 { Ok(x) } else { Err("neg") }
+        }
+        fn main() -> int {
+            return match get_result(-1) { Ok(v) => v, Err(e) => e + 1 }
+        }
+        main()
+    "#,
+    )
+    .expect_run_err_contains("string");
+}
