@@ -10,6 +10,7 @@
 //! - `fields`: array of {name, type, annotations} objects (for struct/type targets)
 //! - `params`: array of {name, type} objects (for function targets)
 //! - `return_type`: string (for function targets)
+//! - `type_ref` siblings: typed descriptors beside each string type field
 //! - `annotations`: array of annotation names already applied
 
 use shape_ast::ast::functions::Annotation;
@@ -50,6 +51,71 @@ pub(crate) type FieldAnnotation = (String, Vec<String>);
 /// Build a string-kinded slot from an owned `String`.
 fn nb_string(s: String) -> KindedSlot {
     KindedSlot::from_string_arc(Arc::new(s))
+}
+
+fn type_ref_kind_from_source(source: &str) -> &'static str {
+    let source = source.trim();
+    if is_option_type(source) {
+        return "Option";
+    }
+    if source.starts_with('[') || source.starts_with("Array<") || source.starts_with("Vec<") {
+        return "Array";
+    }
+    if source.starts_with("HashMap<") {
+        return "HashMap";
+    }
+    if source.starts_with("Result<") {
+        return "Result";
+    }
+    if source.contains("=>") {
+        return "Function";
+    }
+    if source.starts_with("dyn ") {
+        return "TraitObject";
+    }
+    match source {
+        "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => "Int",
+        "number" | "f64" | "f32" | "float" => "Number",
+        "bool" => "Bool",
+        "string" | "str" => "String",
+        "decimal" => "Decimal",
+        "bigint" => "BigInt",
+        "()" | "unit" | "void" => "Unit",
+        _ if source.chars().next().is_some_and(|ch| ch.is_uppercase()) => "TypedObject",
+        _ => "Unresolved",
+    }
+}
+
+fn type_ref_name_from_source(source: &str) -> String {
+    let source = source.trim();
+    if source.starts_with('[') || source.starts_with("Array<") || source.starts_with("Vec<") {
+        return "Array".to_string();
+    }
+    if source.starts_with("HashMap<") {
+        return "HashMap".to_string();
+    }
+    if source.starts_with("Result<") {
+        return "Result".to_string();
+    }
+    if is_option_type(source) {
+        return "Option".to_string();
+    }
+    source.to_string()
+}
+
+pub(crate) fn build_type_ref_descriptor(source: &str, kind: Option<&str>) -> KindedSlot {
+    use shape_runtime::type_schema::typed_object_for_named_schema;
+
+    let source = source.trim();
+    let kind = kind.unwrap_or_else(|| type_ref_kind_from_source(source));
+    typed_object_for_named_schema(
+        "__ComptimeTypeRef",
+        &[
+            ("name", nb_string(type_ref_name_from_source(source))),
+            ("kind", nb_string(kind.to_string())),
+            ("source", nb_string(source.to_string())),
+        ],
+    )
 }
 
 /// Build an `Array<string>` slot carried by a stamped v2-raw
@@ -140,6 +206,10 @@ pub(crate) fn build_field_descriptor_array(
                 ("type", nb_string(effective_type)),
                 ("annotations", anns_arr),
                 ("optional", KindedSlot::from_bool(is_optional)),
+                (
+                    "type_ref",
+                    build_type_ref_descriptor(&unwrap_option_type(ftype), None),
+                ),
             ],
         ));
     }
@@ -377,6 +447,7 @@ impl ComptimeTarget {
                         ("name", nb_string(pname.clone())),
                         ("type", nb_string(ptype.clone())),
                         ("const", KindedSlot::from_bool(*is_const)),
+                        ("type_ref", build_type_ref_descriptor(ptype, None)),
                     ],
                 )
             })
@@ -389,6 +460,11 @@ impl ComptimeTarget {
             .as_ref()
             .map(|r| nb_string(r.clone()))
             .unwrap_or_else(KindedSlot::none);
+        let ret_ref = self
+            .return_type
+            .as_deref()
+            .map(|r| build_type_ref_descriptor(r, None))
+            .unwrap_or_else(|| build_type_ref_descriptor("unknown", Some("Unresolved")));
 
         // annotations: array of strings (names only)
         let ann_arr = nb_string_array(self.annotations.clone())?;
@@ -404,6 +480,7 @@ impl ComptimeTarget {
                 ("fields", fields_arr),
                 ("params", params_arr),
                 ("return_type", ret),
+                ("return_type_ref", ret_ref),
                 ("annotations", ann_arr),
                 ("captures", captures_arr),
             ],
@@ -685,11 +762,11 @@ mod tests {
         let storage = slot
             .as_typed_object_storage()
             .expect("target should be a typed object");
-        assert_eq!(storage.slots().len(), 7);
+        assert_eq!(storage.slots().len(), 8);
 
         let params = storage.slots()[3].raw() as *const TypedArray<*const TypedObjectStorage>;
-        let annotations = storage.slots()[5].raw() as *const TypedArray<*const StringObj>;
-        let captures = storage.slots()[6].raw() as *const TypedArray<*const StringObj>;
+        let annotations = storage.slots()[6].raw() as *const TypedArray<*const StringObj>;
+        let captures = storage.slots()[7].raw() as *const TypedArray<*const StringObj>;
 
         unsafe {
             assert_eq!(read_elem_type(params as *const u8), ELEM_TYPE_TYPED_OBJECT);

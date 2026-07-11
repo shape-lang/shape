@@ -282,6 +282,14 @@ pub fn get_completions_with_context(
             completions.extend(symbols_to_completions(&user_symbols));
             completions.extend(builtin_function_completions());
         }
+        CompletionContext::EnumVariant { enum_name, prefix } => {
+            let variants = enum_variant_completions(&enum_name, &prefix, parsed_program.as_ref());
+            if variants.is_empty() {
+                completions.extend(all_completions(&user_symbols));
+            } else {
+                completions.extend(variants);
+            }
+        }
         CompletionContext::ExprAnnotation => {
             // After `@` in expression position — same as item-level annotations
             completions.extend(annotation_completions(
@@ -1053,6 +1061,71 @@ fn all_completions(user_symbols: &[crate::symbols::SymbolInfo]) -> Vec<Completio
     completions.extend(builtin_function_completions());
 
     completions
+}
+
+fn enum_variant_completions(
+    enum_name: &str,
+    prefix: &str,
+    program: Option<&Program>,
+) -> Vec<CompletionItem> {
+    let names = if enum_name == "FrozenTypeCategory" {
+        shape_runtime::comptime_reflection::FrozenTypeCategory::ALL
+            .into_iter()
+            .map(|category| category.variant_name().to_string())
+            .collect()
+    } else {
+        program
+            .and_then(|program| enum_members_in_items(&program.items, enum_name))
+            .unwrap_or_default()
+    };
+
+    names
+        .into_iter()
+        .filter(|name| name.starts_with(prefix))
+        .map(|name| CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::ENUM_MEMBER),
+            detail: Some(format!("{enum_name} member")),
+            insert_text: Some(name),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn enum_members_in_items(items: &[Item], enum_name: &str) -> Option<Vec<String>> {
+    for item in items {
+        match item {
+            Item::Enum(definition, _) if definition.name == enum_name => {
+                return Some(
+                    definition
+                        .members
+                        .iter()
+                        .map(|member| member.name.clone())
+                        .collect(),
+                );
+            }
+            Item::Export(export, _) => {
+                if let shape_ast::ast::ExportItem::Enum(definition) = &export.item
+                    && definition.name == enum_name
+                {
+                    return Some(
+                        definition
+                            .members
+                            .iter()
+                            .map(|member| member.name.clone())
+                            .collect(),
+                    );
+                }
+            }
+            Item::Module(module, _) => {
+                if let Some(members) = enum_members_in_items(&module.items, enum_name) {
+                    return Some(members);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn dedupe_completion_items(items: &mut Vec<CompletionItem>) {

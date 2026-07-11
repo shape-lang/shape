@@ -2058,6 +2058,7 @@ impl BytecodeCompiler {
             analysis_program.items = merged;
         }
         self.prepend_inline_module_analysis_items(&mut analysis_program)?;
+        self.apply_function_comptime_signature_directives_for_analysis(&mut analysis_program)?;
 
         // Run the shared analyzer and surface diagnostics that are currently
         // proven reliable in the compiler execution path.

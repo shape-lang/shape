@@ -814,6 +814,15 @@ impl TypeInferenceEngine {
                 TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("string".to_string()))),
             ),
             Self::typed_object_field("optional", TypeAnnotation::Basic("bool".to_string())),
+            Self::typed_object_field("type_ref", Self::comptime_type_ref_annotation()),
+        ])
+    }
+
+    fn comptime_type_ref_annotation() -> TypeAnnotation {
+        TypeAnnotation::Object(vec![
+            Self::typed_object_field("name", TypeAnnotation::Basic("string".to_string())),
+            Self::typed_object_field("kind", TypeAnnotation::Basic("string".to_string())),
+            Self::typed_object_field("source", TypeAnnotation::Basic("string".to_string())),
         ])
     }
 
@@ -881,7 +890,32 @@ impl TypeInferenceEngine {
                             Self::comptime_field_descriptor_annotation(),
                         )),
                     ),
+                    ("type_ref", Self::comptime_type_ref_annotation()),
                 ])
+            }
+            "type_ref" => {
+                self.check_comptime_builtin_args(
+                    arg_types,
+                    &[Type::Concrete(TypeAnnotation::Basic(
+                        crate::builtin_metadata::COMPTIME_TYPE_SYNTAX_MARKER.to_string(),
+                    ))],
+                    call_span,
+                )?;
+                Type::Concrete(TypeAnnotation::Basic(
+                    crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                        .to_string(),
+                ))
+            }
+            "type_category" => {
+                self.check_comptime_builtin_args(
+                    arg_types,
+                    &[Type::Concrete(TypeAnnotation::Basic(
+                        crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                            .to_string(),
+                    ))],
+                    call_span,
+                )?;
+                Type::Concrete(TypeAnnotation::Basic("FrozenTypeCategory".to_string()))
             }
             _ => {
                 return Err(TypeError::ConstraintViolation(format!(
@@ -919,21 +953,51 @@ impl TypeInferenceEngine {
         // the expected param is a concrete `Function` shape; everything else
         // falls through to plain `infer_expr` (unchanged behavior).
         let expected_closure_param_types = self.callee_concrete_param_fn_types(name, args);
-        // `type_info(User)` / `implements(Bar, Serialize)` name a type or trait
-        // directly as the argument — a bare identifier that is NOT a value
-        // binding. The comptime driver rewrites those identifiers to string
-        // literals before it evaluates the block (the compiler's
-        // rewrite_type_info_ident_args / rewrite_implements_ident_args pass), so
-        // the reflection builtin always receives the name as a string. Mirror
-        // that here so the outer type-check accepts the bare-identifier form
-        // instead of rejecting `User` as "not compatible with string".
-        let type_symbol_ident_args = self.in_comptime_context()
-            && matches!(name, "type_info" | "implements")
-            && crate::builtin_metadata::is_comptime_builtin_function(name);
+        // `type_info(User)` / `type_ref(User)` / `implements(Bar, Serialize)`
+        // name a type or trait directly as the argument: a bare identifier that
+        // is not a value binding. The comptime driver rewrites legacy reflection
+        // arguments to strings, while `type_ref` receives an unspellable typed
+        // syntax marker and is then lowered to its compiler-issued identity.
+        // Mirror those distinct carriers here so the outer type-check accepts
+        // the bare-identifier form without making TypeRef constructible from
+        // source strings.
+        let is_type_ref_builtin =
+            name == "type_ref" && crate::builtin_metadata::is_comptime_builtin_function(name);
+        if is_type_ref_builtin {
+            match args {
+                [Expr::Identifier(..)] => {}
+                [Expr::Literal(shape_ast::ast::Literal::String(_), _)] => {
+                    return Err(TypeError::ConstraintViolation(
+                        "type_ref expects compiler-resolved type syntax; strings cannot construct TypeRef"
+                            .to_string(),
+                    ));
+                }
+                [_] => {
+                    return Err(TypeError::ConstraintViolation(
+                        "type_ref expects compiler-resolved type syntax such as type_ref(int)"
+                            .to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(TypeError::ConstraintViolation(
+                        "type_ref expects exactly one type argument".to_string(),
+                    ));
+                }
+            }
+        }
+        let type_symbol_ident_args = crate::builtin_metadata::is_comptime_builtin_function(name)
+            && ((self.in_comptime_context() && matches!(name, "type_info" | "implements"))
+                || is_type_ref_builtin);
         let mut arg_types: Vec<Type> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
             if type_symbol_ident_args && matches!(arg, Expr::Identifier(..)) {
-                arg_types.push(BuiltinTypes::string());
+                arg_types.push(if name == "type_ref" {
+                    Type::Concrete(TypeAnnotation::Basic(
+                        crate::builtin_metadata::COMPTIME_TYPE_SYNTAX_MARKER.to_string(),
+                    ))
+                } else {
+                    BuiltinTypes::string()
+                });
                 continue;
             }
             let arg_type = match (

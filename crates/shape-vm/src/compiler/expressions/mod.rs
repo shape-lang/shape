@@ -1914,6 +1914,14 @@ impl BytecodeCompiler {
                         message: format!("Comptime block directive processing failed: {}", e),
                         location: Some(self.span_to_source_location(*span)),
                     })?;
+                if let Some(message) =
+                    shape_runtime::comptime_reflection::runtime_lift_rejection(&execution.value)
+                {
+                    return Err(shape_ast::error::ShapeError::SemanticError {
+                        message: message.to_string(),
+                        location: Some(self.span_to_source_location(*span)),
+                    });
+                }
                 // Convert the result to an expression and compile it.
                 // Use nb_to_expr for complex types (arrays, objects) that
                 // cannot be represented as a single literal.

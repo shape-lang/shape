@@ -93,6 +93,8 @@ pub enum CompletionContext {
     TraitBound,
     /// Inside a `comptime { }` block — suggest comptime builtins + normal expressions
     ComptimeBlock,
+    /// After `EnumName::` with an optional partial variant name.
+    EnumVariant { enum_name: String, prefix: String },
     /// After `@` in expression position — suggest annotations for expression-level decoration
     ExprAnnotation,
     /// After `@` inside a `///` doc comment.
@@ -227,6 +229,12 @@ pub fn analyze_context(text: &str, position: Position) -> CompletionContext {
                 object: object.to_string(),
             };
         }
+    }
+
+    if !inside_interpolation
+        && let Some((enum_name, prefix)) = detect_enum_variant_context(&text_before_cursor)
+    {
+        return CompletionContext::EnumVariant { enum_name, prefix };
     }
 
     // Check if we're after "find" keyword (pattern reference)
@@ -1413,11 +1421,16 @@ fn is_inside_comptime_block(text: &str, current_line: usize) -> bool {
         }
 
         let trimmed = line.trim();
-        // Check for `comptime {` pattern (item-level or expression-level)
-        if (trimmed.starts_with("comptime {")
-            || trimmed.starts_with("comptime{")
-            || trimmed == "comptime")
-            && !in_comptime
+        // Item/expression blocks, comptime functions, and annotation
+        // `comptime pre/post` handlers all share the same staged completion
+        // context.
+        if !in_comptime
+            && (trimmed.starts_with("comptime {")
+                || trimmed.starts_with("comptime{")
+                || trimmed.starts_with("comptime fn ")
+                || trimmed.starts_with("comptime pre(")
+                || trimmed.starts_with("comptime post(")
+                || trimmed == "comptime")
         {
             in_comptime = true;
         }
@@ -1435,6 +1448,36 @@ fn is_inside_comptime_block(text: &str, current_line: usize) -> bool {
     }
 
     in_comptime && brace_count > 0
+}
+
+fn detect_enum_variant_context(text_before_cursor: &str) -> Option<(String, String)> {
+    let trimmed = text_before_cursor.trim_end();
+    let separator = trimmed.rfind("::")?;
+    let prefix = &trimmed[separator + 2..];
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+
+    let before = trimmed[..separator].trim_end();
+    let start = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_')
+        .map_or(0, |(index, c)| index + c.len_utf8());
+    let enum_name = &before[start..];
+    if enum_name.is_empty()
+        || !enum_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
+
+    Some((enum_name.to_string(), prefix.to_string()))
 }
 
 /// Check if cursor is after `@` in expression position (not at statement start).
@@ -2265,6 +2308,37 @@ mod tests {
         };
         let context = analyze_context(text, position);
         assert_eq!(context, CompletionContext::ComptimeBlock);
+    }
+
+    #[test]
+    fn test_comptime_annotation_handler_context() {
+        let text = "annotation inspect() {\n  comptime post(target, ctx) {\n    ";
+        let context = analyze_context(
+            text,
+            Position {
+                line: 2,
+                character: 4,
+            },
+        );
+        assert_eq!(context, CompletionContext::ComptimeBlock);
+    }
+
+    #[test]
+    fn test_enum_variant_context_with_partial_prefix() {
+        let context = analyze_context(
+            "let value = FrozenTypeCategory::Pr",
+            Position {
+                line: 0,
+                character: 34,
+            },
+        );
+        assert_eq!(
+            context,
+            CompletionContext::EnumVariant {
+                enum_name: "FrozenTypeCategory".to_string(),
+                prefix: "Pr".to_string(),
+            }
+        );
     }
 
     #[test]

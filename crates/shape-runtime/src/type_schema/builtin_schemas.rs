@@ -5,8 +5,15 @@
 //! at init with real field types and constant field indices.
 
 use super::SchemaId;
+use super::enum_support::EnumVariantInfo;
 use super::field_types::FieldType;
 use super::registry::{TypeSchemaBuilder, TypeSchemaRegistry};
+use crate::comptime_reflection::FrozenTypeCategory;
+
+/// Unspellable schema identity for compiler-issued comptime `TypeRef` values.
+/// The SOH prefix cannot occur in a Shape identifier, so source code cannot
+/// construct a lookalike nominal carrier.
+pub const COMPTIME_FROZEN_TYPE_REF_SCHEMA: &str = "\u{1}comptime:TypeRef";
 
 // =========================================================================
 // Field index constants
@@ -238,17 +245,51 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .int_field("comptime_api")
         .register(registry);
 
+    let _comptime_type_ref = TypeSchemaBuilder::new("__ComptimeTypeRef")
+        .string_field("name")
+        .string_field("kind")
+        .string_field("source")
+        .register(registry);
+
+    let _frozen_type_category = registry.register_enum_scoped(
+        "FrozenTypeCategory",
+        FrozenTypeCategory::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, category)| EnumVariantInfo::new(category.variant_name(), id as u16, 0))
+            .collect(),
+    );
+
+    let _comptime_frozen_type_ref = TypeSchemaBuilder::new(COMPTIME_FROZEN_TYPE_REF_SCHEMA)
+        .int_field("identity_high")
+        .int_field("identity_low")
+        .register(registry);
+
+    let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")
+        .string_field("kind")
+        .string_field("name")
+        .string_field("return_type")
+        .object_field("return_type_ref", "__ComptimeTypeRef")
+        .string_field("literal_kind")
+        .string_field("literal_string")
+        .int_field("literal_int")
+        .f64_field("literal_number")
+        .bool_field("literal_bool")
+        .register(registry);
+
     let _comptime_field_descriptor = TypeSchemaBuilder::new("__ComptimeFieldDescriptor")
         .string_field("name")
         .string_field("type")
         .array_field("annotations", FieldType::Any)
         .bool_field("optional")
+        .object_field("type_ref", "__ComptimeTypeRef")
         .register(registry);
 
     let _comptime_param_descriptor = TypeSchemaBuilder::new("__ComptimeParamDescriptor")
         .string_field("name")
         .string_field("type")
         .bool_field("const")
+        .object_field("type_ref", "__ComptimeTypeRef")
         .register(registry);
 
     let _comptime_annotation_descriptor = TypeSchemaBuilder::new("__ComptimeAnnotationDescriptor")
@@ -274,6 +315,7 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .array_field("fields", FieldType::Any)
         .array_field("params", FieldType::Any)
         .option_string_field("return_type")
+        .object_field("return_type_ref", "__ComptimeTypeRef")
         .array_field("annotations", FieldType::Any)
         .array_field("captures", FieldType::Any)
         .register(registry);
@@ -293,6 +335,7 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         // builder, no split introspection story. TypedObject kinds populate it
         // from the type's declared fields; every other kind is an empty array.
         .array_field("fields", FieldType::Any)
+        .object_field("type_ref", "__ComptimeTypeRef")
         .register(registry);
 
     // §4.4 comptime-handler `ctx` compile-context record. Read-only build
@@ -352,6 +395,10 @@ mod tests {
         assert!(registry.has_type("__ComptimeAnnotationDescriptor"));
         assert!(registry.has_type("__ComptimeTarget"));
         assert!(registry.has_type("__ComptimeTypeInfo"));
+        assert!(registry.has_type("__ComptimeTypeRef"));
+        assert!(registry.has_type(COMPTIME_FROZEN_TYPE_REF_SCHEMA));
+        assert!(registry.has_type("FrozenTypeCategory"));
+        assert!(registry.has_type("__ComptimeItemFragment"));
 
         // Check field counts
         let any_error = registry.get_by_id(ids.any_error).unwrap();
@@ -434,3 +481,7 @@ mod tests {
         assert_eq!(resolved.result, ids.result);
     }
 }
+
+#[cfg(test)]
+#[path = "builtin_schemas/comptime_reflection_tests.rs"]
+mod comptime_reflection_tests;

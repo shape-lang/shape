@@ -16,11 +16,13 @@ use shape_value::{KindedSlot, NativeKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// (name, arity, target_method, return_type)
-const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
-    ("implements", 2, "implements", None),
-    ("warning", 1, "warning", None),
-    ("error", 1, "error", None),
+const TYPE_REF_FORWARDER: &str = "\u{1}comptime:forward-type-ref";
+
+/// (name, arity, target_method, return_fields, named_return_type)
+const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option<&str>)] = &[
+    ("implements", 2, "implements", None, None),
+    ("warning", 1, "warning", None, None),
+    ("error", 1, "error", None, None),
     (
         "build_config",
         0,
@@ -37,19 +39,43 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>)] = &[
             "target_os",
             "version",
         ]),
+        None,
     ),
     // W7 (2026-05-17) — `type_info(T)` comptime builtin per
     // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
     // §4 (b) recommendation. Bare type-identifier arguments are
     // rewritten to string literals by `rewrite_type_info_ident_args`
     // before this forwarder dispatches into `__comptime__.type_info`.
-    // Return-fields hint matches the `types.shape` TypeInfo declaration
-    // so the comptime compiler can resolve field access on the result
-    // (`ti.name` / `ti.kind` / `ti.fields`).
-    ("type_info", 1, "type_info", Some(&["kind", "name", "fields"])),
+    // Return-fields hint covers the legacy TypeInfo fields plus the additive
+    // TypeRef descriptor so the comptime compiler can resolve field access on
+    // the result (`ti.name` / `ti.kind` / `ti.fields` / `ti.type_ref`).
+    (
+        "type_info",
+        1,
+        "type_info",
+        Some(&["kind", "name", "fields", "type_ref"]),
+        None,
+    ),
+    (
+        TYPE_REF_FORWARDER,
+        2,
+        super::comptime_builtins::TYPE_REF_INTRINSIC,
+        None,
+        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
+    ),
+    (
+        "type_category",
+        1,
+        super::comptime_builtins::TYPE_CATEGORY_INTRINSIC,
+        None,
+        Some("FrozenTypeCategory"),
+    ),
+    // First typed generation fragment surface. `item_fn(...)` returns a
+    // typed fragment carrier accepted by `extend (expr)`.
+    ("item_fn", 3, "item_fn", None, None),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
-    ("string_lit", 1, "string_lit", None),
+    ("string_lit", 1, "string_lit", None, None),
 ];
 
 /// Comptime execution result.
@@ -124,6 +150,35 @@ fn comptime_field_descriptor_annotation() -> TypeAnnotation {
             type_annotation: TypeAnnotation::Basic("bool".to_string()),
             annotations: vec![],
         },
+        ObjectTypeField {
+            name: "type_ref".to_string(),
+            optional: false,
+            type_annotation: comptime_type_ref_annotation(),
+            annotations: vec![],
+        },
+    ])
+}
+
+fn comptime_type_ref_annotation() -> TypeAnnotation {
+    TypeAnnotation::Object(vec![
+        ObjectTypeField {
+            name: "name".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "kind".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "source".to_string(),
+            optional: false,
+            type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
     ])
 }
 
@@ -149,6 +204,12 @@ fn comptime_param_descriptor_annotation() -> TypeAnnotation {
             type_annotation: TypeAnnotation::Basic("bool".to_string()),
             annotations: vec![],
         },
+        ObjectTypeField {
+            name: "type_ref".to_string(),
+            optional: false,
+            type_annotation: comptime_type_ref_annotation(),
+            annotations: vec![],
+        },
     ])
 }
 
@@ -169,23 +230,29 @@ fn comptime_target_param_type() -> TypeAnnotation {
         ObjectTypeField {
             name: "fields".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(
-                comptime_field_descriptor_annotation(),
-            )),
+            type_annotation: TypeAnnotation::Array(
+                Box::new(comptime_field_descriptor_annotation()),
+            ),
             annotations: vec![],
         },
         ObjectTypeField {
             name: "params".to_string(),
             optional: false,
-            type_annotation: TypeAnnotation::Array(Box::new(
-                comptime_param_descriptor_annotation(),
-            )),
+            type_annotation: TypeAnnotation::Array(
+                Box::new(comptime_param_descriptor_annotation()),
+            ),
             annotations: vec![],
         },
         ObjectTypeField {
             name: "return_type".to_string(),
             optional: true,
             type_annotation: TypeAnnotation::Basic("string".to_string()),
+            annotations: vec![],
+        },
+        ObjectTypeField {
+            name: "return_type_ref".to_string(),
+            optional: false,
+            type_annotation: comptime_type_ref_annotation(),
             annotations: vec![],
         },
         ObjectTypeField {
@@ -208,9 +275,9 @@ fn comptime_target_param_type() -> TypeAnnotation {
 }
 
 fn comptime_builtin_forwarders() -> Vec<Item> {
-    COMPTIME_BUILTIN_FORWARDERS
-        .iter()
-        .map(|(name, arity, target_method, return_fields)| {
+    let mut items = vec![frozen_type_category_enum_item()];
+    items.extend(COMPTIME_BUILTIN_FORWARDERS.iter().map(
+        |(name, arity, target_method, return_fields, named_return_type)| {
             let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
                 .map(|i| shape_ast::ast::FunctionParameter {
                     pattern: shape_ast::ast::DestructurePattern::Identifier(
@@ -242,33 +309,36 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
             // If the forwarder has known return fields, generate an Object
             // type annotation so the compiler can emit GetFieldTyped for
             // property access on the return value.
-            let return_type = return_fields.map(|fields| {
-                TypeAnnotation::Object(
-                    fields
-                        .iter()
-                        .map(|f| ObjectTypeField {
-                            name: f.to_string(),
-                            optional: false,
-                            // `type_info(T)` result fields carry their real
-                            // types (comptime-excellence §4.1.2), not `unknown`:
-                            // `.name` / `.kind` are `string` (so `ti.name ==
-                            // "User"` type-checks), and `.fields` is a concrete
-                            // `Array<FieldDescriptor>` so `fields[i].name`
-                            // subscript access resolves — an `unknown` field is
-                            // iterable but neither comparable nor indexable,
-                            // which regressed the flagship `fields[0].name` form.
-                            type_annotation: match *f {
-                                "fields" => TypeAnnotation::Array(Box::new(
-                                    comptime_field_descriptor_annotation(),
-                                )),
-                                "name" | "kind" => TypeAnnotation::Basic("string".to_string()),
-                                _ => TypeAnnotation::Basic("unknown".to_string()),
-                            },
-                            annotations: vec![],
-                        })
-                        .collect(),
-                )
-            });
+            let return_type = named_return_type
+                .map(|name| TypeAnnotation::Basic((*name).to_string()))
+                .or_else(|| {
+                    return_fields.map(|fields| {
+                        TypeAnnotation::Object(
+                            fields
+                                .iter()
+                                .map(|f| ObjectTypeField {
+                                    name: f.to_string(),
+                                    optional: false,
+                                    // `type_info(T)` result fields carry their real
+                                    // types (comptime-excellence §4.1.2), not `unknown`.
+                                    type_annotation: match *f {
+                                        "fields" => TypeAnnotation::Array(Box::new(
+                                            comptime_field_descriptor_annotation(),
+                                        )),
+                                        "return_type_ref" | "type_ref" => {
+                                            comptime_type_ref_annotation()
+                                        }
+                                        "name" | "kind" | "return_type" => {
+                                            TypeAnnotation::Basic("string".to_string())
+                                        }
+                                        _ => TypeAnnotation::Basic("unknown".to_string()),
+                                    },
+                                    annotations: vec![],
+                                })
+                                .collect(),
+                        )
+                    })
+                });
 
             Item::Function(
                 FunctionDef {
@@ -287,8 +357,32 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                 },
                 Span::DUMMY,
             )
-        })
-        .collect()
+        },
+    ));
+    items
+}
+
+fn frozen_type_category_enum_item() -> Item {
+    use shape_ast::ast::{EnumDef, EnumMember, EnumMemberKind};
+
+    Item::Enum(
+        EnumDef {
+            name: "FrozenTypeCategory".to_string(),
+            doc_comment: None,
+            type_params: None,
+            members: super::comptime_builtins::FrozenTypeCategory::ALL
+                .into_iter()
+                .map(|category| EnumMember {
+                    name: category.variant_name().to_string(),
+                    kind: EnumMemberKind::Unit { value: None },
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                })
+                .collect(),
+            annotations: Vec::new(),
+        },
+        Span::DUMMY,
+    )
 }
 
 /// Ensure that the last statement in a body is a tail value (returns its result).
@@ -320,62 +414,69 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
     }
 }
 
-/// Rewrite bare type/trait-name identifier arguments to `type_info()` and
-/// `implements()` calls as string literals, at ANY nesting depth.
+/// Rewrite bare type/trait-name identifier arguments to comptime reflection
+/// payloads at any nesting depth.
 ///
-/// `type_info(User)` and `implements(Dog, Speak)` name a type or trait directly;
-/// those identifiers are not value bindings, so the reflection builtins receive
-/// the name as a string. The walk is fully recursive so the natural nested forms
+/// `type_info(User)`, `type_ref(User)`, and `implements(Dog, Speak)` name types
+/// or traits directly. Legacy reflection receives names; `type_ref` receives a
+/// compiler-issued identity. The walk is fully recursive so natural nested forms
 /// work too — `print(type_info(User).name)`, `if implements(T, "Ord") { ... }`,
 /// `let n = type_info(field.type).name`, etc. — not only a bare top-level
 /// statement. The outer type-checker accepts the same bare-identifier form
 /// (inference/access.rs `type_symbol_ident_args`), so the two paths agree.
-fn rewrite_comptime_type_symbol_args(stmt: &mut Statement) {
+fn rewrite_comptime_type_symbol_args(
+    stmt: &mut Statement,
+    type_snapshot: &super::comptime_builtins::TypeReflectionSnapshot,
+) {
     match stmt {
-        Statement::Expression(expr, _) => rewrite_comptime_type_symbol_args_expr(expr),
-        Statement::Return(Some(expr), _) => rewrite_comptime_type_symbol_args_expr(expr),
+        Statement::Expression(expr, _) => {
+            rewrite_comptime_type_symbol_args_expr(expr, type_snapshot)
+        }
+        Statement::Return(Some(expr), _) => {
+            rewrite_comptime_type_symbol_args_expr(expr, type_snapshot)
+        }
         Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
         Statement::VariableDecl(decl, _) => {
             if let Some(init) = &mut decl.value {
-                rewrite_comptime_type_symbol_args_expr(init);
+                rewrite_comptime_type_symbol_args_expr(init, type_snapshot);
             }
         }
         Statement::Assignment(assign, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut assign.value);
+            rewrite_comptime_type_symbol_args_expr(&mut assign.value, type_snapshot);
         }
         Statement::For(for_loop, _) => {
             match &mut for_loop.init {
                 shape_ast::ast::ForInit::ForIn { iter, .. } => {
-                    rewrite_comptime_type_symbol_args_expr(iter);
+                    rewrite_comptime_type_symbol_args_expr(iter, type_snapshot);
                 }
                 shape_ast::ast::ForInit::ForC {
                     init,
                     condition,
                     update,
                 } => {
-                    rewrite_comptime_type_symbol_args(init);
-                    rewrite_comptime_type_symbol_args_expr(condition);
-                    rewrite_comptime_type_symbol_args_expr(update);
+                    rewrite_comptime_type_symbol_args(init, type_snapshot);
+                    rewrite_comptime_type_symbol_args_expr(condition, type_snapshot);
+                    rewrite_comptime_type_symbol_args_expr(update, type_snapshot);
                 }
             }
             for s in &mut for_loop.body {
-                rewrite_comptime_type_symbol_args(s);
+                rewrite_comptime_type_symbol_args(s, type_snapshot);
             }
         }
         Statement::While(while_loop, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition);
+            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, type_snapshot);
             for s in &mut while_loop.body {
-                rewrite_comptime_type_symbol_args(s);
+                rewrite_comptime_type_symbol_args(s, type_snapshot);
             }
         }
         Statement::If(if_stmt, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition);
+            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, type_snapshot);
             for s in &mut if_stmt.then_body {
-                rewrite_comptime_type_symbol_args(s);
+                rewrite_comptime_type_symbol_args(s, type_snapshot);
             }
             if let Some(else_body) = &mut if_stmt.else_body {
                 for s in else_body {
-                    rewrite_comptime_type_symbol_args(s);
+                    rewrite_comptime_type_symbol_args(s, type_snapshot);
                 }
             }
         }
@@ -384,11 +485,11 @@ fn rewrite_comptime_type_symbol_args(stmt: &mut Statement) {
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }
         | Statement::ExtendItemsExpr { expression, .. } => {
-            rewrite_comptime_type_symbol_args_expr(expression);
+            rewrite_comptime_type_symbol_args_expr(expression, type_snapshot);
         }
         Statement::ReplaceBody { body, .. } => {
             for s in body {
-                rewrite_comptime_type_symbol_args(s);
+                rewrite_comptime_type_symbol_args(s, type_snapshot);
             }
         }
         // Directives with no embedded expression / already-parsed payloads.
@@ -399,24 +500,42 @@ fn rewrite_comptime_type_symbol_args(stmt: &mut Statement) {
     }
 }
 
-fn rewrite_comptime_type_symbol_args_expr(expr: &mut Expr) {
+fn rewrite_comptime_type_symbol_args_expr(
+    expr: &mut Expr,
+    type_snapshot: &super::comptime_builtins::TypeReflectionSnapshot,
+) {
     // Rewrite this call's own bare-identifier args if it is a reflection call.
     if let Expr::FunctionCall { name, args, .. } = expr {
         if name == "type_info" || name == "implements" {
             for arg in args.iter_mut() {
                 if let Expr::Identifier(ident, span) = arg {
-                    *arg =
-                        Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
+                    *arg = Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
                 }
+            }
+        } else if name == "type_ref" {
+            if let [Expr::Identifier(ident, span)] = args.as_slice() {
+                let identity = type_snapshot
+                    .frozen_type_id(ident)
+                    .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
+                let span = *span;
+                *name = TYPE_REF_FORWARDER.to_string();
+                *args = vec![
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.low), span),
+                ];
             }
         }
     }
 
     // Recurse into every child expression so nested reflection calls
     // (`print(type_info(User).name)`) are rewritten too.
-    let recur = rewrite_comptime_type_symbol_args_expr;
+    let recur = |child: &mut Expr| {
+        rewrite_comptime_type_symbol_args_expr(child, type_snapshot);
+    };
     match expr {
-        Expr::FunctionCall { args, named_args, .. } => {
+        Expr::FunctionCall {
+            args, named_args, ..
+        } => {
             for a in args.iter_mut() {
                 recur(a);
             }
@@ -478,6 +597,15 @@ fn rewrite_comptime_type_symbol_args_expr(expr: &mut Expr) {
                 recur(e);
             }
         }
+        Expr::Match(match_expr, _) => {
+            recur(&mut match_expr.scrutinee);
+            for arm in &mut match_expr.arms {
+                if let Some(guard) = &mut arm.guard {
+                    recur(guard);
+                }
+                recur(&mut arm.body);
+            }
+        }
         Expr::Array(elems, _) => {
             for e in elems.iter_mut() {
                 recur(e);
@@ -494,7 +622,7 @@ fn rewrite_comptime_type_symbol_args_expr(expr: &mut Expr) {
         Expr::Block(block, _) => {
             for item in &mut block.items {
                 if let shape_ast::ast::BlockItem::Statement(s) = item {
-                    rewrite_comptime_type_symbol_args(s);
+                    rewrite_comptime_type_symbol_args(s, type_snapshot);
                 } else if let shape_ast::ast::BlockItem::Expression(e) = item {
                     recur(e);
                 }
@@ -578,12 +706,11 @@ pub(crate) fn execute_comptime_with_context(
     // Wrap statements in a function so the compiler produces a callable entry point.
     // Ensure the last statement is a tail return so if/else values aren't discarded.
     let mut body = statements.to_vec();
-    // Transform bare identifiers in implements() / type_info() calls to
-    // string literals, since type/trait names aren't variables in the
-    // comptime scope. Fully recursive so nested forms
-    // (`print(type_info(User).name)`) are rewritten too.
+    // Transform bare identifiers in legacy reflection calls to their existing
+    // internal string payloads. `type_ref(T)` instead receives a compiler-issued
+    // semantic identity; user-provided strings never construct a TypeRef.
     for stmt in &mut body {
-        rewrite_comptime_type_symbol_args(stmt);
+        rewrite_comptime_type_symbol_args(stmt, &type_snapshot);
     }
     ensure_tail_return(&mut body);
 

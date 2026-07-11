@@ -26,6 +26,7 @@ pub mod chart_detect;
 pub mod closure;
 pub mod code_search;
 pub mod columnar_aggregations;
+pub mod comptime_reflection;
 pub mod const_eval;
 pub mod content_dispatch;
 pub mod content_renderer;

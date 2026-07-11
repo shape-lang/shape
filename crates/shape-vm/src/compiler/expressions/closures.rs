@@ -3109,6 +3109,29 @@ impl BytecodeCompiler {
         let param_names: BTreeSet<String> =
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
+
+        let generated_owner = self
+            .current_function
+            .and_then(|idx| self.program.functions.get(idx))
+            .map(|function| function.name.as_str())
+            .filter(|name| self.materialized_comptime_fns.contains(*name));
+        if let Some(owner) = generated_owner
+            && !captured_vars.is_empty()
+        {
+            let captures = captured_vars
+                .iter()
+                .map(|name| format!("'{name}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "generated closure implicitly captures {captures}; generated captures must \
+                     be explicit (in generated function '{owner}')"
+                ),
+                location: Some(self.span_to_source_location(closure_span)),
+            });
+        }
+
         let captured_var_set: BTreeSet<String> = captured_vars.iter().cloned().collect();
         mutated_captures.extend(collect_static_mut_self_container_captures(
             self,
@@ -4107,8 +4130,11 @@ impl BytecodeCompiler {
                     }
                 }
             }
-            self.pending_closure_capture_drop_locals =
-                if drop_captures.is_empty() { None } else { Some(drop_captures) };
+            self.pending_closure_capture_drop_locals = if drop_captures.is_empty() {
+                None
+            } else {
+                Some(drop_captures)
+            };
         }
 
         // Phase F: when the compiler has been told to emit the heap-ABI

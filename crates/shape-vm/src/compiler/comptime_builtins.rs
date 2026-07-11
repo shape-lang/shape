@@ -12,7 +12,6 @@
 //!   (W7 2026-05-17 — see
 //!   `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`)
 
-use shape_ast::ast::TypeAnnotation;
 use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::type_schema::typed_object_for_named_schema;
@@ -20,109 +19,22 @@ use shape_runtime::type_system::BuiltinTypes;
 use shape_runtime::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
 };
-use shape_value::KindedSlot;
-use shape_value::heap_value::HeapValue;
+use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
+use shape_value::{KindedSlot, NativeKind};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
-/// Build a `TypeReflectionSnapshot` from the bytecode compiler's
-/// struct/enum/alias registries.
-///
-/// Called at every `execute_comptime` site so the comptime function
-/// receives a per-compile-unit view of the user's declared types. Only
-/// the type-name catalog is currently consumed by the W7 minimal slice;
-/// the full `(field_name, TypeAnnotation)` field lists are populated
-/// where the compiler has them (via `struct_generic_info`) so the
-/// follow-up `TypeInfo.fields` slice can wire without re-touching this
-/// call path.
-pub(crate) fn build_type_reflection_snapshot(
-    compiler: &super::BytecodeCompiler,
-    enclosing_type_params: &[String],
-) -> TypeReflectionSnapshot {
-    let mut snapshot = TypeReflectionSnapshot::default();
-    for (name, (field_names, _span)) in &compiler.struct_types {
-        let field_types = compiler
-            .struct_generic_info
-            .get(name)
-            .map(|info| info.runtime_field_types.clone())
-            .unwrap_or_default();
-        let ordered: Vec<(String, TypeAnnotation)> = field_names
-            .iter()
-            .filter_map(|fname| {
-                field_types
-                    .get(fname)
-                    .cloned()
-                    .map(|ann| (fname.clone(), ann))
-            })
-            .collect();
-        snapshot.struct_defs.insert(name.clone(), ordered);
-    }
-    for (alias_name, _target) in &compiler.type_aliases {
-        // `type_aliases: HashMap<String, String>` — the value is the
-        // target type-name string, not a TypeAnnotation, so we surface
-        // the alias as `Basic(target)` for downstream `type_info`
-        // resolution.
-        snapshot
-            .alias_defs
-            .insert(alias_name.clone(), TypeAnnotation::Basic(_target.clone()));
-    }
-    // Enums: pull from the schema registry via the type-inference
-    // environment so we don't need a parallel compiler-side enum table.
-    // The schema registry is the single source of truth post the
-    // ADR-005 §1 single-discriminator discipline.
-    for type_name in compiler
-        .type_tracker
-        .schema_registry()
-        .type_names()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-    {
-        if let Some(schema) = compiler.type_tracker.schema_registry().get(&type_name) {
-            if let Some(enum_info) = schema.get_enum_info() {
-                let variants: Vec<String> =
-                    enum_info.variants.iter().map(|v| v.name.clone()).collect();
-                snapshot.enum_defs.insert(type_name.clone(), variants);
-            }
-        }
-    }
-    for tp in enclosing_type_params {
-        snapshot.known_type_params.insert(tp.clone());
-    }
-    snapshot
-}
+mod type_reflection;
 
-/// Snapshot of user-defined type names made available to the
-/// `type_info(T)` comptime builtin.
-///
-/// Built by the outer compiler before comptime execution
-/// (`compile_and_execute_comptime_program` in `comptime.rs`) and passed by
-/// value into the closure for `type_info`. The current shape (minimal
-/// W7 slice) only needs the type-name catalog (`struct_defs` keys),
-/// alias-name catalog (`alias_defs` keys), enum-name catalog
-/// (`enum_defs` keys), and generic-parameter set (`known_type_params`)
-/// for kind discriminator dispatch.
-///
-/// `Vec<(String, TypeAnnotation)>` field payloads are kept on
-/// `struct_defs` even though they're not consumed by the current
-/// shipping shape — they're populated whenever the compiler has them
-/// to hand and will be the load-bearing input when `TypeInfo.fields` is
-/// wired in a follow-up.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TypeReflectionSnapshot {
-    /// type name → ordered `(field_name, TypeAnnotation)` list.
-    pub(crate) struct_defs: HashMap<String, Vec<(String, TypeAnnotation)>>,
-    /// enum name → ordered variant names (TypeKind discriminator dispatch).
-    pub(crate) enum_defs: HashMap<String, Vec<String>>,
-    /// type alias name → underlying TypeAnnotation.
-    pub(crate) alias_defs: HashMap<String, TypeAnnotation>,
-    /// Generic type-parameter names known in the enclosing scope (e.g.
-    /// `T`, `U`). When `type_info(T)` is called and `T` is in this set,
-    /// the returned TypeInfo's `kind` is `TypeKind::Unresolved` (Q2
-    /// parametric-supported disposition; `TypeVar` collapsed into
-    /// `Unresolved` per §4.1.2).
-    pub(crate) known_type_params: HashSet<String>,
-}
+pub(crate) use type_reflection::{
+    FrozenTypeCategory, FrozenTypeIdentity, TypeReflectionSnapshot,
+    build_frozen_type_category_heap_value, build_frozen_type_ref_heap_value,
+    build_type_info_heap_value, build_type_reflection_snapshot, frozen_type_category_from_ref,
+};
+
+pub(crate) const TYPE_REF_INTRINSIC: &str = "\u{1}comptime:type-ref";
+pub(crate) const TYPE_CATEGORY_INTRINSIC: &str = "\u{1}comptime:type-category";
 
 /// Directives emitted during comptime execution (e.g., from `extend target`).
 #[derive(Debug, Clone)]
@@ -250,6 +162,112 @@ fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAn
     maybe_ann.ok_or_else(|| format!("could not parse type payload '{}'", payload))
 }
 
+fn string_field_from_typed_object(
+    storage: &TypedObjectStorage,
+    schema: &shape_runtime::type_schema::TypeSchema,
+    field_name: &str,
+) -> Result<String, String> {
+    let slot = field_slot_from_typed_object(storage, schema, field_name)?;
+    slot.as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("field '{}.{}' is not a string", schema.name, field_name))
+}
+
+fn field_slot_from_typed_object(
+    storage: &TypedObjectStorage,
+    schema: &shape_runtime::type_schema::TypeSchema,
+    field_name: &str,
+) -> Result<KindedSlot, String> {
+    let idx = schema
+        .fields
+        .iter()
+        .find(|field| field.name == field_name)
+        .map(|field| field.index as usize)
+        .ok_or_else(|| {
+            format!(
+                "schema '{}' does not expose expected string field '{}'",
+                schema.name, field_name
+            )
+        })?;
+    storage
+        .clone_field_kinded(idx)
+        .ok_or_else(|| format!("field '{}' is missing from '{}'", field_name, schema.name))
+}
+
+fn type_annotation_from_string_or_type_ref_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<shape_ast::ast::TypeAnnotation, String> {
+    if let Some(payload) = slot.as_str() {
+        return parse_type_annotation_payload(payload);
+    }
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
+        return Err(format!(
+            "{builtin_name} expects a string type payload or __ComptimeTypeRef value, got {:?}",
+            slot.kind()
+        ));
+    }
+    let bits = slot.raw();
+    if bits == 0 {
+        return Err(format!(
+            "{builtin_name} expects a non-null __ComptimeTypeRef value"
+        ));
+    }
+    // SAFETY: the NativeKind witness proves the slot bits are a live
+    // TypedObjectStorage pointer for the duration of this builtin invocation.
+    let storage = unsafe { &*(bits as *const TypedObjectStorage) };
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| {
+        format!(
+            "{builtin_name} could not resolve typed-object schema id {}",
+            storage.schema_id
+        )
+    })?;
+    if schema.name != "__ComptimeTypeRef" {
+        return Err(format!(
+            "{builtin_name} expects __ComptimeTypeRef, got '{}'",
+            schema.name
+        ));
+    }
+    let source = string_field_from_typed_object(storage, &schema, "source")?;
+    parse_type_annotation_payload(&source)
+}
+
+fn type_source_from_string_or_type_ref_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<String, String> {
+    if let Some(payload) = slot.as_str() {
+        parse_type_annotation_payload(payload)?;
+        return Ok(payload.to_string());
+    }
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
+        return Err(format!(
+            "{builtin_name} expects a string type payload or __ComptimeTypeRef value, got {:?}",
+            slot.kind()
+        ));
+    }
+    let storage = slot
+        .as_typed_object_storage()
+        .ok_or_else(|| format!("{builtin_name} expects a non-null __ComptimeTypeRef value"))?;
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| {
+        format!(
+            "{builtin_name} could not resolve typed-object schema id {}",
+            storage.schema_id
+        )
+    })?;
+    if schema.name != "__ComptimeTypeRef" {
+        return Err(format!(
+            "{builtin_name} expects __ComptimeTypeRef, got '{}'",
+            schema.name
+        ));
+    }
+    let source = string_field_from_typed_object(storage, &schema, "source")?;
+    parse_type_annotation_payload(&source)?;
+    Ok(source)
+}
+
 fn parse_function_body_payload(payload: &str) -> Result<Vec<shape_ast::ast::Statement>, String> {
     if let Ok(parsed) = serde_json::from_str::<Vec<shape_ast::ast::Statement>>(payload) {
         return Ok(parsed);
@@ -285,6 +303,261 @@ fn parse_module_items_payload(payload: &str) -> Result<Vec<shape_ast::ast::Item>
     });
 
     maybe_items.ok_or_else(|| "could not parse replacement module payload".to_string())
+}
+
+fn heap_value_from_typed_object_slot(kinded: KindedSlot) -> HeapValue {
+    let ptr = kinded.raw() as *const shape_value::heap_value::TypedObjectStorage;
+    // SAFETY: `typed_object_for_named_schema` returns a live TypedObjectStorage
+    // pointer with at least one refcount share owned by `kinded`.
+    unsafe {
+        shape_value::v2::refcount::v2_retain(&(*ptr).header);
+    }
+    drop(kinded);
+    HeapValue::TypedObject(shape_value::heap_value::TypedObjectPtr::new(ptr))
+}
+
+fn is_valid_generated_function_name(name: &str) -> bool {
+    const SHAPE_IDENT_KEYWORDS: &[&str] = &[
+        "pub",
+        "import",
+        "from",
+        "use",
+        "as",
+        "builtin",
+        "let",
+        "var",
+        "const",
+        "mut",
+        "function",
+        "async",
+        "await",
+        "if",
+        "else",
+        "for",
+        "while",
+        "match",
+        "return",
+        "break",
+        "continue",
+        "true",
+        "false",
+        "null",
+        "None",
+        "Some",
+        "and",
+        "or",
+        "type",
+        "trait",
+        "interface",
+        "impl",
+        "enum",
+        "extend",
+        "method",
+        "in",
+        "comptime",
+        "datasource",
+    ];
+    if SHAPE_IDENT_KEYWORDS.contains(&name) {
+        return false;
+    }
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn literal_fragment_fields_from_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<Vec<(&'static str, KindedSlot)>, String> {
+    let mut fields = vec![
+        ("literal_string", nb_str("")),
+        ("literal_int", KindedSlot::from_int(0)),
+        ("literal_number", KindedSlot::from_number(0.0)),
+        ("literal_bool", KindedSlot::from_bool(false)),
+    ];
+    let kind = if let Some(value) = slot.as_str() {
+        fields[0] = ("literal_string", nb_str(value));
+        "string"
+    } else if let Some(value) = slot.as_i64() {
+        fields[1] = ("literal_int", KindedSlot::from_int(value));
+        "int"
+    } else if let Some(value) = slot.as_f64() {
+        if !value.is_finite() {
+            return Err(format!(
+                "{builtin_name} only supports finite numeric literals in ItemFragment values"
+            ));
+        }
+        fields[2] = ("literal_number", KindedSlot::from_number(value));
+        "number"
+    } else if let Some(value) = slot.as_bool() {
+        fields[3] = ("literal_bool", KindedSlot::from_bool(value));
+        "bool"
+    } else {
+        return Err(format!(
+            "{builtin_name} only supports string, int, number, or bool literal return values; got {:?}",
+            slot.kind()
+        ));
+    };
+    fields.insert(0, ("literal_kind", nb_str(kind)));
+    Ok(fields)
+}
+
+fn literal_expr_from_fragment(
+    storage: &TypedObjectStorage,
+    schema: &shape_runtime::type_schema::TypeSchema,
+) -> Result<shape_ast::ast::Expr, String> {
+    use shape_ast::ast::{Expr, Literal, Span};
+
+    let kind = string_field_from_typed_object(storage, schema, "literal_kind")?;
+    let literal = match kind.as_str() {
+        "string" => Literal::String(string_field_from_typed_object(
+            storage,
+            schema,
+            "literal_string",
+        )?),
+        "int" => {
+            let slot = field_slot_from_typed_object(storage, schema, "literal_int")?;
+            Literal::Int(
+                slot.as_i64()
+                    .ok_or_else(|| "ItemFragment.literal_int is not an int".to_string())?,
+            )
+        }
+        "number" => {
+            let slot = field_slot_from_typed_object(storage, schema, "literal_number")?;
+            let value = slot
+                .as_f64()
+                .ok_or_else(|| "ItemFragment.literal_number is not a number".to_string())?;
+            if !value.is_finite() {
+                return Err("ItemFragment.literal_number must be finite".to_string());
+            }
+            Literal::Number(value)
+        }
+        "bool" => {
+            let slot = field_slot_from_typed_object(storage, schema, "literal_bool")?;
+            Literal::Bool(
+                slot.as_bool()
+                    .ok_or_else(|| "ItemFragment.literal_bool is not a bool".to_string())?,
+            )
+        }
+        other => {
+            return Err(format!("unsupported ItemFragment literal kind '{}'", other));
+        }
+    };
+    Ok(Expr::Literal(literal, Span::default()))
+}
+
+fn type_ref_slot_from_string_or_type_ref_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<KindedSlot, String> {
+    if let Some(source) = slot.as_str() {
+        parse_type_annotation_payload(source)?;
+        return Ok(super::comptime_target::build_type_ref_descriptor(
+            source, None,
+        ));
+    }
+    type_annotation_from_string_or_type_ref_slot(slot, builtin_name)?;
+    Ok(slot.clone())
+}
+
+fn build_function_item_fragment(
+    name: &str,
+    return_type_slot: &KindedSlot,
+    value: &KindedSlot,
+) -> Result<HeapValue, String> {
+    if !is_valid_generated_function_name(name) {
+        return Err(format!(
+            "item_fn expected a valid generated free-function name, got '{}'",
+            name
+        ));
+    }
+    let return_type = type_source_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
+    let return_type_ref = type_ref_slot_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
+    let literal_fields = literal_fragment_fields_from_slot(value, "item_fn")?;
+
+    let mut fields = vec![
+        ("kind", nb_str("function")),
+        ("name", nb_str(name)),
+        ("return_type", nb_str(return_type.as_str())),
+        ("return_type_ref", return_type_ref),
+    ];
+    fields.extend(literal_fields);
+    let fragment = typed_object_for_named_schema("__ComptimeItemFragment", &fields);
+    Ok(heap_value_from_typed_object_slot(fragment))
+}
+
+fn function_item_from_fragment(
+    storage: &TypedObjectStorage,
+    schema: &shape_runtime::type_schema::TypeSchema,
+) -> Result<shape_ast::ast::Item, String> {
+    use shape_ast::ast::{FunctionDef, Item, Span, Statement};
+
+    let kind = string_field_from_typed_object(storage, schema, "kind")?;
+    if kind != "function" {
+        return Err(format!(
+            "unsupported ItemFragment kind '{}'; only 'function' is supported",
+            kind
+        ));
+    }
+    let name = string_field_from_typed_object(storage, schema, "name")?;
+    if !is_valid_generated_function_name(&name) {
+        return Err(format!(
+            "ItemFragment function name '{}' is not a valid Shape identifier",
+            name
+        ));
+    }
+    let return_type_ref = field_slot_from_typed_object(storage, schema, "return_type_ref")?;
+    let return_type =
+        type_annotation_from_string_or_type_ref_slot(&return_type_ref, "ItemFragment.return_type")?;
+    let expr = literal_expr_from_fragment(storage, schema)?;
+
+    Ok(Item::Function(
+        FunctionDef {
+            name,
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: Vec::new(),
+            return_type: Some(return_type),
+            where_clause: None,
+            body: vec![Statement::Expression(expr, Span::default())],
+            annotations: Vec::new(),
+            is_async: false,
+            is_comptime: false,
+        },
+        Span::default(),
+    ))
+}
+
+fn parse_extend_items_slot(slot: &KindedSlot) -> Result<Vec<shape_ast::ast::Item>, String> {
+    if let Some(payload) = slot.as_str() {
+        return parse_module_items_payload(payload);
+    }
+
+    let storage = slot.as_typed_object_storage().ok_or_else(|| {
+        format!(
+            "__emit_extend_items expects a source string or __ComptimeItemFragment, got {:?}",
+            slot.kind()
+        )
+    })?;
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| {
+        format!(
+            "__emit_extend_items could not resolve typed-object schema id {}",
+            storage.schema_id
+        )
+    })?;
+    if schema.name != "__ComptimeItemFragment" {
+        return Err(format!(
+            "__emit_extend_items expects a source string or __ComptimeItemFragment, got '{}'",
+            schema.name
+        ));
+    }
+    Ok(vec![function_item_from_fragment(storage, &schema)?])
 }
 
 /// Helper: create a string-kinded `KindedSlot` from a `&str`.
@@ -485,6 +758,72 @@ pub(crate) fn create_comptime_builtins_module(
         },
     );
 
+    let snapshot_for_type_ref = type_snapshot.clone();
+    register_typed_function(
+        &mut module,
+        TYPE_REF_INTRINSIC,
+        "Create an opaque TypeRef from compiler-resolved type syntax",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_high".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_low".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                .to_string(),
+        ),
+        move |slots, _ctx| {
+            let identity_part = |index: usize| {
+                slots
+                    .get(index)
+                    .and_then(KindedSlot::as_i64)
+                    .ok_or_else(|| "internal type_ref identity transport is invalid".to_string())
+            };
+            let identity = FrozenTypeIdentity {
+                high: identity_part(0)?,
+                low: identity_part(1)?,
+            };
+            let type_ref = build_frozen_type_ref_heap_value(identity, &snapshot_for_type_ref)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(type_ref),
+            )))
+        },
+    );
+
+    let snapshot_for_type_category = type_snapshot.clone();
+    register_typed_function(
+        &mut module,
+        TYPE_CATEGORY_INTRINSIC,
+        "Return the exhaustive semantic category of an opaque TypeRef",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "type_ref".to_string(),
+            type_name: shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                .to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::OpaqueTypedObject("FrozenTypeCategory".to_string()),
+        move |slots, _ctx| {
+            let type_ref = slots
+                .first()
+                .ok_or_else(|| "type_category expects one TypeRef value".to_string())?;
+            let category = frozen_type_category_from_ref(type_ref, &snapshot_for_type_category)?;
+            let category = build_frozen_type_category_heap_value(category)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(category),
+            )))
+        },
+    );
+
     // W7 (2026-05-17) — `type_info(T)` comptime builtin.
     //
     // Returns the `TypeInfo` reflection record for the named type. See
@@ -541,6 +880,52 @@ pub(crate) fn create_comptime_builtins_module(
         },
     );
 
+    // item_fn(name: string, return_type: string | TypeRef, value: literal) -> ItemFragment
+    //
+    // First typed additive-generation slice: construct a zero-arg free
+    // function fragment without requiring the comptime handler to assemble
+    // `fn ...` source text. The fragment is still converted to an AST item and
+    // compiled by the same strict registration/type/body pipeline as the
+    // source-string `extend (expr)` path.
+    register_typed_function(
+        &mut module,
+        "item_fn",
+        "Build a typed ItemFragment for a zero-arg generated free function",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "return_type".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "value".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__ComptimeItemFragment".to_string()),
+        |slots, _ctx| {
+            if slots.len() != 3 {
+                return Err(format!("item_fn expects 3 arguments, got {}", slots.len()));
+            }
+            let name = slots[0]
+                .as_str()
+                .ok_or_else(|| "item_fn expects a string function name".to_string())?;
+            let fragment = build_function_item_fragment(name, &slots[1], &slots[2])?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(fragment),
+            )))
+        },
+    );
+
     // Internal comptime directive: emit an extend statement payload (JSON AST).
     register_typed_fn_1::<_, Arc<String>>(
         &mut module,
@@ -571,55 +956,107 @@ pub(crate) fn create_comptime_builtins_module(
     );
 
     // Internal comptime directive: set a parameter type by parameter name.
-    // __emit_set_param_type(param_name: string, type_payload: string)
-    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
+    // __emit_set_param_type(param_name: string, type_payload: string | TypeRef)
+    register_typed_function(
         &mut module,
         "__emit_set_param_type",
         "Internal: set a parameter type by name",
-        [("param_name", "string"), ("type_payload", "string")],
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "param_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "type_payload".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
         ConcreteType::Unit,
-        |param_name, payload, _ctx| {
-            let type_annotation = parse_type_annotation_payload(payload.as_str())?;
+        |slots, _ctx| {
+            if slots.len() != 2 {
+                return Err(format!(
+                    "__emit_set_param_type expects 2 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let param_name = slots[0]
+                .as_str()
+                .ok_or_else(|| "__emit_set_param_type expects a string param name".to_string())?
+                .to_string();
+            let type_annotation =
+                type_annotation_from_string_or_type_ref_slot(&slots[1], "__emit_set_param_type")?;
             push_comptime_directive(ComptimeDirective::SetParamType {
-                param_name: param_name.as_str().to_string(),
+                param_name,
                 type_annotation,
             })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
-    // Internal comptime directive: set an integer parameter default value.
-    // __emit_set_param_value(param_name: string, value: int)
-    //
-    // This intentionally uses the fixed-arity typed marshal path: the
-    // variadic `register_typed_function` helper currently stamps every
-    // incoming argument as Bool, so a string param name cannot be recovered
-    // there without a dynamic fallback.
-    register_typed_fn_2::<_, Arc<String>, i64>(
+    // Internal comptime directive: set a scalar parameter default value.
+    // __emit_set_param_value(param_name: string, value: scalar)
+    register_typed_function(
         &mut module,
         "__emit_set_param_value",
         "Internal: set a parameter default value by name",
-        [("param_name", "string"), ("value", "int")],
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "param_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "value".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
         ConcreteType::Unit,
-        |param_name, value, _ctx| {
-            let value = KindedSlot::from_int(value);
-            let param_name = param_name.as_str().to_string();
+        |slots, _ctx| {
+            if slots.len() != 2 {
+                return Err(format!(
+                    "__emit_set_param_value expects 2 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let param_name = slots[0]
+                .as_str()
+                .ok_or_else(|| "__emit_set_param_value expects a string param name".to_string())?
+                .to_string();
+            let value = slots[1].clone();
             push_comptime_directive(ComptimeDirective::SetParamValue { param_name, value })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
     // Internal comptime directive: set function return type.
-    // __emit_set_return_type(type_payload: string)
-    register_typed_fn_1::<_, Arc<String>>(
+    // __emit_set_return_type(type_payload: string | TypeRef)
+    register_typed_function(
         &mut module,
         "__emit_set_return_type",
         "Internal: set the function return type",
-        "type_payload",
-        "string",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "type_payload".to_string(),
+            type_name: "unknown".to_string(),
+            required: true,
+            ..Default::default()
+        }],
         ConcreteType::Unit,
-        |payload, _ctx| {
-            let type_annotation = parse_type_annotation_payload(payload.as_str())?;
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_set_return_type expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let type_annotation =
+                type_annotation_from_string_or_type_ref_slot(&slots[0], "__emit_set_return_type")?;
             push_comptime_directive(ComptimeDirective::SetReturnType { type_annotation })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -657,17 +1094,27 @@ pub(crate) fn create_comptime_builtins_module(
         },
     );
 
-    // Internal comptime directive: ADD generated items from source payload
-    // (§4.5.7 `extend (expr)`). __emit_extend_items(items_payload: string)
-    register_typed_fn_1::<_, Arc<String>>(
+    // Internal comptime directive: ADD generated items from source or typed
+    // ItemFragment payload (§4.5.7 `extend (expr)`).
+    register_typed_function(
         &mut module,
         "__emit_extend_items",
-        "Internal: add generated module items from source payload",
-        "items_payload",
-        "string",
+        "Internal: add generated module items from source or typed ItemFragment payload",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "items_payload".to_string(),
+            type_name: "unknown".to_string(),
+            required: true,
+            ..Default::default()
+        }],
         ConcreteType::Unit,
-        |payload, _ctx| {
-            let items = parse_module_items_payload(payload.as_str())?;
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_extend_items expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let items = parse_extend_items_slot(&slots[0])?;
             push_comptime_directive(ComptimeDirective::ExtendItems { items })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -718,185 +1165,6 @@ fn render_shape_string_literal(s: &str) -> String {
     }
     out.push('"');
     out
-}
-
-// =========================================================================
-// W7 (2026-05-17) — `type_info(T)` builder helpers.
-//
-// Constructs a `TypeInfo` HeapValue (`{ name: string, kind: TypeKind }`)
-// from a bare type name string. Mirrors the `build_config` precedent
-// (`typed_object_from_pairs` + v2-raw `TypedObjectStorage::_new` +
-// `TypedObjectPtr` wrapping). The `kind` field is itself an enum-variant
-// TypedObject (TypeKind discriminator), looked up against the
-// user-registered `TypeKind` schema from `std::core::types`.
-//
-// Refcount discipline: every `TypedObjectStorage::_new` returns a raw
-// pointer with refcount = 1. Wrapping in `TypedObjectPtr` transfers the
-// share to the wrapper. Nested TypedObject embedded in a TypedObject
-// slot uses `ValueSlot::from_typed_object_raw` (one share owned by the
-// outer storage's slot list, retired via the schema's heap_mask + the
-// nested TypedObject's HeapHeader release path on outer drop).
-//
-// Recursive Array<FieldInfo> / Array<TypeInfo> threading is deliberately
-// deferred (W7-followup) — `Array<TypedObject>` field-storage requires
-// the V3-S5 ckpt-5 / ckpt-6 monomorphized Array carriers to land first
-// (see CLAUDE.md "Known Constraints" v2-raw-heap-audit entry). The
-// shipping shape covers the `if ti.kind == TypeKind::TypedObject {...}`
-// dispatch use case which is the primary v0.3 user-facing surface.
-// =========================================================================
-
-/// Bare type-name kind hints, mirroring `TypeKind` variants declared in
-/// `crates/shape-runtime/stdlib-src/core/types.shape`. We look up
-/// variant IDs by name at runtime (the order in `types.shape` is the
-/// source of truth) so the ordinal here is not bit-encoded.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-enum TypeKindLabel {
-    Int,
-    Number,
-    Bool,
-    String,
-    Decimal,
-    BigInt,
-    Array,
-    HashMap,
-    Option,
-    Result,
-    TypedObject,
-    TraitObject,
-    Function,
-    Tuple,
-    Unit,
-    /// Collapsed discriminator (§4.1.2 ratified): a generic type parameter in
-    /// parametric form (formerly `TypeVar`) AND an unprojectable / unregistered
-    /// type (formerly `Unknown`). One string owner: `"Unresolved"`.
-    Unresolved,
-}
-
-impl TypeKindLabel {
-    fn as_str(self) -> &'static str {
-        match self {
-            TypeKindLabel::Int => "Int",
-            TypeKindLabel::Number => "Number",
-            TypeKindLabel::Bool => "Bool",
-            TypeKindLabel::String => "String",
-            TypeKindLabel::Decimal => "Decimal",
-            TypeKindLabel::BigInt => "BigInt",
-            TypeKindLabel::Array => "Array",
-            TypeKindLabel::HashMap => "HashMap",
-            TypeKindLabel::Option => "Option",
-            TypeKindLabel::Result => "Result",
-            TypeKindLabel::TypedObject => "TypedObject",
-            TypeKindLabel::TraitObject => "TraitObject",
-            TypeKindLabel::Function => "Function",
-            TypeKindLabel::Tuple => "Tuple",
-            TypeKindLabel::Unit => "Unit",
-            TypeKindLabel::Unresolved => "Unresolved",
-        }
-    }
-}
-
-/// Classify a bare type name (without generic parameters) into a
-/// `TypeKindLabel`. Generic-parameter names declared in the enclosing
-/// scope project to `TypeVar` per Q2 disposition.
-fn classify_bare_type_name(name: &str, snapshot: &TypeReflectionSnapshot) -> TypeKindLabel {
-    if snapshot.known_type_params.contains(name) {
-        return TypeKindLabel::Unresolved;
-    }
-    match name {
-        "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => TypeKindLabel::Int,
-        "number" | "f64" | "f32" | "float" => TypeKindLabel::Number,
-        "bool" => TypeKindLabel::Bool,
-        "string" | "str" => TypeKindLabel::String,
-        "decimal" => TypeKindLabel::Decimal,
-        "bigint" => TypeKindLabel::BigInt,
-        "()" | "unit" | "void" => TypeKindLabel::Unit,
-        _ => {
-            if snapshot.struct_defs.contains_key(name)
-                || snapshot.alias_defs.contains_key(name)
-                || snapshot.enum_defs.contains_key(name)
-            {
-                // Enums and structs both materialize under the same
-                // TypedObject HeapKind today (single schema per enum;
-                // variants share __variant + payload fields). The
-                // user-facing TypeKind discriminator is TypedObject
-                // until a dedicated Enum variant is wired in a follow-up
-                // — this matches the audit-doc §4.6 flat-discriminator
-                // shape.
-                TypeKindLabel::TypedObject
-            } else {
-                TypeKindLabel::Unresolved
-            }
-        }
-    }
-}
-
-/// Build a `TypeInfo` HeapValue from a type name string.
-///
-/// Entry point for the `type_info(T)` comptime builtin. Resolves the
-/// name against the snapshot's struct / enum / alias / generic-param
-/// catalogs and materializes the corresponding `TypeInfo` typed object.
-/// The `kind` field is a string-encoded `TypeKind` variant name (e.g.
-/// `"Int"`, `"TypedObject"`) — see the `TypeInfo` docstring in
-/// `crates/shape-runtime/stdlib-src/core/types.shape` for the
-/// cross-registry-boundary rationale.
-fn build_type_info_heap_value(
-    type_name: &str,
-    snapshot: &TypeReflectionSnapshot,
-) -> Result<HeapValue, String> {
-    let label = classify_bare_type_name(type_name, snapshot);
-    // fields: only a TypedObject (struct) type has declared fields; every other
-    // kind reflects an empty array. Rows are built through the SAME
-    // `build_field_descriptor_array` row builder as `target.fields`
-    // (comptime-excellence §4.1.2) so both introspection surfaces agree.
-    let field_rows: Vec<(String, String, Vec<super::comptime_target::FieldAnnotation>)> = snapshot
-        .struct_defs
-        .get(type_name)
-        .map(|fields| {
-            fields
-                .iter()
-                .map(|(fname, ftype)| {
-                    (
-                        fname.clone(),
-                        super::comptime_target::type_annotation_to_string(ftype),
-                        Vec::new(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let fields_arr =
-        super::comptime_target::build_field_descriptor_array(&field_rows).map_err(|e| {
-            format!("failed to build type_info fields for '{type_name}': {e}")
-        })?;
-    // {name, kind, fields} order matches the stdlib `TypeInfo` declaration so the
-    // object's physical slot layout aligns with the compiler's typed field
-    // access on the `OpaqueTypedObject("TypeInfo")` return type.
-    let kinded = typed_object_for_named_schema(
-        "__ComptimeTypeInfo",
-        &[
-            ("name", nb_str(type_name)),
-            ("kind", nb_str(label.as_str())),
-            ("fields", fields_arr),
-        ],
-    );
-    // Wave 2 Round 4 D4 receiver-recovery pattern (same as build_config):
-    // slot bits are `*const TypedObjectStorage`; bump refcount for the
-    // outer HeapValue::TypedObject wrapper, drop the kinded slot so its
-    // Drop releases the original share via the §2.7.7 / Q9 dispatch
-    // table TypedObject arm.
-    let bits = kinded.slot().raw();
-    let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
-    // SAFETY: `typed_object_for_named_schema` returns a fresh raw pointer
-    // with refcount ≥ 1; the v2_retain pairs with the outer
-    // `HeapValue::TypedObject` wrapper's eventual drop.
-    unsafe {
-        shape_value::v2::refcount::v2_retain(&(*ptr).header);
-    }
-    drop(kinded);
-    Ok(HeapValue::TypedObject(
-        shape_value::heap_value::TypedObjectPtr::new(ptr),
-    ))
 }
 
 // Tests gated `deep-tests` post-W11: bodies invoke

@@ -15,3 +15,4 @@ mod presentation;
 mod signature_help;
 mod symbols;
 mod toml_support;
+mod typed_comptime;

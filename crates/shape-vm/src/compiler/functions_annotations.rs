@@ -21,6 +21,268 @@ struct ComptimeAnnotationHandlers {
 }
 
 impl BytecodeCompiler {
+    pub(super) fn apply_function_comptime_signature_directives_for_analysis(
+        &mut self,
+        program: &mut shape_ast::ast::Program,
+    ) -> Result<()> {
+        let handler_map = self.collect_comptime_annotation_handlers(program);
+        if handler_map.is_empty() {
+            return Ok(());
+        }
+
+        let extensions: Vec<_> = self
+            .extension_registry
+            .as_ref()
+            .map(|r| r.as_ref().clone())
+            .unwrap_or_default();
+        let trait_impls = self.type_inference.env.trait_impl_keys();
+        let known_type_symbols: HashSet<String> = self
+            .struct_types
+            .keys()
+            .chain(self.type_aliases.keys())
+            .cloned()
+            .collect();
+        let ctx_module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+        let ctx_file = self
+            .program
+            .debug_info
+            .source_map
+            .get_file(self.current_file_id)
+            .unwrap_or("")
+            .to_string();
+
+        Self::apply_function_comptime_signature_directives_to_items(
+            self,
+            &handler_map,
+            &extensions,
+            &trait_impls,
+            &known_type_symbols,
+            &ctx_module_path,
+            &ctx_file,
+            &mut program.items,
+        )
+    }
+
+    fn apply_function_comptime_signature_directives_to_items(
+        compiler: &mut BytecodeCompiler,
+        handler_map: &HashMap<String, ComptimeAnnotationHandlers>,
+        extensions: &[shape_runtime::module_exports::ModuleExports],
+        trait_impls: &std::collections::HashSet<String>,
+        known_type_symbols: &HashSet<String>,
+        ctx_module_path: &str,
+        ctx_file: &str,
+        items: &mut [shape_ast::ast::Item],
+    ) -> Result<()> {
+        use shape_ast::ast::{ExportItem, Item};
+
+        for item in items {
+            match item {
+                Item::Function(func, _) => {
+                    compiler.apply_function_comptime_signature_directives_to_function(
+                        handler_map,
+                        extensions,
+                        trait_impls,
+                        known_type_symbols,
+                        ctx_module_path,
+                        ctx_file,
+                        func,
+                    )?;
+                }
+                Item::Export(export, _) => {
+                    if let ExportItem::Function(func) = &mut export.item {
+                        compiler.apply_function_comptime_signature_directives_to_function(
+                            handler_map,
+                            extensions,
+                            trait_impls,
+                            known_type_symbols,
+                            ctx_module_path,
+                            ctx_file,
+                            func,
+                        )?;
+                    }
+                }
+                Item::Module(module, _) => {
+                    Self::apply_function_comptime_signature_directives_to_items(
+                        compiler,
+                        handler_map,
+                        extensions,
+                        trait_impls,
+                        known_type_symbols,
+                        ctx_module_path,
+                        ctx_file,
+                        &mut module.items,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_function_comptime_signature_directives_to_function(
+        &mut self,
+        handler_map: &HashMap<String, ComptimeAnnotationHandlers>,
+        extensions: &[shape_runtime::module_exports::ModuleExports],
+        trait_impls: &std::collections::HashSet<String>,
+        known_type_symbols: &HashSet<String>,
+        ctx_module_path: &str,
+        ctx_file: &str,
+        func_def: &mut FunctionDef,
+    ) -> Result<()> {
+        use shape_ast::ast::AnnotationHandlerType;
+
+        let annotations = func_def.annotations.clone();
+        let phases = [
+            AnnotationHandlerType::ComptimePre,
+            AnnotationHandlerType::ComptimePost,
+        ];
+        for phase in phases.iter() {
+            for ann in &annotations {
+                let Some(entry) = handler_map.get(ann.name.as_str()).or_else(|| {
+                    ann.name
+                        .rsplit("::")
+                        .next()
+                        .and_then(|bare| handler_map.get(bare))
+                }) else {
+                    continue;
+                };
+                for handler in entry.handlers.iter().filter(|h| &h.handler_type == phase) {
+                    let target = super::comptime_target::ComptimeTarget::from_function(func_def);
+                    let target_value = target.to_nanboxed()?;
+                    let mut helpers = self.collect_comptime_helpers();
+                    helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
+                    helpers.sort_by(|a, b| a.name.cmp(&b.name));
+                    helpers.dedup_by(|a, b| a.name == b.name);
+
+                    let prev_suppressed =
+                        super::comptime_builtins::set_comptime_output_suppressed(true);
+                    let execution_result =
+                        super::comptime::execute_comptime_with_annotation_handler(
+                            &handler.body,
+                            &handler.params,
+                            target_value,
+                            &ann.args,
+                            &entry.def_param_names,
+                            &[],
+                            &helpers,
+                            extensions,
+                            trait_impls.clone(),
+                            known_type_symbols.clone(),
+                            ctx_module_path,
+                            ctx_file,
+                        );
+                    super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
+
+                    let execution = match execution_result {
+                        Ok(execution) => execution,
+                        Err(e) => {
+                            if e.to_string().contains("[comptime error]") {
+                                let context =
+                                    format!("the @{} annotation on {}", ann.name, func_def.name);
+                                return Err(self.build_comptime_failure(&e, ann.span, &context));
+                            }
+                            continue;
+                        }
+                    };
+                    Self::apply_signature_directives_to_analysis_function(
+                        func_def,
+                        execution.directives,
+                    )
+                    .map_err(|message| ShapeError::RuntimeError {
+                        message: format!(
+                            "Comptime handler '{}' directive processing failed: {}",
+                            ann.name, message
+                        ),
+                        location: Some(self.span_to_source_location(handler.span)),
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_signature_directives_to_analysis_function(
+        func_def: &mut FunctionDef,
+        directives: Vec<super::comptime_builtins::ComptimeDirective>,
+    ) -> std::result::Result<(), String> {
+        for directive in directives {
+            match directive {
+                super::comptime_builtins::ComptimeDirective::SetParamType {
+                    param_name,
+                    type_annotation,
+                } => {
+                    let Some(param) = func_def
+                        .params
+                        .iter_mut()
+                        .find(|p| p.simple_name() == Some(param_name.as_str()))
+                    else {
+                        continue;
+                    };
+                    if let Some(existing) = &param.type_annotation {
+                        if existing != &type_annotation {
+                            return Err(format!(
+                                "cannot override explicit type of parameter '{}'",
+                                param_name
+                            ));
+                        }
+                    } else {
+                        param.type_annotation = Some(type_annotation);
+                    }
+                }
+                super::comptime_builtins::ComptimeDirective::SetParamValue {
+                    param_name,
+                    value,
+                } => {
+                    let Some(param) = func_def
+                        .params
+                        .iter_mut()
+                        .find(|p| p.simple_name() == Some(param_name.as_str()))
+                    else {
+                        continue;
+                    };
+                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
+                        &param_name,
+                        &value,
+                    )?);
+                }
+                super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn scalar_default_expr_from_kinded_slot(
+        param_name: &str,
+        value: &KindedSlot,
+    ) -> std::result::Result<Expr, String> {
+        let coerce_to_f64 = |slot: &KindedSlot| -> Option<f64> {
+            match slot.kind() {
+                shape_value::NativeKind::Int64 => slot.as_i64().map(|i| i as f64),
+                shape_value::NativeKind::Float64 => slot.as_f64(),
+                _ => None,
+            }
+        };
+        if let Some(i) = value.as_i64() {
+            Ok(Expr::Literal(Literal::Int(i), Span::DUMMY))
+        } else if let Some(n) = coerce_to_f64(value) {
+            Ok(Expr::Literal(Literal::Number(n), Span::DUMMY))
+        } else if let Some(b) = value.as_bool() {
+            Ok(Expr::Literal(Literal::Bool(b), Span::DUMMY))
+        } else if let Some(s) = value.as_str() {
+            Ok(Expr::Literal(Literal::String(s.to_string()), Span::DUMMY))
+        } else if matches!(value.kind(), shape_value::NativeKind::Null) {
+            Ok(Expr::Literal(Literal::None, Span::DUMMY))
+        } else {
+            Err(format!(
+                "unsupported default value for parameter '{}': set param value only supports int, number, bool, string, and none scalars in this lane (got {:?})",
+                param_name,
+                value.kind()
+            ))
+        }
+    }
+
     fn emit_empty_annotation_event_log(&mut self) {
         self.emit(Instruction::new(
             crate::compiler::v2_typed_emission::TypedArrayKind::String.new_opcode(),
@@ -1146,7 +1408,14 @@ impl BytecodeCompiler {
             if !self.materialized_comptime_fns.contains(&func_def.name) {
                 self.register_function(&func_def)?;
             }
-            self.compile_function_body(&func_def)?;
+            // Wave-38F generated-method JIT parity: hand-written `extend`
+            // methods compile through the full driver (`compile_function`),
+            // which lowers MIR and back-patches `Function.mir_data` for the
+            // JIT. Generated methods need the same path; the signature was
+            // already registered above/pre-pass, so this only fills the body
+            // and MIR for the existing function slot.
+            self.materialized_comptime_fns.insert(func_def.name.clone());
+            self.compile_function(&func_def)?;
         }
         Ok(())
     }
@@ -1347,7 +1616,7 @@ impl BytecodeCompiler {
                                         // every user body (`fn main`) can resolve
                                         // the call. The BODY is still compiled by
                                         // pass-2's `apply_comptime_extend_items`
-                                        // (`compile_function_body`) when the
+                                        // (`compile_function`) when the
                                         // annotated type compiles — the identical
                                         // path as before this pre-pass, so the
                                         // generated function's runtime/JIT
@@ -1366,9 +1635,10 @@ impl BytecodeCompiler {
                                     // `Type.method` name), and return the `extend`
                                     // block so the analyzer learns the method on the
                                     // type. Pass-2's `apply_comptime_extend` fills
-                                    // each pre-registered slot with the compiled
-                                    // body — the identical path as before, so
-                                    // runtime/JIT characteristics are unchanged.
+                                    // each pre-registered slot through the normal
+                                    // function driver, so generated methods get the
+                                    // same MIR/JIT surface as hand-written `extend`
+                                    // methods.
                                     let mut any_new = false;
                                     for method in &extend.methods {
                                         let func_def =
@@ -1397,7 +1667,7 @@ impl BytecodeCompiler {
         // to the ANALYSIS program (the analyzer type-checks their call sites and
         // their bodies). They are NOT added to the compiled program's items:
         // their signatures are already registered above, and their bodies are
-        // compiled by pass-2 exactly as before.
+        // compiled by pass-2 through the normal function driver.
         Ok(generated)
     }
 
@@ -1507,6 +1777,7 @@ impl BytecodeCompiler {
                 continue;
             }
             self.register_function(func_def)?;
+            self.materialized_comptime_fns.insert(func_def.name.clone());
         }
         for func_def in &functions {
             // WF-3D generated-fn JIT parity: compile via the FULL driver
@@ -1880,33 +2151,10 @@ impl BytecodeCompiler {
                             param_name
                         ));
                     };
-                    // Convert the comptime KindedSlot to an AST literal
-                    // expression. Per ADR-006 §2.7.6 / playbook §1, the
-                    // cross-kind int-or-float coercion lives at the body
-                    // site, NOT on the `KindedSlot` carrier (the deleted
-                    // `as_number_coerce` was a §2.7.6/Q8 carrier-bound
-                    // violation). The compiler crate cannot import
-                    // `executor::builtins::kind_coerce` (private module);
-                    // the body-site dispatch is inlined here per Q8.
-                    let coerce_to_f64 = |slot: &KindedSlot| -> Option<f64> {
-                        match slot.kind {
-                            shape_value::NativeKind::Int64 => slot.as_i64().map(|i| i as f64),
-                            shape_value::NativeKind::Float64 => slot.as_f64(),
-                            _ => None,
-                        }
-                    };
-                    let default_expr = if let Some(i) = value.as_i64() {
-                        Expr::Literal(Literal::Int(i), Span::DUMMY)
-                    } else if let Some(n) = coerce_to_f64(&value) {
-                        Expr::Literal(Literal::Number(n), Span::DUMMY)
-                    } else if let Some(b) = value.as_bool() {
-                        Expr::Literal(Literal::Bool(b), Span::DUMMY)
-                    } else if let Some(s) = value.as_str() {
-                        Expr::Literal(Literal::String(s.to_string()), Span::DUMMY)
-                    } else {
-                        Expr::Literal(Literal::None, Span::DUMMY)
-                    };
-                    param.default_value = Some(default_expr);
+                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
+                        &param_name,
+                        &value,
+                    )?);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { type_annotation } => {
                     if let Some(existing) = &func_def.return_type {
