@@ -115,6 +115,9 @@ impl BytecodeCompiler {
             specialization_const_bindings: HashMap::new(),
             struct_types: HashMap::new(),
             struct_generic_info: HashMap::new(),
+            // ADR-009 §4.1 (A1/S1): installed exactly once at the
+            // registration-complete barrier in `compile()`.
+            semantic_freeze: None,
             native_layout_types: HashSet::new(),
             generated_native_conversion_pairs: HashSet::new(),
             current_function_is_async: false,

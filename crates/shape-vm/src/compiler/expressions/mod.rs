@@ -1874,12 +1874,13 @@ impl BytecodeCompiler {
                     .cloned()
                     .collect();
                 let comptime_helpers = self.collect_comptime_helpers();
-                // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
-                // resolution from a comptime expression.
-                let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
-                    self,
-                    &[],
-                );
+                // ADR-009 §4.1 (S2): comptime expressions consume the
+                // per-compilation-unit freeze handle; the enclosing generic
+                // function's type parameters enter via the scoped overlay
+                // (`comptime_freeze_overlay` discovers `current_function`).
+                // No per-site rebuild; a site without a handle is a compile
+                // error (row 3).
+                let freeze = self.comptime_freeze_overlay()?;
                 // J-CT.2 — comptime-context items: trait defs, struct defs,
                 // and comptime impl blocks are prepended to the mini-VM
                 // program so `instance.method()` inside the comptime block
@@ -1902,7 +1903,7 @@ impl BytecodeCompiler {
                     &extensions,
                     trait_impls,
                     known_type_symbols,
-                    type_snapshot,
+                    freeze,
                 )
                 .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
                 // §4.4: re-emit any `warning()` output anchored at this block.

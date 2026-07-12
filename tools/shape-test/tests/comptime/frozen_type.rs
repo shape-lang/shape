@@ -411,6 +411,38 @@ print(describe(1))
     .expect_run_err_contains("Non-exhaustive match");
 }
 
+/// ADR-009 §4.1 (ticket A1, slice S2) post-freeze semantics: the semantic
+/// freeze is built ONCE per compilation unit at the registration-complete
+/// barrier, so a comptime block sees every type declared anywhere in the
+/// unit — including aliases and enums declared textually AFTER the block.
+/// (Structs were already order-independent via the schema predeclare
+/// prepass; aliases and enums previously registered only when their item
+/// compiled in pass 2, so the old per-site snapshot rebuild missed them.)
+#[test]
+fn later_declared_alias_and_enum_are_visible_to_earlier_comptime_blocks() {
+    let source = r#"
+let alias_label = comptime {
+  match type_category(type_ref(LaterUserId)) {
+    FrozenTypeCategory::Primitive => "primitive"
+    _ => "wrong"
+  }
+}
+let enum_label = comptime {
+  match type_category(type_ref(LaterStatus)) {
+    FrozenTypeCategory::Nominal => "nominal"
+    _ => "wrong"
+  }
+}
+
+type LaterUserId = int
+enum LaterStatus { Ready, Done }
+
+print(alias_label)
+print(enum_label)
+"#;
+    expect_vm_and_jit_output(source, "primitive\nnominal");
+}
+
 #[test]
 fn strings_cannot_construct_type_refs() {
     ShapeTest::new(

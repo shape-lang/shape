@@ -327,6 +327,14 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     // typed fields; `fields` follows as the declared-field descriptor array.
     // Field access on the reflection result resolves by NAME through this
     // schema, so appending `fields` does not disturb `name` / `kind` reads.
+    //
+    // E5-deletes: this schema is the carrier of the LEGACY `type_info`
+    // reflection path only (ADR-009 §4.1 "one kind vocabulary" — the typed
+    // surface uses `__ComptimeFrozenTypeRef` / `FrozenTypeCategory`). It is
+    // confined to shape-vm's `type_reflection::build_type_info_heap_value`;
+    // ticket E5 deletes the path and this registration with it. Sentinel:
+    // shape-vm `type_reflection/tests.rs::
+    // legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`.
     let _comptime_type_info = TypeSchemaBuilder::new("__ComptimeTypeInfo")
         .string_field("name")
         .string_field("kind")

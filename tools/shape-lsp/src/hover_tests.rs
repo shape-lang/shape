@@ -981,6 +981,30 @@ fn test_comptime_builtin_hover_type_info_removed() {
     assert!(hover.is_none(), "type_info hover should not exist");
 }
 
+/// ADR-009 A1 S4: the `type_category` hover must surface the category
+/// enumeration generated from the shared reflection catalog
+/// (`shape_runtime::comptime_reflection::FrozenTypeCategory::ALL`) — the same
+/// catalog enum-variant completion consumes — proving the hover path is
+/// driven by the shared query surface, not a hand-written parallel row.
+#[test]
+fn test_comptime_builtin_hover_type_category_uses_shared_catalog() {
+    let hover = get_comptime_builtin_hover("type_category");
+    assert!(hover.is_some(), "Should get hover for type_category");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(markup.value.contains("exhaustive semantic category"));
+            for category in shape_runtime::comptime_reflection::FrozenTypeCategory::ALL {
+                assert!(
+                    markup.value.contains(category.variant_name()),
+                    "type_category hover should enumerate catalog variant `{}`, got: {}",
+                    category.variant_name(),
+                    markup.value
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn test_comptime_builtin_hover_build_config() {
     let hover = get_comptime_builtin_hover("build_config");

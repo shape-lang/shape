@@ -343,4 +343,110 @@ a + r.w
         // area(4,6)=24 ; r.w=4 ; 24+4 = 28
         assert_eq!(run_modules_program_to_i64(numbers, main), 28);
     }
+
+    // ── ADR-009 §4.1 review round 1 (findings 1+2): comptime sites inside
+    // imported modules must obtain the semantic-freeze handle. ──
+    //
+    // Graph-driven compilation (`compile_with_graph_and_prelude`, the standard
+    // pipeline via `execution.rs`) compiles dependency modules FIRST in
+    // Phase 1 (`compile_module_from_graph` → `compile_item_with_context`).
+    // With the freeze barrier only inside `compile()` (Phase 2, root), every
+    // comptime site inside an imported module hit `comptime_freeze_overlay()`
+    // while `semantic_freeze` was still `None` and failed with the row-3
+    // NO_FREEZE_HANDLE diagnostic — a regression of the imports × comptime
+    // composition (the deleted per-site builder worked at any phase). The
+    // barrier now runs at the graph entry point BEFORE Phase 1, over
+    // predeclared freeze inputs of every graph module + the root.
+
+    #[test]
+    fn imported_module_fn_body_comptime_expression_gets_freeze_handle() {
+        // `Expr::Comptime` in an imported fn body (expressions/mod.rs site).
+        let numbers = r#"
+pub fn scaled(a: int) -> int {
+    let k = comptime { 2 }
+    a * k
+}
+"#;
+        let main = r#"
+from calc::numbers use { scaled }
+scaled(21)
+"#;
+        assert_eq!(run_modules_program_to_i64(numbers, main), 42);
+    }
+
+    #[test]
+    fn imported_module_top_level_comptime_block_gets_freeze_handle() {
+        // Top-level `comptime { }` item in an imported module (passes
+        // `qualify_module_item`'s default arm, hits the Item::Comptime
+        // freeze site in statements.rs).
+        let numbers = r#"
+comptime {
+    let sanity = 1 + 2
+}
+pub fn seven() -> int { 7 }
+"#;
+        let main = r#"
+from calc::numbers use { seven }
+seven()
+"#;
+        assert_eq!(run_modules_program_to_i64(numbers, main), 7);
+    }
+
+    #[test]
+    fn imported_module_comptime_reflection_consumes_a_populated_freeze() {
+        // The handle an imported-module comptime site obtains is the REAL
+        // populated per-unit freeze (the reflection trio resolves against
+        // it), not merely "some handle exists". Reflection uses a primitive
+        // here: resolving a module's OWN nominal type by its bare name from
+        // inside its own comptime block is a pre-existing name-resolution
+        // gap (dep structs freeze under their qualified names, and the
+        // deleted per-site builder on main read the same qualified tables),
+        // independent of the freeze-barrier ordering this test pins.
+        let numbers = r#"
+pub fn int_category_code() -> int {
+    let code = comptime {
+        match type_category(type_ref(int)) {
+            FrozenTypeCategory::Primitive => 1
+            _ => 0
+        }
+    }
+    code
+}
+"#;
+        let main = r#"
+from calc::numbers use { int_category_code }
+int_category_code()
+"#;
+        assert_eq!(run_modules_program_to_i64(numbers, main), 1);
+    }
+
+    #[test]
+    fn imported_module_annotation_comptime_handler_gets_freeze_handle() {
+        // Third comptime-site family: an annotation comptime handler on an
+        // item inside an imported module executes during Phase 1
+        // (`execute_comptime_annotation_handler` → `comptime_freeze_overlay`)
+        // and must obtain the pre-Phase-1 unit freeze — its body uses frozen
+        // reflection to prove the handle is populated.
+        let numbers = r#"
+annotation reflected() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let flag = match type_category(type_ref(int)) {
+      FrozenTypeCategory::Primitive => 1
+      _ => 0
+    }
+  }
+}
+
+@reflected()
+type Config { id: int }
+
+pub fn five() -> int { 5 }
+"#;
+        let main = r#"
+from calc::numbers use { five }
+five()
+"#;
+        assert_eq!(run_modules_program_to_i64(numbers, main), 5);
+    }
 }

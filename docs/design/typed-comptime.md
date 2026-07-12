@@ -144,6 +144,30 @@ Book status: behavior is gate-runnable green on VM and JIT; the gate-runnable
 book example lands with F1 or earlier per spec §3.7 (book examples only after
 gate-runnable green — satisfied for this slice).
 
+**CURRENT / VM+JIT - canonical semantic freeze (ticket A1, 2026-07-12).** The
+reflection surface above is served by ONE `SemanticFreeze` built per
+compilation unit at the registration-complete barrier
+(`shape-vm/src/compiler/comptime_builtins/semantic_freeze.rs`), never rebuilt
+per comptime site. Scoped generic parameters enter through `FreezeOverlay`
+layers; every comptime site — inline blocks, comptime expressions, and
+annotation handlers, speculative pre-pass included — consumes the same
+`Arc<FreezeOverlay>` handle, and a site that cannot obtain one is a named
+compile error (`NO_FREEZE_HANDLE_DIAGNOSTIC`), never an empty snapshot.
+Freeze-boundary failures fire before any user comptime executes (Decision 52).
+Aliases and enums declared after a comptime block are visible to it
+(registration-complete freeze). The LSP `type_ref`/`type_category` metadata
+rows are generated from the shared runtime-owned catalog
+(`shape-runtime/src/comptime_reflection.rs`), not a parallel static table.
+The legacy `type_info` path (`TypeKindLabel` string vocabulary,
+`__ComptimeTypeInfo` carrier) consumes the same freeze handle and is confined
+to the legacy intrinsic behind an `E5-deletes` marker + sentinel test until
+ticket E5 deletes it. Evidence:
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md` (A1 addendum).
+Book status: A1-enabled behaviors are gate-runnable in ShapeTest
+(`tools/shape-test/tests/comptime/frozen_type.rs`,
+`tests/annotations_comptime/frozen_reflection.rs`, VM+JIT); book-chapter
+examples land in stage F1 per the program spec.
+
 **CURRENT / compiler - generated implicit capture rejection**
 
 Annotation-generated functions are marked before body compilation. A closure
@@ -212,13 +236,12 @@ examples, rejection requirements, and implementation implications.
 | Structure | Stage | Purpose | Status |
 |---|---|---|---|
 | `ConstValue<T>` / literal lifting | comptime | Move closed values into generated code | accepted |
-| `TypeRef<T>` | comptime | Canonical type identity | accepted |
+| `TypeRef<T>` | comptime | Canonical type identity | accepted; CURRENT / VM+JIT — A1 canonical semantic freeze: one per-unit freeze barrier, shared query API, annotation-handler handle threading (wave46 A1 addendum) |
 | `TraitRef<Trait>` | comptime | Canonical trait identity | accepted |
 | `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |
-| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94 |
+| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum remains TARGET (B tickets) |
 | `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
-| `AliasDescriptor<A, T>` | comptime declaration | Transparent-alias provenance and underlying type | accepted |
 | `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted |
 | `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted |
 | `NamePolicy<Domain, Namespace>` | comptime generation | Deterministic external identifier to hygienic symbol mapping | accepted |

@@ -1,3 +1,4 @@
+use super::semantic_freeze::FreezeOverlay;
 use crate::compiler::comptime_target;
 use sha2::{Digest, Sha256};
 use shape_ast::ast::TypeAnnotation;
@@ -6,7 +7,7 @@ use shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Stable semantic identity carried by an opaque comptime `TypeRef`.
 ///
@@ -22,7 +23,7 @@ pub(crate) struct FrozenTypeIdentity {
 impl FrozenTypeIdentity {
     pub(crate) const INVALID: Self = Self { high: -1, low: -1 };
 
-    fn from_canonical_descriptor(descriptor: &str) -> Self {
+    pub(super) fn from_canonical_descriptor(descriptor: &str) -> Self {
         let digest = Sha256::digest(descriptor.as_bytes());
         let high = i64::from_be_bytes(digest[0..8].try_into().expect("8-byte hash prefix"));
         let low = i64::from_be_bytes(digest[8..16].try_into().expect("8-byte hash suffix"));
@@ -30,26 +31,31 @@ impl FrozenTypeIdentity {
     }
 }
 
-/// Immutable semantic type table handed from the outer compiler to one
-/// comptime mini-VM. Public `TypeRef` values carry only a canonical semantic
-/// fingerprint, never a rendered type name or snapshot-local ordinal.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TypeReflectionSnapshot {
+/// ADR-009 §4.1 (ticket A1, slice S2): the semantic freeze's INTERNAL type
+/// index. This is the reduced remainder of the deleted per-site
+/// `TypeReflectionSnapshot` carrier (whose `build_type_reflection_snapshot`
+/// per-site rebuild pattern S2 deleted): it survives only inside
+/// [`super::semantic_freeze::SemanticFreeze`], never as a reachable parallel
+/// carrier, and deliberately has no `Default`/empty constructor — the freeze
+/// barrier is the single construction point. Scoped generic parameters live
+/// in [`FreezeOverlay`], not here. Public `TypeRef` values carry only a
+/// canonical semantic fingerprint, never a rendered type name or
+/// index-local ordinal.
+#[derive(Debug)]
+pub(crate) struct FrozenTypeIndex {
     pub(crate) struct_defs: HashMap<String, Vec<(String, TypeAnnotation)>>,
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     pub(crate) alias_defs: HashMap<String, TypeAnnotation>,
-    pub(crate) known_type_params: HashSet<String>,
-    parameter_owner: Option<String>,
-    frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
-    frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
+    pub(crate) frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
+    pub(crate) frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
 }
 
-impl TypeReflectionSnapshot {
+impl FrozenTypeIndex {
     pub(crate) fn frozen_type_id(&self, name: &str) -> Option<FrozenTypeIdentity> {
         self.frozen_type_ids.get(name).copied()
     }
 
-    fn category_for_identity(
+    pub(super) fn category_for_identity(
         &self,
         identity: FrozenTypeIdentity,
     ) -> Result<FrozenTypeCategory, String> {
@@ -59,7 +65,7 @@ impl TypeReflectionSnapshot {
             .ok_or_else(|| "type_ref received an unknown semantic type identity".to_string())
     }
 
-    fn rebuild_frozen_type_index(&mut self) {
+    pub(super) fn rebuild_frozen_type_index(&mut self) {
         let mut ids = HashMap::new();
         let mut categories = HashMap::new();
 
@@ -148,18 +154,9 @@ impl TypeReflectionSnapshot {
             );
         }
 
-        let mut parameters: Vec<_> = self.known_type_params.iter().cloned().collect();
-        parameters.sort();
-        let parameter_owner = self.parameter_owner.as_deref().unwrap_or("<module>");
-        for name in parameters {
-            intern_identity(
-                &mut ids,
-                &mut categories,
-                &name,
-                &format!("parameter:{parameter_owner}:{name}"),
-                FrozenTypeCategory::Parameter,
-            );
-        }
+        // Scoped generic parameters are NOT interned here: they enter through
+        // a `FreezeOverlay` (`parameter:{owner}:{name}` identities layered
+        // over the shared base), never through the base index (ADR-009 §4.1).
 
         // Aliases are transparent: an alias receives the exact identity of its
         // canonical target. Iterate to a fixed point so alias chains normalize.
@@ -225,93 +222,11 @@ fn intern_synonyms(
     }
 }
 
-pub(crate) fn build_type_reflection_snapshot(
-    compiler: &crate::compiler::BytecodeCompiler,
-    enclosing_type_params: &[String],
-) -> TypeReflectionSnapshot {
-    let mut snapshot = TypeReflectionSnapshot::default();
-    for (name, (field_names, _span)) in &compiler.struct_types {
-        let field_types = compiler
-            .struct_generic_info
-            .get(name)
-            .map(|info| info.runtime_field_types.clone())
-            .unwrap_or_default();
-        let ordered = field_names
-            .iter()
-            .filter_map(|field_name| {
-                field_types
-                    .get(field_name)
-                    .cloned()
-                    .map(|annotation| (field_name.clone(), annotation))
-            })
-            .collect();
-        snapshot.struct_defs.insert(name.clone(), ordered);
-    }
-    for (alias, target) in &compiler.type_aliases {
-        snapshot
-            .alias_defs
-            .insert(alias.clone(), TypeAnnotation::Basic(target.clone()));
-    }
-    for type_name in compiler
-        .type_tracker
-        .schema_registry()
-        .type_names()
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-    {
-        let Some(schema) = compiler.type_tracker.schema_registry().get(&type_name) else {
-            continue;
-        };
-        let Some(enum_info) = schema.get_enum_info() else {
-            continue;
-        };
-        snapshot.enum_defs.insert(
-            type_name,
-            enum_info
-                .variants
-                .iter()
-                .map(|variant| variant.name.clone())
-                .collect(),
-        );
-    }
-    snapshot
-        .known_type_params
-        .extend(enclosing_type_params.iter().cloned());
-    if let Some(function) = compiler
-        .current_function
-        .and_then(|index| compiler.program.functions.get(index))
-        && let Some(definition) = compiler.function_defs.get(&function.name)
-    {
-        snapshot.parameter_owner = Some(function.name.clone());
-        if let Some(parameters) = &definition.type_params {
-            snapshot.known_type_params.extend(
-                parameters
-                    .iter()
-                    .map(|parameter| parameter.name().to_string()),
-            );
-        }
-    }
-    // ADR-009 A3 — specialization overlay: while a monomorphized body
-    // compiles, the registered def carries `type_params = None` (substitution
-    // strips them), so the discovery above finds nothing. The overlay set
-    // around `compile_function` in `monomorphization/cache.rs` re-supplies the
-    // BASE generic function's declared type-param names, with the owner scoped
-    // to the BASE name (never the mono key) so Parameter identities are
-    // declaration-stable across instantiations (ADR-009 §Semantic Freeze,
-    // Decision 52 pre-substitution identities).
-    if let Some((base_name, parameters)) = &compiler.specialization_type_param_overlay {
-        snapshot.parameter_owner = Some(base_name.clone());
-        snapshot.known_type_params.extend(parameters.iter().cloned());
-    }
-    snapshot.rebuild_frozen_type_index();
-    snapshot
-}
-
 pub(crate) fn build_frozen_type_ref_heap_value(
     identity: FrozenTypeIdentity,
-    snapshot: &TypeReflectionSnapshot,
+    freeze: &FreezeOverlay,
 ) -> Result<HeapValue, String> {
-    snapshot.category_for_identity(identity)?;
+    freeze.category_of(identity)?;
     typed_slot_into_heap_value(typed_object_for_named_schema(
         COMPTIME_FROZEN_TYPE_REF_SCHEMA,
         &[
@@ -323,7 +238,7 @@ pub(crate) fn build_frozen_type_ref_heap_value(
 
 pub(crate) fn frozen_type_category_from_ref(
     slot: &KindedSlot,
-    snapshot: &TypeReflectionSnapshot,
+    freeze: &FreezeOverlay,
 ) -> Result<FrozenTypeCategory, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
         return Err("type_category expects a TypeRef value".to_string());
@@ -357,7 +272,7 @@ pub(crate) fn frozen_type_category_from_ref(
         high: identity_field("identity_high")?,
         low: identity_field("identity_low")?,
     };
-    snapshot.category_for_identity(identity)
+    freeze.category_of(identity)
 }
 
 pub(crate) fn build_frozen_type_category_heap_value(
@@ -394,6 +309,10 @@ fn typed_slot_into_heap_value(slot: KindedSlot) -> Result<HeapValue, String> {
     Ok(HeapValue::TypedObject(TypedObjectPtr::new(ptr)))
 }
 
+// E5-deletes: legacy `type_info` string kind vocabulary. Confined to this
+// module + the single path-qualified intrinsic caller in the parent module
+// (ADR-009 §4.1 "one kind vocabulary"); ticket E5 deletes it. Sentinel:
+// `tests::legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`.
 #[derive(Debug, Clone, Copy)]
 enum TypeKindLabel {
     Int,
@@ -423,10 +342,17 @@ impl TypeKindLabel {
     }
 }
 
-fn classify_legacy_type_info(name: &str, snapshot: &TypeReflectionSnapshot) -> TypeKindLabel {
-    if snapshot.known_type_params.contains(name) {
+/// Legacy `type_info` classification (`TypeKindLabel` string vocabulary).
+/// E5 deletes this path; until then it consumes the SAME freeze handle as
+/// the typed reflection surface — scoped generic parameters come from the
+/// overlay, nominal/alias/enum membership from the freeze's index. No
+/// per-site table survives.
+// E5-deletes: reachable only from `build_type_info_heap_value` below.
+fn classify_legacy_type_info(name: &str, freeze: &FreezeOverlay) -> TypeKindLabel {
+    if freeze.is_scoped_parameter(name) {
         return TypeKindLabel::Unresolved;
     }
+    let index = freeze.base().index();
     match name {
         "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => TypeKindLabel::Int,
         "number" | "f64" | "f32" | "float" => TypeKindLabel::Number,
@@ -435,9 +361,9 @@ fn classify_legacy_type_info(name: &str, snapshot: &TypeReflectionSnapshot) -> T
         "decimal" => TypeKindLabel::Decimal,
         "bigint" => TypeKindLabel::BigInt,
         "()" | "unit" | "void" => TypeKindLabel::Unit,
-        _ if snapshot.struct_defs.contains_key(name)
-            || snapshot.alias_defs.contains_key(name)
-            || snapshot.enum_defs.contains_key(name) =>
+        _ if index.struct_defs.contains_key(name)
+            || index.alias_defs.contains_key(name)
+            || index.enum_defs.contains_key(name) =>
         {
             TypeKindLabel::TypedObject
         }
@@ -445,12 +371,19 @@ fn classify_legacy_type_info(name: &str, snapshot: &TypeReflectionSnapshot) -> T
     }
 }
 
-pub(crate) fn build_type_info_heap_value(
+// E5-deletes: legacy `type_info` record builder (`__ComptimeTypeInfo`
+// carrier). `pub(super)` — the parent module's `type_info` intrinsic is the
+// ONLY caller (path-qualified, never re-exported); ticket E5 deletes the path
+// together with `TypeKindLabel` / `classify_legacy_type_info` and the
+// `__ComptimeTypeInfo` schema registration in `builtin_schemas.rs`.
+pub(super) fn build_type_info_heap_value(
     type_name: &str,
-    snapshot: &TypeReflectionSnapshot,
+    freeze: &FreezeOverlay,
 ) -> Result<HeapValue, String> {
-    let label = classify_legacy_type_info(type_name, snapshot);
-    let field_rows: Vec<(String, String, Vec<comptime_target::FieldAnnotation>)> = snapshot
+    let label = classify_legacy_type_info(type_name, freeze);
+    let field_rows: Vec<(String, String, Vec<comptime_target::FieldAnnotation>)> = freeze
+        .base()
+        .index()
         .struct_defs
         .get(type_name)
         .map(|fields| {

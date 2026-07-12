@@ -142,3 +142,74 @@ growth pressure on the pre-existing oversized `comptime_builtins.rs`.
 
 These gaps remain compile-time capability gaps. This wave does not add runtime
 fallbacks or claim partially populated descriptors.
+
+## ADR009-A1 Addendum (2026-07-12, ticket #2, branch adr009/a1)
+
+Ticket A1 (spec §4.1, slices S1-S5) supersedes parts of this audit's
+"Typed Type Identity and Category" and "Verification" sections:
+
+- **Per-site snapshot is gone.** "the immutable type-reflection snapshot"
+  above now reads as ONE `SemanticFreeze` per compilation unit, built at the
+  registration-complete barrier in `compile()`
+  (`comptime_builtins/semantic_freeze.rs`); `build_type_reflection_snapshot`
+  and the by-value `TypeReflectionSnapshot` carrier are deleted. Active
+  generic-function parameters are no longer "added to the snapshot": they
+  enter through scoped `FreezeOverlay` layers over the shared `Arc` base.
+- **Annotation handlers consume the same freeze.** The empty-snapshot gap
+  (`comptime.rs:1340-1344` at this audit's baseline) is deleted; the barrier
+  runs AHEAD of the speculative annotation pre-passes, and a comptime site
+  without a freeze handle is the named compile error
+  `NO_FREEZE_HANDLE_DIAGNOSTIC`.
+- **Registration-complete semantics.** Aliases and enums declared after a
+  comptime block are visible to it (new VM+JIT proof
+  `later_declared_alias_and_enum_are_visible_to_earlier_comptime_blocks`).
+- **LSP rows are catalog-generated.** The hand-written `type_ref` /
+  `type_category` rows in `builtin_metadata.rs` are replaced by descriptors
+  owned by the shared runtime catalog (`comptime_reflection.rs`,
+  `frozen_type_category_catalog!`).
+- **Legacy vocabulary confined.** `TypeKindLabel` /
+  `classify_legacy_type_info` / `build_type_info_heap_value` /
+  `__ComptimeTypeInfo` survive ONLY on the legacy `type_info` intrinsic path
+  (consuming the same freeze handle), marked `E5-deletes` and pinned by the
+  sentinel test
+  `type_reflection/tests.rs::legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`.
+  Ticket E5 deletes them; nothing new may import them.
+
+### A1 rejection matrix (rows 1-8, all named-diagnostic-asserted, green 2026-07-12)
+
+| Row | Forbidden form | Asserting tests |
+|---|---|---|
+| 1 | String constructs a `TypeRef` | `comptime/frozen_type.rs::strings_cannot_construct_type_refs`; `lsp/typed_comptime.rs::string_type_ref_construction_has_semantic_diagnostic` |
+| 2 | Unresolved/unknown type crosses the freeze boundary | `frozen_type.rs::unresolved_type_cannot_cross_freeze_boundary`; `lsp/typed_comptime.rs::unresolved_type_ref_has_semantic_diagnostic`; unit `type_reflection/tests.rs::unknown_identity_is_rejected_at_the_freeze_boundary` |
+| 3 | Comptime site without a freeze handle (A1-new) | `semantic_freeze::tests::comptime_site_without_freeze_handle_is_a_named_compile_error`; `functions_annotations::s3_freeze_gate_tests::{extends,signature_directive}_prepass_without_freeze_handle_is_the_named_row3_compile_error` |
+| 4 | Partial semantic state frozen / handler runs before freeze check (Dec 52, A1-new) | `semantic_freeze::tests::{unresolved_inference_variable_cannot_be_frozen, nested_unresolved_inference_variable_cannot_be_frozen}`; `functions_annotations::s3_freeze_gate_tests::freeze_rejection_fires_before_annotation_handler_body_executes` |
+| 5 | Raw `TypeRef`/`FrozenTypeCategory` escapes to runtime | `frozen_type.rs::{type_ref_is_comptime_only, raw_type_refs_cannot_escape_to_runtime_code, raw_frozen_categories_cannot_escape_to_runtime_code}`; `lsp/typed_comptime.rs::raw_type_ref_escape_has_semantic_diagnostic` |
+| 6 | Legacy descriptors / arbitrary values forge a `TypeRef` | `frozen_type.rs::{legacy_reflection_descriptors_cannot_forge_type_refs, arbitrary_values_cannot_be_used_as_type_refs}`; `lsp/typed_comptime.rs::legacy_type_descriptor_has_semantic_diagnostic` |
+| 7 | Wrong arity / non-type argument forms | `frozen_type.rs::{type_ref_requires_exactly_one_type_argument, non_type_expressions_cannot_construct_type_refs}` |
+| 8 | Non-exhaustive category consumption / `Unknown` arm | `frozen_type.rs::category_matches_are_checked_for_exhaustiveness`; `lsp/typed_comptime.rs::frozen_category_completion_is_closed_and_has_no_unknown_arm` |
+
+Row 9 (no `Option<freeze>` / `default()` at any comptime entry) is enforced
+structurally — `SemanticFreeze`/`FrozenTypeIndex` have no `Default` and no
+empty constructor — and by diff-review grep at each slice close.
+
+### A1 final verification counts (this addendum's date)
+
+Suite counts changed since the wave46 baseline (all strictly additive vs
+`main@4d70508b`; no deletions, no rebaselines):
+
+- shape-vm `compiler::comptime_builtins`: 19 passed (semantic_freeze +
+  9-test identity matrix + confinement sentinel); `compiler::comptime`
+  filter: 82 passed / 4 pre-existing ignores; `compiler::functions_annotations`
+  s3 freeze gate: 3 passed.
+- shape-runtime: `comptime_reflection` 6, `type_schema::builtin_schemas` 6,
+  `builtin_metadata` 4 — all passed.
+- ShapeTest `comptime`: 109 passed (baseline 108 on main + the
+  later-declared-visibility VM+JIT proof).
+- ShapeTest `annotations_comptime`: 48 passed with two threads (44 on main +
+  the 4-test `frozen_reflection.rs` VM+JIT matrix). NOTE: this audit's
+  original "60 passed" verification line does not match `main@4d70508b`
+  (static count 44); the addendum records the measured current truth.
+- ShapeTest `lsp`: full 399 passed (not just the 14-test typed_comptime
+  module); shape-lsp `completion::tests` 58 + `context::tests` 58 passed.
+- `just check-clean` + `scripts/check-no-dynamic.sh`: green at slice close
+  (see S5 close-out in `docs/defections.md`).
