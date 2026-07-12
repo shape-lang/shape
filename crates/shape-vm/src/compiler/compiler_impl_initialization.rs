@@ -218,6 +218,8 @@ impl BytecodeCompiler {
             monomorphization_cache:
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             monomorphization_in_progress: std::collections::HashSet::new(),
+            specialization_type_param_overlay: None,
+            failed_call_site_specializations: std::collections::HashSet::new(),
             next_monomorphization_id: 0,
             closure_specialization_count: 0,
         }

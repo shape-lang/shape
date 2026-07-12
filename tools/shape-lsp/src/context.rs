@@ -1413,6 +1413,12 @@ fn is_inside_comptime_block(text: &str, current_line: usize) -> bool {
     let lines: Vec<&str> = text.lines().collect();
 
     let mut in_comptime = false;
+    // Brace depth OUTSIDE the current comptime block. The block is closed
+    // once the running depth returns to this value — comparing against the
+    // entry depth (not 0) keeps detection correct for comptime blocks nested
+    // inside function bodies (e.g. generic fn bodies, which never compile at
+    // definition, so completion relies entirely on this textual context).
+    let mut comptime_entry_depth: i32 = 0;
     let mut brace_count: i32 = 0;
 
     for (i, line) in lines.iter().enumerate() {
@@ -1423,31 +1429,30 @@ fn is_inside_comptime_block(text: &str, current_line: usize) -> bool {
         let trimmed = line.trim();
         // Item/expression blocks, comptime functions, and annotation
         // `comptime pre/post` handlers all share the same staged completion
-        // context.
+        // context. `contains` also catches expression position
+        // (`let x = comptime {`).
         if !in_comptime
             && (trimmed.starts_with("comptime {")
                 || trimmed.starts_with("comptime{")
                 || trimmed.starts_with("comptime fn ")
                 || trimmed.starts_with("comptime pre(")
                 || trimmed.starts_with("comptime post(")
-                || trimmed == "comptime")
+                || trimmed == "comptime"
+                || trimmed.contains("comptime {"))
         {
             in_comptime = true;
-        }
-        // Also check for `= comptime {` or `let x = comptime {` (expression position)
-        if !in_comptime && trimmed.contains("comptime {") {
-            in_comptime = true;
+            comptime_entry_depth = brace_count;
         }
 
         brace_count += line.matches('{').count() as i32;
         brace_count -= line.matches('}').count() as i32;
 
-        if in_comptime && brace_count == 0 && line.contains('}') {
+        if in_comptime && line.contains('}') && brace_count <= comptime_entry_depth {
             in_comptime = false;
         }
     }
 
-    in_comptime && brace_count > 0
+    in_comptime && brace_count > comptime_entry_depth
 }
 
 fn detect_enum_variant_context(text_before_cursor: &str) -> Option<(String, String)> {
@@ -2352,6 +2357,39 @@ mod tests {
         assert!(
             !matches!(context, CompletionContext::ComptimeBlock),
             "Should not be ComptimeBlock after closing brace, got {:?}",
+            context
+        );
+    }
+
+    // ADR-009 A3 (S5): comptime blocks nested inside (generic) fn bodies.
+    // Generic template bodies never compile at definition, so completion
+    // context comes entirely from this textual detection.
+    #[test]
+    fn test_comptime_block_context_inside_generic_fn_body() {
+        let text = "fn describe<T>(value: T) -> string {\n  let label = comptime {\n    ";
+        let position = Position {
+            line: 2,
+            character: 4,
+        };
+        let context = analyze_context(text, position);
+        assert_eq!(context, CompletionContext::ComptimeBlock);
+    }
+
+    #[test]
+    fn test_comptime_block_not_after_close_inside_fn_body() {
+        // The comptime block closes at brace depth 1 (still inside the fn
+        // body) — the position after it is a RUNTIME position and must not
+        // be classified as ComptimeBlock.
+        let text =
+            "fn describe<T>(value: T) -> string {\n  let label = comptime {\n    type_ref(T)\n  }\n  ";
+        let position = Position {
+            line: 4,
+            character: 2,
+        };
+        let context = analyze_context(text, position);
+        assert!(
+            !matches!(context, CompletionContext::ComptimeBlock),
+            "Should not be ComptimeBlock after the block closed inside a fn body, got {:?}",
             context
         );
     }

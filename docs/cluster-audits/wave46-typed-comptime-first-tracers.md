@@ -112,10 +112,25 @@ growth pressure on the pre-existing oversized `comptime_builtins.rs`.
 3. Native type-expression syntax that can form `TypeRef` for tuples, records,
    callables, references, unions, erased domains, and applied generic types.
 4. Complete semantic normalization for applied nominals, object intersections,
-   trait intersections, and declared generic parameters on every call path. The
-   active-function parameter snapshot path has a unit proof, but a public
-   generic-function e2e remains blocked by the existing generic-call
-   specialization gap when a generic body contains this comptime reflection.
+   and trait intersections on every call path. The declared-generic-parameter
+   half of this gap is CLOSED (2026-07-12, ADR009-A3): the generic-call
+   specialization gap is fixed — a scoped compiler overlay carries the base
+   definition's declared type parameters into the reflection snapshot when the
+   monomorphized body compiles, and hard specialized-body compile errors now
+   propagate instead of being masked as "cannot infer type argument(s)".
+   Public e2es (VM+JIT) in `tools/shape-test/tests/comptime/frozen_type.rs`:
+   `generic_body_observes_parameter_category_for_its_own_type_param`
+   (positive `Parameter` proof),
+   `undeclared_name_in_generic_body_still_fails_the_freeze` (negative:
+   `type_ref(U)` in `fn f<T>` → "unknown semantic type identity"),
+   `parameter_category_is_stable_across_instantiations_of_one_generic_fn`,
+   `distinct_generic_fns_each_observe_parameter_for_their_own_type_param`,
+   plus the full rejection matrix re-fired inside generic bodies
+   (`*_inside_generic_bodies` / `*_generic_bodies_*` tests). Specialization
+   unit pins in
+   `crates/shape-vm/src/compiler/comptime_builtins/type_reflection/tests.rs`
+   and `crates/shape-vm/src/compiler/monomorphization/cache.rs`; LSP
+   generic-body matrix in `tools/shape-test/tests/lsp/typed_comptime.rs`.
 5. Public `CaptureDescriptor<Sig, I, T, Mode>`, heterogeneous capture packs,
    `CheckedBody<Sig, Captures>`, and `CheckedTemplate<Sig, Captures>`.
 6. Explicit generated closure capture syntax/builders and full ownership,

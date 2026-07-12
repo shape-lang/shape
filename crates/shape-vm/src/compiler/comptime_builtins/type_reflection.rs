@@ -291,6 +291,18 @@ pub(crate) fn build_type_reflection_snapshot(
             );
         }
     }
+    // ADR-009 A3 — specialization overlay: while a monomorphized body
+    // compiles, the registered def carries `type_params = None` (substitution
+    // strips them), so the discovery above finds nothing. The overlay set
+    // around `compile_function` in `monomorphization/cache.rs` re-supplies the
+    // BASE generic function's declared type-param names, with the owner scoped
+    // to the BASE name (never the mono key) so Parameter identities are
+    // declaration-stable across instantiations (ADR-009 §Semantic Freeze,
+    // Decision 52 pre-substitution identities).
+    if let Some((base_name, parameters)) = &compiler.specialization_type_param_overlay {
+        snapshot.parameter_owner = Some(base_name.clone());
+        snapshot.known_type_params.extend(parameters.iter().cloned());
+    }
     snapshot.rebuild_frozen_type_index();
     snapshot
 }

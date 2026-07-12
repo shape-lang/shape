@@ -89,6 +89,61 @@ consumed inside comptime. Completion, hover, signature help, enum-variant
 completion, and compile diagnostics use the same catalog and compiler path.
 This is the category layer, not yet the payload-bearing `FrozenType<T>` sum.
 
+**CURRENT / VM+JIT - `Parameter` category from generic bodies (ADR009-A3)**
+
+```shape
+fn describe<T>(value: T) -> string {
+    comptime {
+        match type_category(type_ref(T)) {
+            FrozenTypeCategory::Parameter => "parameter"
+            FrozenTypeCategory::Primitive => "primitive"
+            FrozenTypeCategory::Never => "never"
+            FrozenTypeCategory::Nominal => "nominal"
+            FrozenTypeCategory::Tuple => "tuple"
+            FrozenTypeCategory::Record => "record"
+            FrozenTypeCategory::Callable => "callable"
+            FrozenTypeCategory::Reference => "reference"
+            FrozenTypeCategory::Union => "union"
+            FrozenTypeCategory::Erased => "erased"
+        }
+    }
+}
+
+print(describe(1))  // "parameter"
+```
+
+A generic function whose body reflects on its own declared type parameter now
+compiles and runs on VM and JIT. `type_ref(T)` inside the generic body yields
+the declared pre-substitution `Parameter` identity (Decision 52: declared
+generic parameters are typed parameter identities, not inference holes), never
+the substituted concrete category. The identity is scoped to the BASE generic
+function name — stable across instantiations of one function (`identity(1)`
+and `identity("s")` observe the same identity) and distinct across owning
+functions. The specialization compiler carries the base definition's declared
+type parameters into the reflection snapshot via an explicit scoped overlay
+(spec §4.1: overlay, not rebuild — a single derivation, no second parameter
+table).
+
+Execution semantics: a generic body's comptime block executes once PER
+instantiation (generic template bodies never compile at definition;
+`identity(1)` + `identity("s")` = two comptime runs). Side-effectful comptime
+(`warning()`, directives) in generic bodies therefore duplicates per
+instantiation by design; it is not deduplicated.
+
+Rejections re-fire on the specialized-compile path with their named
+diagnostics: an undeclared name (`type_ref(U)` inside `fn f<T>`) fails the
+freeze with "unknown semantic type identity" — hard specialized-body compile
+errors now propagate out of monomorphization instead of being masked as
+"cannot infer type argument(s)"; soft resolution failures (unresolved type
+args, specialization cycles) keep their non-error fallback. String
+construction, arity, comptime-only stage, runtime escape, and match
+exhaustiveness rejections all hold inside generic bodies. `Parameter`
+descriptor payloads (`TypeParamDescriptor<T>`) are B7, not yet enabled.
+
+Book status: behavior is gate-runnable green on VM and JIT; the gate-runnable
+book example lands with F1 or earlier per spec §3.7 (book examples only after
+gate-runnable green — satisfied for this slice).
+
 **CURRENT / compiler - generated implicit capture rejection**
 
 Annotation-generated functions are marked before body compilation. A closure
@@ -162,7 +217,7 @@ examples, rejection requirements, and implementation implications.
 | `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |
 | `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94 |
-| `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted |
+| `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
 | `AliasDescriptor<A, T>` | comptime declaration | Transparent-alias provenance and underlying type | accepted |
 | `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted |
 | `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted |

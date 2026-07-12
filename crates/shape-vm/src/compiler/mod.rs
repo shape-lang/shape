@@ -52,8 +52,8 @@ use crate::type_tracking::{NativeKind, TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
-    InferenceFacts, Type, TypeAnalysisMode, TypeErrorWithLocation,
-    analyze_program_full, checking::MethodTable,
+    InferenceFacts, Type, TypeAnalysisMode, TypeErrorWithLocation, analyze_program_full,
+    checking::MethodTable,
 };
 
 // Sub-modules
@@ -1832,6 +1832,35 @@ pub struct BytecodeCompiler {
     /// cache-insert-before-compile behaviour; this guard only fires on the
     /// pathological transitive-resolution cycle.
     pub(crate) monomorphization_in_progress: std::collections::HashSet<String>,
+
+    /// ADR-009 A3 — `(base generic fn name, declared type-param names)` for
+    /// the specialization whose body is currently being compiled. Set/restored
+    /// (Err-safe, save-then-restore) around the `compile_function` calls in
+    /// `monomorphization/cache.rs` and consumed by
+    /// `build_type_reflection_snapshot` as an explicit overlay extending the
+    /// existing discovery path (spec §4.1 — one derivation, no second
+    /// parameter table). A specialized def is registered with
+    /// `type_params = None` (substitution strips them), so without this
+    /// overlay `type_ref(T)` inside a generic body freezes to an INVALID
+    /// identity when the mono body compiles. The owner is the BASE function
+    /// name, never the mono key, so Parameter identities stay
+    /// declaration-stable across instantiations (ADR-009 §Semantic Freeze,
+    /// Decision 52 pre-substitution identities). `None` outside a
+    /// specialized-body compile.
+    pub(crate) specialization_type_param_overlay: Option<(String, Vec<String>)>,
+
+    /// ADR-009 A3 (review round 1) — names of call-site specializations
+    /// (`__w24_method_*`, `__w27_implicit_*`) whose body compile FAILED after
+    /// registration. `register_function` runs before `compile_function` (the
+    /// body may reference itself), and a failed compile cannot roll the
+    /// registration back (later registrations may already have shifted
+    /// indices). Without this set, a second call site's `find_function`
+    /// reuse short-circuit would return the registered-but-never-compiled
+    /// function index — dispatching a ZERO-instruction body (silent wrong
+    /// output / linker `remap_fid` self-recursion). The short-circuits
+    /// consult this set and re-raise a hard error instead
+    /// (surface-and-stop).
+    pub(crate) failed_call_site_specializations: std::collections::HashSet<String>,
 
     /// Monotonic counter for monomorphization specialization IDs.
     pub(crate) next_monomorphization_id: u64,

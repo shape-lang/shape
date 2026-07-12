@@ -7208,3 +7208,113 @@ T1 surfaces it for Round 13 cluster-0 disposition.
 **Alternative taken:** carrier (b) shipped (`wf2f-close-matrix.md` §Residual, `8fbe82f4`). Logged here per append-only discipline because it is a *bounded deviation, not a rejected one* — acceptable for same-image whole-VM resume (the only path exercised), but it must NOT be extended to cross-version distributed transfer without a content-hash pin. WF-3E (distributed composition) is the point where this assumption gets stress-tested; if `@remote`×foreign transfer ever resolves ModuleFn by name across differently-linked nodes, this entry is the flag to re-open (b)→(a).
 
 **Cost saved:** n/a (deviation taken, not avoided) — logged to prevent a future silent cross-version mis-bind.
+
+## 2026-07-12 — ADR009-A3 S4: deliberate NON-expansion into the stress_generics `generic_identity_*` "Null family" (roots differ / family not live at base)
+
+**Considered:** ticket ADR009-A3's scope guard allowed fixing the CLAUDE.md
+Known-Constraints family (a) ("generic-fn instantiation returning Null",
+`stress_generics::generic_identity_*`) *iff* it shared the identical root
+with A3's defect (comptime reflection in generic bodies failing at
+specialization compile, masked by the `Err(_) => Ok(None)` swallow at
+`function_calls.rs`).
+
+**Distinguishing experiment run (2026-07-12, both directions):**
+
+- Baseline `main@4d70508b` (worktree detached, build verified genuine —
+  `frozen_type` shows the pre-A3 16-test matrix): `cargo test -p shape-test
+  --test type_inference stress_generics` → **22 passed; 0 failed**
+  (including `generic_identity_int/string/bool/number/with_none`);
+  `cargo test -p shape-test --test structs_types generics_comptime` →
+  **20 passed; 0 failed**.
+- Branch `adr009/a3@47a8df4b` (post S1+S2+S3): identical — 22/22 and 20/20.
+- Worktree-vs-main FAILED-name differential: **empty in both directions.**
+  S2's hard-error propagation flipped no signatures because no family
+  member fails at this base.
+
+**Root attribution:** the family is NOT live at `main@4d70508b`. The
+CLAUDE.md Known Constraints family-(a) listing (anchored to the old
+`jit-v2-phase1@53a06ce` baseline) is stale for these named tests. The
+historically failing member was `generic_identity_with_null` (bare
+`id(None)`, failing "cannot infer type argument(s) for generic function"
+per `docs/cluster-audits/v0.3-classification/type_inference.md:324-348`,
+classified FN-REG-CORRECTNESS); commit `831b1133` (2026-07-03, pre-base)
+renamed it to `generic_identity_with_none` and annotated the operand
+(`let n: Option<int> = None`), after which it passes. The only element the
+two defect families ever shared is the *masking diagnostic surface* (the
+call-site "cannot infer type argument(s)" arm downstream of the
+`Err→Ok(None)` swallow) — a mechanism, not a root. A3's root (declared
+`type_params` stripped at `substitution.rs` before the specialized body
+compiles, so the reflection snapshot lacked `T`) is specific to comptime
+reflection and was fixed by S1 (overlay) + S2 (soft/hard propagation).
+
+**Alternative rejected:** re-opening the unannotated `id(None)` inference
+gap (bare `None` as the sole type-argument source) under this ticket. That
+is a generic-inference feature question, deliberately rebaselined by
+`831b1133`, with no comptime-reflection component — expanding into it here
+would be the exact whole-cluster scope creep the ticket forbids.
+
+**Cost saved:** avoided an unbounded generics-inference workstream inside a
+bounded compiler-correctness ticket; kept A3's blast radius at the already
+verified zero-differential.
+
+## 2026-07-12 — ADR009-A3 close-out: rejected compromises (Parameter category from generic bodies)
+
+Ticket ADR009-A3 (shape-lang/shape#3) fixed the generic-call specialization
+gap so `type_category(type_ref(T))` inside a generic body yields
+`FrozenTypeCategory::Parameter` on VM and JIT. Compromises considered and
+REJECTED during implementation:
+
+**1. Substituting `type_ref(T)` → concrete type during monomorphization.**
+Rewriting the reflection argument to the instantiation's concrete type (so
+`describe(1)` observes `Primitive`) would have "fixed" the compile failure
+without any snapshot change. Rejected: it makes `Parameter` publicly
+unreachable (no source program could ever observe the category), contradicts
+Decision 52 (declared generic parameters are valid PRE-substitution typed
+identities, not inference holes), and undercuts B7 (`TypeParamDescriptor<T>`
+payloads need a reachable `Parameter` arm to hang off). A variant of the same
+compromise — a blanket `Expr::Identifier` rewrite in `substitution.rs` — was
+also rejected: identifier passthrough is correct value semantics; a blanket
+rewrite corrupts value identifiers that merely shadow a type-parameter name.
+
+**2. Mono-key owner scoping for the `Parameter` identity.**
+Scoping the interned descriptor `parameter:{owner}:{name}` to the
+monomorphized name (`describe::i64`) was the path of least resistance (the
+specialized def is registered under the mono name). Rejected:
+instantiation-dependent identities violate ADR-009 declaration stability —
+`identity(1)` and `identity("s")` would observe DIFFERENT identities for the
+same declared `T`. The overlay carries the BASE fn name; unit pins
+(`specialization_overlay_supplies_base_scoped_parameter_identity`,
+`specialization_overlay_identity_is_stable_across_instantiations`) forbid
+regressing this by renumbering (the SHA-256 descriptor scheme is fixed; any
+future red is fixed in owner-scoping state threading, never identities).
+
+**3. Defaulting an INVALID identity to a category.**
+Mapping `FrozenTypeIdentity::INVALID` (unknown name in `type_ref`) to some
+category — an `Unknown`/`Any`-arm analog — would have made the negative case
+"work". Rejected per Decision 50/94 (closed 10-category catalog, no Unknown
+arm) and CLAUDE.md surface-and-stop: unresolved names must fail the freeze
+boundary with the named diagnostic "unknown semantic type identity".
+
+**4. Keeping the `Err(_) => Ok(None)` specialization swallow "for compatibility".**
+The pre-existing arm at `function_calls.rs` converted EVERY specialized-body
+compile error into a soft fallback, re-reported downstream as the unrelated
+"cannot infer type argument(s)" inference diagnostic. Keeping it (and pattern-
+matching only the freeze error out) was considered for blast-radius safety.
+Rejected: blanket error swallowing violates surface-and-stop and had already
+masked this ticket's defect class. Fix landed as a typed soft/hard
+classification (`SpecializationFailure::{Soft, Hard}` in
+`monomorphization/cache.rs`): resolution-stage failures (unresolved type args,
+cycle detector) stay soft with the None fallback preserved; specialized-BODY
+compile errors propagate hard on the free-fn, implicit-generic, and
+method-mirror paths. Blast-radius differential vs `main@4d70508b`: zero
+newly-failing names across all generics-heavy suites.
+
+**Scope guard honored:** the stress_generics `generic_identity_*` "Null
+family" was investigated and NOT expanded into (see the 2026-07-12 S4 entry
+above — roots differ; family not live at base; CLAUDE.md family-(a) row is
+stale for those named tests, rebaselined by `831b1133`).
+
+**Cost saved:** each rejected compromise would have converted a
+compiler-correctness fix into either a publicly-unreachable feature (1), an
+identity-stability regression (2), a forbidden Unknown-arm analog (3), or a
+persistent diagnostic-masking layer (4).
