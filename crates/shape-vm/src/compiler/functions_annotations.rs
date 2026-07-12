@@ -155,6 +155,15 @@ impl BytecodeCompiler {
                     helpers.sort_by(|a, b| a.name.cmp(&b.name));
                     helpers.dedup_by(|a, b| a.name == b.name);
 
+                    // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
+                    // module doc): this signature-directive pre-pass runs
+                    // AFTER the semantic-freeze barrier and consumes the
+                    // real registration-complete freeze handle — the same
+                    // one pass-2 uses. A site that cannot obtain it is the
+                    // row-3 named compile error; the handle is acquired
+                    // before the output-suppression toggle so the error
+                    // path cannot leak suppression state.
+                    let freeze = self.comptime_freeze_overlay()?;
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
                     let execution_result =
@@ -167,10 +176,11 @@ impl BytecodeCompiler {
                             &[],
                             &helpers,
                             extensions,
-                            trait_impls.clone(),
                             known_type_symbols.clone(),
                             ctx_module_path,
                             ctx_file,
+                            trait_impls.clone(),
+                            freeze,
                         );
                     super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
 
@@ -907,6 +917,12 @@ impl BytecodeCompiler {
             .to_string();
 
         let context = format!("the @{} annotation handler", annotation.name);
+        // ADR-009 §4.1 (S2): authoritative handler execution consumes the
+        // per-compilation-unit freeze handle — the empty-snapshot defect
+        // (`TypeReflectionSnapshot::default()`) is deleted. This runs in
+        // pass 2, after the freeze barrier; a handler reached without an
+        // installed freeze is a compile error (row 3).
+        let freeze = self.comptime_freeze_overlay()?;
         let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
             &handler.params,
@@ -916,10 +932,11 @@ impl BytecodeCompiler {
             const_bindings,
             &comptime_helpers,
             &extensions,
-            trait_impls,
             known_type_symbols,
             &ctx_module_path,
             &ctx_file,
+            trait_impls,
+            freeze,
         )
         .map_err(|e| self.build_comptime_failure(&e, handler_span, &context))?;
         // §4.4: re-emit any `warning()` output anchored at this handler site.
@@ -1558,6 +1575,17 @@ impl BytecodeCompiler {
                     // re-runs the same handler authoritatively. Suppress raw
                     // handler output during the speculative run so a handler
                     // that prints does not emit twice.
+                    // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
+                    // module doc): this speculative run fires AFTER the
+                    // semantic-freeze barrier and consumes the real
+                    // registration-complete freeze handle, so reflection-
+                    // using handlers materialize their generated functions
+                    // here (visible to every user body) instead of
+                    // deferring to pass 2. A site that cannot obtain the
+                    // handle is the row-3 named compile error; the handle
+                    // is acquired before the output-suppression toggle so
+                    // the error path cannot leak suppression state.
+                    let freeze = self.comptime_freeze_overlay()?;
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
                     let execution_result =
@@ -1570,10 +1598,11 @@ impl BytecodeCompiler {
                             &[],
                             &helpers,
                             &extensions,
-                            trait_impls.clone(),
                             known_type_symbols.clone(),
                             &ctx_module_path,
                             &ctx_file,
+                            trait_impls.clone(),
+                            freeze,
                         );
                     super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
                     let execution = match execution_result {
@@ -3305,5 +3334,152 @@ impl BytecodeCompiler {
         }
 
         Ok(())
+    }
+}
+
+// ADR-009 §4.1 (ticket A1, slice S3) — the annotation-handler freeze gate.
+//
+// Pre-pass freeze rule (S3, named rule per plan graft 4): the speculative
+// annotation pre-passes (`materialize_computed_comptime_extends` and
+// `apply_function_comptime_signature_directives_for_analysis`) consume the
+// SAME registration-complete freeze handle as the authoritative pass-2
+// execution — the freeze barrier runs BEFORE them in `compile()`. A pre-pass
+// comptime site that cannot obtain the handle is the row-3 named compile
+// error (`NO_FREEZE_HANDLE_DIAGNOSTIC`); exemption-by-suppression, empty
+// snapshots and `Option<freeze>` are forbidden shapes. Dec 52 ordering: a
+// freeze-boundary rejection fires at the barrier, BEFORE any handler body
+// executes.
+#[cfg(test)]
+mod s3_freeze_gate_tests {
+    use super::BytecodeCompiler;
+
+    fn parse(source: &str) -> shape_ast::ast::Program {
+        shape_ast::parse_program(source).expect("test program parses")
+    }
+
+    /// Rejection-matrix row 3, type-target pre-pass: running the speculative
+    /// extends pre-pass on a compiler whose freeze barrier has not run is a
+    /// compile error with the named diagnostic — the pre-pass consumes the
+    /// real handle, it does not fall back to a reflection-rejecting module.
+    #[test]
+    fn extends_prepass_without_freeze_handle_is_the_named_row3_compile_error() {
+        let program = parse(
+            r#"
+annotation touch() {
+  targets: [type]
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@touch()
+type Probe { id: int }
+"#,
+        );
+        let mut compiler = BytecodeCompiler::new();
+        let error = compiler
+            .materialize_computed_comptime_extends(&program)
+            .expect_err("pre-barrier pre-pass site must be a compile error");
+        assert!(
+            error.to_string().contains("no semantic freeze handle"),
+            "row-3 named diagnostic missing: {error}"
+        );
+    }
+
+    /// Rejection-matrix row 3, function-target pre-pass (signature
+    /// directives): same gate, same named diagnostic.
+    #[test]
+    fn signature_directive_prepass_without_freeze_handle_is_the_named_row3_compile_error() {
+        let mut program = parse(
+            r#"
+annotation touch() {
+  targets: [function]
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@touch()
+fn probe() -> int { 2 }
+"#,
+        );
+        let mut compiler = BytecodeCompiler::new();
+        let error = compiler
+            .apply_function_comptime_signature_directives_for_analysis(&mut program)
+            .expect_err("pre-barrier pre-pass site must be a compile error");
+        assert!(
+            error.to_string().contains("no semantic freeze handle"),
+            "row-3 named diagnostic missing: {error}"
+        );
+    }
+
+    /// Dec 52 ordering proof (rejection-matrix row 4): a freeze-boundary
+    /// rejection fires at the barrier, BEFORE any annotation handler body
+    /// executes. The handler here would leave two observable side effects
+    /// (a comptime warning and a hard `error()`); the compile error must be
+    /// the freeze rejection and neither side effect may be observed.
+    #[test]
+    fn freeze_rejection_fires_before_annotation_handler_body_executes() {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::{TypeVar, tyvar_to_annotation};
+
+        // Clear any diagnostics left by other tests on this thread.
+        let _ = crate::compiler::comptime_builtins::take_comptime_diagnostics();
+
+        // Poison the unit with partial semantic state: a struct field whose
+        // annotation still carries an unresolved inference variable.
+        let mut compiler = BytecodeCompiler::new();
+        compiler.struct_types.insert(
+            "Poisoned".to_string(),
+            (vec!["min".to_string()], shape_ast::ast::Span::DUMMY),
+        );
+        compiler.struct_generic_info.insert(
+            "Poisoned".to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: Vec::new(),
+                runtime_field_types: [(
+                    "min".to_string(),
+                    tyvar_to_annotation(&TypeVar("T3".to_string())),
+                )]
+                .into_iter()
+                .collect::<std::collections::HashMap<String, TypeAnnotation>>(),
+            },
+        );
+
+        let program = parse(
+            r#"
+annotation marker() {
+  targets: [type]
+  comptime post(target, ctx) {
+    warning("SIDE_EFFECT")
+    error("HANDLER_RAN")
+  }
+}
+
+@marker()
+type Probe { id: int }
+"#,
+        );
+
+        let error = compiler
+            .compile(&program)
+            .expect_err("partial semantic state must reject compilation at the barrier");
+        let message = error.to_string();
+        assert!(
+            message.contains("unresolved inference variable"),
+            "the compile error must be the named freeze rejection, got: {message}"
+        );
+        assert!(
+            !message.contains("HANDLER_RAN"),
+            "Dec 52 violated: the handler body executed before the freeze \
+             rejection fired: {message}"
+        );
+        let diagnostics = crate::compiler::comptime_builtins::take_comptime_diagnostics();
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| !d.message.contains("SIDE_EFFECT")),
+            "Dec 52 violated: handler side effect observed: {diagnostics:?}"
+        );
     }
 }

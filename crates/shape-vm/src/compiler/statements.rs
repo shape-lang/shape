@@ -1093,6 +1093,84 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-009 §4.1 (ticket A1, slice S2): pre-register the remaining named
+    /// freeze inputs — type aliases and enum schemas — before the semantic-
+    /// freeze barrier, mirroring `predeclare_item_struct_schemas` for
+    /// structs. Without this the barrier at `compile()` would freeze before
+    /// the pass-2 `Item::TypeAlias` / `Item::Enum` arms run, silently
+    /// omitting every alias and enum of the unit (a partial freeze —
+    /// exactly what Dec 52 forbids). Registration is idempotent with the
+    /// pass-2 arms: alias insertion re-writes the same mapping, and
+    /// `register_enum_scoped` content-interns to a stable schema id.
+    pub(super) fn predeclare_item_semantic_freeze_inputs(&mut self, item: &Item) -> Result<()> {
+        match item {
+            Item::TypeAlias(type_alias, _) => {
+                self.predeclare_type_alias_freeze_input(type_alias);
+            }
+            Item::Enum(enum_def, _) => {
+                self.register_enum(enum_def)?;
+            }
+            Item::Export(export, _) => match &export.item {
+                ExportItem::TypeAlias(type_alias) => {
+                    self.predeclare_type_alias_freeze_input(type_alias);
+                }
+                ExportItem::Enum(enum_def) => {
+                    self.register_enum(enum_def)?;
+                }
+                _ => {}
+            },
+            Item::Module(module_def, _) => {
+                let module_path = self.current_module_path_for(module_def.name.as_str());
+                self.module_scope_stack.push(module_path.clone());
+                let result = (|| -> Result<()> {
+                    for inner in &module_def.items {
+                        if let Ok(qualified) = self.qualify_module_item(inner, &module_path) {
+                            self.predeclare_item_semantic_freeze_inputs(&qualified)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                self.module_scope_stack.pop();
+                result?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// True when `item` can contribute named semantic-freeze inputs — i.e.
+    /// the item kinds `predeclare_item_struct_schemas` /
+    /// `predeclare_item_semantic_freeze_inputs` above act on. The graph entry
+    /// point's pre-Phase-1 barrier (ADR-009 §4.1,
+    /// `compile_with_graph_and_prelude`) uses this to skip qualifying
+    /// (deep-cloning) dependency-module items that cannot carry freeze
+    /// inputs. Keep in lockstep with the two predeclare matches above.
+    pub(super) fn item_can_carry_semantic_freeze_inputs(item: &Item) -> bool {
+        match item {
+            Item::StructType(..) | Item::TypeAlias(..) | Item::Enum(..) | Item::Module(..) => true,
+            Item::Export(export, _) => matches!(
+                &export.item,
+                ExportItem::Struct(_) | ExportItem::TypeAlias(_) | ExportItem::Enum(_)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Alias half of `predeclare_item_semantic_freeze_inputs`: the same
+    /// name→target mapping the pass-2 `Item::TypeAlias` arm records into
+    /// `self.type_aliases` (single derivation, registered earlier).
+    fn predeclare_type_alias_freeze_input(&mut self, type_alias: &shape_ast::ast::TypeAliasDef) {
+        let base_type_name = match &type_alias.type_annotation {
+            TypeAnnotation::Basic(name) => Some(name.clone()),
+            TypeAnnotation::Reference(name) => Some(name.to_string()),
+            _ => None,
+        };
+        self.type_aliases.insert(
+            type_alias.name.clone(),
+            base_type_name.unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
+        );
+    }
+
     /// Register a function definition
     pub(super) fn register_function(&mut self, func_def: &FunctionDef) -> Result<()> {
         // Detect duplicate function definitions (Shape does not support overloading).
@@ -1775,11 +1853,11 @@ impl BytecodeCompiler {
                     .cloned()
                     .collect();
                 let comptime_helpers = self.collect_comptime_helpers();
-                // W7 (2026-05-17): build the TypeReflectionSnapshot for
-                // `type_info(T)` resolution. Top-level comptime block has
-                // no enclosing generic-type-param scope.
-                let type_snapshot =
-                    super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
+                // ADR-009 §4.1 (S2): the site consumes the per-compilation-
+                // unit freeze handle (installed at the registration-complete
+                // barrier in `compile()`) — no per-site rebuild. A site
+                // without a handle is a compile error (row 3).
+                let freeze = self.comptime_freeze_overlay()?;
                 // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
                 // rationale on comptime-context items.
                 let comptime_impl_blocks = self.comptime_impl_blocks.clone();
@@ -1799,7 +1877,7 @@ impl BytecodeCompiler {
                     &extensions,
                     trait_impls,
                     known_type_symbols,
-                    type_snapshot,
+                    freeze,
                 )
                 .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
                 // §4.4: re-emit any `warning()` output anchored at this block.
@@ -5517,9 +5595,9 @@ impl BytecodeCompiler {
             let mut comptime_helpers = self.collect_comptime_helpers();
             self.inject_module_local_comptime_helper_aliases(module_path, &mut comptime_helpers);
 
-            // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
-            // resolution from a module-scoped comptime block.
-            let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
+            // ADR-009 §4.1 (S2): module-scoped comptime blocks consume the
+            // same per-compilation-unit freeze handle — no per-site rebuild.
+            let freeze = self.comptime_freeze_overlay()?;
             // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
             // rationale on comptime-context items.
             let comptime_impl_blocks = self.comptime_impl_blocks.clone();
@@ -5538,7 +5616,7 @@ impl BytecodeCompiler {
                 &extensions,
                 trait_impls,
                 known_type_symbols,
-                type_snapshot,
+                freeze,
             )
             .map_err(|e| self.build_comptime_failure(&e, span, "a compile-time block"))?;
             // §4.4: re-emit any `warning()` output anchored at this block.

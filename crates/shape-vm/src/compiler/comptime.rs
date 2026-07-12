@@ -426,57 +426,53 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
 /// (inference/access.rs `type_symbol_ident_args`), so the two paths agree.
 fn rewrite_comptime_type_symbol_args(
     stmt: &mut Statement,
-    type_snapshot: &super::comptime_builtins::TypeReflectionSnapshot,
+    freeze: &super::comptime_builtins::FreezeOverlay,
 ) {
     match stmt {
-        Statement::Expression(expr, _) => {
-            rewrite_comptime_type_symbol_args_expr(expr, type_snapshot)
-        }
-        Statement::Return(Some(expr), _) => {
-            rewrite_comptime_type_symbol_args_expr(expr, type_snapshot)
-        }
+        Statement::Expression(expr, _) => rewrite_comptime_type_symbol_args_expr(expr, freeze),
+        Statement::Return(Some(expr), _) => rewrite_comptime_type_symbol_args_expr(expr, freeze),
         Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
         Statement::VariableDecl(decl, _) => {
             if let Some(init) = &mut decl.value {
-                rewrite_comptime_type_symbol_args_expr(init, type_snapshot);
+                rewrite_comptime_type_symbol_args_expr(init, freeze);
             }
         }
         Statement::Assignment(assign, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut assign.value, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(&mut assign.value, freeze);
         }
         Statement::For(for_loop, _) => {
             match &mut for_loop.init {
                 shape_ast::ast::ForInit::ForIn { iter, .. } => {
-                    rewrite_comptime_type_symbol_args_expr(iter, type_snapshot);
+                    rewrite_comptime_type_symbol_args_expr(iter, freeze);
                 }
                 shape_ast::ast::ForInit::ForC {
                     init,
                     condition,
                     update,
                 } => {
-                    rewrite_comptime_type_symbol_args(init, type_snapshot);
-                    rewrite_comptime_type_symbol_args_expr(condition, type_snapshot);
-                    rewrite_comptime_type_symbol_args_expr(update, type_snapshot);
+                    rewrite_comptime_type_symbol_args(init, freeze);
+                    rewrite_comptime_type_symbol_args_expr(condition, freeze);
+                    rewrite_comptime_type_symbol_args_expr(update, freeze);
                 }
             }
             for s in &mut for_loop.body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze);
             }
         }
         Statement::While(while_loop, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, freeze);
             for s in &mut while_loop.body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze);
             }
         }
         Statement::If(if_stmt, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, freeze);
             for s in &mut if_stmt.then_body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze);
             }
             if let Some(else_body) = &mut if_stmt.else_body {
                 for s in else_body {
-                    rewrite_comptime_type_symbol_args(s, type_snapshot);
+                    rewrite_comptime_type_symbol_args(s, freeze);
                 }
             }
         }
@@ -485,11 +481,11 @@ fn rewrite_comptime_type_symbol_args(
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }
         | Statement::ExtendItemsExpr { expression, .. } => {
-            rewrite_comptime_type_symbol_args_expr(expression, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(expression, freeze);
         }
         Statement::ReplaceBody { body, .. } => {
             for s in body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze);
             }
         }
         // Directives with no embedded expression / already-parsed payloads.
@@ -502,7 +498,7 @@ fn rewrite_comptime_type_symbol_args(
 
 fn rewrite_comptime_type_symbol_args_expr(
     expr: &mut Expr,
-    type_snapshot: &super::comptime_builtins::TypeReflectionSnapshot,
+    freeze: &super::comptime_builtins::FreezeOverlay,
 ) {
     // Rewrite this call's own bare-identifier args if it is a reflection call.
     if let Expr::FunctionCall { name, args, .. } = expr {
@@ -514,8 +510,8 @@ fn rewrite_comptime_type_symbol_args_expr(
             }
         } else if name == "type_ref" {
             if let [Expr::Identifier(ident, span)] = args.as_slice() {
-                let identity = type_snapshot
-                    .frozen_type_id(ident)
+                let identity = freeze
+                    .identity_of(ident)
                     .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
                 let span = *span;
                 *name = TYPE_REF_FORWARDER.to_string();
@@ -530,7 +526,7 @@ fn rewrite_comptime_type_symbol_args_expr(
     // Recurse into every child expression so nested reflection calls
     // (`print(type_info(User).name)`) are rewritten too.
     let recur = |child: &mut Expr| {
-        rewrite_comptime_type_symbol_args_expr(child, type_snapshot);
+        rewrite_comptime_type_symbol_args_expr(child, freeze);
     };
     match expr {
         Expr::FunctionCall {
@@ -620,11 +616,25 @@ fn rewrite_comptime_type_symbol_args_expr(
             }
         }
         Expr::Block(block, _) => {
+            // Exhaustive over `BlockItem` — annotation-handler bodies are
+            // block EXPRESSIONS, so `let` / assignment items arrive as
+            // `BlockItem::VariableDecl` / `BlockItem::Assignment`, not as
+            // `BlockItem::Statement` (S3: `let flag = type_category(
+            // type_ref(User))` inside a handler body).
             for item in &mut block.items {
-                if let shape_ast::ast::BlockItem::Statement(s) = item {
-                    rewrite_comptime_type_symbol_args(s, type_snapshot);
-                } else if let shape_ast::ast::BlockItem::Expression(e) = item {
-                    recur(e);
+                match item {
+                    shape_ast::ast::BlockItem::Statement(s) => {
+                        rewrite_comptime_type_symbol_args(s, freeze);
+                    }
+                    shape_ast::ast::BlockItem::Expression(e) => recur(e),
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                        if let Some(init) = &mut decl.value {
+                            recur(init);
+                        }
+                    }
+                    shape_ast::ast::BlockItem::Assignment(assign) => {
+                        recur(&mut assign.value);
+                    }
                 }
             }
         }
@@ -665,7 +675,7 @@ pub(crate) fn execute_comptime(
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
-    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
+    freeze: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
 ) -> Result<ComptimeExecutionResult> {
     execute_comptime_with_context(
         statements,
@@ -676,7 +686,7 @@ pub(crate) fn execute_comptime(
         extensions,
         trait_impl_keys,
         known_type_symbols,
-        type_snapshot,
+        freeze,
     )
 }
 
@@ -701,7 +711,7 @@ pub(crate) fn execute_comptime_with_context(
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
-    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
+    freeze: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
 ) -> Result<ComptimeExecutionResult> {
     // Wrap statements in a function so the compiler produces a callable entry point.
     // Ensure the last statement is a tail return so if/else values aren't discarded.
@@ -710,7 +720,7 @@ pub(crate) fn execute_comptime_with_context(
     // internal string payloads. `type_ref(T)` instead receives a compiler-issued
     // semantic identity; user-provided strings never construct a TypeRef.
     for stmt in &mut body {
-        rewrite_comptime_type_symbol_args(stmt, &type_snapshot);
+        rewrite_comptime_type_symbol_args(stmt, freeze.as_ref());
     }
     ensure_tail_return(&mut body);
 
@@ -777,30 +787,34 @@ pub(crate) fn execute_comptime_with_context(
         docs: shape_ast::ast::ProgramDocs::default(),
     };
 
+    // ADR-009 §4.1 (S2): the reflection intrinsics consume the shared
+    // freeze handle — the Arc moves into the builtins module's closures.
+    let comptime_builtins =
+        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys, freeze);
     compile_and_execute_comptime_program(
         &program,
         vec!["__comptime__".to_string()],
         Vec::new(),
         extensions,
-        trait_impl_keys,
         known_type_symbols,
-        type_snapshot,
+        comptime_builtins,
     )
 }
 
+/// Compile and execute one comptime mini-program with a caller-supplied
+/// `__comptime__` builtins module (the freeze-consuming module from
+/// `create_comptime_builtins_module` — the only flavor; the S2-era
+/// pre-pass rejection module is deleted, S3).
 fn compile_and_execute_comptime_program(
     program: &Program,
     mut known_bindings: Vec<String>,
     mut runtime_module_bindings: Vec<(String, KindedSlot)>,
     extensions: &[shape_runtime::module_exports::ModuleExports],
-    trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
-    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
+    comptime_builtins: shape_runtime::module_exports::ModuleExports,
 ) -> Result<ComptimeExecutionResult> {
     // Build the full extension list first so module namespace bindings
     // (e.g. `__comptime__`) are typed during compilation.
-    let comptime_builtins =
-        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys, type_snapshot);
     let mut all_extensions: Vec<shape_runtime::module_exports::ModuleExports> = extensions.to_vec();
     all_extensions.push(comptime_builtins);
 
@@ -1082,6 +1096,11 @@ pub(crate) fn execute_comptime_with_target(
         name: handler_param.to_string(),
         is_variadic: false,
     }];
+    // Test-only entry: a real freeze over an empty compilation unit through
+    // the single freeze barrier (no empty-snapshot construction exists).
+    let freeze = super::comptime_builtins::semantic_freeze::overlay_for_tests(
+        &crate::compiler::BytecodeCompiler::new(),
+    );
     execute_comptime_with_annotation_handler(
         handler_body,
         &handler_params,
@@ -1091,10 +1110,11 @@ pub(crate) fn execute_comptime_with_target(
         &[],
         &[],
         extensions,
-        trait_impl_keys,
         known_type_symbols,
         "",
         "",
+        trait_impl_keys,
+        freeze,
     )
 }
 
@@ -1124,6 +1144,17 @@ pub(crate) fn execute_comptime_with_target(
 /// `statements.rs` / `expressions/mod.rs` continue to compile, but the
 /// body panics until the rebuild lands rather than synthesizing a
 /// placeholder result that would silently mis-bind handler params.
+///
+/// ADR-009 §4.1 (S2, ABI closed in S3): every caller supplies the REAL
+/// per-compilation-unit freeze handle (`compiler.comptime_freeze_overlay()?`)
+/// — the barrier runs before the first comptime site of the unit, including
+/// the two speculative annotation pre-passes. The `__comptime__` builtins
+/// module is built here from that handle, and the handler body receives the
+/// same `type_ref`/`type_info`/`implements` type-symbol rewrite as comptime
+/// blocks (`rewrite_comptime_type_symbol_args`), so frozen reflection
+/// resolves inside annotation handlers too. No default/empty snapshot, no
+/// `Option<freeze>`, exists on any path (rejection-matrix row 9).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_comptime_with_annotation_handler(
     handler_body: &Expr,
     handler_params: &[AnnotationHandlerParam],
@@ -1133,10 +1164,11 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     const_bindings: &[(String, KindedSlot)],
     comptime_helpers: &[FunctionDef],
     extensions: &[shape_runtime::module_exports::ModuleExports],
-    trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
     ctx_module_path: &str,
     ctx_file: &str,
+    trait_impl_keys: std::collections::HashSet<String>,
+    freeze: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
 ) -> Result<ComptimeExecutionResult> {
     if handler_params.iter().filter(|p| p.is_variadic).count() > 1 {
         return Err(ShapeError::RuntimeError {
@@ -1262,6 +1294,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         ],
     );
 
+    // ADR-009 §4.1 (S3): annotation-handler bodies get the same frozen
+    // type-symbol rewrite as comptime blocks — `type_ref(User)` becomes the
+    // compiler-issued identity forwarder resolved against the shared freeze.
+    let mut body_statement = Statement::Return(Some(handler_body.clone()), Span::DUMMY);
+    rewrite_comptime_type_symbol_args(&mut body_statement, freeze.as_ref());
+
     // Wrap the handler body in a function that takes the target parameter.
     let func_name = "__comptime_handler_fn__".to_string();
     let func_def = FunctionDef {
@@ -1271,7 +1309,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         doc_comment: None,
         params,
         return_type: None,
-        body: vec![Statement::Return(Some(handler_body.clone()), Span::DUMMY)],
+        body: vec![body_statement],
         type_params: Some(Vec::new()),
         annotations: Vec::new(),
         where_clause: None,
@@ -1322,6 +1360,14 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         docs: shape_ast::ast::ProgramDocs::default(),
     };
 
+    // ADR-009 §4.1 (S2/S3): the `__comptime__` builtins module carries the
+    // reflection surface resolved against the shared freeze handle — for the
+    // speculative pre-pass runs exactly as for the authoritative pass-2
+    // runs. The old `TypeReflectionSnapshot::default()` empty-snapshot
+    // defect and its S2 successor (the pre-pass reflection-rejection
+    // module) are deleted.
+    let comptime_builtins =
+        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys, freeze);
     compile_and_execute_comptime_program(
         &program,
         vec![
@@ -1334,13 +1380,8 @@ pub(crate) fn execute_comptime_with_annotation_handler(
             ("__ctx_arg__".to_string(), ctx_nb),
         ],
         extensions,
-        trait_impl_keys,
         known_type_symbols,
-        // Annotation-handler comptime execution does not yet snapshot
-        // user type definitions; `type_info(T)` from an annotation body
-        // resolves only built-in primitives until the handler-context
-        // type snapshot lands as a follow-up.
-        super::comptime_builtins::TypeReflectionSnapshot::default(),
+        comptime_builtins,
     )
 }
 
@@ -1848,11 +1889,60 @@ fn read_typed_object_field(
 // plus the deleted `vm.execute()` synthesis path. The whole module is
 // stubbed and ignored until the comptime rebuild lands; re-enable
 // per-test as the rebuild walks each path.
+/// Test-only freeze handle: a REAL freeze of an empty compilation unit
+/// through the single freeze barrier (never an empty-snapshot construction).
+#[cfg(test)]
+pub(crate) fn test_freeze_overlay() -> std::sync::Arc<super::comptime_builtins::FreezeOverlay> {
+    super::comptime_builtins::semantic_freeze::overlay_for_tests(
+        &crate::compiler::BytecodeCompiler::new(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     #[ignore = "phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4"]
     fn placeholder_phase_2c_comptime_tests() {}
+
+    /// ADR-009 S3 probe: `type_ref(User)` inside an ANNOTATION HANDLER body
+    /// receives the same frozen type-symbol rewrite as comptime blocks.
+    #[test]
+    fn annotation_handler_body_type_ref_is_rewritten_against_the_freeze() {
+        let program = shape_ast::parse_program(
+            r#"
+annotation reflect() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let flag = match type_category(type_ref(User)) {
+      FrozenTypeCategory::Nominal => 1
+      _ => 0
+    }
+    flag
+  }
+}
+"#,
+        )
+        .expect("annotation parses");
+        let handler_body = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::AnnotationDef(def, _) => Some(def.handlers[0].body.clone()),
+                _ => None,
+            })
+            .expect("annotation handler present");
+
+        let freeze = crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(
+            &crate::compiler::BytecodeCompiler::new(),
+        );
+        let mut statement = Statement::Return(Some(handler_body), Span::DUMMY);
+        super::rewrite_comptime_type_symbol_args(&mut statement, freeze.as_ref());
+        let rendered = format!("{statement:?}");
+        assert!(
+            !rendered.contains("\"type_ref\""),
+            "handler-body type_ref call must be rewritten to the identity forwarder: {rendered}"
+        );
+    }
 
     // Regression (2026-06-21): a comptime block evaluating to `false` (and
     // `build_config().debug` in a release build) was baked as `null` at the
@@ -1930,7 +2020,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -1971,7 +2061,7 @@ mod tests {
                 &[],
                 Default::default(),
                 Default::default(),
-                Default::default(),
+                super::test_freeze_overlay(),
             )
         }));
         match result {
@@ -2031,7 +2121,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .expect("build_config() comptime evaluation should succeed");
 
@@ -2115,7 +2205,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .expect("implements() should dispatch end-to-end");
         assert_eq!(result.value.as_bool(), Some(false));
@@ -2141,7 +2231,7 @@ mod tests {
             &[],
             trait_impl_keys,
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .expect("implements() should see typed string args and registered impl keys");
         assert_eq!(result.value.as_bool(), Some(true));
@@ -2171,7 +2261,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -2205,7 +2295,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_err(),
@@ -2293,18 +2383,14 @@ mod tests {
     fn assert_dispatch_reached(
         stmts: Vec<Statement>,
         trait_impl_keys: std::collections::HashSet<String>,
-        snapshot: crate::compiler::comptime_builtins::TypeReflectionSnapshot,
+        (freeze, known_types): (
+            std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
+            std::collections::HashSet<String>,
+        ),
         ctx: &str,
     ) {
-        let known_types: std::collections::HashSet<String> = snapshot
-            .struct_defs
-            .keys()
-            .chain(snapshot.alias_defs.keys())
-            .chain(snapshot.enum_defs.keys())
-            .cloned()
-            .collect();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_comptime(&stmts, &[], &[], trait_impl_keys, known_types, snapshot)
+            execute_comptime(&stmts, &[], &[], trait_impl_keys, known_types, freeze)
         }));
         match result {
             Ok(Ok(_)) => {}
@@ -2331,29 +2417,66 @@ mod tests {
         }
     }
 
-    fn snapshot_with_struct(
+    /// S2 fabricator: populate a real compiler with one struct and freeze
+    /// it through the single barrier (replaces the deleted field-poked
+    /// snapshot construction). Returns the freeze handle plus the
+    /// known-type-symbol set the sites derive from compiler tables.
+    fn freeze_with_struct(
         name: &str,
         fields: &[(&str, TypeAnn)],
-    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
-        let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
-        let ordered: Vec<(String, TypeAnn)> = fields
-            .iter()
-            .map(|(n, t)| (n.to_string(), t.clone()))
-            .collect();
-        snapshot.struct_defs.insert(name.to_string(), ordered);
-        snapshot
+    ) -> (
+        std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
+        std::collections::HashSet<String>,
+    ) {
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler.struct_types.insert(
+            name.to_string(),
+            (
+                fields.iter().map(|(n, _)| n.to_string()).collect(),
+                Span::DUMMY,
+            ),
+        );
+        compiler.struct_generic_info.insert(
+            name.to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: Vec::new(),
+                runtime_field_types: fields
+                    .iter()
+                    .map(|(n, t)| (n.to_string(), t.clone()))
+                    .collect(),
+            },
+        );
+        let overlay =
+            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(&compiler);
+        (overlay, [name.to_string()].into_iter().collect())
     }
 
-    fn snapshot_with_enum(
+    /// S2 fabricator: enum variant of `freeze_with_struct` — the enum goes
+    /// through the canonical schema registry (named freeze input 3).
+    fn freeze_with_enum(
         name: &str,
         variants: &[&str],
-    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
-        let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
-        snapshot.enum_defs.insert(
-            name.to_string(),
-            variants.iter().map(|v| v.to_string()).collect(),
-        );
-        snapshot
+    ) -> (
+        std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
+        std::collections::HashSet<String>,
+    ) {
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler
+            .type_tracker
+            .schema_registry_mut()
+            .register_enum_scoped(
+                name,
+                variants
+                    .iter()
+                    .enumerate()
+                    .map(|(id, variant)| {
+                        shape_runtime::type_schema::EnumVariantInfo::new(*variant, id as u16, 0)
+                    })
+                    .collect(),
+            );
+        let overlay =
+            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(&compiler);
+        (overlay, [name.to_string()].into_iter().collect())
     }
 
     // -------- (1) chained_access -----------------------------------------
@@ -2383,7 +2506,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct(
+        let snapshot = freeze_with_struct(
             "Point",
             &[
                 ("x", TypeAnn::Basic("int".to_string())),
@@ -2421,7 +2544,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2468,7 +2591,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2518,7 +2641,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2576,7 +2699,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2613,7 +2736,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_on_array_generic",
         );
     }
@@ -2636,7 +2759,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2667,7 +2790,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_on_result_two_params",
         );
     }
@@ -2699,7 +2822,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_chained_kind_on_hashmap_generic",
         );
     }
@@ -2726,7 +2849,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_enum("Color", &["Red", "Green", "Blue"]);
+        let snapshot = freeze_with_enum("Color", &["Red", "Green", "Blue"]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2759,7 +2882,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_enum("Color", &["Red", "Green", "Blue"]);
+        let snapshot = freeze_with_enum("Color", &["Red", "Green", "Blue"]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2796,7 +2919,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_on_undefined_type_returns_unknown",
         );
     }
@@ -2825,7 +2948,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_bare_ident_rewrites_for_unknown",
         );
     }
@@ -3072,7 +3195,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3098,7 +3221,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3131,7 +3254,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3283,7 +3406,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3320,7 +3443,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .map(|r| r.value);
         assert!(
@@ -3368,7 +3491,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),

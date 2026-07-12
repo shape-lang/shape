@@ -52,8 +52,8 @@ use crate::type_tracking::{NativeKind, TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
-    InferenceFacts, Type, TypeAnalysisMode, TypeErrorWithLocation,
-    analyze_program_full, checking::MethodTable,
+    InferenceFacts, Type, TypeAnalysisMode, TypeErrorWithLocation, analyze_program_full,
+    checking::MethodTable,
 };
 
 // Sub-modules
@@ -1138,6 +1138,18 @@ pub struct BytecodeCompiler {
     /// Generic metadata for struct types used to instantiate runtime type names
     /// (e.g. `MyType<number>`) at struct-literal construction sites.
     pub(crate) struct_generic_info: HashMap<String, StructGenericInfo>,
+
+    /// ADR-009 §4.1 (ticket A1, S1): the single per-compilation-unit semantic
+    /// freeze, installed exactly once at the registration-complete barrier
+    /// (`install_semantic_freeze`) — before Phase 1 in
+    /// `compile_with_graph_and_prelude` when compiling with a module graph
+    /// (the unit is root + dependencies, and imported-module comptime sites
+    /// execute in Phase 1), else in `compile()`. `None` only before the
+    /// barrier; comptime sites are rewired onto this handle in S2/S3 — a
+    /// comptime site that cannot obtain it is a compile error, never an empty
+    /// snapshot.
+    pub(crate) semantic_freeze:
+        Option<std::sync::Arc<comptime_builtins::semantic_freeze::SemanticFreeze>>,
     /// Names of `type C` declarations with native layout metadata.
     pub(crate) native_layout_types: HashSet<String>,
     /// Generated conversion pair cache keys: `c_type::object_type`.
