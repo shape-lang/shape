@@ -1861,6 +1861,18 @@ pub struct BytecodeCompiler {
     /// specialized-body compile.
     pub(crate) specialization_type_param_overlay: Option<(String, Vec<String>)>,
 
+    /// ADR-009 D1 (Decision 68) — compiler-owned registry of
+    /// generated-symbol identities: the single source of truth for which
+    /// declarations were generated, by which expansion, from which source
+    /// anchor. Issued identities are content-derived
+    /// (`expansion_provenance::SymbolId`), never counter-allocated. The
+    /// name-keyed `materialized_comptime_fns` set becomes a derived lookup
+    /// into this table (D1 slice S2), never an identity of its own.
+    /// (allow: first production reader lands with the S2 stamping pass —
+    /// delete the allow there.)
+    #[allow(dead_code)]
+    pub(crate) generated_symbols: comptime_builtins::expansion_provenance::GeneratedSymbolTable,
+
     /// ADR-009 A3 (review round 1) — names of call-site specializations
     /// (`__w24_method_*`, `__w27_implicit_*`) whose body compile FAILED after
     /// registration. `register_function` runs before `compile_function` (the

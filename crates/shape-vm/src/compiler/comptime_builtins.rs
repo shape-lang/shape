@@ -25,6 +25,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub(crate) mod expansion_provenance;
 pub(crate) mod semantic_freeze;
 mod type_reflection;
 
