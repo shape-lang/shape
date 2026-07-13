@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tower_lsp_server::ls_types::{
     CodeActionOrCommand, CompletionItem, Diagnostic, DocumentSymbol, DocumentSymbolResponse,
     FormattingOptions, GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent,
-    Position, Range, SymbolKind, Uri,
+    Position, Range, SymbolKind, TextEdit, Uri,
 };
 
 use shape_lsp::context::CompletionContext;
@@ -892,6 +892,174 @@ impl ShapeTest {
             self.position.line,
             self.position.character
         );
+        self
+    }
+
+    /// Every same-file TextEdit the rename at the current position produces
+    /// (empty when rename declines).
+    fn rename_text_edits(&self, new_name: &str) -> Vec<TextEdit> {
+        let uri = self.uri();
+        shape_lsp::rename::rename(&self.text, &uri, self.position, new_name, None)
+            .and_then(|edit| edit.changes)
+            .map(|changes| changes.into_values().flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Zero-based (line, character) of a byte offset in the document.
+    fn offset_position(text: &str, offset: usize) -> (u32, u32) {
+        let clamped = offset.min(text.len());
+        let mut line = 0u32;
+        let mut character = 0u32;
+        for (i, ch) in text.char_indices() {
+            if i >= clamped {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += 1;
+            }
+        }
+        (line, character)
+    }
+
+    /// Assert the rename at the current position produces edits whose start
+    /// lines include every line in `expected_lines` (zero-based).
+    ///
+    /// ADR-009 D1 (S6, rejection row 5): rename on an explicit source binder
+    /// edits the SOURCE BINDER occurrences (generator binder token + call
+    /// sites) — the expansion recomputes.
+    pub fn expect_rename_edits_include_lines(self, new_name: &str, expected_lines: &[u32]) -> Self {
+        let lines: Vec<u32> = self
+            .rename_text_edits(new_name)
+            .iter()
+            .map(|edit| edit.range.start.line)
+            .collect();
+        for expected in expected_lines {
+            assert!(
+                lines.contains(expected),
+                "Expected a rename edit on line {} at ({}, {}), got lines {:?}",
+                expected,
+                self.position.line,
+                self.position.character,
+                lines
+            );
+        }
+        self
+    }
+
+    /// Assert NO rename edit at the current position starts on `line`
+    /// (zero-based). ADR-009 D1 (S6, rejection rows 5/6): decoy text
+    /// occurrences (comments, string literals) of a generated symbol's name
+    /// are never edited — rename is not a text scan for generated symbols.
+    pub fn expect_rename_edits_exclude_line(self, new_name: &str, line: u32) -> Self {
+        let lines: Vec<u32> = self
+            .rename_text_edits(new_name)
+            .iter()
+            .map(|edit| edit.range.start.line)
+            .collect();
+        assert!(
+            !lines.contains(&line),
+            "Did not expect a rename edit on line {} at ({}, {}), got lines {:?}",
+            line,
+            self.position.line,
+            self.position.character,
+            lines
+        );
+        self
+    }
+
+    /// Assert rename at the current position produces NO workspace edit.
+    /// ADR-009 D1 (S6, rejection row 4): a wholly generator-controlled
+    /// generated name is NEVER renamed by text edit.
+    pub fn expect_rename_none(self, new_name: &str) -> Self {
+        let uri = self.uri();
+        let result = shape_lsp::rename::rename(&self.text, &uri, self.position, new_name, None);
+        assert!(
+            result.is_none(),
+            "Expected rename to decline at ({}, {}), got edits: {:?}",
+            self.position.line,
+            self.position.character,
+            result
+        );
+        self
+    }
+
+    /// Assert every rename edit at the current position lands OUTSIDE the
+    /// generated-declaration ranges reported by the compiler query surface.
+    ///
+    /// ADR-009 D1 (S6, rejection row 5): rename on an explicit source binder
+    /// edits only source-binder occurrences; ZERO edits land inside
+    /// generated ranges (the expansion recomputes).
+    pub fn expect_rename_edits_outside_generated_ranges(self, new_name: &str) -> Self {
+        let edits = self.rename_text_edits(new_name);
+        assert!(
+            !edits.is_empty(),
+            "Expected rename edits at ({}, {})",
+            self.position.line,
+            self.position.character
+        );
+        let program = shape_ast::parser::parse_program(&self.text).expect("program parses");
+        let generated = shape_lsp::generated_symbols::generated_decl_ranges(&program, &self.text);
+        assert!(
+            !generated.is_empty(),
+            "test precondition: the document must hold generated declarations"
+        );
+        for span in &generated {
+            let generated_start = Self::offset_position(&self.text, span.start);
+            let generated_end = Self::offset_position(&self.text, span.end);
+            for edit in &edits {
+                let edit_start = (edit.range.start.line, edit.range.start.character);
+                let edit_end = (edit.range.end.line, edit.range.end.character);
+                let overlaps = edit_start < generated_end && generated_start < edit_end;
+                assert!(
+                    !overlaps,
+                    "Rename edit {:?} lands inside generated range {:?}..{:?}",
+                    edit.range, generated_start, generated_end
+                );
+            }
+        }
+        self
+    }
+
+    /// Assert rename at the current position is answered with the
+    /// generator-controlled REPORT (never a text edit): the message carries
+    /// `message_contains` and the linked generator definition starts on
+    /// `generator_line` (zero-based).
+    ///
+    /// ADR-009 D1 (S6, rejection row 4 / Decision 68): when a generated name
+    /// is wholly generator-controlled, rename reports that fact and links
+    /// the generator definition.
+    pub fn expect_rename_generator_controlled(
+        self,
+        new_name: &str,
+        message_contains: &str,
+        generator_line: u32,
+    ) -> Self {
+        let uri = self.uri();
+        let outcome =
+            shape_lsp::rename::generated_rename(&self.text, &uri, self.position, new_name, None);
+        match outcome {
+            Some(shape_lsp::rename::GeneratedRename::GeneratorControlled(report)) => {
+                assert!(
+                    report.message.contains(message_contains),
+                    "Generator-controlled rename report must contain {:?}, got: {}",
+                    message_contains,
+                    report.message
+                );
+                assert_eq!(
+                    report.generator.range.start.line, generator_line,
+                    "Generator-controlled rename report must link the generator \
+                     definition on line {generator_line}, got {:?}",
+                    report.generator
+                );
+            }
+            other => panic!(
+                "Expected a generator-controlled rename report at ({}, {}), got {:?}",
+                self.position.line, self.position.character, other
+            ),
+        }
         self
     }
 

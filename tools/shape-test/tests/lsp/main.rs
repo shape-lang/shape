@@ -10,6 +10,7 @@ mod folding;
 mod foreign_lsp;
 mod generated_navigation;
 mod generated_provenance;
+mod generated_rename;
 mod hover;
 mod inlay_storage_class;
 mod navigation;

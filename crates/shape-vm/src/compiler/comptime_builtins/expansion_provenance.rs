@@ -1276,6 +1276,146 @@ mod tests {
         assert_eq!(anchored.span(), Span::new(0, 12));
     }
 
+    // ---- S6 close-out: repo-wide grep sentinels (rows 9/10), the
+    // ---- `executor/tests/no_dynamic.rs` pattern. Documentation trees
+    // ---- (docs/, CLAUDE.md) intentionally discuss these by name and are
+    // ---- NOT scanned; source comments may NAME the D2 scope exclusion but
+    // ---- code may not implement it. Needles are assembled from fragments
+    // ---- so this file never contains them contiguously.
+
+    /// Walk the repo's Rust source scope (crates/, bin/, tools/,
+    /// extensions/) collecting each `.rs` file's contents.
+    fn source_rs_contents() -> Vec<(std::path::PathBuf, String)> {
+        // CARGO_MANIFEST_DIR = <repo>/crates/shape-vm — repo root is two up.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repo root (two levels above crates/shape-vm)");
+        let mut out = Vec::new();
+        for dir in ["crates", "bin", "tools", "extensions"] {
+            collect_rs(&repo_root.join(dir), &mut out);
+        }
+        assert!(
+            !out.is_empty(),
+            "sentinel scope must resolve source files from {repo_root:?}"
+        );
+        out
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(src) = std::fs::read_to_string(&path) {
+                    out.push((path, src));
+                }
+            }
+        }
+    }
+
+    // Rejection row 9 (D2 scope guard): the declaration-discovery fixed
+    // point, `shape-expansion` virtual-document URIs, and a memoized
+    // expansion query graph are ticket D2. The URI scheme may be NAMED on
+    // comment lines (scope notes) but must not appear in code; the
+    // fixed-point / query-graph vocabulary must not appear as identifiers
+    // in the comptime-compiler or LSP surfaces at all.
+    #[test]
+    fn row9_d2_scope_vocabulary_has_not_entered_the_source_tree() {
+        let uri_needle = ["shape-expa", "nsion://"].concat();
+        let mut code_hits = Vec::new();
+        for (path, src) in source_rs_contents() {
+            for (line_index, line) in src.lines().enumerate() {
+                if line.contains(&uri_needle) && !line.trim_start().starts_with("//") {
+                    code_hits.push(format!("{}:{}", path.display(), line_index + 1));
+                }
+            }
+        }
+        assert!(
+            code_hits.is_empty(),
+            "the D2 virtual-document URI scheme appears in CODE (ticket D2 \
+             scope violation): {code_hits:#?}"
+        );
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repo root");
+        let mut scoped = Vec::new();
+        collect_rs(&repo_root.join("crates/shape-vm/src/compiler"), &mut scoped);
+        collect_rs(&repo_root.join("tools/shape-lsp/src"), &mut scoped);
+        let identifier_needles = [
+            ["fixed", "_point"].concat(),
+            ["Fixed", "Point"].concat(),
+            ["query", "_graph"].concat(),
+            ["Query", "Graph"].concat(),
+            ["expansion", "_query"].concat(),
+            ["Expansion", "Query"].concat(),
+        ];
+        let mut identifier_hits = Vec::new();
+        for (path, src) in scoped {
+            for needle in &identifier_needles {
+                if src.contains(needle) {
+                    identifier_hits.push(format!("{}: {needle}", path.display()));
+                }
+            }
+        }
+        assert!(
+            identifier_hits.is_empty(),
+            "D2 fixed-point / query-graph vocabulary entered the comptime \
+             compiler or LSP surface: {identifier_hits:#?}"
+        );
+    }
+
+    // Rejection row 10 (forbidden carrier shapes): no provenance/expansion
+    // bridge-shim-adapter renames (CLAUDE.md refuse-on-sight family), no
+    // optional expansion identity ("stamp provenance later"), and no public
+    // name-string SymbolId constructor anywhere in the identity module's
+    // crate scope.
+    #[test]
+    fn row10_forbidden_provenance_carrier_shapes_are_absent() {
+        let stems = ["provenance", "expansion", "generated_symbol", "symbol_id"];
+        let suffixes = ["bridge", "shim", "adapter", "probe", "translator"];
+        let optional_identity = ["Opt", "ion<", "Expansion", "Identity"].concat();
+        let name_ctor = ["pub fn from_", "name("].concat();
+        let mut hits = Vec::new();
+        for (path, src) in source_rs_contents() {
+            let lowered = src.to_lowercase();
+            for stem in &stems {
+                for suffix in &suffixes {
+                    let snake = [stem, "_", suffix].concat();
+                    let fused = [stem.replace('_', "").as_str(), suffix].concat();
+                    if lowered.contains(&snake) || lowered.contains(&fused) {
+                        hits.push(format!("{}: {stem}×{suffix}", path.display()));
+                    }
+                }
+            }
+            if src.contains(&optional_identity) {
+                hits.push(format!("{}: optional expansion identity", path.display()));
+            }
+            if path.to_string_lossy().contains("comptime_builtins") && src.contains(&name_ctor) {
+                hits.push(format!(
+                    "{}: public name-string constructor in the identity scope",
+                    path.display()
+                ));
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "forbidden provenance-carrier shape found (CLAUDE.md \
+             refuse-on-sight family / row 10): {hits:#?}"
+        );
+    }
+
     // (d) Row-9 structural pattern, A1 precedent: the three identity types
     // are total by construction — no zero-value impl or derive, no
     // empty/partial constructor, no optional fields. The compile-time part

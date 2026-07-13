@@ -123,6 +123,18 @@ Accepted: every generated declaration and internal node is an ordinary checked
 compiler symbol with stable expansion provenance. Generated text and dummy
 spans are not semantic representations.
 
+Status (2026-07-13, ADR009-D1): CURRENT on the existing extend/materialization
+path — compiler-issued `SymbolId` / `ExpansionIdentity` / `GeneratedOrigin`
+(`crates/shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs`),
+real source anchors (no `Span::DUMMY`), identity-keyed dedup with named
+conflict/duplicate rejections, and LSP behaviors 1-3 and 5 below plus
+identity-controlled rename (source binders rename by recomputation; wholly
+generator-controlled names report that fact and link the generator
+definition), all served from `BytecodeCompiler::generated_symbol_query()`.
+Behavior 4 (`shape-expansion://` virtual documents) and the Decision 67
+declaration-discovery fixed point remain TARGET (ticket D2). Evidence:
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md` (D1 addendum).
+
 Each generated node carries the equivalent of:
 
 ```shape

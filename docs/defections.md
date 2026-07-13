@@ -7357,3 +7357,73 @@ persistent diagnostic-masking layer (4).
 **Bounded scope decision (pre-existing gap, not taken as part of this fix):** resolving a module's OWN nominal type by its BARE name from inside that module's comptime block (`type_ref(Point)` where the dep module defines `Point`) still yields "unknown semantic type identity": dependency structs freeze under their qualified names (`calc::numbers::Point`) while the body's identifier stays bare, and the deleted per-site builder on main read the same qualified tables — identical failure pre-branch. This is comptime name-resolution territory (B-ticket query-API extension), independent of barrier ordering; pinned in the test comment of `imported_module_comptime_reflection_consumes_a_populated_freeze`.
 
 **Cost saved:** imported-module comptime works again before the A1 merge instead of surfacing as a post-merge multi-file breakage the 12-gate set could not see (no gate exercised comptime inside an imported module).
+## 2026-07-13 — ADR009-D1 S6 close-out: rename semantics (recomputation vs generator-controlled) + D1 scope/duality dispositions
+
+**Pre-pass/pass-2 duality resolution (risk 7):** the speculative pre-pass
+(`materialize_computed_comptime_extends`) and the authoritative pass-2 compile
+are the SAME `ComptimeStage` producing the SAME `ExpansionIdentity` (both
+`ExpansionSite`s are built from identical AST inputs), reconciled by an
+idempotent `Fresh`/`Reissued` reservation in `GeneratedSymbolTable`.
+Considered and rejected: (a) distinct `PrePass`/`PassTwo` stage variants —
+would double every identity, split provenance across two records, and make
+"application runs once per identity" (Dec 67) unprovable; (b) a pre-pass-only
+side table merged later — a parallel carrier across the same producer
+boundary.
+
+**S3 scaffolding-span scope line (carried to close):** D1 re-anchors
+DECL-LEVEL spans (name span, synthesized type-param spans) of every generated
+declaration to its application anchor; body node spans keep handler-emitted
+(snippet-relative) offsets until D2 virtual documents give generated bodies
+addressable text — `GeneratedOrigin.node_path` covers body attribution
+meanwhile. `function_item_from_fragment`'s `Span::default()` sites are
+documented mini-VM scaffolding that never survives onto a registered
+declaration (no application anchor exists inside comptime execution).
+Pretending to fix every dummy span in unrelated annotation scaffolding was
+rejected as undeclared scope; leaving decl-level spans dummy was rejected as
+the Dec-68 required rejection.
+
+**augment_program_with_generated_extends tension (E3 deletion target):** the
+static AST collector still feeds the LSP's type-inference view and the
+analysis-program prepend. D1 attaches identity WITHOUT deepening it: identity
+is issued at the directive-consumption points, the collector gained no
+provenance API, and the S5 LSP navigation path answers from the compiler
+table instead of the collector. Extending the collector to carry SymbolId was
+considered and rejected — investment in an E3 deletion target.
+
+**Rename classification (S6):** a generated name is an explicit SOURCE BINDER
+when its token occurs inside the expansion's compiler-resolved generator or
+application anchors (a span refinement of provenance anchors, not document
+text discovery); otherwise it is wholly generator-controlled. Considered and
+rejected: (a) new `#binder` syntax from the Dec 68 example — Decision 69 name
+policies are NOT D1 (no new binder syntax; ticket rule); (b) linking the
+generator via `annotation_discovery.rs` name lookup — the provenance
+`generator` anchor from the query surface is the Dec-66-conformant source
+(annotation_discovery stays consumed for ordinary annotation navigation
+only); (c) letting the existing text-scan fallback (`find_symbol_occurrences`)
+serve source-binder renames — edits decoy comments/strings (row 6); the
+source-binder path now edits binder tokens + AST call sites only, with a
+retain-guard excluding generated ranges at the enforcement point; (d) partial
+text edits when SEVERAL generated symbols share the simple name and only some
+are source-bound — coarse-but-sound: any non-source-bound match makes the
+answer generator-controlled (a partial edit would desynchronize the rest).
+
+**Server report shape:** the generator-controlled report is surfaced as the
+rename request's error response (`jsonrpc invalid_params` carrying the named
+const + generator location in the message) after `prepare_rename` already
+declined; inventing a non-LSP side channel or encoding the report as an empty
+WorkspaceEdit (silent no-op) were rejected — the empty edit masks the fact,
+the error message states it.
+
+**Carried S2/S4 notes (recorded at their slices, closed here):** row-3
+content fingerprint uses a deterministic Debug-format structural AST encoding
+(a dedicated canonical AST fold can replace it if D2 needs cross-process
+stability); two applications generating one symbol name is now a compile
+error (was silent first-wins; zero tests relied on it); `checked_decl` and
+`application` anchors coincide until D2 virtual documents (documented field
+split in `GeneratedSymbolProvenance`); imported-annotation generator anchors
+share the compiling unit's file id (pre-existing file-less-Span model limit).
+
+**Cost saved:** rename over generated symbols never routes through text
+scanning (the decoy-edit defect died with this slice), D2's fixed
+point/virtual documents keep a clean seam (grep sentinels pin the exclusion),
+and the identity table remains the single provenance authority end to end.

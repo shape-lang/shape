@@ -246,6 +246,147 @@ pub fn generated_references(
     Some(locations)
 }
 
+/// ADR-009 D1 (S6, Decision 68): rename classification of a generated
+/// symbol, derived from its `ExpansionIdentity`/`GeneratedOrigin` provenance
+/// (generator + application anchors from the compiler query surface).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedRenameClassification {
+    /// The name is an EXPLICIT SOURCE BINDER: the expansion takes it from
+    /// source (the name token appears inside the generator definition or
+    /// the application anchor). Rename edits ONLY these source occurrences
+    /// — the expansion recomputes; generated ranges receive zero edits.
+    SourceBinder {
+        /// Name-token occurrences inside the compiler-provided generator /
+        /// application anchors (a span refinement of compiler-resolved
+        /// anchors, not symbol discovery by text scan).
+        binder_spans: Vec<Span>,
+        /// AST-resolved call-site name tokens of the generated symbol.
+        call_site_spans: Vec<Span>,
+        /// Checked-decl anchors — rename edits must never land here.
+        generated_ranges: Vec<Span>,
+    },
+    /// The name is WHOLLY GENERATOR-CONTROLLED: it is computed by the
+    /// generator (its token appears in no source anchor of the expansion).
+    /// Never a text edit; the caller reports the fact and links the
+    /// generator definition.
+    GeneratorControlled {
+        decl_names: Vec<String>,
+        generator_span: Span,
+    },
+}
+
+/// Every identifier-bounded occurrence of `name` INSIDE a compiler-provided
+/// anchor span — the source-binder detector. This refines a span the
+/// provenance query surface already resolved; it never scans the document.
+fn binder_token_spans_in(text: &str, anchor: Span, name: &str) -> Vec<Span> {
+    let end = anchor.end.min(text.len());
+    let Some(slice) = text.get(anchor.start..end) else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(found) = slice[from..].find(name) {
+        let at = from + found;
+        let before_is_boundary = at == 0
+            || slice[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
+        let after = &slice[at + name.len()..];
+        let after_is_boundary = after
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
+        if before_is_boundary && after_is_boundary {
+            spans.push(Span::new(anchor.start + at, anchor.start + at + name.len()));
+        }
+        from = at + name.len();
+    }
+    spans
+}
+
+/// Classify a rename request over a generated symbol (Decision 68
+/// identity-controlled rename). `None` = the position does not target a
+/// generated symbol — ordinary rename applies. The classification is
+/// derived from the compiler-issued provenance: a name whose token appears
+/// inside the expansion's generator or application anchor is an explicit
+/// source binder (renaming it there recomputes the expansion); a name whose
+/// token appears in NO source anchor is generator-controlled. When several
+/// generated symbols answer to one name, every one must be source-bound for
+/// a text rename — otherwise the coarse-but-sound answer is
+/// generator-controlled (a partial text edit would desynchronize the rest).
+pub fn classify_generated_rename(
+    program: &Program,
+    text: &str,
+    word: &str,
+    offset: usize,
+) -> Option<GeneratedRenameClassification> {
+    if !program_may_generate_symbols(program) {
+        return None;
+    }
+    let sites = call_site_name_spans(program, text, word);
+    if !cursor_on_call_site(&sites, offset) {
+        return None;
+    }
+    let compiler = compile_for_generated_symbol_queries(program, text);
+    let matches = compiler.generated_symbol_query().symbols_named(word);
+    if matches.is_empty() {
+        return None;
+    }
+    let mut binder_spans: Vec<Span> = Vec::new();
+    let mut every_match_is_source_bound = true;
+    for provenance in &matches {
+        let mut spans = binder_token_spans_in(text, provenance.generator.span(), word);
+        spans.extend(binder_token_spans_in(
+            text,
+            provenance.application.span(),
+            word,
+        ));
+        if spans.is_empty() {
+            every_match_is_source_bound = false;
+        }
+        binder_spans.extend(spans);
+    }
+    let generated_ranges: Vec<Span> = matches
+        .iter()
+        .map(|provenance| provenance.checked_decl.span())
+        .collect();
+    if every_match_is_source_bound {
+        binder_spans.sort_by_key(|span| span.start);
+        binder_spans.dedup();
+        Some(GeneratedRenameClassification::SourceBinder {
+            binder_spans,
+            call_site_spans: sites,
+            generated_ranges,
+        })
+    } else {
+        Some(GeneratedRenameClassification::GeneratorControlled {
+            decl_names: matches
+                .iter()
+                .map(|provenance| provenance.decl_name.to_string())
+                .collect(),
+            generator_span: matches[0].generator.span(),
+        })
+    }
+}
+
+/// The source ranges where generated declarations anchor (checked-decl
+/// anchors from the compiler query surface). Rejection row 5: rename edits
+/// must NEVER land inside these ranges — the harness inspects rename edit
+/// spans against this list. Empty when the document generates nothing.
+pub fn generated_decl_ranges(program: &Program, text: &str) -> Vec<Span> {
+    if !program_may_generate_symbols(program) {
+        return Vec::new();
+    }
+    let compiler = compile_for_generated_symbol_queries(program, text);
+    compiler
+        .generated_symbol_query()
+        .generated_symbols()
+        .iter()
+        .map(|provenance| provenance.checked_decl.span())
+        .collect()
+}
+
 fn generated_symbol_kind(decl_name: &str) -> SymbolKind {
     if decl_name.contains('.') {
         SymbolKind::METHOD
@@ -340,6 +481,97 @@ let b = p.answer()
                 "the refined token span covers exactly the method name"
             );
         }
+    }
+
+    /// The generated method name here is COMPUTED (`an{suffix}` inside an
+    /// f-string snippet): its token never appears in the generator.
+    const GENERATOR_CONTROLLED_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let suffix = "swer"
+    extend (f"extend {target.name} \{ method an{suffix}() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let x = p.answer()
+"#;
+
+    #[test]
+    fn source_written_generated_name_classifies_as_source_binder() {
+        let program = parse_program(GENERATING_PROGRAM).expect("parses");
+        let offset = GENERATING_PROGRAM.find("p.answer()").expect("call site") + 2;
+        let classification =
+            classify_generated_rename(&program, GENERATING_PROGRAM, "answer", offset)
+                .expect("generated symbol position classifies");
+        let GeneratedRenameClassification::SourceBinder {
+            binder_spans,
+            call_site_spans,
+            generated_ranges,
+        } = classification
+        else {
+            panic!("`answer` is written in the generator: must classify as source binder");
+        };
+        assert!(
+            !binder_spans.is_empty(),
+            "the binder token inside the generator must be found"
+        );
+        for span in &binder_spans {
+            assert_eq!(&GENERATING_PROGRAM[span.start..span.end], "answer");
+        }
+        assert_eq!(call_site_spans.len(), 2, "both call sites resolve");
+        assert!(
+            !generated_ranges.is_empty(),
+            "the checked-decl anchors are reported for the zero-edits guard"
+        );
+    }
+
+    #[test]
+    fn computed_generated_name_classifies_as_generator_controlled() {
+        let program = parse_program(GENERATOR_CONTROLLED_PROGRAM).expect("parses");
+        let offset = GENERATOR_CONTROLLED_PROGRAM
+            .find("p.answer()")
+            .expect("call site")
+            + 2;
+        let classification =
+            classify_generated_rename(&program, GENERATOR_CONTROLLED_PROGRAM, "answer", offset)
+                .expect("generated symbol position classifies");
+        let GeneratedRenameClassification::GeneratorControlled {
+            decl_names,
+            generator_span,
+        } = classification
+        else {
+            panic!("a computed name must classify as generator-controlled");
+        };
+        assert_eq!(decl_names, vec!["Point.answer".to_string()]);
+        assert!(
+            GENERATOR_CONTROLLED_PROGRAM[generator_span.start..generator_span.end]
+                .contains("comptime post"),
+            "the generator span covers the handler definition"
+        );
+    }
+
+    #[test]
+    fn ordinary_symbols_do_not_classify_for_generated_rename() {
+        // Ordinary call site in a generating document: not a generated
+        // symbol — falls through to ordinary rename.
+        let source = format!("{GENERATING_PROGRAM}fn helper() -> int {{ 7 }}\nlet h = helper()\n");
+        let program = parse_program(&source).expect("parses");
+        let offset = source.rfind("helper()").expect("call site") + 2;
+        assert!(
+            classify_generated_rename(&program, &source, "helper", offset).is_none(),
+            "an ordinary symbol must not classify as a generated rename"
+        );
+        // Cursor NOT on a call site of the generated symbol: ordinary rename.
+        let decl_offset = GENERATING_PROGRAM.find("type Point").expect("type decl");
+        assert!(
+            classify_generated_rename(&program, &source, "Point", decl_offset).is_none(),
+            "the extend target's declaration position is ordinary rename territory"
+        );
     }
 
     #[test]

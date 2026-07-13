@@ -198,8 +198,10 @@ fn generic_body_undeclared_param_has_unknown_identity_diagnostic() {
 fn generic_body_runtime_type_ref_use_has_comptime_only_diagnostic() {
     // Runtime use inside a generic body is rejected by the AST-walk validator
     // even though the template body never compiles (no call site needed).
-    ShapeTest::new("fn describe<T>(value: T) -> string {\n  let label = type_ref(T)\n  \"ok\"\n}\n")
-        .expect_semantic_diagnostic_contains("comptime-only builtin");
+    ShapeTest::new(
+        "fn describe<T>(value: T) -> string {\n  let label = type_ref(T)\n  \"ok\"\n}\n",
+    )
+    .expect_semantic_diagnostic_contains("comptime-only builtin");
 }
 
 #[test]
