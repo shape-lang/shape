@@ -281,13 +281,16 @@ built (structural grep sentinels pin the exclusion).
 
 ### D1 final verification counts (2026-07-13, all 13 gates green)
 
-Strictly additive vs base `adr009/base@fbff1b5d` (A1 close baselines in
+Counts at branch head `118e278b` (S6 close + review round 1 — the round-1
+fix added 5 generated-symbol classification units and 4 collision
+integration tests over the S6-close numbers). Strictly additive vs base
+`adr009/base@fbff1b5d` (A1 close baselines in
 parentheses): shape-vm `compiler::comptime_builtins` 38 (19);
 `compiler::functions_annotations` 17 (3-test s3 gate at A1);
 `compiler::comptime` 101 passed / 4 pre-existing ignores (82+4);
 `compiler::monomorphization` 175; `no_dynamic` 1; shape-runtime
-`comptime_reflection` 6 (6); shape-lsp `--lib` 783 (incl. new rename +
-generated-symbol classification units); ShapeTest `lsp` 425 (399);
+`comptime_reflection` 6 (6); shape-lsp `--lib` 788 (incl. new rename +
+generated-symbol classification units); ShapeTest `lsp` 431 (399);
 `comptime` 122 (109); `annotations_comptime` 52 with two threads (48);
 `extend_blocks` 17. `cargo check -p shape-ast -p shape-vm -p shape-runtime
 -p shape-lsp -p shape-test --all-targets` clean;
