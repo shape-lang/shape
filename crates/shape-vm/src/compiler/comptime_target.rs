@@ -492,7 +492,12 @@ impl ComptimeTarget {
 ///
 /// Annotation args are typically literals (string, number, bool). For anything
 /// more complex we fall back to the Debug representation.
-fn expr_to_string_lossy(expr: &Expr) -> String {
+///
+/// ADR-009 D1: this is also the canonical argument-descriptor rendering for
+/// `ExpansionIdentity.arguments_hash` — it is exactly the stringification the
+/// comptime handler itself consumes for field-annotation args, so identity
+/// hashes what the expansion saw, never re-rendered source text.
+pub(crate) fn expr_to_string_lossy(expr: &Expr) -> String {
     match expr {
         // For string literals, return the raw string (no quotes)
         Expr::Literal(Literal::String(s), _) => s.clone(),

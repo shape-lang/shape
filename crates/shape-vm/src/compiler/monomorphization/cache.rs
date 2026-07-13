@@ -39,6 +39,56 @@ use crate::compiler::monomorphization::type_resolution::{
 /// `docs/v2-closure-specialization.md` for the rationale.
 pub const DEFAULT_CLOSURE_SPECIALIZATION_BUDGET: u32 = 64;
 
+/// ADR-009 A3 (S2) — typed classification of specialization failures.
+///
+/// [`BytecodeCompiler::ensure_monomorphic_function`] /
+/// [`BytecodeCompiler::ensure_monomorphic_function_with_consts`] can fail for
+/// two very different reasons, and callers must treat them differently:
+///
+/// - [`SpecializationFailure::Soft`] — the specialization MACHINERY could not
+///   produce a specialization: cycle detected, missing `FunctionDef` AST,
+///   declared-param/supplied-arg arity mismatch, const-default resolution
+///   failure, registration / index bookkeeping. Callers may fall back to the
+///   generic-template path; the call site then surfaces its own diagnostic
+///   ("cannot infer type argument(s) ...") when the callee is generic.
+/// - [`SpecializationFailure::Hard`] — the specialized BODY itself failed to
+///   compile: a real user-code compile error (e.g. a comptime semantic-freeze
+///   failure such as "type_ref received an unknown semantic type identity")
+///   surfaced while compiling the substituted body. Swallowing it and
+///   re-reporting a call-site inference failure masks the real diagnostic.
+///   Callers MUST propagate it (surface-and-stop).
+#[derive(Debug)]
+pub enum SpecializationFailure {
+    /// Resolution-stage failure — callers may fall back to the generic path.
+    Soft(ShapeError),
+    /// Specialized-body compile error — callers must propagate.
+    Hard(ShapeError),
+}
+
+impl SpecializationFailure {
+    /// Unwrap the underlying compile error regardless of classification.
+    pub fn into_error(self) -> ShapeError {
+        match self {
+            SpecializationFailure::Soft(e) | SpecializationFailure::Hard(e) => e,
+        }
+    }
+}
+
+/// Every bare `ShapeError` raised inside the specialization machinery via `?`
+/// is a resolution-stage failure — the body-compile site opts into `Hard`
+/// explicitly with `map_err(SpecializationFailure::Hard)`.
+impl From<ShapeError> for SpecializationFailure {
+    fn from(e: ShapeError) -> Self {
+        SpecializationFailure::Soft(e)
+    }
+}
+
+impl From<SpecializationFailure> for ShapeError {
+    fn from(f: SpecializationFailure) -> Self {
+        f.into_error()
+    }
+}
+
 /// Cache mapping a monomorphization key to the compiled function index.
 ///
 /// The cache is owned by [`crate::compiler::BytecodeCompiler`] and lives for
@@ -237,17 +287,18 @@ impl BytecodeCompiler {
     ///
     /// - `Err(...)` if `base_fn_name` is not a known function in the current
     ///   compiler state.
-    /// - `Err(...)` if the callee declares no type parameters but type
+    /// - `Err(Soft(...))` if the callee declares no type parameters but type
     ///   arguments were supplied.
-    /// - `Err(...)` if `type_args.len()` does not match the number of declared
-    ///   type parameters.
-    /// - Any compile error returned by `compile_function` for the
-    ///   substituted body.
+    /// - `Err(Soft(...))` if `type_args.len()` does not match the number of
+    ///   declared type parameters.
+    /// - `Err(Hard(...))` for any compile error returned by
+    ///   `compile_function` for the substituted body — a real user-code
+    ///   error that callers must propagate (ADR-009 A3 S2, surface-and-stop).
     pub fn ensure_monomorphic_function(
         &mut self,
         base_fn_name: &str,
         type_args: &[ConcreteType],
-    ) -> Result<u16> {
+    ) -> std::result::Result<u16, SpecializationFailure> {
         // B.3 — if the callee declares any const generic parameters, auto-bind
         // them from their declared default expressions (literals only today —
         // no call-site `::<4>` turbofish syntax exists yet) and route through
@@ -292,13 +343,13 @@ impl BytecodeCompiler {
         // `(type, method)` pair — would recurse forever. Refuse to descend a
         // second time and let the caller fall back to the generic path.
         if self.monomorphization_in_progress.contains(&mono_key) {
-            return Err(ShapeError::SemanticError {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
                     mono_key
                 ),
                 location: None,
-            });
+            }));
         }
 
         // Look up the original FunctionDef AST. The bytecode compiler always
@@ -335,17 +386,17 @@ impl BytecodeCompiler {
             .unwrap_or_default();
 
         if declared_type_params.is_empty() {
-            return Err(ShapeError::SemanticError {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function: '{}' declares no type parameters but {} type arguments were supplied",
                     base_fn_name,
                     type_args.len()
                 ),
                 location: None,
-            });
+            }));
         }
         if declared_type_params.len() != type_args.len() {
-            return Err(ShapeError::SemanticError {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function: '{}' declares {} type parameters but {} type arguments were supplied",
                     base_fn_name,
@@ -353,7 +404,7 @@ impl BytecodeCompiler {
                     type_args.len()
                 ),
                 location: None,
-            });
+            }));
         }
 
         let subs: HashMap<String, ConcreteType> = declared_type_params
@@ -426,6 +477,16 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+        // ADR-009 A3 — expose the BASE generic function's declared type-param
+        // names to comptime reflection snapshots built while the specialized
+        // body compiles (the specialized def carries `type_params = None`).
+        // Saved/restored unconditionally below so the Err path restores too;
+        // nested monomorphizations stack correctly through the same
+        // save/restore discipline.
+        let saved_type_param_overlay = std::mem::replace(
+            &mut self.specialization_type_param_overlay,
+            Some((base_fn_name.to_string(), declared_type_params.clone())),
+        );
         // Compile the specialized body. On failure, surface the error — the
         // caller is responsible for falling through to the generic path on
         // any failure mode it wants to tolerate.
@@ -433,8 +494,13 @@ impl BytecodeCompiler {
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
+        self.specialization_type_param_overlay = saved_type_param_overlay;
         self.monomorphization_in_progress.remove(&mono_key);
-        result?;
+        // ADR-009 A3 (S2) — a specialized-body compile error is a HARD
+        // failure: it is the user's real diagnostic (e.g. a comptime
+        // semantic-freeze rejection) and must not be soft-swallowed into a
+        // generic-template fallback at the call site.
+        result.map_err(SpecializationFailure::Hard)?;
 
         Ok(specialization_idx)
     }
@@ -472,16 +538,17 @@ impl BytecodeCompiler {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::ensure_monomorphic_function`], plus:
+    /// Same as [`Self::ensure_monomorphic_function`] (soft/hard
+    /// classification included), plus:
     ///
-    /// - `Err(...)` if the type args don't satisfy the same arity / presence
-    ///   constraints as the type-only path.
+    /// - `Err(Soft(...))` if the type args don't satisfy the same arity /
+    ///   presence constraints as the type-only path.
     pub fn ensure_monomorphic_function_with_consts(
         &mut self,
         base_fn_name: &str,
         type_args: &[ConcreteType],
         const_args: &[ComptimeConstValue],
-    ) -> Result<u16> {
+    ) -> std::result::Result<u16, SpecializationFailure> {
         // Fast path: no const args at all → reuse the existing entry point so
         // type-only callers stay byte-for-byte identical.
         if const_args.is_empty() {
@@ -496,13 +563,13 @@ impl BytecodeCompiler {
 
         // BUG3 — cycle detector (see `ensure_monomorphic_function`).
         if self.monomorphization_in_progress.contains(&mono_key) {
-            return Err(ShapeError::SemanticError {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function_with_consts: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
                     mono_key
                 ),
                 location: None,
-            });
+            }));
         }
 
         let original_def = self
@@ -529,7 +596,7 @@ impl BytecodeCompiler {
             .unwrap_or_default();
 
         if type_param_names.len() != type_args.len() {
-            return Err(ShapeError::SemanticError {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function_with_consts: '{}' declares {} type parameters but {} type arguments were supplied",
                     base_fn_name,
@@ -537,11 +604,11 @@ impl BytecodeCompiler {
                     type_args.len()
                 ),
                 location: None,
-            });
+            }));
         }
 
         if const_param_names.len() != const_args.len() {
-            return Err(ShapeError::SemanticError {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function_with_consts: '{}' declares {} const generic parameters but {} const arguments were supplied",
                     base_fn_name,
@@ -549,7 +616,7 @@ impl BytecodeCompiler {
                     const_args.len()
                 ),
                 location: None,
-            });
+            }));
         }
 
         let type_subs: HashMap<String, ConcreteType> = type_param_names
@@ -619,12 +686,22 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+        // ADR-009 A3 — see `ensure_monomorphic_function`: base-name-scoped
+        // declared type params for reflection snapshots (type-kind only;
+        // const-kind params are value bindings, not Parameter identities).
+        let saved_type_param_overlay = std::mem::replace(
+            &mut self.specialization_type_param_overlay,
+            Some((base_fn_name.to_string(), type_param_names.clone())),
+        );
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
+        self.specialization_type_param_overlay = saved_type_param_overlay;
         self.monomorphization_in_progress.remove(&mono_key);
-        result?;
+        // ADR-009 A3 (S2) — see `ensure_monomorphic_function`: body compile
+        // errors are HARD and must propagate.
+        result.map_err(SpecializationFailure::Hard)?;
 
         Ok(specialization_idx)
     }
@@ -838,15 +915,48 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+        // ADR-009 A3 — see `ensure_monomorphic_function`: base-name-scoped
+        // declared type params for reflection snapshots. Unlike the local
+        // `declared_type_params` above (which is positional against
+        // `type_args` and unfiltered), the overlay carries type-kind names
+        // only — const-kind params are value bindings, not Parameter
+        // identities.
+        let overlay_type_params: Vec<String> = original_def
+            .type_params
+            .as_ref()
+            .map(|tps| {
+                tps.iter()
+                    .filter(|tp| !tp.is_const())
+                    .map(|tp| tp.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let saved_type_param_overlay = std::mem::replace(
+            &mut self.specialization_type_param_overlay,
+            Some((base_fn_name.to_string(), overlay_type_params)),
+        );
         let compile_result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
+        self.specialization_type_param_overlay = saved_type_param_overlay;
         self.monomorphization_in_progress.remove(&mono_key);
         if compile_result.is_err() {
             // Compilation failed — we already inserted the cache entry; the
             // caller will fall back to the generic path anyway. Returning
             // Ok(None) keeps the error surface clean.
+            //
+            // ADR-009 A3 (S2) — this stays a SOFT failure by design, unlike
+            // the type-only / const-aware entry points above. The closure-
+            // aware path INLINES closure bodies into the specialized
+            // template, so a compile error here can be an artifact of the
+            // inlining transformation rather than a genuine user-body error.
+            // The caller (`try_monomorphize_method_call`) falls through to
+            // the type-only path, which recompiles the SAME user body
+            // without inlining — any genuine user-body error (e.g. a
+            // comptime semantic-freeze rejection) re-fires there and is
+            // classified `SpecializationFailure::Hard`, so surface-and-stop
+            // still holds end-to-end.
             return Ok(None);
         }
 
@@ -1509,10 +1619,64 @@ mod tests {
     fn b5_register_and_monomorphize(
         compiler: &mut BytecodeCompiler,
         def: FunctionDef,
-    ) -> Result<u16> {
+    ) -> std::result::Result<u16, SpecializationFailure> {
         let fn_name = def.name.clone();
         compiler.register_function(&def)?;
         compiler.ensure_monomorphic_function(&fn_name, &[])
+    }
+
+    // =====================================================================
+    // ADR-009 A3 (S2) — soft/hard classification of specialization failures.
+    // =====================================================================
+
+    /// A compile error inside the SPECIALIZED BODY is the user's real
+    /// diagnostic and must be classified `SpecializationFailure::Hard` so
+    /// call sites propagate it instead of soft-falling back to the generic
+    /// template (which would mask it behind "cannot infer type
+    /// argument(s)").
+    #[test]
+    fn specialized_body_compile_error_is_classified_hard() {
+        let src = r#"
+            fn broken<T>(x: T) -> int {
+                return no_such_fn(x)
+            }
+        "#;
+        let def = b5_function_def_from_source(src, "broken");
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(&def)
+            .expect("registration should succeed");
+        let result = compiler.ensure_monomorphic_function("broken", &[ConcreteType::I64]);
+        match result {
+            Err(SpecializationFailure::Hard(e)) => {
+                let msg = format!("{:?}", e);
+                assert!(
+                    msg.contains("no_such_fn"),
+                    "hard failure should carry the body's own diagnostic, got: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "expected Err(SpecializationFailure::Hard(_)) for a specialized-body \
+                 compile error, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Resolution-stage failures (here: no FunctionDef AST recorded) are
+    /// `SpecializationFailure::Soft` — call sites may fall back to the
+    /// generic-template path and surface their own diagnostic.
+    #[test]
+    fn resolution_stage_failure_is_classified_soft() {
+        let mut compiler = BytecodeCompiler::new();
+        let result =
+            compiler.ensure_monomorphic_function("definitely_not_a_function", &[ConcreteType::I64]);
+        assert!(
+            matches!(result, Err(SpecializationFailure::Soft(_))),
+            "missing FunctionDef must be a SOFT failure, got: {:?}",
+            result
+        );
     }
 
     /// Count how many `Identifier("<name>", ...)` nodes survive anywhere in

@@ -21,6 +21,21 @@ struct NativeFieldLayoutSpec {
     align: u64,
 }
 
+/// ADR-009 (ticket B2, slice S1): sub-pass selector for
+/// `predeclare_item_semantic_freeze_inputs`. The freeze-input predeclare
+/// walk runs TWICE over the whole compilation unit — all type/trait
+/// definitions first, then all impls — because source order does not
+/// guarantee trait-before-impl and `register_trait_impl` validation needs
+/// the trait def present when the impl registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SemanticFreezePredeclarePass {
+    /// Sub-pass 1: type aliases, enum schemas, and trait definitions.
+    TypesAndTraits,
+    /// Sub-pass 2: trait impl registrations (requires sub-pass 1 complete
+    /// over the WHOLE unit — root and every graph dependency module).
+    Impls,
+}
+
 impl BytecodeCompiler {
     fn comptime_field_slot_from_literal(
         struct_name: &str,
@@ -1093,6 +1108,216 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-009 §4.1 (ticket A1, slice S2): pre-register the remaining named
+    /// freeze inputs — type aliases and enum schemas — before the semantic-
+    /// freeze barrier, mirroring `predeclare_item_struct_schemas` for
+    /// structs. Without this the barrier at `compile()` would freeze before
+    /// the pass-2 `Item::TypeAlias` / `Item::Enum` arms run, silently
+    /// omitting every alias and enum of the unit (a partial freeze —
+    /// exactly what Dec 52 forbids). Registration is idempotent with the
+    /// pass-2 arms: alias insertion re-writes the same mapping, and
+    /// `register_enum_scoped` content-interns to a stable schema id.
+    ///
+    /// ADR-009 (ticket B2, slice S1): the walk additionally pre-registers
+    /// barrier-time trait/impl truth into `type_inference.env` (the single
+    /// truth source S2's trait-identity / impl-evidence freeze inputs read).
+    /// It runs as TWO sub-passes over the whole unit — all trait definitions
+    /// first ([`SemanticFreezePredeclarePass::TypesAndTraits`]), then all
+    /// impls ([`SemanticFreezePredeclarePass::Impls`]) — because source
+    /// order does not guarantee trait-before-impl and `register_trait_impl`
+    /// validation needs the trait def present. Impl registration is
+    /// idempotent with the later pass-2 / analyzer registrations
+    /// (`registry.rs` `register_trait_impl_with_assoc_types_named`: an
+    /// exact-shape re-registration returns `Ok(())`; see the coherence check
+    /// around registry.rs:315-330).
+    ///
+    /// Ruled stance (B2 S1): barrier truth is FREEZE-TIME truth. Impls that
+    /// register only after the barrier — the comptime-generated families
+    /// (annotation/extend paths, e.g. the From/TryFrom-derived Into/TryInto
+    /// registrations below at `compile_from_impl`, and `comptime impl`
+    /// blocks deferred to the mini-VM per J-CT.2) — are NOT barrier truth
+    /// and therefore not impl evidence; slice S5 lands the named
+    /// surface-and-stop diagnostic for querying them (never a silent None).
+    pub(super) fn predeclare_item_semantic_freeze_inputs(
+        &mut self,
+        item: &Item,
+        pass: SemanticFreezePredeclarePass,
+    ) -> Result<()> {
+        match item {
+            Item::TypeAlias(type_alias, _)
+                if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+            {
+                self.predeclare_type_alias_freeze_input(type_alias);
+            }
+            Item::Enum(enum_def, _) if pass == SemanticFreezePredeclarePass::TypesAndTraits => {
+                self.register_enum(enum_def)?;
+            }
+            // ADR-009 A2 (slice S5) + B2 (slice S1): trait NAMES are a named
+            // semantic-freeze input (input 5) — `dyn` bounds / trait
+            // intersections in `type_ref` resolve against the frozen
+            // trait-name set — and B2's predeclare additionally records the
+            // full trait identity. Pass-1 registration
+            // (`register_item_functions`) runs AFTER the barrier, so both
+            // predeclare here. Name/identity only; full `TraitDef`
+            // registration stays in pass 1 (idempotent).
+            Item::Trait(trait_def, _) if pass == SemanticFreezePredeclarePass::TypesAndTraits => {
+                self.known_traits.insert(trait_def.name.clone());
+                self.predeclare_trait_def_freeze_input(trait_def);
+            }
+            Item::Impl(impl_block, _) if pass == SemanticFreezePredeclarePass::Impls => {
+                self.predeclare_trait_impl_freeze_input(impl_block);
+            }
+            Item::Export(export, _) => match &export.item {
+                ExportItem::TypeAlias(type_alias)
+                    if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+                {
+                    self.predeclare_type_alias_freeze_input(type_alias);
+                }
+                ExportItem::Enum(enum_def)
+                    if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+                {
+                    self.register_enum(enum_def)?;
+                }
+                ExportItem::Trait(trait_def)
+                    if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+                {
+                    self.known_traits.insert(trait_def.name.clone());
+                    self.predeclare_trait_def_freeze_input(trait_def);
+                }
+                _ => {}
+            },
+            Item::Module(module_def, _) => {
+                let module_path = self.current_module_path_for(module_def.name.as_str());
+                self.module_scope_stack.push(module_path.clone());
+                let result = (|| -> Result<()> {
+                    for inner in &module_def.items {
+                        if let Ok(qualified) = self.qualify_module_item(inner, &module_path) {
+                            self.predeclare_item_semantic_freeze_inputs(&qualified, pass)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                self.module_scope_stack.pop();
+                result?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// True when `item` can contribute named semantic-freeze inputs — i.e.
+    /// the item kinds `predeclare_item_struct_schemas` /
+    /// `predeclare_item_semantic_freeze_inputs` above act on. The graph entry
+    /// point's pre-Phase-1 barrier (ADR-009 §4.1,
+    /// `compile_with_graph_and_prelude`) uses this to skip qualifying
+    /// (deep-cloning) dependency-module items that cannot carry freeze
+    /// inputs. Keep in lockstep with the two predeclare matches above.
+    pub(super) fn item_can_carry_semantic_freeze_inputs(item: &Item) -> bool {
+        match item {
+            Item::StructType(..)
+            | Item::TypeAlias(..)
+            | Item::Enum(..)
+            | Item::Trait(..)
+            | Item::Impl(..)
+            | Item::Module(..) => true,
+            Item::Export(export, _) => matches!(
+                &export.item,
+                ExportItem::Struct(_)
+                    | ExportItem::TypeAlias(_)
+                    | ExportItem::Enum(_)
+                    | ExportItem::Trait(_)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Trait half of the B2 S1 freeze-input predeclare: the same
+    /// registrations the pass-2 `register_item_functions` `Item::Trait` arm
+    /// performs (single derivation, registered earlier; all inserts are
+    /// idempotent re-writes of the same value).
+    fn predeclare_trait_def_freeze_input(&mut self, trait_def: &shape_ast::ast::TraitDef) {
+        self.known_traits.insert(trait_def.name.clone());
+        self.trait_defs
+            .insert(trait_def.name.clone(), trait_def.clone());
+        self.type_inference.env.define_trait(trait_def);
+    }
+
+    /// Impl half of the B2 S1 freeze-input predeclare: mirrors the
+    /// analyzer's registration (`inference/items.rs::register_impl`) — trait
+    /// and target names as written (`type_name_str` semantics), method names
+    /// from the block, associated-type bindings included — so the analyzer's
+    /// own later registration is an exact-shape idempotent `Ok(())`
+    /// (registry.rs:315-330). Runs in the `Impls` sub-pass, after ALL trait
+    /// defs of the unit predeclared, so registry validation (required
+    /// methods / associated types / coherence) sees the trait def; a
+    /// validation failure here registers nothing — the analyzer re-attempts
+    /// post-barrier and reports the named `TypeError`, keeping the
+    /// diagnostic surface unchanged.
+    ///
+    /// `comptime impl` blocks are skipped: they are deferred to the comptime
+    /// mini-VM (J-CT.2) and are not barrier truth (B2 S1 ruled stance).
+    fn predeclare_trait_impl_freeze_input(&mut self, impl_block: &shape_ast::ast::ImplBlock) {
+        if impl_block.is_comptime {
+            return;
+        }
+        let trait_name = match &impl_block.trait_name {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        let type_name = match &impl_block.target_type {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        let method_names: Vec<String> = impl_block.methods.iter().map(|m| m.name.clone()).collect();
+        let associated_types: std::collections::HashMap<String, TypeAnnotation> = impl_block
+            .associated_type_bindings
+            .iter()
+            .map(|b| (b.name.clone(), b.concrete_type.clone()))
+            .collect();
+        let _ = self
+            .type_inference
+            .env
+            .register_trait_impl_with_assoc_types_named(
+                &trait_name,
+                &type_name,
+                impl_block.impl_name.as_deref(),
+                method_names,
+                associated_types,
+            );
+    }
+
+    /// Alias half of `predeclare_item_semantic_freeze_inputs`: the same
+    /// name→target mapping the pass-2 `Item::TypeAlias` arm records into
+    /// `self.type_aliases` (single derivation, registered earlier).
+    ///
+    /// ADR-009 A2 (slice S4): the pass-2 arm's SECOND projection of the same
+    /// declaration — the full target annotation in the type-inference
+    /// environment (`define_type_alias`) — is registered here too. The
+    /// semantic freeze reads the structural annotation from that entry
+    /// (named freeze input 2), so a COMPOSITE alias target (`type Pair =
+    /// [int, string]`) must be visible at the registration-complete barrier,
+    /// not only after the alias item compiles in pass 2; otherwise the S1
+    /// alias fixpoint sees only the debug-string projection and `type_ref(
+    /// Pair)` rejects while `type_ref([int, string])` succeeds (R7/Dec-53
+    /// identity split). Pass 2 re-registers the identical entry (plain
+    /// insert, same source declaration — idempotent).
+    fn predeclare_type_alias_freeze_input(&mut self, type_alias: &shape_ast::ast::TypeAliasDef) {
+        let base_type_name = match &type_alias.type_annotation {
+            TypeAnnotation::Basic(name) => Some(name.clone()),
+            TypeAnnotation::Reference(name) => Some(name.to_string()),
+            _ => None,
+        };
+        self.type_aliases.insert(
+            type_alias.name.clone(),
+            base_type_name.unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
+        );
+        self.type_inference.env.define_type_alias(
+            &type_alias.name,
+            &type_alias.type_annotation,
+            type_alias.meta_param_overrides.clone(),
+        );
+    }
+
     /// Register a function definition
     pub(super) fn register_function(&mut self, func_def: &FunctionDef) -> Result<()> {
         // Detect duplicate function definitions (Shape does not support overloading).
@@ -1775,11 +2000,11 @@ impl BytecodeCompiler {
                     .cloned()
                     .collect();
                 let comptime_helpers = self.collect_comptime_helpers();
-                // W7 (2026-05-17): build the TypeReflectionSnapshot for
-                // `type_info(T)` resolution. Top-level comptime block has
-                // no enclosing generic-type-param scope.
-                let type_snapshot =
-                    super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
+                // ADR-009 §4.1 (S2): the site consumes the per-compilation-
+                // unit freeze handle (installed at the registration-complete
+                // barrier in `compile()`) — no per-site rebuild. A site
+                // without a handle is a compile error (row 3).
+                let freeze = self.comptime_freeze_overlay()?;
                 // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
                 // rationale on comptime-context items.
                 let comptime_impl_blocks = self.comptime_impl_blocks.clone();
@@ -1799,15 +2024,19 @@ impl BytecodeCompiler {
                     &extensions,
                     trait_impls,
                     known_type_symbols,
-                    type_snapshot,
+                    freeze,
                 )
                 .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
                 // §4.4: re-emit any `warning()` output anchored at this block.
                 self.surface_comptime_warnings(&execution.warnings, *span);
-                self.process_comptime_directives(execution.directives, "")
-                    .map_err(|e| ShapeError::RuntimeError {
-                        message: format!("Comptime block directive processing failed: {}", e),
-                        location: Some(self.span_to_source_location(*span)),
+                // ADR-009 D1 (S2): the block is its own expansion site.
+                let module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+                let expansion_site = self.comptime_block_expansion_site(*span, &module_path);
+                self.process_comptime_directives(execution.directives, "", &expansion_site)
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(e, "Comptime block", *span)
                     })?;
             }
             Item::Query(query, _span) => {
@@ -2264,11 +2493,38 @@ impl BytecodeCompiler {
 
     /// Register an enum definition in the TypeSchemaRegistry
     fn register_enum(&mut self, enum_def: &EnumDef) -> Result<()> {
+        // ADR-009 B1 S3 — the comptime-injected `FrozenType` payload enum
+        // carries the Dec 50/94 catalog ORDINALS as variant ids
+        // (Primitive=0, Never=1, Erased=9), matching the ordinal-pinned
+        // unspellable descriptor schema (`builtin_schemas.rs`) the
+        // `reflect()` value carrier is built against — never densely
+        // renumbered (comptime-ABI stability, spec §3.3). The pin applies
+        // only in comptime mode when EVERY member is an enabled-payload
+        // catalog variant (i.e. exactly the injected model enum); ordinary
+        // user enums keep declaration-index ids.
+        let pinned_ordinals: Option<Vec<u16>> = if self.comptime_mode
+            && enum_def.name == shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME
+        {
+            enum_def
+                .members
+                .iter()
+                .map(|member| {
+                    shape_runtime::comptime_reflection::frozen_type_payload_variant_ordinal(
+                        &member.name,
+                    )
+                })
+                .collect()
+        } else {
+            None
+        };
         let variants: Vec<EnumVariantInfo> = enum_def
             .members
             .iter()
             .enumerate()
             .map(|(id, member)| {
+                let id = pinned_ordinals
+                    .as_ref()
+                    .map_or(id as u16, |pins| pins[id]);
                 // W18.0 (User 2026-05-23 Item 1): carry variant payload
                 // shape into the runtime EnumVariantInfo so print() can
                 // render `Red` / `Blue(42)` / `Point { x: 1, y: 2 }` per
@@ -2276,13 +2532,13 @@ impl BytecodeCompiler {
                 // is unchanged (`__payload_N` slots at offset 8/16/...);
                 // the kind here only descriptively shapes the print form.
                 match &member.kind {
-                    EnumMemberKind::Unit { .. } => EnumVariantInfo::new(&member.name, id as u16, 0),
+                    EnumMemberKind::Unit { .. } => EnumVariantInfo::new(&member.name, id, 0),
                     EnumMemberKind::Tuple(types) => {
-                        EnumVariantInfo::new(&member.name, id as u16, types.len() as u16)
+                        EnumVariantInfo::new(&member.name, id, types.len() as u16)
                     }
                     EnumMemberKind::Struct(fields) => {
                         let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-                        EnumVariantInfo::new_struct(&member.name, id as u16, names)
+                        EnumVariantInfo::new_struct(&member.name, id, names)
                     }
                 }
             })
@@ -2408,8 +2664,13 @@ impl BytecodeCompiler {
         method: &shape_ast::ast::types::MethodDef,
         target_type: &shape_ast::ast::TypeName,
     ) -> Result<FunctionDef> {
+        // ADR-009 D1 (S3): the method's own span is the desugared decl's
+        // real anchor — never Span::DUMMY (Decision 68). For hand-written
+        // extends this is the method's location in the source file; for
+        // comptime-generated extends the expansion path re-bases the decl
+        // anchor to the application span (`anchor_generated_function_decl`).
         let (implicit_extend_type_params, receiver_type) =
-            Self::synthesize_extend_type_params(target_type);
+            Self::synthesize_extend_type_params(target_type, method.span);
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
         // Extend methods use qualified "Type.method" names to avoid collisions
@@ -2437,7 +2698,9 @@ impl BytecodeCompiler {
                     {
                         Some(shape_ast::ast::TypeParam::Type {
                             name: name.clone(),
-                            span: Span::DUMMY,
+                            // ADR-009 D1 (S3): synthesized type params anchor
+                            // at the method they are synthesized for.
+                            span: method.span,
                             doc_comment: None,
                             default_type: None,
                             trait_bounds: Vec::new(),
@@ -2486,7 +2749,9 @@ impl BytecodeCompiler {
 
         Ok(FunctionDef {
             name: format!("{}.{}", type_str, method.name),
-            name_span: Span::DUMMY,
+            // ADR-009 D1 (S3): the desugared decl anchors at the method's
+            // own span (see comment at `synthesize_extend_type_params`).
+            name_span: method.span,
             declaring_module_path: method.declaring_module_path.clone(),
             doc_comment: None,
             params,
@@ -2653,6 +2918,9 @@ impl BytecodeCompiler {
     /// such as `extend Vec<number>` keep their source annotation unchanged.
     fn synthesize_extend_type_params(
         target_type: &shape_ast::ast::TypeName,
+        // ADR-009 D1 (S3): real anchor for the synthesized type params —
+        // the method they are synthesized for, never Span::DUMMY.
+        anchor: Span,
     ) -> (
         Vec<shape_ast::ast::TypeParam>,
         Option<shape_ast::ast::TypeAnnotation>,
@@ -2661,7 +2929,7 @@ impl BytecodeCompiler {
             shape_ast::ast::TypeName::Simple(name) if matches!(name.as_str(), "Array" | "Vec") => {
                 let type_params = vec![shape_ast::ast::TypeParam::Type {
                     name: "T".to_string(),
-                    span: Span::DUMMY,
+                    span: anchor,
                     doc_comment: None,
                     default_type: None,
                     trait_bounds: Vec::new(),
@@ -2677,7 +2945,7 @@ impl BytecodeCompiler {
             {
                 let type_params = vec![shape_ast::ast::TypeParam::Type {
                     name: "N".to_string(),
-                    span: Span::DUMMY,
+                    span: anchor,
                     doc_comment: None,
                     default_type: None,
                     trait_bounds: Vec::new(),
@@ -4191,6 +4459,11 @@ impl BytecodeCompiler {
                         &struct_def.name,
                         &fields,
                     );
+                    // ADR-009 D1 (S2): pass-2 builds the SAME expansion site
+                    // the speculative pre-pass built for this application
+                    // (same ann node, same handler AST, same ComptimeTarget
+                    // inputs) — one identity across both phases.
+                    let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
@@ -4206,13 +4479,20 @@ impl BytecodeCompiler {
                     )?;
 
                     if self
-                        .process_comptime_directives(execution.directives, &target_name)
-                        .map_err(|e| ShapeError::RuntimeError {
-                            message: format!(
-                                "Comptime handler '{}' directive processing failed: {}",
-                                ann.name, e
-                            ),
-                            location: Some(self.span_to_source_location(handler_span)),
+                        .process_comptime_directives(
+                            execution.directives,
+                            &target_name,
+                            &expansion_site,
+                        )
+                        .map_err(|e| {
+                            // ADR-009 D1 (S4): provenance-carrying
+                            // generated-decl failures pass through with
+                            // their location notes intact.
+                            self.preserve_or_wrap_directive_failure(
+                                e,
+                                &format!("Comptime handler '{}'", ann.name),
+                                handler_span,
+                            )
                         })?
                     {
                         removed = true;
@@ -5360,17 +5640,16 @@ impl BytecodeCompiler {
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         module_name: &str,
         module_items: &mut Vec<Item>,
-    ) -> std::result::Result<bool, String> {
+        site: &super::comptime_builtins::expansion_provenance::ExpansionSite,
+    ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
-                    self.apply_comptime_extend(extend, module_name)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend(extend, module_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
-                    self.apply_comptime_extend_items(items, module_name)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend_items(items, module_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     removed = true;
@@ -5381,22 +5660,19 @@ impl BytecodeCompiler {
                 }
                 super::comptime_builtins::ComptimeDirective::SetParamType { .. }
                 | super::comptime_builtins::ComptimeDirective::SetParamValue { .. } => {
-                    return Err(
-                        "`set param` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`set param` directives are only valid when compiling function targets",
+                    ));
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {
-                    return Err(
-                        "`set return` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`set return` directives are only valid when compiling function targets",
+                    ));
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceBody { .. } => {
-                    return Err(
-                        "`replace body` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`replace body` directives are only valid when compiling function targets",
+                    ));
                 }
             }
         }
@@ -5421,6 +5697,9 @@ impl BytecodeCompiler {
                         module_path,
                         &Self::module_target_fields(module_items),
                     );
+                    // ADR-009 D1 (S2): expansion site for this module-target
+                    // handler application.
+                    let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
@@ -5438,13 +5717,17 @@ impl BytecodeCompiler {
                             execution.directives,
                             module_path,
                             module_items,
+                            &expansion_site,
                         )
-                        .map_err(|e| ShapeError::RuntimeError {
-                            message: format!(
-                                "Comptime handler '{}' directive processing failed: {}",
-                                ann.name, e
-                            ),
-                            location: Some(self.span_to_source_location(handler_span)),
+                        .map_err(|e| {
+                            // ADR-009 D1 (S4): provenance-carrying
+                            // generated-decl failures pass through with
+                            // their location notes intact.
+                            self.preserve_or_wrap_directive_failure(
+                                e,
+                                &format!("Comptime handler '{}'", ann.name),
+                                handler_span,
+                            )
                         })?
                     {
                         removed = true;
@@ -5517,9 +5800,9 @@ impl BytecodeCompiler {
             let mut comptime_helpers = self.collect_comptime_helpers();
             self.inject_module_local_comptime_helper_aliases(module_path, &mut comptime_helpers);
 
-            // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
-            // resolution from a module-scoped comptime block.
-            let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
+            // ADR-009 §4.1 (S2): module-scoped comptime blocks consume the
+            // same per-compilation-unit freeze handle — no per-site rebuild.
+            let freeze = self.comptime_freeze_overlay()?;
             // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
             // rationale on comptime-context items.
             let comptime_impl_blocks = self.comptime_impl_blocks.clone();
@@ -5538,21 +5821,26 @@ impl BytecodeCompiler {
                 &extensions,
                 trait_impls,
                 known_type_symbols,
-                type_snapshot,
+                freeze,
             )
             .map_err(|e| self.build_comptime_failure(&e, span, "a compile-time block"))?;
             // §4.4: re-emit any `warning()` output anchored at this block.
             self.surface_comptime_warnings(&execution.warnings, span);
 
+            // ADR-009 D1 (S2): the module-scoped block is its own expansion
+            // site.
+            let expansion_site = self.comptime_block_expansion_site(span, module_path);
             if self
                 .process_comptime_directives_for_module(
                     execution.directives,
                     module_path,
                     module_items,
+                    &expansion_site,
                 )
-                .map_err(|e| ShapeError::RuntimeError {
-                    message: format!("Comptime block directive processing failed: {}", e),
-                    location: Some(self.span_to_source_location(span)),
+                .map_err(|e| {
+                    // ADR-009 D1 (S4): provenance-carrying generated-decl
+                    // failures pass through with their location notes.
+                    self.preserve_or_wrap_directive_failure(e, "Comptime block", span)
                 })?
             {
                 return Ok(true);

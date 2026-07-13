@@ -221,6 +221,10 @@ fn infer_expr_type_with_env(expr: &Expr, env: &HashMap<String, String>) -> Optio
         Expr::TypeAssertion {
             type_annotation, ..
         } => type_annotation_to_string(type_annotation),
+        // ADR-009 A2: type syntax is not a value expression — it has no
+        // value type to surface here (type_ref(...) call hover is handled
+        // by the comptime-builtin metadata rows).
+        Expr::TypeSyntax(_, _) => None,
         Expr::InstanceOf { .. } => Some("bool".to_string()),
         Expr::FunctionExpr {
             params,

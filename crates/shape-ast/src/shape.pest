@@ -1133,6 +1133,27 @@ arg_list = { argument ~ ("," ~ argument)* }
 argument = { named_arg | expression }
 named_arg = { ident ~ ":" ~ expression }
 
+// ===== type_ref checked type-argument position (ADR-009 A2) =====
+// `type_ref(...)` takes a TYPE argument, not a value expression. The
+// argument is routed through the checked `type_annotation` grammar FIRST
+// (ordered choice). PEG choice is committed, so each type alternative
+// carries a `&")"` lookahead: it only succeeds when the type expression
+// fills the whole parenthesis. Every non-type argument (strings, `1 + 2`,
+// `x.y`, two args, named args) therefore backtracks into the ordinary
+// `arg_list` and keeps the plain FunctionCall path, so the A1 named
+// diagnostics keep firing unchanged.
+type_ref_call = { type_ref_kw ~ "(" ~ (type_ref_type_arg | type_ref_const_generic_reject | arg_list)? ~ ")" }
+type_ref_kw = @{ "type_ref" ~ !(ASCII_ALPHANUMERIC | "_") }
+type_ref_type_arg = { type_annotation ~ &")" }
+// Const-generic type applications (`Page<User, 32>`) have no
+// TypeAnnotation carrier yet (spec §3.7 prove-or-reject): this branch
+// parses the spelling ONLY so the parser can emit the named rejection
+// "const-generic type applications are not yet supported in type_ref".
+type_ref_const_generic_reject = {
+    qualified_ident ~ "<" ~ type_ref_const_generic_arg ~ ("," ~ type_ref_const_generic_arg)* ~ ">" ~ &")"
+}
+type_ref_const_generic_arg = { type_annotation | integer }
+
 
 // Primary expression - object literal before block to handle { key: value } correctly
 primary_expr = {
@@ -1168,6 +1189,7 @@ primary_expr = {
     | "(" ~ expression ~ ")"
     | some_expr  // Some(value) constructor for Option type
     | temporal_nav
+    | type_ref_call   // type_ref(TYPE) checked type-argument position (ADR-009 A2) — before ident
     | struct_literal  // Struct literal: TypeName { field: value, ... } — before ident
     | ident
     | timeframe_expr

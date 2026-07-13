@@ -115,6 +115,9 @@ impl BytecodeCompiler {
             specialization_const_bindings: HashMap::new(),
             struct_types: HashMap::new(),
             struct_generic_info: HashMap::new(),
+            // ADR-009 §4.1 (A1/S1): installed exactly once at the
+            // registration-complete barrier in `compile()`.
+            semantic_freeze: None,
             native_layout_types: HashSet::new(),
             generated_native_conversion_pairs: HashSet::new(),
             current_function_is_async: false,
@@ -145,7 +148,6 @@ impl BytecodeCompiler {
             trait_defs: HashMap::new(),
             comptime_impl_blocks: Vec::new(),
             comptime_context_struct_defs: HashMap::new(),
-            materialized_comptime_fns: std::collections::HashSet::new(),
             extension_registry: None,
             comptime_fields: HashMap::new(),
             type_diagnostic_mode: TypeDiagnosticMode::Strict, // Strict is the default; the suppressing ReliableOnly variant was deleted (WF-0A)
@@ -218,6 +220,11 @@ impl BytecodeCompiler {
             monomorphization_cache:
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             monomorphization_in_progress: std::collections::HashSet::new(),
+            specialization_type_param_overlay: None,
+            generated_symbols:
+                crate::compiler::comptime_builtins::expansion_provenance::GeneratedSymbolTable::new(
+                ),
+            failed_call_site_specializations: std::collections::HashSet::new(),
             next_monomorphization_id: 0,
             closure_specialization_count: 0,
         }

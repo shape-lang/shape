@@ -25,16 +25,38 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub(crate) mod expansion_provenance;
+pub(crate) mod semantic_freeze;
+// ADR-009 (ticket B2, slice S3): opaque TraitRef/ImplRef carriers + the
+// schema-name-checked evidence decode. New code lives in the submodule, not
+// in this (already oversized) parent.
+mod trait_evidence;
 mod type_reflection;
 
+pub(crate) use semantic_freeze::FreezeOverlay;
 pub(crate) use type_reflection::{
-    FrozenTypeCategory, FrozenTypeIdentity, TypeReflectionSnapshot,
-    build_frozen_type_category_heap_value, build_frozen_type_ref_heap_value,
-    build_type_info_heap_value, build_type_reflection_snapshot, frozen_type_category_from_ref,
+    FrozenTypeCategory, FrozenTypeIdentity, build_frozen_type_category_heap_value,
+    build_frozen_type_ref_heap_value, frozen_type_category_from_ref, frozen_type_from_ref,
 };
+// Legacy-path confinement (ADR-009 §4.1 "one kind vocabulary", ticket A1 S5):
+// `type_reflection::build_type_info_heap_value` is deliberately NOT
+// re-exported. The legacy `type_info` intrinsic below is its only caller
+// (path-qualified); ticket E5 deletes the whole path. Sentinel:
+// `type_reflection/tests.rs::legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`.
 
 pub(crate) const TYPE_REF_INTRINSIC: &str = "\u{1}comptime:type-ref";
 pub(crate) const TYPE_CATEGORY_INTRINSIC: &str = "\u{1}comptime:type-category";
+/// ADR-009 B1 S3: `reflect(TypeRef<T>) -> FrozenType<T>` intrinsic name.
+/// Unspellable (SOH-prefixed) like its siblings; the spellable `reflect`
+/// name reaches it only through the comptime forwarder (`comptime.rs`) —
+/// the runtime `reflect` builtin mapping (`helpers.rs`) is untouched.
+pub(crate) const REFLECT_INTRINSIC: &str = "\u{1}comptime:reflect";
+
+// ADR-009 (ticket B2, slice S4): trait-identity + implementation-evidence
+// intrinsics. Registered in `trait_evidence.rs`; the SOH prefix keeps them
+// unspellable in Shape source (identity-literal transport only, Dec 49).
+pub(crate) const TRAIT_REF_INTRINSIC: &str = "\u{1}comptime:trait-ref";
+pub(crate) const FIND_IMPL_INTRINSIC: &str = "\u{1}comptime:find-impl";
 
 /// Directives emitted during comptime execution (e.g., from `extend target`).
 #[derive(Debug, Clone)]
@@ -514,6 +536,14 @@ fn function_item_from_fragment(
         type_annotation_from_string_or_type_ref_slot(&return_type_ref, "ItemFragment.return_type")?;
     let expr = literal_expr_from_fragment(storage, schema)?;
 
+    // ADR-009 D1 (S3): the spans below are mini-VM scaffolding — this
+    // builder runs inside comptime execution, where no application anchor
+    // exists yet. The directive-consumption points
+    // (`materialize_computed_comptime_extends` /
+    // `apply_comptime_extend_items`) re-base every decl-level span to the
+    // real application anchor via `anchor_generated_function_decl` BEFORE
+    // the declaration is reserved or registered, so no Span::default()
+    // survives onto a registered generated declaration (Decision 68).
     Ok(Item::Function(
         FunctionDef {
             name,
@@ -576,14 +606,49 @@ fn nb_str(s: &str) -> KindedSlot {
 /// These are registered as an extension module named "__comptime__" so they
 /// are available during comptime execution but NOT during normal runtime.
 ///
+/// ADR-009 §4.1 (slice S2): the reflection builtins (`type_ref` /
+/// `type_category` / `type_info`) consume the per-compilation-unit semantic
+/// freeze through the shared `Arc<FreezeOverlay>` handle — the intrinsic
+/// closures clone the `Arc`, never snapshot data. The deleted per-site
+/// `build_type_reflection_snapshot` rebuild has no successor here.
+///
 /// `trait_impl_keys` contains the set of registered trait implementations.
 /// Supported key forms:
 /// - Legacy: "TraitName::TypeName"
 /// - Canonical: "TraitName::TypeName::ImplNameOrDefault"
+///
+/// `site_time_impl_keys` (slice S5) is the superset key snapshot visible at
+/// the comptime site (live keys + J-CT.2 `comptime impl` pairs); it feeds
+/// ONLY `find_impl`'s named Dec 52 post-barrier ordering diagnostic — never
+/// evidence, never the legacy `implements` path.
 pub(crate) fn create_comptime_builtins_module(
     trait_impl_keys: HashSet<String>,
-    type_snapshot: TypeReflectionSnapshot,
+    site_time_impl_keys: HashSet<String>,
+    freeze: Arc<FreezeOverlay>,
 ) -> ModuleExports {
+    let mut module = comptime_builtins_module_base(trait_impl_keys);
+    // ADR-009 B2 (slice S4): `trait_ref` / `find_impl` consume the SAME
+    // freeze handle — implementation evidence comes ONLY from the frozen
+    // barrier truth (freeze inputs 4/5), never from the legacy
+    // `trait_impl_keys` set above (E5 deletes that path).
+    trait_evidence::register_trait_evidence_builtins(
+        &mut module,
+        Arc::clone(&freeze),
+        site_time_impl_keys,
+    );
+    register_frozen_reflection_builtins(&mut module, freeze);
+    module
+}
+
+// ADR-009 A1 slice S3: the S2-era speculative pre-pass module
+// (`create_annotation_prepass_builtins_module` + the named
+// `PREPASS_REFLECTION_UNAVAILABLE` call-time rejections) is DELETED — the
+// semantic-freeze barrier now runs before the annotation pre-passes in
+// `compile()`, so every handler execution (speculative or authoritative)
+// consumes the real freeze handle via `create_comptime_builtins_module`.
+
+/// All comptime builtins EXCEPT the freeze-consuming reflection trio.
+fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExports {
     let mut module = ModuleExports::new("__comptime__");
 
     // implements(type_name: string, trait_name: string) -> bool
@@ -758,127 +823,10 @@ pub(crate) fn create_comptime_builtins_module(
         },
     );
 
-    let snapshot_for_type_ref = type_snapshot.clone();
-    register_typed_function(
-        &mut module,
-        TYPE_REF_INTRINSIC,
-        "Create an opaque TypeRef from compiler-resolved type syntax",
-        vec![
-            shape_runtime::module_exports::ModuleParam {
-                name: "identity_high".to_string(),
-                type_name: "int".to_string(),
-                required: true,
-                ..Default::default()
-            },
-            shape_runtime::module_exports::ModuleParam {
-                name: "identity_low".to_string(),
-                type_name: "int".to_string(),
-                required: true,
-                ..Default::default()
-            },
-        ],
-        ConcreteType::OpaqueTypedObject(
-            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
-                .to_string(),
-        ),
-        move |slots, _ctx| {
-            let identity_part = |index: usize| {
-                slots
-                    .get(index)
-                    .and_then(KindedSlot::as_i64)
-                    .ok_or_else(|| "internal type_ref identity transport is invalid".to_string())
-            };
-            let identity = FrozenTypeIdentity {
-                high: identity_part(0)?,
-                low: identity_part(1)?,
-            };
-            let type_ref = build_frozen_type_ref_heap_value(identity, &snapshot_for_type_ref)?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
-                Arc::new(type_ref),
-            )))
-        },
-    );
-
-    let snapshot_for_type_category = type_snapshot.clone();
-    register_typed_function(
-        &mut module,
-        TYPE_CATEGORY_INTRINSIC,
-        "Return the exhaustive semantic category of an opaque TypeRef",
-        vec![shape_runtime::module_exports::ModuleParam {
-            name: "type_ref".to_string(),
-            type_name: shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
-                .to_string(),
-            required: true,
-            ..Default::default()
-        }],
-        ConcreteType::OpaqueTypedObject("FrozenTypeCategory".to_string()),
-        move |slots, _ctx| {
-            let type_ref = slots
-                .first()
-                .ok_or_else(|| "type_category expects one TypeRef value".to_string())?;
-            let category = frozen_type_category_from_ref(type_ref, &snapshot_for_type_category)?;
-            let category = build_frozen_type_category_heap_value(category)?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
-                Arc::new(category),
-            )))
-        },
-    );
-
-    // W7 (2026-05-17) — `type_info(T)` comptime builtin.
-    //
-    // Returns the `TypeInfo` reflection record for the named type. See
-    // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md` §4
-    // (recommendation (b) TypeInfo struct return) + §8 (user dispositions
-    // Q1-Q5). Bare type-identifier arguments are rewritten to string
-    // literals at the call site by `rewrite_type_info_ident_args` in
-    // `comptime.rs` (mirror of the `implements` precedent).
-    //
-    // Schema layout matches `crates/shape-runtime/stdlib-src/core/types.shape`:
-    //   TypeInfo { name: string, kind: TypeKind }
-    //   FieldInfo { name: string, type_name: string }   // future-use; not
-    //                                                   // transitively reachable
-    //                                                   // through TypeInfo today
-    //   TypeKind = enum { Int Float Bool String Decimal BigInt
-    //                     Array HashMap Option Result TypedObject
-    //                     TraitObject TypeVar Function Tuple Unit Unknown }
-    //
-    // S2 (comptime-excellence §4.3): the TypeInfo record is built via the
-    // reserved, concrete named schema `__ComptimeTypeInfo` ({name, kind},
-    // registered at init in `builtin_schemas.rs`) — see
-    // `build_type_info_heap_value`. The previous
-    // `register_predeclared_any_schema(&["kind", "name"])` lazily minted an
-    // anonymous `{kind, name}` schema whose field ORDER was the reverse of
-    // the stdlib `TypeInfo {name, kind}` the compiler uses for the
-    // `OpaqueTypedObject("TypeInfo")` return type, so typed field access
-    // read `name`/`kind` at swapped offsets. Named construction in
-    // {name, kind} order aligns the physical layout with the consumer.
-    //
-    // `type_info(T).fields` returns the declared fields of a TypedObject type as
-    // an `Array<FieldDescriptor>` — the same row shape as `target.fields` in an
-    // annotation handler (comptime-excellence §4.1.2). Every non-TypedObject kind
-    // reflects an empty array.
-    let snapshot_for_type_info = type_snapshot;
-    register_typed_function(
-        &mut module,
-        "type_info",
-        "Return the TypeInfo reflection record for the named type",
-        vec![],
-        ConcreteType::OpaqueTypedObject("TypeInfo".to_string()),
-        move |nb_args, _ctx| {
-            // The type name arrives as a string arg (bare type identifiers are
-            // rewritten to string literals before the comptime block runs). If
-            // it cannot be read as a string, surface a clean error rather than
-            // reflecting an arbitrary name.
-            let raw_name = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| "type_info expects a type name".to_string())?;
-            let type_info_hv = build_type_info_heap_value(raw_name, &snapshot_for_type_info)?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
-                Arc::new(type_info_hv),
-            )))
-        },
-    );
+    // The freeze-consuming reflection trio (`type_ref` / `type_category` /
+    // `type_info`) is NOT part of the base: `create_comptime_builtins_module`
+    // registers it with the shared `Arc<FreezeOverlay>` handle (the barrier
+    // runs before every comptime site — S3).
 
     // item_fn(name: string, return_type: string | TypeRef, value: literal) -> ItemFragment
     //
@@ -1140,6 +1088,174 @@ pub(crate) fn create_comptime_builtins_module(
     module
 }
 
+/// Register the freeze-consuming reflection builtins (`type_ref` /
+/// `type_category` / `reflect` / legacy `type_info`) against the shared
+/// per-compilation-unit freeze handle (ADR-009 §4.1, slice S2; `reflect`
+/// added in B1 S3). Each closure clones the `Arc<FreezeOverlay>` — the
+/// base index is shared, never rebuilt and never copied.
+fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<FreezeOverlay>) {
+    let freeze_for_type_ref = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        TYPE_REF_INTRINSIC,
+        "Create an opaque TypeRef from compiler-resolved type syntax",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_high".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_low".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                .to_string(),
+        ),
+        move |slots, _ctx| {
+            let identity_part = |index: usize| {
+                slots
+                    .get(index)
+                    .and_then(KindedSlot::as_i64)
+                    .ok_or_else(|| "internal type_ref identity transport is invalid".to_string())
+            };
+            let identity = FrozenTypeIdentity {
+                high: identity_part(0)?,
+                low: identity_part(1)?,
+            };
+            let type_ref = build_frozen_type_ref_heap_value(identity, &freeze_for_type_ref)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(type_ref),
+            )))
+        },
+    );
+
+    let freeze_for_type_category = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        TYPE_CATEGORY_INTRINSIC,
+        "Return the exhaustive semantic category of an opaque TypeRef",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "type_ref".to_string(),
+            type_name: shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                .to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::OpaqueTypedObject("FrozenTypeCategory".to_string()),
+        move |slots, _ctx| {
+            let type_ref = slots
+                .first()
+                .ok_or_else(|| "type_category expects one TypeRef value".to_string())?;
+            let category = frozen_type_category_from_ref(type_ref, &freeze_for_type_category)?;
+            let category = build_frozen_type_category_heap_value(category)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(category),
+            )))
+        },
+    );
+
+    // ADR-009 B1 S3 — `reflect(TypeRef<T>) -> FrozenType<T>`: the FOURTH
+    // freeze-consuming builtin against the same Arc'd handle. The TypeRef
+    // argument goes through the same reader as `type_category`
+    // (reflect-named R4 diagnostics); the payload comes from the ONE freeze
+    // query API (`payload_of`); the value is the sealed `FrozenType` sum
+    // carrier (unspellable descriptor schema, catalog-ordinal variant ids).
+    // Reflecting a category whose payload ticket has not landed is the
+    // named R1 per-category rejection, surfaced as a compile error from
+    // the comptime run — never a partial descriptor.
+    let freeze_for_reflect = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        REFLECT_INTRINSIC,
+        "Reflect an opaque TypeRef into the sealed FrozenType payload sum",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "type_ref".to_string(),
+            type_name: shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                .to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::OpaqueTypedObject(
+            shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME.to_string(),
+        ),
+        move |slots, _ctx| {
+            let type_ref = slots
+                .first()
+                .ok_or_else(|| "reflect expects exactly one TypeRef argument".to_string())?;
+            let frozen = frozen_type_from_ref(type_ref, &freeze_for_reflect)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(frozen),
+            )))
+        },
+    );
+
+    // W7 (2026-05-17) — `type_info(T)` comptime builtin.
+    //
+    // Returns the `TypeInfo` reflection record for the named type. See
+    // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md` §4
+    // (recommendation (b) TypeInfo struct return) + §8 (user dispositions
+    // Q1-Q5). Bare type-identifier arguments are rewritten to string
+    // literals at the call site by `rewrite_type_info_ident_args` in
+    // `comptime.rs` (mirror of the `implements` precedent).
+    //
+    // Schema layout matches `crates/shape-runtime/stdlib-src/core/types.shape`:
+    //   TypeInfo { name: string, kind: TypeKind }
+    //   FieldInfo { name: string, type_name: string }   // future-use; not
+    //                                                   // transitively reachable
+    //                                                   // through TypeInfo today
+    //   TypeKind = enum { Int Float Bool String Decimal BigInt
+    //                     Array HashMap Option Result TypedObject
+    //                     TraitObject TypeVar Function Tuple Unit Unknown }
+    //
+    // S2 (comptime-excellence §4.3): the TypeInfo record is built via the
+    // reserved, concrete named schema `__ComptimeTypeInfo` ({name, kind},
+    // registered at init in `builtin_schemas.rs`) — see
+    // `build_type_info_heap_value`. The previous
+    // `register_predeclared_any_schema(&["kind", "name"])` lazily minted an
+    // anonymous `{kind, name}` schema whose field ORDER was the reverse of
+    // the stdlib `TypeInfo {name, kind}` the compiler uses for the
+    // `OpaqueTypedObject("TypeInfo")` return type, so typed field access
+    // read `name`/`kind` at swapped offsets. Named construction in
+    // {name, kind} order aligns the physical layout with the consumer.
+    //
+    // `type_info(T).fields` returns the declared fields of a TypedObject type as
+    // an `Array<FieldDescriptor>` — the same row shape as `target.fields` in an
+    // annotation handler (comptime-excellence §4.1.2). Every non-TypedObject kind
+    // reflects an empty array.
+    //
+    // This legacy path (TypeKindLabel string vocabulary) consumes the SAME
+    // freeze handle as the typed reflection surface; E5 deletes it.
+    let freeze_for_type_info = freeze;
+    register_typed_function(
+        module,
+        "type_info",
+        "Return the TypeInfo reflection record for the named type",
+        vec![],
+        ConcreteType::OpaqueTypedObject("TypeInfo".to_string()),
+        move |nb_args, _ctx| {
+            // The type name arrives as a string arg (bare type identifiers are
+            // rewritten to string literals before the comptime block runs). If
+            // it cannot be read as a string, surface a clean error rather than
+            // reflecting an arbitrary name.
+            let raw_name = nb_args
+                .first()
+                .and_then(|nb| nb.as_str())
+                .ok_or_else(|| "type_info expects a type name".to_string())?;
+            let type_info_hv =
+                type_reflection::build_type_info_heap_value(raw_name, &freeze_for_type_info)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(type_info_hv),
+            )))
+        },
+    );
+}
+
 /// Render `s` as a valid Shape string literal: wrap in double quotes and escape
 /// the characters the Shape lexer treats specially inside a `"..."` literal.
 /// Shape's escape set (string_literals.rs) is `\n \t \r \\ \" \' \0 \{ \} \$ \#`;
@@ -1195,14 +1311,22 @@ mod tests {
 
     #[test]
     fn test_comptime_builtins_module_created() {
-        let module = create_comptime_builtins_module(Default::default(), Default::default());
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        );
         assert_eq!(module.name, "__comptime__");
     }
 
     #[test]
     fn test_comptime_warning_builtin() {
         let ctx = test_ctx();
-        let module = create_comptime_builtins_module(Default::default(), Default::default());
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        );
         let warning = module
             .typed_exports()
             .get("warning")
@@ -1218,7 +1342,11 @@ mod tests {
     #[test]
     fn test_comptime_error_builtin() {
         let ctx = test_ctx();
-        let module = create_comptime_builtins_module(Default::default(), Default::default());
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        );
         let error = module
             .typed_exports()
             .get("error")
@@ -1232,7 +1360,11 @@ mod tests {
 
     #[test]
     fn test_comptime_implements_returns_false_when_not_registered() {
-        let module = create_comptime_builtins_module(Default::default(), Default::default());
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        );
         let result = module
             .typed_exports()
             .get("implements")
@@ -1245,7 +1377,11 @@ mod tests {
         let mut impls = HashSet::new();
         impls.insert("Serializable::number".to_string());
         impls.insert("Display::Currency".to_string());
-        let module = create_comptime_builtins_module(impls, Default::default());
+        let module = create_comptime_builtins_module(
+            impls,
+            Default::default(),
+            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        );
         let result = module
             .typed_exports()
             .get("implements")
@@ -1257,7 +1393,11 @@ mod tests {
     fn test_comptime_implements_numeric_widening() {
         let mut impls = HashSet::new();
         impls.insert("Serializable::number".to_string());
-        let module = create_comptime_builtins_module(impls, Default::default());
+        let module = create_comptime_builtins_module(
+            impls,
+            Default::default(),
+            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        );
         let result = module
             .typed_exports()
             .get("implements")
@@ -1268,7 +1408,11 @@ mod tests {
     #[test]
     fn test_comptime_build_config_builtin() {
         let ctx = test_ctx();
-        let module = create_comptime_builtins_module(Default::default(), Default::default());
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        );
         let build_config = module
             .typed_exports()
             .get("build_config")
@@ -1279,5 +1423,220 @@ mod tests {
             result,
             TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(_))
         ));
+    }
+}
+
+// S2/S3 (ADR-009 §4.1) — always-on unit proofs for the single builtins-module
+// flavor: reflection resolves against the shared freeze handle (the S2-era
+// pre-pass rejection flavor is deleted; the barrier precedes every comptime
+// site). These do not depend on the deleted comptime dispatch ABI, so they
+// are not `deep-tests`-gated.
+#[cfg(test)]
+mod freeze_handle_module_tests {
+    use super::*;
+    use shape_runtime::type_schema::TypeSchemaRegistry;
+
+    fn test_ctx() -> shape_runtime::module_exports::ModuleContext<'static> {
+        let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
+        shape_runtime::module_exports::ModuleContext {
+            schemas: registry,
+            invoke_callable: None,
+            raw_invoker: None,
+            function_hashes: None,
+            vm_state: None,
+            granted_permissions: None,
+            scope_constraints: None,
+            set_pending_resume: None,
+            set_pending_frame_resume: None,
+            remote_dispatch: None,
+        }
+    }
+
+    /// The authoritative module's `type_ref` intrinsic resolves a frozen
+    /// identity against the shared freeze handle (Arc-cloned into the
+    /// closure — no snapshot copy, no rebuild).
+    #[test]
+    fn authoritative_type_ref_resolves_against_the_shared_freeze() {
+        let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
+        let int_identity = overlay
+            .identity_of("int")
+            .expect("int is frozen in every unit");
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            Arc::clone(&overlay),
+        );
+        let ctx = test_ctx();
+
+        let type_ref = module
+            .typed_exports()
+            .get(TYPE_REF_INTRINSIC)
+            .expect("type_ref intrinsic registered");
+        let result = (type_ref.invoke)(
+            &[
+                KindedSlot::from_int(int_identity.high),
+                KindedSlot::from_int(int_identity.low),
+            ],
+            &ctx,
+        )
+        .expect("frozen identity must resolve");
+        assert!(matches!(
+            result,
+            TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(_))
+        ));
+
+        // An identity the freeze never issued is rejected (freeze-boundary
+        // rule), through the same Arc-shared handle.
+        let error = (type_ref.invoke)(&[KindedSlot::from_int(-1), KindedSlot::from_int(-1)], &ctx)
+            .expect_err("unknown identity must be rejected");
+        assert!(
+            error.contains("unknown semantic type identity"),
+            "freeze-boundary rejection missing: {error}"
+        );
+    }
+
+    // ── ADR-009 B1 S3: `reflect` — the fourth freeze-consuming builtin ────
+
+    /// Build an opaque TypeRef argument slot for a frozen identity (the
+    /// same carrier `type_ref` produces).
+    fn type_ref_slot(identity: FrozenTypeIdentity) -> KindedSlot {
+        typed_object_for_named_schema(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+            &[
+                ("identity_high", KindedSlot::from_int(identity.high)),
+                ("identity_low", KindedSlot::from_int(identity.low)),
+            ],
+        )
+    }
+
+    /// Read `__variant` (field 0) and `__payload_0` (field 1) out of a
+    /// descriptor object, returning the variant id and the payload slot.
+    fn descriptor_variant_and_payload(
+        storage: &shape_value::heap_value::TypedObjectStorage,
+    ) -> (i64, Option<KindedSlot>) {
+        let variant = storage
+            .clone_field_kinded(0)
+            .and_then(|slot| slot.as_i64())
+            .expect("__variant is an int at field 0");
+        (variant, storage.clone_field_kinded(1))
+    }
+
+    fn schema_name_of(storage: &shape_value::heap_value::TypedObjectStorage) -> String {
+        shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+            .expect("descriptor schema resolvable")
+            .name
+            .clone()
+    }
+
+    /// `reflect` on a Primitive identity returns the sealed `FrozenType`
+    /// carrier: the unspellable descriptor schema with the CATALOG-ORDINAL
+    /// variant id (Primitive=0), wrapping the nested `FrozenPrimitive`
+    /// descriptor whose family variant carries its width-domain object
+    /// (int → SignedInteger(W64)).
+    #[test]
+    fn reflect_intrinsic_returns_the_ordinal_pinned_frozen_type_carrier() {
+        use shape_runtime::type_schema::builtin_schemas::{
+            COMPTIME_FROZEN_PRIMITIVE_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA,
+        };
+
+        let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
+        let int_identity = overlay
+            .identity_of("int")
+            .expect("int is frozen in every unit");
+        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let ctx = test_ctx();
+
+        let reflect = module
+            .typed_exports()
+            .get(REFLECT_INTRINSIC)
+            .expect("reflect intrinsic registered as the fourth freeze consumer");
+        let result = (reflect.invoke)(&[type_ref_slot(int_identity)], &ctx)
+            .expect("Primitive payload is enabled");
+        let TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(value)) = result else {
+            panic!("reflect must return an opaque typed-object carrier");
+        };
+        let HeapValue::TypedObject(ptr) = value.as_ref() else {
+            panic!("reflect carrier must be a TypedObject");
+        };
+        // SAFETY: the carrier owns one live share for the wrapper's lifetime.
+        let storage = unsafe { &*ptr.as_ptr() };
+        assert_eq!(schema_name_of(storage), COMPTIME_FROZEN_TYPE_SCHEMA);
+        let (variant, payload) = descriptor_variant_and_payload(storage);
+        assert_eq!(
+            variant, 0,
+            "FrozenType::Primitive must carry the catalog ORDINAL 0"
+        );
+
+        let payload = payload.expect("Primitive payload present");
+        let primitive = payload
+            .as_typed_object_storage()
+            .expect("payload is the nested FrozenPrimitive descriptor");
+        assert_eq!(schema_name_of(primitive), COMPTIME_FROZEN_PRIMITIVE_SCHEMA);
+        let (primitive_variant, width) = descriptor_variant_and_payload(primitive);
+        // SignedInteger is catalog position 3 (Unit, Bool, Char, SignedInteger, …).
+        assert_eq!(primitive_variant, 3, "int is a SignedInteger family member");
+        let width = width.expect("family variant carries a width-domain payload");
+        let width_storage = width
+            .as_typed_object_storage()
+            .expect("width payload is the IntegerWidth enum object");
+        assert_eq!(
+            schema_name_of(width_storage),
+            shape_runtime::comptime_reflection::INTEGER_WIDTH_SCHEMA_NAME
+        );
+        let (width_variant, _) = descriptor_variant_and_payload(width_storage);
+        // W64 is IntegerWidth catalog position 3 (W8, W16, W32, W64, Arbitrary).
+        assert_eq!(width_variant, 3, "int carries the exact W64 width domain");
+    }
+
+    /// R1 (sanctioned tracer): a category whose payload ticket has not
+    /// landed rejects with the NAMED per-category diagnostic through the
+    /// intrinsic — never a partial descriptor. `Array` is frozen Nominal
+    /// in every unit.
+    #[test]
+    fn reflect_intrinsic_rejects_non_enabled_categories_with_the_named_diagnostic() {
+        let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
+        let nominal_identity = overlay
+            .identity_of("Array")
+            .expect("Array is frozen as a builtin nominal");
+        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let ctx = test_ctx();
+
+        let reflect = module
+            .typed_exports()
+            .get(REFLECT_INTRINSIC)
+            .expect("reflect intrinsic registered");
+        let error = (reflect.invoke)(&[type_ref_slot(nominal_identity)], &ctx)
+            .expect_err("Nominal payload has not landed");
+        assert!(
+            error.contains("reflect: the Nominal payload descriptor has not landed"),
+            "R1 rejection must be the named per-category diagnostic: {error}"
+        );
+    }
+
+    /// R4 at the intrinsic layer: a non-TypeRef argument and an identity
+    /// the freeze never issued both reject with named diagnostics.
+    #[test]
+    fn reflect_intrinsic_rejects_non_type_ref_args_and_unknown_identities() {
+        let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
+        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let ctx = test_ctx();
+        let reflect = module
+            .typed_exports()
+            .get(REFLECT_INTRINSIC)
+            .expect("reflect intrinsic registered");
+
+        let error = (reflect.invoke)(&[KindedSlot::from_int(42)], &ctx)
+            .expect_err("an int is not a TypeRef");
+        assert!(
+            error.contains("reflect expects a TypeRef value"),
+            "R4 rejection must be reflect-named: {error}"
+        );
+
+        let error = (reflect.invoke)(&[type_ref_slot(FrozenTypeIdentity::INVALID)], &ctx)
+            .expect_err("an identity the freeze never issued must reject");
+        assert!(
+            error.contains("unknown semantic type identity"),
+            "freeze-boundary rejection missing: {error}"
+        );
     }
 }

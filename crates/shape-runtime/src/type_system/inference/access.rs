@@ -917,6 +917,121 @@ impl TypeInferenceEngine {
                 )?;
                 Type::Concrete(TypeAnnotation::Basic("FrozenTypeCategory".to_string()))
             }
+            // ADR-009 B1 S3 — `reflect(TypeRef<T>) -> FrozenType<T>`. R4
+            // arg-form rejections are NAMED (mirroring the `type_ref`
+            // arg-form rejections below in `infer_function_call`): wrong
+            // arity, and any argument whose resolved type is concretely NOT
+            // the opaque TypeRef schema (string, int, the legacy
+            // `__ComptimeTypeRef` descriptor object, arbitrary objects).
+            // Only a still-unresolved argument falls through to the
+            // standard constraint push.
+            "reflect" => {
+                let type_ref_schema =
+                    crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA;
+                if arg_types.len() != 1 {
+                    return Err(TypeError::ConstraintViolation(
+                        "reflect expects exactly one TypeRef argument".to_string(),
+                    ));
+                }
+                let resolved = self.solver.unifier().apply_substitutions(&arg_types[0]);
+                match resolved.to_annotation() {
+                    Some(TypeAnnotation::Basic(name)) if name == type_ref_schema => {}
+                    Some(_) => {
+                        return Err(TypeError::ConstraintViolation(
+                            "reflect expects a TypeRef value (create one with type_ref(T)); \
+                             strings and other values cannot be reflected"
+                                .to_string(),
+                        ));
+                    }
+                    None => {
+                        self.push_constraint_with_origin(
+                            arg_types[0].clone(),
+                            Type::Concrete(TypeAnnotation::Basic(type_ref_schema.to_string())),
+                            call_span,
+                        );
+                    }
+                }
+                Type::Concrete(TypeAnnotation::Basic(
+                    crate::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME.to_string(),
+                ))
+            }
+            // ADR-009 B2 (slice S4): `trait_ref(Tr)` types as the opaque
+            // TraitRef carrier — a DISTINCT identity kind from TypeRef (a
+            // trait is not a value type, Dec 49). Argument is the same
+            // compiler-resolved type-syntax marker as `type_ref` (bare
+            // identifier; strings are rejected in `infer_function_call`).
+            "trait_ref" => {
+                self.check_comptime_builtin_args(
+                    arg_types,
+                    &[Type::Concrete(TypeAnnotation::Basic(
+                        crate::builtin_metadata::COMPTIME_TYPE_SYNTAX_MARKER.to_string(),
+                    ))],
+                    call_span,
+                )?;
+                Type::Concrete(TypeAnnotation::Basic(
+                    crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TRAIT_REF_SCHEMA
+                        .to_string(),
+                ))
+            }
+            // ADR-009 B2 (slice S4): `find_impl(TypeRef, TraitRef)` types as
+            // `Option<ImplRef>` — branch-scoped evidence consumed through the
+            // `Some(proof)` match arm; an unimplemented pair is `None` (R9).
+            //
+            // Slice S5 named rejection rows precede the generic constraint
+            // path so the forbidden forms fail with their Dec 49 names:
+            // R8 (arity), R4 (boolean-authorized generation), R3 (name-string
+            // lookup). Anything else still flows through the schema-typed
+            // constraints below (R7's checker tier: arbitrary values and
+            // legacy descriptors never unify with the opaque carriers).
+            "find_impl" => {
+                if arg_types.len() != 2 {
+                    return Err(TypeError::ConstraintViolation(
+                        "find_impl expects exactly two arguments: a TypeRef from type_ref and a \
+                         TraitRef from trait_ref"
+                            .to_string(),
+                    ));
+                }
+                for arg_type in arg_types {
+                    if let Type::Concrete(TypeAnnotation::Basic(basic)) = arg_type {
+                        if basic == "bool" {
+                            return Err(TypeError::ConstraintViolation(
+                                "a boolean cannot authorize an operation that requires \
+                                 implementation evidence: find_impl consumes a compiler-issued \
+                                 TypeRef and TraitRef and answers with ImplRef evidence — a bool \
+                                 (including an implements(...) result) never unifies with \
+                                 implementation evidence"
+                                    .to_string(),
+                            ));
+                        }
+                        if basic == "string" {
+                            return Err(TypeError::ConstraintViolation(
+                                "trait lookup cannot use text: find_impl expects a \
+                                 compiler-issued TypeRef and TraitRef — strings cannot name a \
+                                 type or a trait here"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                self.check_comptime_builtin_args(
+                    arg_types,
+                    &[
+                        Type::Concrete(TypeAnnotation::Basic(
+                            crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                                .to_string(),
+                        )),
+                        Type::Concrete(TypeAnnotation::Basic(
+                            crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TRAIT_REF_SCHEMA
+                                .to_string(),
+                        )),
+                    ],
+                    call_span,
+                )?;
+                Type::Concrete(TypeAnnotation::option(TypeAnnotation::Basic(
+                    crate::type_schema::builtin_schemas::COMPTIME_FROZEN_IMPL_REF_SCHEMA
+                        .to_string(),
+                )))
+            }
             _ => {
                 return Err(TypeError::ConstraintViolation(format!(
                     "comptime builtin '{}' has no type-analysis signature",
@@ -965,7 +1080,16 @@ impl TypeInferenceEngine {
             name == "type_ref" && crate::builtin_metadata::is_comptime_builtin_function(name);
         if is_type_ref_builtin {
             match args {
-                [Expr::Identifier(..)] => {}
+                // ADR-009 A2 (slice S4) lockstep contract: this accepted-shape
+                // set mirrors the comptime rewrite arm
+                // (shape-vm compiler/comptime.rs
+                // `rewrite_comptime_type_symbol_args_expr`) — a bare
+                // compiler-resolved identifier OR the checked type-expression
+                // carrier `Expr::TypeSyntax` (tuples, records, callables,
+                // references, unions, erased dyn, applied generics). Any
+                // drift between the two produces compile-passes-then-
+                // comptime-fails splits; change both together.
+                [Expr::Identifier(..)] | [Expr::TypeSyntax(..)] => {}
                 [Expr::Literal(shape_ast::ast::Literal::String(_), _)] => {
                     return Err(TypeError::ConstraintViolation(
                         "type_ref expects compiler-resolved type syntax; strings cannot construct TypeRef"
@@ -985,13 +1109,67 @@ impl TypeInferenceEngine {
                 }
             }
         }
+        // ADR-009 B1 S3 — R4: reflect's arity rejection fires EARLY (before
+        // argument inference and the generic callee-scheme arity check can
+        // produce an unnamed diagnostic first), mirroring the type_ref
+        // arg-form block above. Value-form rejections (string / int /
+        // legacy descriptor) need the inferred argument type and live in
+        // `infer_comptime_builtin_call`.
+        if name == "reflect"
+            && crate::builtin_metadata::is_comptime_builtin_function(name)
+            && args.len() != 1
+        {
+            return Err(TypeError::ConstraintViolation(
+                "reflect expects exactly one TypeRef argument".to_string(),
+            ));
+        }
+        // ADR-009 B2 (slice S4): `trait_ref` mirrors `type_ref`'s
+        // bare-identifier carrier — a declared trait named directly. Trait
+        // lookup cannot use text (Dec 49): strings never construct a
+        // TraitRef. (S5 lands the full named rejection matrix; these forms
+        // must not type-check meanwhile.)
+        let is_trait_ref_builtin =
+            name == "trait_ref" && crate::builtin_metadata::is_comptime_builtin_function(name);
+        if is_trait_ref_builtin {
+            match args {
+                [Expr::Identifier(..)] => {}
+                [Expr::Literal(shape_ast::ast::Literal::String(_), _)] => {
+                    return Err(TypeError::ConstraintViolation(
+                        "trait_ref expects a declared trait named directly; strings cannot construct TraitRef"
+                            .to_string(),
+                    ));
+                }
+                [_] => {
+                    return Err(TypeError::ConstraintViolation(
+                        "trait_ref expects a declared trait named directly, such as trait_ref(Serializable)"
+                            .to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(TypeError::ConstraintViolation(
+                        "trait_ref expects exactly one trait argument".to_string(),
+                    ));
+                }
+            }
+        }
         let type_symbol_ident_args = crate::builtin_metadata::is_comptime_builtin_function(name)
             && ((self.in_comptime_context() && matches!(name, "type_info" | "implements"))
-                || is_type_ref_builtin);
+                || is_type_ref_builtin
+                || is_trait_ref_builtin);
         let mut arg_types: Vec<Type> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
+            // ADR-009 A2 (S4): the type-syntax carrier is never inferred as a
+            // value expression — it carries the same unspellable typed-syntax
+            // marker as the bare-identifier form (one marker, two accepted
+            // spellings; identical to the comptime rewrite's two arms).
+            if is_type_ref_builtin && matches!(arg, Expr::TypeSyntax(..)) {
+                arg_types.push(Type::Concrete(TypeAnnotation::Basic(
+                    crate::builtin_metadata::COMPTIME_TYPE_SYNTAX_MARKER.to_string(),
+                )));
+                continue;
+            }
             if type_symbol_ident_args && matches!(arg, Expr::Identifier(..)) {
-                arg_types.push(if name == "type_ref" {
+                arg_types.push(if matches!(name, "type_ref" | "trait_ref") {
                     Type::Concrete(TypeAnnotation::Basic(
                         crate::builtin_metadata::COMPTIME_TYPE_SYNTAX_MARKER.to_string(),
                     ))

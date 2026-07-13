@@ -7208,3 +7208,516 @@ T1 surfaces it for Round 13 cluster-0 disposition.
 **Alternative taken:** carrier (b) shipped (`wf2f-close-matrix.md` §Residual, `8fbe82f4`). Logged here per append-only discipline because it is a *bounded deviation, not a rejected one* — acceptable for same-image whole-VM resume (the only path exercised), but it must NOT be extended to cross-version distributed transfer without a content-hash pin. WF-3E (distributed composition) is the point where this assumption gets stress-tested; if `@remote`×foreign transfer ever resolves ModuleFn by name across differently-linked nodes, this entry is the flag to re-open (b)→(a).
 
 **Cost saved:** n/a (deviation taken, not avoided) — logged to prevent a future silent cross-version mis-bind.
+
+## 2026-07-12 — ADR009-A3 S4: deliberate NON-expansion into the stress_generics `generic_identity_*` "Null family" (roots differ / family not live at base)
+
+**Considered:** ticket ADR009-A3's scope guard allowed fixing the CLAUDE.md
+Known-Constraints family (a) ("generic-fn instantiation returning Null",
+`stress_generics::generic_identity_*`) *iff* it shared the identical root
+with A3's defect (comptime reflection in generic bodies failing at
+specialization compile, masked by the `Err(_) => Ok(None)` swallow at
+`function_calls.rs`).
+
+**Distinguishing experiment run (2026-07-12, both directions):**
+
+- Baseline `main@4d70508b` (worktree detached, build verified genuine —
+  `frozen_type` shows the pre-A3 16-test matrix): `cargo test -p shape-test
+  --test type_inference stress_generics` → **22 passed; 0 failed**
+  (including `generic_identity_int/string/bool/number/with_none`);
+  `cargo test -p shape-test --test structs_types generics_comptime` →
+  **20 passed; 0 failed**.
+- Branch `adr009/a3@47a8df4b` (post S1+S2+S3): identical — 22/22 and 20/20.
+- Worktree-vs-main FAILED-name differential: **empty in both directions.**
+  S2's hard-error propagation flipped no signatures because no family
+  member fails at this base.
+
+**Root attribution:** the family is NOT live at `main@4d70508b`. The
+CLAUDE.md Known Constraints family-(a) listing (anchored to the old
+`jit-v2-phase1@53a06ce` baseline) is stale for these named tests. The
+historically failing member was `generic_identity_with_null` (bare
+`id(None)`, failing "cannot infer type argument(s) for generic function"
+per `docs/cluster-audits/v0.3-classification/type_inference.md:324-348`,
+classified FN-REG-CORRECTNESS); commit `831b1133` (2026-07-03, pre-base)
+renamed it to `generic_identity_with_none` and annotated the operand
+(`let n: Option<int> = None`), after which it passes. The only element the
+two defect families ever shared is the *masking diagnostic surface* (the
+call-site "cannot infer type argument(s)" arm downstream of the
+`Err→Ok(None)` swallow) — a mechanism, not a root. A3's root (declared
+`type_params` stripped at `substitution.rs` before the specialized body
+compiles, so the reflection snapshot lacked `T`) is specific to comptime
+reflection and was fixed by S1 (overlay) + S2 (soft/hard propagation).
+
+**Alternative rejected:** re-opening the unannotated `id(None)` inference
+gap (bare `None` as the sole type-argument source) under this ticket. That
+is a generic-inference feature question, deliberately rebaselined by
+`831b1133`, with no comptime-reflection component — expanding into it here
+would be the exact whole-cluster scope creep the ticket forbids.
+
+**Cost saved:** avoided an unbounded generics-inference workstream inside a
+bounded compiler-correctness ticket; kept A3's blast radius at the already
+verified zero-differential.
+
+## 2026-07-12 — ADR009-A3 close-out: rejected compromises (Parameter category from generic bodies)
+
+Ticket ADR009-A3 (shape-lang/shape#3) fixed the generic-call specialization
+gap so `type_category(type_ref(T))` inside a generic body yields
+`FrozenTypeCategory::Parameter` on VM and JIT. Compromises considered and
+REJECTED during implementation:
+
+**1. Substituting `type_ref(T)` → concrete type during monomorphization.**
+Rewriting the reflection argument to the instantiation's concrete type (so
+`describe(1)` observes `Primitive`) would have "fixed" the compile failure
+without any snapshot change. Rejected: it makes `Parameter` publicly
+unreachable (no source program could ever observe the category), contradicts
+Decision 52 (declared generic parameters are valid PRE-substitution typed
+identities, not inference holes), and undercuts B7 (`TypeParamDescriptor<T>`
+payloads need a reachable `Parameter` arm to hang off). A variant of the same
+compromise — a blanket `Expr::Identifier` rewrite in `substitution.rs` — was
+also rejected: identifier passthrough is correct value semantics; a blanket
+rewrite corrupts value identifiers that merely shadow a type-parameter name.
+
+**2. Mono-key owner scoping for the `Parameter` identity.**
+Scoping the interned descriptor `parameter:{owner}:{name}` to the
+monomorphized name (`describe::i64`) was the path of least resistance (the
+specialized def is registered under the mono name). Rejected:
+instantiation-dependent identities violate ADR-009 declaration stability —
+`identity(1)` and `identity("s")` would observe DIFFERENT identities for the
+same declared `T`. The overlay carries the BASE fn name; unit pins
+(`specialization_overlay_supplies_base_scoped_parameter_identity`,
+`specialization_overlay_identity_is_stable_across_instantiations`) forbid
+regressing this by renumbering (the SHA-256 descriptor scheme is fixed; any
+future red is fixed in owner-scoping state threading, never identities).
+
+**3. Defaulting an INVALID identity to a category.**
+Mapping `FrozenTypeIdentity::INVALID` (unknown name in `type_ref`) to some
+category — an `Unknown`/`Any`-arm analog — would have made the negative case
+"work". Rejected per Decision 50/94 (closed 10-category catalog, no Unknown
+arm) and CLAUDE.md surface-and-stop: unresolved names must fail the freeze
+boundary with the named diagnostic "unknown semantic type identity".
+
+**4. Keeping the `Err(_) => Ok(None)` specialization swallow "for compatibility".**
+The pre-existing arm at `function_calls.rs` converted EVERY specialized-body
+compile error into a soft fallback, re-reported downstream as the unrelated
+"cannot infer type argument(s)" inference diagnostic. Keeping it (and pattern-
+matching only the freeze error out) was considered for blast-radius safety.
+Rejected: blanket error swallowing violates surface-and-stop and had already
+masked this ticket's defect class. Fix landed as a typed soft/hard
+classification (`SpecializationFailure::{Soft, Hard}` in
+`monomorphization/cache.rs`): resolution-stage failures (unresolved type args,
+cycle detector) stay soft with the None fallback preserved; specialized-BODY
+compile errors propagate hard on the free-fn, implicit-generic, and
+method-mirror paths. Blast-radius differential vs `main@4d70508b`: zero
+newly-failing names across all generics-heavy suites.
+
+**Scope guard honored:** the stress_generics `generic_identity_*` "Null
+family" was investigated and NOT expanded into (see the 2026-07-12 S4 entry
+above — roots differ; family not live at base; CLAUDE.md family-(a) row is
+stale for those named tests, rebaselined by `831b1133`).
+
+**Cost saved:** each rejected compromise would have converted a
+compiler-correctness fix into either a publicly-unreachable feature (1), an
+identity-stability regression (2), a forbidden Unknown-arm analog (3), or a
+persistent diagnostic-masking layer (4).
+## 2026-07-12 — ADR009-A1 S2: per-site snapshot rebuild deleted; speculative annotation pre-pass runs with named reflection rejections until S3
+
+**Transitional-coexistence close-out (plan graft 2):** the S1 scaffolding — `build_type_reflection_snapshot` and the by-value `TypeReflectionSnapshot` carrier — is deleted in this slice. The snapshot type survives only as `FrozenTypeIndex`, the `SemanticFreeze`'s private internal index (no `Default` derive, no empty constructor, constructed solely inside `SemanticFreeze::freeze`). The three comptime sites (`statements.rs` Item::Comptime + `execute_module_inline_comptime_blocks`, `expressions/mod.rs` Expr::Comptime) and the authoritative annotation-handler path consume the shared `Arc<FreezeOverlay>` handle via `BytecodeCompiler::comptime_freeze_overlay()`; a site without a handle is a compile error (`NO_FREEZE_HANDLE_DIAGNOSTIC`, rejection-matrix row 3). The freeze barrier gained an alias/enum predeclare pass (`predeclare_item_semantic_freeze_inputs`) so it freezes registration-COMPLETE state — observable (intended, tested) semantics change: aliases and enums declared after a comptime block are now visible to it, matching the existing struct/function order-independence.
+
+**Considered and rejected for the annotation entry:** (a) keeping an explicitly-constructed empty index at the old `comptime.rs:1343` site — the empty-snapshot defect renamed; (b) `Option<Arc<FreezeOverlay>>` / an enum with a "no freeze yet" variant threaded through the comptime entries — `Option<freeze>` for the pre-pass, refused on sight per the merged plan notes; (c) building a fresh freeze inside the pre-barrier annotation callers — the per-site rebuild pattern renamed, and a Dec 52 violation (freezing registration-incomplete state).
+
+**Bounded deviation taken (S2 → S3):** the two SPECULATIVE annotation pre-pass callers (`functions_annotations.rs::apply_function_comptime_signature_directives_*` and `materialize_computed_comptime_extends`) run before the freeze barrier by construction. They now execute with `create_annotation_prepass_builtins_module`: same builtin names/signatures, but `type_ref`/`type_category`/`type_info` REJECT at call time with the named diagnostic `PREPASS_REFLECTION_UNAVAILABLE` (deliberately without the `[comptime error]` marker, so the pre-pass's existing deferral arm re-runs the handler authoritatively in pass 2, where the real freeze handle is consumed). This is surface-and-stop, not fabrication: no empty table exists, no wrong answer is returned, and handlers not touching reflection are unaffected. S3 owns the terminal resolution per the binding plan rule: either the pre-pass receives the registration-complete freeze (ordering restructure) or the limitation is surfaced to the user — "exempted-by-suppression" stays refused.
+
+**Cost saved:** the annotation-handler empty-snapshot defect (silently wrong `type_info` answers in handlers) is gone one slice early on the authoritative path; the pre-pass can no longer silently answer reflection queries from a fabricated empty table.
+
+## 2026-07-12 — ADR009-A1 S3: pre-pass freeze rule resolved — barrier moved AHEAD of the annotation pre-passes; S2's named-rejection module deleted
+
+**Terminal resolution of the S2 bounded deviation (plan graft 4):** the S3 outcome is (a) — the speculative pre-pass RECEIVES the registration-complete freeze. The semantic-freeze barrier (with its struct-schema + alias/enum predeclare inputs) moved ahead of `materialize_computed_comptime_extends` / `apply_function_comptime_signature_directives_for_analysis` in `compile()` (the freeze reads no function tables, so registration of its named inputs is complete at that point). Every annotation-handler execution — speculative or authoritative — now consumes the real `Arc<FreezeOverlay>` through the closed `execute_comptime_with_annotation_handler` ABI (`trait_impl_keys + freeze` params; the caller-supplied-module seam is gone), and the handler body receives the same `rewrite_comptime_type_symbol_args` type-symbol rewrite as comptime blocks (the rewrite's `Expr::Block` arm was extended to the `BlockItem::VariableDecl` / `BlockItem::Assignment` variants annotation-handler block bodies produce). `create_annotation_prepass_builtins_module` + `PREPASS_REFLECTION_UNAVAILABLE` + `register_prepass_reflection_rejections` are deleted — the two-flavor builtins module no longer exists, so an "exempted-by-suppression" pre-pass cannot be reintroduced without re-growing the seam.
+
+**Considered and rejected:** (a) keeping the S2 rejection module as a "pre-pass compatibility flavor" alongside the real-freeze path — a parallel implementation across the same producer boundary, and the exemption-by-suppression shape the plan refuses on sight; (b) `Option<freeze>` at the handler entry with a pre-pass `None` — rejection-matrix row 9; (c) exempting the pre-pass from Dec 52 ordering ("handlers may run before the freeze check because their output is discarded") — the ordering proof (`freeze_rejection_fires_before_annotation_handler_body_executes`) pins the opposite: a freeze-boundary rejection fires at the barrier BEFORE any handler body executes, including the speculative ones.
+
+**Pre-existing limitation surfaced, not masked:** JIT-native `print` does not route through the embedding host's output adapter (a bare `print(7)` under `with_jit()` + captured-output assertion fails identically with zero comptime/annotation involvement). The S3 VM+JIT e2e proofs therefore assert completion VALUES under both tiers (`expect_vm_and_jit_number`, the established `generated_capture.rs` / `flagship_wf3d.rs` convention) with output assertions VM-side, and the test module doc names the limitation. Follow-up territory: JIT print→adapter routing (S3-independent).
+
+**Cost saved:** reflection-using annotation handlers now materialize their generated functions at pre-pass time, so `fn` bodies (not just top-level statements) resolve them — the "Undefined function" class for reflection-driven codegen is gone; and the deferral arm no longer swallows a whole class of handler executions, so pre-pass behavior equals pass-2 behavior with one freeze.
+
+## 2026-07-12 — ADR009-A1 S5: legacy `type_info` vocabulary confined (not deleted), docs close-out, full-baseline sweep
+
+**Confinement, not deletion (spec §4.1 "one kind vocabulary" + program stage E5):** `TypeKindLabel`, `classify_legacy_type_info`, `build_type_info_heap_value` (shape-vm `type_reflection.rs`) and the `__ComptimeTypeInfo` schema (shape-runtime `builtin_schemas.rs`) stay alive but confined to the legacy `type_info` intrinsic path: the crate-wide `pub(crate) use` re-export of `build_type_info_heap_value` is deleted (the builder is now `pub(super)`, called path-qualified from the single intrinsic registration site), each definition site carries an `E5-deletes` marker, and a file-read sentinel test (`type_reflection/tests.rs::legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`, same pattern as `executor/tests/no_dynamic.rs`) pins that the vocabulary appears in neither `semantic_freeze.rs` nor the shared runtime catalog (`comptime_reflection.rs`) nor any `use` re-export. The legacy path keeps consuming the SAME freeze handle (`type_info_chained.rs` suite green) — no second table, no second derivation.
+
+**Considered and rejected:** (a) deleting the legacy path in this ticket ("it is only ~90 lines") — E5 territory; per invariant §3.6 a legacy class is deleted only when its typed replacement covers the wave41 example-matrix behavior, and `type_info(T).fields`/`kind` consumers have no payload-bearing replacement until the B tickets; premature deletion here would be an undeclared scope grab and would break the working `type_info` book/test surface. (b) Making `build_type_info_heap_value` fully private and moving the intrinsic registration into `type_reflection.rs` — moves a comptime-builtins registration concern into the reflection module purely to shrink visibility, growing the 474-line file toward its 500 cap and blurring the module boundary the E5 deletion will cut along; `pub(super)` + sentinel gives the same guarantee. (c) Renaming the legacy symbols to something "clearly legacy" (e.g. `legacy_type_info_carrier`) — renames of deletion-fated code are the exact defection-attractor CLAUDE.md §Forbidden documents; they are described by name + deletion fate instead.
+
+**Docs close-out:** design index `docs/design/typed-comptime.md` — `TypeRef<T>` row moved accepted → accepted + CURRENT / VM+JIT with A1 evidence; `FrozenType<T>` row annotated category-layer-CURRENT / payload-TARGET; new "canonical semantic freeze" CURRENT block + book status line (A1 behaviors gate-runnable in ShapeTest; book-chapter examples land in F1). `wave46-typed-comptime-first-tracers.md` gained the A1 addendum superseding its stale per-site-snapshot verification prose, with the rejection-matrix rows 1-8 → test mapping and measured suite counts (including the honest note that the audit's original "annotations_comptime 60 passed" line does not match `main@4d70508b`'s static count of 44; the branch is strictly additive 44→48, 108→109).
+
+**Not done here (deliberately):** no gate on the public generic-function reflection e2e (blocked by the generic-call specialization gap, ticket A3 — parameter-overlay path proven at unit level); no book-chapter edits (F1; the book lives in shape-web, outside this worktree and this ticket).
+
+## 2026-07-12 — ADR009-A1 review round 1: freeze barrier moved to the graph entry point (imported-module comptime sites regression)
+
+**Defect fixed (review findings 1+2):** the S1 barrier lived only inside `compile()` (Phase 2, root), but graph-driven compilation (`compile_with_graph_and_prelude`, the standard pipeline) compiles dependency modules FIRST in Phase 1 — so every comptime site inside an imported module (top-level `comptime { }` item, `Expr::Comptime` in an imported fn body, annotation comptime handler on an imported item) hit `comptime_freeze_overlay()` with `semantic_freeze = None` and failed with the row-3 NO_FREEZE_HANDLE diagnostic. A hard regression of the imports × comptime composition (the deleted per-site builder worked at any phase). Fix per the ticket's own rule: the named freeze inputs (struct schemas, aliases, enums) of every graph module are predeclared under their qualified names — mirroring `compile_module_from_graph`'s own qualification — followed by the root's, and the SINGLE unit barrier runs before Phase 1; `compile()` installs only when it is itself the entry point. Four red-then-green e2e tests in `feature_tests/module_tests.rs` cover all three site families plus populated-freeze reflection.
+
+**Considered and rejected:** (a) a per-module re-freeze at each Phase 1 module (`install` per module) — explicitly named forbidden by the finding, and a rebuild-per-site pattern one level up; (b) letting dependency comptime sites lazily trigger the install on first miss — the barrier stops being a barrier (Dec 52 ordering unprovable) and turns `comptime_freeze_overlay` into a construction site; (c) surface-and-stop (keep rejecting imported-module comptime with a friendlier message) — needs an ADR-level ruling and regresses previously-working multi-file behavior for no invariant gain, when the freeze inputs demonstrably read no function tables and can run early.
+
+**Bounded scope decision (pre-existing gap, not taken as part of this fix):** resolving a module's OWN nominal type by its BARE name from inside that module's comptime block (`type_ref(Point)` where the dep module defines `Point`) still yields "unknown semantic type identity": dependency structs freeze under their qualified names (`calc::numbers::Point`) while the body's identifier stays bare, and the deleted per-site builder on main read the same qualified tables — identical failure pre-branch. This is comptime name-resolution territory (B-ticket query-API extension), independent of barrier ordering; pinned in the test comment of `imported_module_comptime_reflection_consumes_a_populated_freeze`.
+
+**Cost saved:** imported-module comptime works again before the A1 merge instead of surfacing as a post-merge multi-file breakage the 12-gate set could not see (no gate exercised comptime inside an imported module).
+
+
+## 2026-07-13 — ADR009-B1 close-out: rejected compromises (payload-bearing `FrozenType<T>` via `reflect()`)
+
+Ticket ADR009-B1 (shape-lang/shape#5) landed `reflect(TypeRef<T>) ->
+FrozenType<T>` with the first complete payload categories (Primitive with the
+sealed `FrozenPrimitive` sub-algebra, Never, Erased). Compromises considered
+and REJECTED during implementation, plus the named/bounded decisions taken:
+
+**1. Declaring all 10 `FrozenType` variants with stub payload schemas.**
+The sealed sum is a 10-variant catalog (Dec 50/94) but B1 can only construct
+3 variants. Declaring all 10 in the descriptor schema — 7 of them as unit
+variants or empty-payload stubs "to be filled in by later tickets" — was
+rejected: unit variants are forgeable from source (an R7 hole), an
+empty-payload variant IS a partially populated descriptor (spec §3.1
+forbidden), and every later B ticket would churn the variant's payload arity
+(a comptime-ABI break per ticket). Chosen shape: the descriptor sum declares
+exactly the 3 constructable payload-arity-1 variants; the CATEGORY layer
+(`FrozenTypeCategory`, `type_category`) stays exhaustive at 10 untouched, and
+reflecting a non-enabled category is the named per-category R1 rejection
+("reflect: the <Category> payload descriptor has not landed (pending payload
+ticket); use type_category for the exhaustive category").
+
+**2. Dense variant numbering (0/1/2) for the enabled payload variants.**
+Numbering the 3 constructable variants densely was rejected: when B2/B4-B7
+land the remaining payload categories, dense ids renumber on every insert —
+canonical descriptors enter expansion/artifact hashes shared by VM and JIT
+(spec §3.3), so renumbering is a comptime-ABI break. Chosen: variant ids are
+pinned to the Dec 50/94 catalog ORDINALS (Primitive=0, Never=1, Erased=9)
+via `FrozenTypeCategory::catalog_ordinal()`, and the mini-VM's injected
+spellable model enum is pinned to the same ordinals at `register_enum` time
+(`frozen_type_payload_variant_ordinal`, gated on comptime_mode + the model
+enum name + every-member-pins), so the spellable model and the unspellable
+carrier can never disagree. The Erased=9 arm is proven end-to-end.
+
+**3. `bigint` as a separate top-level `FrozenPrimitive` member.**
+Rejected in favor of the named decision: `bigint` is
+`SignedInteger(IntegerWidth::Arbitrary)` — a member of the signed-integer
+FAMILY with an explicit unbounded-width domain member. A separate top-level
+member would have duplicated the family structure the Dec 50/94 list names
+("signed/unsigned integer families ... with exact width/domain payloads")
+and left `Arbitrary` unrepresentable for any future unsigned-arbitrary
+carrier. Also rejected at the carrier level: encoding widths as raw ints
+with a sentinel value for Arbitrary — untyped magic encoding. Chosen:
+`IntegerWidth`/`FloatWidth` registered as spellable unit-variant enum
+schemas generated from the shared runtime catalog (the `FrozenTypeCategory`
+precedent — users match these variants), each with its own named
+`runtime_lift_rejection` arm + lift tests in the SAME commit (an S2
+extension of the S1 data model, disclosed at slice close).
+
+**4. Erased bound-set reachability bounded to `any` (empty set) until A2/B2.**
+`type_ref` accepts bare identifiers only until A2, so the only reachable
+erased spelling is `any` — an empty bound set. Rather than stubbing a bound
+representation no source can produce (or testing pretend forms, invariant
+§3.7), `FrozenErasedBound` is a deliberately UNINHABITED enum: a non-empty
+bound set is STRUCTURALLY unrepresentable until A2 lands trait-bound syntax
+and B2 retypes the elements to `TraitRef`. The `bounds` array is complete
+and provably empty for `any` (`erased_bound_set_is_empty_for_any`, VM+JIT).
+This is surface-and-stop, not a partial descriptor: the payload is complete
+for every reachable form.
+
+**5. T-index: compiler-tracked, carrier-erased — no dynamic `Any` payload.**
+`FrozenType<T>`/`FrozenPrimitive` retain their type index in the COMPILER'S
+tracking (the outer type-check types `reflect(type_ref(T))` at the
+`FrozenType` model; the freeze/overlay supplies the identity), while the
+comptime value carrier (TypedObjectStorage over the descriptor schemas)
+erases `T` — it holds catalog ordinals + nested typed descriptors only.
+Rejected alternative: a dynamic `Any`-typed payload slot to "carry" the
+index at runtime — forbidden by Dec 50/94 and CLAUDE.md (no dynamic Any).
+No rendered type-name strings appear inside payloads (reviewed separately
+from the E5 import sentinel, which greps imports, not string renders).
+
+**Bounded named-exception rows (disclosed, not defections):** two permanent
+`post_inference_verify.rs` `WhitelistEntry` rows — the unspellable
+`COMPTIME_FROZEN_ERASED_SCHEMA` (S1) and the spellable injected
+`FrozenErased` model struct (S3) — because `bounds: Array<never>` maps
+through the intermediate-tier Any arm of the E0900 wall; both follow the
+audit-sanctioned `__ComptimeTarget`/`__ComptimeTypeInfo` §4.D.11 precedent
+(unspellable/lift-walled names, empty-only until A2/B2, retype at B2), with
+names pinned to the shared catalog constants by unit test. NOT a dynamic
+fallback: the wall stays on for everything else.
+
+**Off-plan surfaces taken (disclosed at slice close):** (a)
+`infer_function_value_binding_call` now bails for
+`is_comptime_builtin_function` names — the mini-VM's same-named unannotated
+forwarder was captured by that fast path, surfacing an unnamed generic
+arity error before the named R4 diagnostic (general rule: comptime builtins
+route through `infer_comptime_builtin_call`); (b) `ComptimeExecutionResult`
+grew a `schema_registry` carry field so the S4 value-deep lift wall
+(`comptime_result_lift_rejection`: typed-object fields + typed-array
+elements, every node through the shared `runtime_lift_rejection`) can NAME
+mini-VM-registered schemas — dense/colliding id lookup in the outer
+registry was the root cause of nested descriptors silently lifting as
+`Null`; the fix extends the CHANNEL to call the wall, never the reverse;
+(c) spellable payload-model values (`FrozenType`/`FrozenPrimitive`/
+`FrozenNever`/`FrozenErased`/`IntegerWidth`/`FloatWidth`) are
+user-constructable inside comptime exactly like `FrozenTypeCategory` —
+lift-walled by the same named arms, so R7 is held by the wall plus the
+unspellable carrier, not by spelling tricks; (d) the S5 LSP lookup
+(`reflection_enum_variant_names`) is a catalog projection, not a new list.
+
+**R8 structural close-out (grep evidence, 2026-07-13):** `grep -rn
+"derive(Default)\|impl Default"` over
+`comptime_builtins/type_reflection/payloads.rs`, `type_reflection.rs`,
+`semantic_freeze.rs`, and `shape-runtime/src/comptime_reflection.rs` finds
+NO `Default`/empty constructor on any descriptor type
+(`FrozenPayloadDescriptor`, `FrozenErasedBound`, `FrozenPrimitive`,
+`IntegerWidth`, `FloatWidth`, `SemanticFreeze`, `FrozenTypeIndex`) —
+wave46 row-9 discipline holds.
+
+**Cost saved:** each rejected compromise would have converted the tracer
+into either a forgeable/partial descriptor surface (1), a per-ticket
+comptime-ABI break (2), an untyped magic encoding (3), a pretend-coverage
+test surface (4), or a dynamic-Any reintroduction (5). Rejection-matrix
+rows R1-R8 with asserting test names: the B1 addendum in
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md`.
+
+## 2026-07-13 — ADR009-A2 S3: const-generic type applications in type_ref = named parse-time rejection (no TypeAnnotation const carrier grown)
+
+**Decision (spec §3.7 prove-or-reject, plan option (ii)):** `type_ref(Page<User, 32>)` and every const-generic type application inside `type_ref(...)` is a NAMED compile-time rejection — "const-generic type applications are not yet supported in type_ref" — emitted by the parser via a dedicated rejection-only grammar branch (`type_ref_const_generic_reject` in `shape.pest`), which matches an applied head whose argument list contains an integer literal and lowers straight to the named `ShapeError::ParseError`. No `TypeAnnotation` const variant, no descriptor `const:{i64}` grammar, no annotation-walk cascade was grown. Pinned by `parser/tests/type_ref_syntax.rs::const_generic_application_is_a_named_rejection`.
+
+**Considered and rejected:** (a) plan option (i) — a minimal `TypeAnnotation::ConstArg(i64)` carrier + descriptor extension: the carrier is NOT mechanical — it cascades through the exhaustive `TypeAnnotation` walks (`annotation_has_unresolved_inference_variable`, the S1 canonicalizer, type resolution, LSP annotation rendering) and would mint B4-substrate descriptor bytes (`const:{i64}`) in a slice whose ticket scope has no consumer, test surface, or Dec-54 arity/kind enforcement for them — descriptor grammar minted now is ABI (rehash = break) and belongs with B4's `type_constructor` work; (b) leaving the spelling a bare pest parse error ("expected EOI") — spec §3 surface-and-stop demands a NAMED diagnostic for a spelled-out form the ticket explicitly lists; (c) accepting the application and erasing the const arg (treating `Page<User, 32>` as `Page<User>`) — a partial descriptor / silent normalization, forbidden per §3 (no partial descriptors).
+
+**Bounded shape of the rejection branch:** it is not a parallel type grammar — it reuses `type_annotation` for type-position args and adds only `integer` as an alternative, exists solely inside the `type_ref_call` rule, produces no AST, and its single lowering action is the named error. When B4/Dec-54 lands a real const carrier, the branch is replaced by the real parse, not extended.
+
+## 2026-07-13 — ADR009-A2 S6 close: LSP type_ref completion routing, catalog row, and the compromises considered across A2
+
+**LSP routing decision (no new provider):** completion inside the `type_ref(` type position is textual context detection (`context.rs::is_in_type_ref_type_position` — word-boundary `type_ref(`, open-paren tracking that lets the callable form `(int) -> R` balance its own parentheses, string-literal cursor excluded per R1) routing to the EXISTING `CompletionContext::TypeAnnotation` provider. The provider arm was enriched — primitive spellings, user-declared type names (`SymbolKind::Type` only), in-scope generic type parameters — and still never offers value bindings. Considered and rejected: (a) a dedicated `TypeRefArgument` completion context + provider — a second type-completion surface that would drift from ordinary type-annotation positions (parallel-surface class); (b) AST-based detection via the parsed `Expr::TypeSyntax` node — a cursor mid-typing (`type_ref(Op`) rarely parses, and comptime blocks in generic fn bodies never compile at definition, so the textual discipline of `is_inside_comptime_block` (A3 precedent) is the only detection that works where the feature is most used.
+
+**Primitive-name list in the LSP provider:** the canonical primitive vocabulary lives in the compiler's frozen index (`type_reflection.rs::rebuild_frozen_type_index`), which shape-lsp cannot read (dependency direction). The completion arm carries a small primary-spelling list (`int`, `number`, `bool`, `string`, `decimal`, `bigint`, `unit`, `never`, `any`) mirroring that table — same bounded-list precedent as `definition.rs::is_builtin_primitive`, documented with a pointer at the definition site. Considered and rejected: exporting the frozen index's synonym table through shape-runtime purely for completion labels — moves compiler-owned vocabulary into a runtime crate for a non-semantic consumer; the list offers only primary spellings and misalignment cannot mint identities (completion text still goes through the real canonicalizer).
+
+**Composite-memo placement (S2, recorded here at close):** composite identities minted at rewrite time are answered by an interior-mutable memo ON `FreezeOverlay`, FOLDED INTO the existing `category_of` query (spec §4.1 one-query-API). Considered and rejected: carrying the category inside the `TYPE_REF_FORWARDER` rewrite (a third int literal) so the intrinsic never queries — a second derivation of a freeze fact traveling through bytecode, exactly the parallel-carrier shape §4.1 forbids, and it would leave `category_of` unable to answer for composite identities (query-API split).
+
+**Bare-generic-head tension left pinned (not resolved here):** `type_ref(Option)` stays `Nominal` (pinned by `frozen_type.rs::enum_and_builtin_container_types_are_nominal`), in recorded tension with the 2026-05-31 bare-unparameterized-generic ruling. Reclassification is B4's `type_constructor` territory; changing the pinned category in A2 would be a silent rebaseline of an A1 surface.
+
+**Const-generic scope decision:** unchanged from the S3 entry above (named parse-time rejection; no const carrier, no descriptor bytes).
+
+**Applied ENUM arity left unchecked (S5, recorded at close):** enum generic arity is not recoverable from the schema registry at freeze time (`register_enum` drops `EnumDef.type_params`); applied enum heads pass arity-unchecked rather than guessing. Wiring a compiler-side enum-arity store is a surfaced deferred decision.
+
+## 2026-07-13 — ADR009-B1 fix round 1 (A2+B1 merge seam): payload_of composites-layer symmetry + bounded-Erased disposition
+
+**Defect fixed:** at the A2+B1 integration merge (`c17d8b7f`), `FreezeOverlay::payload_of` resolved only parameters → base while `category_of` resolved parameters → composites → base. Every `reflect(type_ref(<A2 composite>))` — tuple, record, callable, reference, union, applied generic, `dyn` bound set — fell through to the base index and surfaced the wrong-family "type_ref received an unknown semantic type identity" diagnostic instead of the ticket-mandated named R1 per-category rejection. The merge was a textual union with zero reflect×composite tests over the seam. Fix: `payload_of` now resolves the same three layers as `category_of` (one query, three layers, spec §4.1), with e2e reflect×composite tests per category on both the site-interned and alias-fixpoint base paths (`tools/shape-test/tests/comptime/reflect.rs`).
+
+**Considered and rejected — answering Erased from the memoized category (empty bound set):** the naive symmetry fix (memo category Erased → `FrozenPayloadDescriptor::Erased { bounds: Vec::new() }`) would have made `dyn A + B` silently reflect to an EMPTY bound set — a partially populated descriptor, the exact spec §3.1 violation, and it would have falsified the uninhabited `FrozenErasedBound` and `erased_bound_set_is_empty_for_any`'s premise. The composites memo stores only `FrozenTypeCategory`, so no complete bound-set descriptor is constructible at HEAD. Disposition taken: bounded erased identities (site-interned `erased:dyn …` composites AND alias-fixpoint-interned base identities — the latter was live, not latent: `type Speaker = dyn Speak` reflected to `Erased { bounds: [] }` pre-fix) are the NAMED `bounded_erased_payload_rejection` until B2 lands the trait-reference bound descriptors; only the base-frozen `any` leaf answers the Erased payload. `FrozenErasedBound` stays uninhabited.
+
+**Considered and rejected — storing bound sets at intern time:** growing the composites memo to `(FrozenTypeCategory, Option<Vec<TraitBound>>)` so bounded Erased could answer now would mint a bound-set carrier B2 immediately retypes (B2 retypes the element to the trait-reference descriptor), a second derivation of descriptor data outside the payload query's single construction point, for a payload whose ticket has not landed. Named rejection is the sanctioned tracer pattern.
+
+**Union-coalescing subtlety kept single-derivation:** union coalescing memoizes base LEAF identities (`int | i64` → the `int` leaf, `any | any` → the `any` leaf). A memoized identity the base also froze answers from the base index (same payload, one derivation) — pinned by `coalesced_union_identities_answer_the_member_payload_through_the_memo` and the VM+JIT e2e `coalesced_union_reflects_the_member_payload`.
+
+**Turbofish-vs-call-argument surface (Dec 48 tension, recorded at close):** Decision 48's TARGET spelling is the turbofish `type_ref<T>()`; A2 keeps the shipped call-argument surface `type_ref(T)` and extends its argument to the full checked type grammar. Considered and rejected: (a) switching to turbofish in A2 — it re-spells the entire A1 surface (every pinned test, LSP row, and diagnostic text) inside a slice whose ticket is the type-argument grammar, and Dec 54 routes the constructor-identity story (where the turbofish earns its keep, `type_constructor<C>()`) through ticket B4 — the surface decision belongs there; (b) accepting both spellings — two grammars for one construct, drift-prone lockstep between rewrite/checker/LSP for zero semantic gain. The call-argument choice is descriptor-invisible (identities hash the canonicalized annotation, not the call spelling), so B4 can revisit the surface without an ABI break.
+
+**Record-field / union-member canonical ordering (R11, recorded at close):** Dec 50/94 are silent on member ordering; A2 fixes byte-sort-by-field-name for record descriptors and dedup-plus-byte-sort (with singleton collapse) for union members, with field optionality (`?`) and reference mutability (`&` vs `&mut`) descriptor-significant. The rule lives in the descriptor-grammar comment at `type_reflection.rs` (the B4/B7 ABI substrate — changing it re-hashes identities). Considered and rejected: source-order-significant descriptors — they violate the ticket's declaration-order-independence requirement (R11: reordering the source spelling of the same semantic type must not change its identity) and would make `{a: int, b: string}` and `{b: string, a: int}` distinct semantic types.
+
+## 2026-07-13 — ADR009-B2 close-out: ruled stances + rejected compromises (TraitRef / ImplRef / find_impl typed implementation evidence)
+
+Ticket ADR009-B2 (shape-lang/shape#6, branch adr009/b2, slices S1-S6) landed
+`trait_ref` / `find_impl` typed implementation evidence over the A1 semantic
+freeze. Considered-but-rejected compromises and ruled stances, logged per
+slice mandate:
+
+**1. Spelling: positional `trait_ref(Serializable)` vs Dec 49's
+`trait_ref<Serializable>()` turbofish.** Dec 49 spells the turbofish form,
+but ticket A2 (checked type-expression syntax) is not in this base — the only
+landed type-symbol surface is the positional bare-identifier form
+(`type_ref(int)`). B2 lands `trait_ref(Trait)` positionally for consistency.
+REJECTED: partially implementing A2's turbofish inside B2 (an undeclared
+scope grab that would collide with A2's checked-syntax design), and a
+string-argument stopgap (`trait_ref("Serializable")` — rejection-matrix row
+R3 forbids exactly that). A2 upgrades the spelling for `type_ref` and
+`trait_ref` together; the design-index row records the pending deviation.
+
+**2. Blanket-impl satisfaction and legacy numeric widening are NOT frozen
+evidence (divergence from legacy `implements`; E5 reconciles).** The legacy
+boolean path answers `true` for blanket-impl satisfaction
+(`registry.type_implements_trait` recursion) and for the int→number widening
+heuristic. `find_impl` answers only from direct (default or named)
+`TraitImplEntry` facts frozen at the barrier; querying a pair whose only
+satisfaction route is a blanket impl or the widening rule is a NAMED
+surface-and-stop (`BLANKET_IMPL_NOT_EVIDENCE_DIAGNOSTIC`,
+`NUMERIC_WIDENING_NOT_EVIDENCE_DIAGNOSTIC`), never a silent `None` and never
+fabricated evidence. REJECTED: inheriting either rule into the evidence
+surface (bounds-unevaluated blanket "evidence" is partially-populated
+evidence — spec §3.1 forbids partial descriptors; the widening rule is
+legacy-`implements` vocabulary E5 deletes). Known conservatism, documented in
+S2: ANY blanket impl on the trait surfaces the stop for every non-direct
+pair (bounds are not evaluated); a future ticket may refine satisfaction
+into certified evidence with its own descriptor scheme. The user-visible
+divergence from `implements` is deliberate and disappears when E5 deletes
+the legacy path.
+
+**3. Post-freeze (comptime-generated/derived) impls: named ordering stop,
+never `find_impl -> None`.** Implementations registered after the barrier —
+annotation/extend paths, From/TryFrom-derived Into/TryInto, J-CT.2
+`comptime impl` blocks — are not barrier truth. Querying such a pair is the
+named `POST_BARRIER_IMPL_NOT_EVIDENCE_DIAGNOSTIC` (detection consults the
+site-time key set via freeze reverse name maps, diagnostic-only, never an
+evidence source). REJECTED: (a) silent `None` — masks a Dec 52 ordering
+violation as a missing impl (the exact "document it as out-of-scope" shade
+the plan forbids); (b) re-reading live `env.trait_impl_keys()` at the query
+site to "see" the late impl — the deleted A1 per-site-rebuild pattern; (c)
+re-freezing after generation phases — a second barrier breaks the
+one-freeze-per-unit invariant (spec §4.1).
+
+**4. R5 branch scoping: honestly minimal enforcement, no over-claimed escape
+analysis.** What is enforced and proven: (i) ImplRef/TraitRef are
+comptime-only — the stage-boundary lift rejection fires when evidence would
+enter runtime code (R6 family, `runtime_lift_rejection`); (ii) evidence is
+obtainable ONLY through `find_impl`'s `Some(proof)` arm — issuance is
+structural (only `find_impl` builds `ImplRef`; the schema-name-checked
+opaque decode + freeze re-validation block forgery, R7). NOT claimed: an
+intra-comptime escape analysis (evidence stored into a comptime local that
+outlives its match arm inside the same comptime block is not tracked).
+REJECTED: shipping a partial-but-silent arm-lifetime checker (partial
+enforcement masquerading as full branch scoping); the residual is explicit
+follow-up territory for the checked-consumption tickets (B3+), where
+evidence-consuming builders give the arm-scoping rule a real consumer.
+
+**5. Named-impls-only pairs: named stop, not `None`, not a fabricated
+default (S4 ruled stance).** A pair implemented ONLY via named impls has
+real evidence but no default selection; `find_impl`'s two-argument form
+answers with `FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC` instead of picking one
+(fabricated-default evidence) or lying (`None` while evidence exists). A
+future named-impl selector argument can lift the stop without changing the
+descriptor scheme (impl identities already carry
+`impl:{trait}:{type}:{impl_name}`).
+
+**6. Ambiguous unqualified-impl attribution: query-time stop (S2 residual).**
+Impl entries registered under unqualified trait names attribute exact →
+target-module-relative → unique-suffix; an entry matching more than one
+frozen trait def poisons its candidate pairs with
+`AMBIGUOUS_IMPL_EVIDENCE_DIAGNOSTIC` at query time. REJECTED: guessing an
+attribution (wrong-evidence risk) or dropping the entry silently
+(un-queryable evidence with no surfaced reason).
+
+**S6 fold-in (firewall safety):** the S2 stance diagnostics carried an
+"(ADR-009 B2 ruled stance)" suffix; the comptime diagnostics firewall
+(`helpers.rs::sanitize_comptime_internal`) wholesale-replaces any message
+containing "ADR-" — the named stops would have surfaced user-facing as the
+generic not-available sentence. De-jargonized in S6 (red-then-green), pinned
+by `semantic_freeze::tests::b2_user_facing_diagnostics_are_firewall_safe`
+over every mini-VM-path B2 diagnostic. `NO_FREEZE_HANDLE_DIAGNOSTIC` (A1,
+compile-error path, never firewall-routed) deliberately excluded — outside
+this ticket's territory.
+
+**Evidence:** rejection-row → test-name table + verification counts in the
+B2 addendum of `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`;
+design-index rows `TraitRef<Trait>` / `ImplRef<T, Trait>` flipped to CURRENT
+/ VM+JIT in `docs/design/typed-comptime.md`.
+## 2026-07-13 — ADR009-D1 S6 close-out: rename semantics (recomputation vs generator-controlled) + D1 scope/duality dispositions
+
+**Pre-pass/pass-2 duality resolution (risk 7):** the speculative pre-pass
+(`materialize_computed_comptime_extends`) and the authoritative pass-2 compile
+are the SAME `ComptimeStage` producing the SAME `ExpansionIdentity` (both
+`ExpansionSite`s are built from identical AST inputs), reconciled by an
+idempotent `Fresh`/`Reissued` reservation in `GeneratedSymbolTable`.
+Considered and rejected: (a) distinct `PrePass`/`PassTwo` stage variants —
+would double every identity, split provenance across two records, and make
+"application runs once per identity" (Dec 67) unprovable; (b) a pre-pass-only
+side table merged later — a parallel carrier across the same producer
+boundary.
+
+**S3 scaffolding-span scope line (carried to close):** D1 re-anchors
+DECL-LEVEL spans (name span, synthesized type-param spans) of every generated
+declaration to its application anchor; body node spans keep handler-emitted
+(snippet-relative) offsets until D2 virtual documents give generated bodies
+addressable text — `GeneratedOrigin.node_path` covers body attribution
+meanwhile. `function_item_from_fragment`'s `Span::default()` sites are
+documented mini-VM scaffolding that never survives onto a registered
+declaration (no application anchor exists inside comptime execution).
+Pretending to fix every dummy span in unrelated annotation scaffolding was
+rejected as undeclared scope; leaving decl-level spans dummy was rejected as
+the Dec-68 required rejection.
+
+**augment_program_with_generated_extends tension (E3 deletion target):** the
+static AST collector still feeds the LSP's type-inference view and the
+analysis-program prepend. D1 attaches identity WITHOUT deepening it: identity
+is issued at the directive-consumption points, the collector gained no
+provenance API, and the S5 LSP navigation path answers from the compiler
+table instead of the collector. Extending the collector to carry SymbolId was
+considered and rejected — investment in an E3 deletion target.
+
+**Rename classification (S6):** a generated name is an explicit SOURCE BINDER
+when its token occurs inside the expansion's compiler-resolved generator or
+application anchors (a span refinement of provenance anchors, not document
+text discovery); otherwise it is wholly generator-controlled. Considered and
+rejected: (a) new `#binder` syntax from the Dec 68 example — Decision 69 name
+policies are NOT D1 (no new binder syntax; ticket rule); (b) linking the
+generator via `annotation_discovery.rs` name lookup — the provenance
+`generator` anchor from the query surface is the Dec-66-conformant source
+(annotation_discovery stays consumed for ordinary annotation navigation
+only); (c) letting the existing text-scan fallback (`find_symbol_occurrences`)
+serve source-binder renames — edits decoy comments/strings (row 6); the
+source-binder path now edits binder tokens + AST call sites only, with a
+retain-guard excluding generated ranges at the enforcement point; (d) partial
+text edits when SEVERAL generated symbols share the simple name and only some
+are source-bound — coarse-but-sound: any non-source-bound match makes the
+answer generator-controlled (a partial edit would desynchronize the rest).
+
+**Server report shape:** the generator-controlled report is surfaced as the
+rename request's error response (`jsonrpc invalid_params` carrying the named
+const + generator location in the message) after `prepare_rename` already
+declined; inventing a non-LSP side channel or encoding the report as an empty
+WorkspaceEdit (silent no-op) were rejected — the empty edit masks the fact,
+the error message states it.
+
+**Carried S2/S4 notes (recorded at their slices, closed here):** row-3
+content fingerprint uses a deterministic Debug-format structural AST encoding
+(a dedicated canonical AST fold can replace it if D2 needs cross-process
+stability); two applications generating one symbol name is now a compile
+error (was silent first-wins; zero tests relied on it); `checked_decl` and
+`application` anchors coincide until D2 virtual documents (documented field
+split in `GeneratedSymbolProvenance`); imported-annotation generator anchors
+share the compiling unit's file id (pre-existing file-less-Span model limit).
+
+**Cost saved:** rename over generated symbols never routes through text
+scanning (the decoy-edit defect died with this slice), D2's fixed
+point/virtual documents keep a clean seam (grep sentinels pin the exclusion),
+and the identity table remains the single provenance authority end to end.
+
+## 2026-07-13 — ADR009-D1 review round 1: generated-symbol LSP gate no longer hijacks bare-name-colliding ordinary symbols
+
+**Defect fixed (review finding 1, major):** the S5/S6 gate matched call
+sites and generated declarations by BARE-NAME equality only
+(`CallSiteCollector` collected FunctionCall/MethodCall/QualifiedFunctionCall
+alike; `symbols_named()` matches the method segment of `Point.answer`), so
+a hand-written `fn answer()` coexisting with the generated method
+`Point.answer` had its call sites classified as generated: goto-definition
+dropped the real `fn answer` declaration from the answer set, and the
+SourceBinder rename edited the generator binder plus the ordinary call
+sites while never editing the ordinary declaration (a corrupting workspace
+edit). Reproduced red via QUALIFIED calls (`m::answer()` — the plain
+`FunctionCall` AST span covers only the argument list, so plain-call sites
+were dropped by token refinement and masked the defect; the tests now pin
+both forms) and via hand-written `extend Other { method answer() }`
+method-kind collisions. Fix: every call site carries its syntactic
+`CallableKind` (Method vs Function), and a generated declaration only
+answers KIND-COMPATIBLE sites (`Point.answer` is method-kind; it can never
+claim `answer()` / `m::answer()`). For a SAME-KIND hand-written collision
+(hand-written method vs generated method — unresolvable without
+receiver-type analysis, which is D2+ territory): goto-definition answers
+the coarse-but-sound candidate SET (generated provenance + the hand-written
+declaration — the true definition is never excluded); references and rename
+ABSTAIN (`None` → the pre-D1 providers), since a reference claim or text
+edit over an ambiguous site set would corrupt/mislead one of the two
+symbols.
+
+**Considered and rejected:** (a) receiver-type resolution to disambiguate
+method-kind collisions exactly — a second type-inference evaluator inside
+the LSP gate (Dec 66 violation); the compiler query surface is the only
+evaluator, and the coarse union/abstain split is sound without it; (b)
+abstaining on goto-definition too — excludes the generated true definition
+at a genuinely-generated call site (the same unsoundness class the finding
+names, mirrored); (c) tightening ORDINARY rename so its text fallback stops
+touching same-named generator-binder/method tokens — pre-existing
+text-based-rename over-reach that predates D1 (rename.rs is documented
+text-based), self-consistent under recomputation, and out of this ticket's
+territory; the integration test pins the discriminator instead (the
+ordinary declaration IS edited, which the hijacking classification never
+did).
+
+**Cost saved:** the generated gate is now sound in both directions —
+generated symbols keep compiler-table navigation, ordinary symbols with
+colliding bare names keep their pre-D1 providers — before D2 builds the
+declaration-discovery fixed point on top of this gate.

@@ -1,12 +1,64 @@
+use super::semantic_freeze::{FreezeOverlay, annotation_has_unresolved_inference_variable};
 use crate::compiler::comptime_target;
 use sha2::{Digest, Sha256};
-use shape_ast::ast::TypeAnnotation;
+use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 pub(crate) use shape_runtime::comptime_reflection::FrozenTypeCategory;
+use shape_runtime::comptime_reflection::{FloatWidth, FrozenPrimitive, IntegerWidth};
 use shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA;
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+/// ADR-009 B1 S2: payload descriptors + heap-value builders for the sealed
+/// `FrozenType` sum returned by `reflect()`.
+pub(crate) mod payloads;
+
+/// The single primitive synonym-family table (ADR-009 §4.1 canonical-inputs
+/// rule): each row carries the family's interned synonyms AND its exact
+/// width/domain payload from the sealed `FrozenPrimitive` sub-algebra
+/// (Dec 50/94). `rebuild_frozen_type_index` derives both the identity map
+/// and the identity→payload map from THIS table — there is deliberately no
+/// second name table. `bigint` is the named `SignedInteger(Arbitrary)`
+/// decision (unbounded width-domain member, logged in `docs/defections.md`).
+const PRIMITIVE_SYNONYM_FAMILIES: &[(&[&str], FrozenPrimitive)] = &[
+    (&["unit", "void", "()"], FrozenPrimitive::Unit),
+    (&["bool"], FrozenPrimitive::Bool),
+    (&["char"], FrozenPrimitive::Char),
+    (
+        &["int", "i64"],
+        FrozenPrimitive::SignedInteger(IntegerWidth::W64),
+    ),
+    (&["i8"], FrozenPrimitive::SignedInteger(IntegerWidth::W8)),
+    (&["i16"], FrozenPrimitive::SignedInteger(IntegerWidth::W16)),
+    (&["i32"], FrozenPrimitive::SignedInteger(IntegerWidth::W32)),
+    (&["u8"], FrozenPrimitive::UnsignedInteger(IntegerWidth::W8)),
+    (
+        &["u16"],
+        FrozenPrimitive::UnsignedInteger(IntegerWidth::W16),
+    ),
+    (
+        &["u32"],
+        FrozenPrimitive::UnsignedInteger(IntegerWidth::W32),
+    ),
+    (
+        &["u64"],
+        FrozenPrimitive::UnsignedInteger(IntegerWidth::W64),
+    ),
+    (
+        &["bigint"],
+        FrozenPrimitive::SignedInteger(IntegerWidth::Arbitrary),
+    ),
+    (
+        &["number", "f64", "float"],
+        FrozenPrimitive::BinaryFloat(FloatWidth::W64),
+    ),
+    (&["f32"], FrozenPrimitive::BinaryFloat(FloatWidth::W32)),
+    (&["decimal"], FrozenPrimitive::Decimal),
+    (&["string", "str"], FrozenPrimitive::String),
+    (&["null"], FrozenPrimitive::Null),
+    (&["undefined"], FrozenPrimitive::Undefined),
+];
 
 /// Stable semantic identity carried by an opaque comptime `TypeRef`.
 ///
@@ -22,34 +74,89 @@ pub(crate) struct FrozenTypeIdentity {
 impl FrozenTypeIdentity {
     pub(crate) const INVALID: Self = Self { high: -1, low: -1 };
 
-    fn from_canonical_descriptor(descriptor: &str) -> Self {
+    pub(super) fn from_canonical_descriptor(descriptor: &str) -> Self {
         let digest = Sha256::digest(descriptor.as_bytes());
         let high = i64::from_be_bytes(digest[0..8].try_into().expect("8-byte hash prefix"));
         let low = i64::from_be_bytes(digest[8..16].try_into().expect("8-byte hash suffix"));
         Self { high, low }
     }
+
+    /// ADR-009 (ticket B2, slice S2; Dec 49 / Dec 50 rule 5): canonical TRAIT
+    /// identity — a DISTINCT identity kind from value-type identities, keyed
+    /// by the `trait:` descriptor prefix. Trait identities are NEVER interned
+    /// into `FrozenTypeIndex.frozen_type_ids` (so `type_ref(TraitName)` keeps
+    /// failing and `intern_identity`'s cross-category collision assertion
+    /// never sees them) and there is deliberately NO
+    /// `FrozenTypeCategory::Trait` variant.
+    pub(super) fn for_trait(canonical_trait_name: &str) -> Self {
+        Self::from_canonical_descriptor(&format!("trait:{canonical_trait_name}"))
+    }
+
+    /// ADR-009 (ticket B2, slice S2; Dec 49): canonical IMPL-evidence
+    /// identity — `impl:{trait}:{type}:{impl_name_or_default}`, so canonical
+    /// trait AND implementation identities enter the SHA-256 fingerprint
+    /// scheme and named impls (`impl Trait for Type as Name`) are distinct
+    /// evidence. `__default__` mirrors the registry's `DEFAULT_IMPL_NAME`
+    /// selector convention (`environment/registry.rs`).
+    pub(super) fn for_impl(
+        canonical_trait_name: &str,
+        target_type_name: &str,
+        impl_name: Option<&str>,
+    ) -> Self {
+        Self::from_canonical_descriptor(&format!(
+            "impl:{}:{}:{}",
+            canonical_trait_name,
+            target_type_name,
+            impl_name.unwrap_or("__default__")
+        ))
+    }
 }
 
-/// Immutable semantic type table handed from the outer compiler to one
-/// comptime mini-VM. Public `TypeRef` values carry only a canonical semantic
-/// fingerprint, never a rendered type name or snapshot-local ordinal.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct TypeReflectionSnapshot {
+/// ADR-009 §4.1 (ticket A1, slice S2): the semantic freeze's INTERNAL type
+/// index. This is the reduced remainder of the deleted per-site
+/// `TypeReflectionSnapshot` carrier (whose `build_type_reflection_snapshot`
+/// per-site rebuild pattern S2 deleted): it survives only inside
+/// [`super::semantic_freeze::SemanticFreeze`], never as a reachable parallel
+/// carrier, and deliberately has no `Default`/empty constructor — the freeze
+/// barrier is the single construction point. Scoped generic parameters live
+/// in [`FreezeOverlay`], not here. Public `TypeRef` values carry only a
+/// canonical semantic fingerprint, never a rendered type name or
+/// index-local ordinal.
+#[derive(Debug)]
+pub(crate) struct FrozenTypeIndex {
     pub(crate) struct_defs: HashMap<String, Vec<(String, TypeAnnotation)>>,
     pub(crate) enum_defs: HashMap<String, Vec<String>>,
     pub(crate) alias_defs: HashMap<String, TypeAnnotation>,
-    pub(crate) known_type_params: HashSet<String>,
-    parameter_owner: Option<String>,
-    frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
-    frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
+    /// ADR-009 A2 (slice S5): frozen trait names (named freeze input 5,
+    /// `BytecodeCompiler::known_traits`). `dyn` bounds and trait
+    /// intersections in checked type expressions resolve against this set;
+    /// an unknown bound is a named rejection in the unknown-identity family.
+    pub(crate) trait_names: std::collections::HashSet<String>,
+    /// ADR-009 A2 (slice S5): declared generic arity per user STRUCT name —
+    /// the freeze-input projection of `struct_generic_info.type_params`
+    /// (part of named freeze input 1). Enum generic arity is NOT recoverable
+    /// from the schema registry today, so applied enum heads are arity-
+    /// unchecked (surfaced S5 decision — no guessing).
+    pub(crate) struct_generic_arities: HashMap<String, usize>,
+    pub(crate) frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
+    pub(crate) frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
+    /// ADR-009 B1 S2: exact width/domain payload per Primitive identity,
+    /// derived from [`PRIMITIVE_SYNONYM_FAMILIES`] in the same rebuild that
+    /// interns the identities (one source, no second derivation).
+    pub(crate) frozen_primitive_payloads: HashMap<FrozenTypeIdentity, FrozenPrimitive>,
+    /// ADR-009 A2 (slice S5): identity-keyed declared arity for applicable
+    /// nominal heads (builtin table + user structs), built by
+    /// `rebuild_frozen_type_index`. Identity-keyed so alias heads inherit
+    /// their target's arity transparently (Dec 53).
+    pub(crate) generic_arities: HashMap<FrozenTypeIdentity, usize>,
 }
 
-impl TypeReflectionSnapshot {
+impl FrozenTypeIndex {
     pub(crate) fn frozen_type_id(&self, name: &str) -> Option<FrozenTypeIdentity> {
         self.frozen_type_ids.get(name).copied()
     }
 
-    fn category_for_identity(
+    pub(super) fn category_for_identity(
         &self,
         identity: FrozenTypeIdentity,
     ) -> Result<FrozenTypeCategory, String> {
@@ -59,41 +166,60 @@ impl TypeReflectionSnapshot {
             .ok_or_else(|| "type_ref received an unknown semantic type identity".to_string())
     }
 
-    fn rebuild_frozen_type_index(&mut self) {
+    /// ADR-009 B1 S2: the shared query API's payload half at the index
+    /// level. Enabled payload categories (Primitive / Never / Erased)
+    /// return complete typed descriptors; every non-enabled category is
+    /// the named R1 per-category rejection — never a partial descriptor.
+    /// The unknown-identity freeze-boundary rejection is unchanged.
+    pub(super) fn payload_for_identity(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> Result<payloads::FrozenPayloadDescriptor, String> {
+        use payloads::FrozenPayloadDescriptor;
+        match self.category_for_identity(identity)? {
+            FrozenTypeCategory::Primitive => self
+                .frozen_primitive_payloads
+                .get(&identity)
+                .copied()
+                .map(FrozenPayloadDescriptor::Primitive)
+                .ok_or_else(|| {
+                    "internal invariant: a Primitive identity was frozen without its \
+                     FrozenPrimitive payload"
+                        .to_string()
+                }),
+            FrozenTypeCategory::Never => Ok(FrozenPayloadDescriptor::Never),
+            FrozenTypeCategory::Erased => {
+                // The base-frozen `any` leaf carries the complete AND empty
+                // bound set. Every OTHER Erased identity the base can hold
+                // is an alias-fixpoint-interned `erased:dyn …` bound set
+                // (A2): its typed bound elements land with ticket B2
+                // (`FrozenErasedBound` is uninhabited until then), so it is
+                // the named bounded-erased rejection — never an empty
+                // (partial) bound set.
+                if self.frozen_type_id("any") == Some(identity) {
+                    Ok(FrozenPayloadDescriptor::Erased { bounds: Vec::new() })
+                } else {
+                    Err(payloads::bounded_erased_payload_rejection())
+                }
+            }
+            pending => Err(payloads::pending_payload_rejection(pending)),
+        }
+    }
+
+    pub(super) fn rebuild_frozen_type_index(&mut self) {
         let mut ids = HashMap::new();
         let mut categories = HashMap::new();
+        let mut primitive_payloads = HashMap::new();
+        let mut arities: HashMap<FrozenTypeIdentity, usize> = HashMap::new();
 
-        intern_synonyms(
-            &mut ids,
-            &mut categories,
-            &["unit", "void", "()"],
-            FrozenTypeCategory::Primitive,
-        );
-        for names in [
-            &["bool"][..],
-            &["char"][..],
-            &["int", "i64"][..],
-            &["i8"][..],
-            &["i16"][..],
-            &["i32"][..],
-            &["u8"][..],
-            &["u16"][..],
-            &["u32"][..],
-            &["u64"][..],
-            &["bigint"][..],
-            &["number", "f64", "float"][..],
-            &["f32"][..],
-            &["decimal"][..],
-            &["string", "str"][..],
-            &["null"][..],
-            &["undefined"][..],
-        ] {
-            intern_synonyms(
+        for (names, primitive) in PRIMITIVE_SYNONYM_FAMILIES {
+            let identity = intern_synonyms(
                 &mut ids,
                 &mut categories,
                 names,
                 FrozenTypeCategory::Primitive,
             );
+            primitive_payloads.insert(identity, *primitive);
         }
         intern_synonyms(
             &mut ids,
@@ -108,26 +234,30 @@ impl TypeReflectionSnapshot {
             FrozenTypeCategory::Erased,
         );
 
-        for name in [
-            "Array",
-            "Vec",
-            "HashMap",
-            "Option",
-            "Result",
-            "Future",
-            "Set",
-            "Deque",
-            "PriorityQueue",
-            "Mutex",
-            "Slice",
+        // Builtin nominal constructors: one table carries name AND declared
+        // arity (S5 R5 — arity is a freeze fact, enforced by the single
+        // canonicalizer, identity-keyed so alias heads inherit it).
+        for (name, arity) in [
+            ("Array", 1),
+            ("Vec", 1),
+            ("HashMap", 2),
+            ("Option", 1),
+            ("Result", 2),
+            ("Future", 1),
+            ("Set", 1),
+            ("Deque", 1),
+            ("PriorityQueue", 1),
+            ("Mutex", 1),
+            ("Slice", 1),
         ] {
-            intern_identity(
+            let identity = intern_identity(
                 &mut ids,
                 &mut categories,
                 name,
                 &format!("nominal:{name}"),
                 FrozenTypeCategory::Nominal,
             );
+            arities.insert(identity, arity);
         }
 
         let mut nominal_names: Vec<_> = self
@@ -139,42 +269,80 @@ impl TypeReflectionSnapshot {
         nominal_names.sort();
         nominal_names.dedup();
         for name in nominal_names {
-            intern_identity(
+            let identity = intern_identity(
                 &mut ids,
                 &mut categories,
                 &name,
                 &format!("nominal:{name}"),
                 FrozenTypeCategory::Nominal,
             );
+            // User-struct arity from the declared type parameters (freeze
+            // input 1 projection). Enums have no entry — arity-unchecked.
+            if let Some(arity) = self.struct_generic_arities.get(&name) {
+                arities.insert(identity, *arity);
+            }
         }
 
-        let mut parameters: Vec<_> = self.known_type_params.iter().cloned().collect();
-        parameters.sort();
-        let parameter_owner = self.parameter_owner.as_deref().unwrap_or("<module>");
-        for name in parameters {
-            intern_identity(
-                &mut ids,
-                &mut categories,
-                &name,
-                &format!("parameter:{parameter_owner}:{name}"),
-                FrozenTypeCategory::Parameter,
-            );
-        }
+        // Scoped generic parameters are NOT interned here: they enter through
+        // a `FreezeOverlay` (`parameter:{owner}:{name}` identities layered
+        // over the shared base), never through the base index (ADR-009 §4.1).
 
         // Aliases are transparent: an alias receives the exact identity of its
         // canonical target. Iterate to a fixed point so alias chains normalize.
+        //
+        // ADR-009 A2 (slice S1): composite alias targets (`type Pair =
+        // [int, string]`, `type Ids = Array<UserId>`) intern via the SAME
+        // canonicalizer as every other composite form, resolving leaves
+        // against the module-scope table built so far (a `FreezeOverlay`
+        // cannot exist mid-freeze; this table is exactly what the module
+        // overlay will read). A target whose leaves are not yet resolvable
+        // this round is retried next round; a target that never resolves
+        // (unknown name, self-cycle) simply stays un-interned — the later
+        // `type_ref` use rejects with the named unknown-identity diagnostic.
+        // Termination bound: `aliases.len()` rounds resolve any acyclic
+        // chain; interned values are write-once so composite embeddings
+        // never re-hash.
         let mut aliases: Vec<_> = self.alias_defs.iter().collect();
         aliases.sort_by(|(left, _), (right, _)| left.cmp(right));
         for _ in 0..=aliases.len() {
             let mut changed = false;
             for (alias, target) in &aliases {
-                let Some(target_name) = target.as_simple_name() else {
+                if let Some(target_name) = target.as_simple_name() {
+                    let Some(identity) = ids.get(target_name).copied() else {
+                        continue;
+                    };
+                    changed |= ids.insert((*alias).clone(), identity) != Some(identity);
+                    continue;
+                }
+                let canonical = {
+                    let resolve = |name: &str| {
+                        let identity = ids.get(name).copied()?;
+                        let category = categories.get(&identity).copied()?;
+                        Some((identity, category))
+                    };
+                    let is_trait = |name: &str| self.trait_names.contains(name);
+                    let applied_arity =
+                        |identity: FrozenTypeIdentity| arities.get(&identity).copied();
+                    canonicalize_with(
+                        target,
+                        &LeafScope {
+                            resolve: &resolve,
+                            is_trait: &is_trait,
+                            applied_arity: &applied_arity,
+                        },
+                    )
+                };
+                let Ok(canonical) = canonical else {
                     continue;
                 };
-                let Some(identity) = ids.get(target_name).copied() else {
-                    continue;
-                };
-                changed |= ids.insert((*alias).clone(), identity) != Some(identity);
+                if let Some(previous) = categories.insert(canonical.identity, canonical.category) {
+                    assert_eq!(
+                        previous, canonical.category,
+                        "canonical type identity collision across semantic categories"
+                    );
+                }
+                changed |= ids.insert((*alias).clone(), canonical.identity)
+                    != Some(canonical.identity);
             }
             if !changed {
                 break;
@@ -183,6 +351,8 @@ impl TypeReflectionSnapshot {
 
         self.frozen_type_ids = ids;
         self.frozen_type_categories = categories;
+        self.frozen_primitive_payloads = primitive_payloads;
+        self.generic_arities = arities;
     }
 }
 
@@ -212,7 +382,7 @@ fn intern_synonyms(
     categories: &mut HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
     names: &[&str],
     category: FrozenTypeCategory,
-) {
+) -> FrozenTypeIdentity {
     let identity = intern_identity(
         ids,
         categories,
@@ -223,83 +393,448 @@ fn intern_synonyms(
     for name in &names[1..] {
         ids.insert((*name).to_string(), identity);
     }
+    identity
 }
 
-pub(crate) fn build_type_reflection_snapshot(
-    compiler: &crate::compiler::BytecodeCompiler,
-    enclosing_type_params: &[String],
-) -> TypeReflectionSnapshot {
-    let mut snapshot = TypeReflectionSnapshot::default();
-    for (name, (field_names, _span)) in &compiler.struct_types {
-        let field_types = compiler
-            .struct_generic_info
-            .get(name)
-            .map(|info| info.runtime_field_types.clone())
-            .unwrap_or_default();
-        let ordered = field_names
-            .iter()
-            .filter_map(|field_name| {
-                field_types
-                    .get(field_name)
-                    .cloned()
-                    .map(|annotation| (field_name.clone(), annotation))
-            })
-            .collect();
-        snapshot.struct_defs.insert(name.clone(), ordered);
-    }
-    for (alias, target) in &compiler.type_aliases {
-        snapshot
-            .alias_defs
-            .insert(alias.clone(), TypeAnnotation::Basic(target.clone()));
-    }
-    for type_name in compiler
-        .type_tracker
-        .schema_registry()
-        .type_names()
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-    {
-        let Some(schema) = compiler.type_tracker.schema_registry().get(&type_name) else {
-            continue;
-        };
-        let Some(enum_info) = schema.get_enum_info() else {
-            continue;
-        };
-        snapshot.enum_defs.insert(
-            type_name,
-            enum_info
-                .variants
-                .iter()
-                .map(|variant| variant.name.clone())
-                .collect(),
+/// ADR-009 A2 (slice S1): canonicalization result for one resolved type
+/// expression — the canonical descriptor string, its exhaustive semantic
+/// category, and the identity hashed from the descriptor.
+///
+/// Compile-time-only value confined to `comptime_builtins` (`pub(super)`):
+/// it never escapes as a runtime carrier; public `TypeRef` values carry only
+/// the 128-bit identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CanonicalType {
+    pub(super) descriptor: String,
+    pub(super) category: FrozenTypeCategory,
+    pub(super) identity: FrozenTypeIdentity,
+}
+
+/// The 32-lowercase-hex embedding form of a frozen identity. Every composite
+/// descriptor embeds its children in this form (see the descriptor grammar on
+/// [`canonicalize_type_annotation`]).
+pub(super) fn identity_hex(identity: FrozenTypeIdentity) -> String {
+    format!("{:016x}{:016x}", identity.high as u64, identity.low as u64)
+}
+
+/// ADR-009 A2 (slice S1): THE single canonicalizer from a resolved
+/// `TypeAnnotation` to `(descriptor, category, identity)` (spec §4.1 —
+/// no second derivation of any semantic fact).
+///
+/// Leaves resolve ONLY through the freeze/overlay query API
+/// ([`FreezeOverlay::identity_of`] / [`FreezeOverlay::category_of`]): alias
+/// transparency, primitive-synonym coalescing and `parameter:{owner}:{name}`
+/// scoping are inherited from the freeze, never re-implemented here.
+/// Failure is always a named error — never `FrozenTypeIdentity::INVALID`,
+/// never a partially populated descriptor.
+///
+/// # Canonical descriptor grammar (B4/B7 ABI substrate — identity-stable)
+///
+/// These strings are SHA-256 pre-images of [`FrozenTypeIdentity`] values
+/// shared by VM and JIT; changing any rule re-hashes identities (ABI break).
+///
+/// * **Child embedding** — every child (leaf or composite) embeds as the
+///   32-lowercase-hex of its identity (`identity_hex`), written `h` below.
+///   Leaf pre-images live in the freeze index (`Primitive:int`,
+///   `nominal:Point`, `parameter:{owner}:{name}`, …) and are unchanged.
+/// * **Tuple** — `tuple:[h,h,…]`; member order significant.
+/// * **Record** — `record:{name:h,name?:h,…}`; fields sorted by byte order
+///   of the field NAME (declaration-order independent); `?` marks an
+///   optional field; duplicate field names are a named rejection.
+/// * **Callable** — `callable:(h,h?,…)->h`; positional parameter order
+///   significant; `?` marks an optional parameter; names insignificant.
+/// * **Reference** — `reference:&h` / `reference:&mut h`; mutability is
+///   descriptor-significant.
+/// * **Union** — `union:(h|h|…)`; membership is an associative SET: a
+///   syntactically nested union (the parenthesized spelling the grammar
+///   admits, `(int | string) | bool`) splices its members into the
+///   enclosing union, then members dedup and byte-sort by their hex
+///   embedding (source order/duplication/grouping insignificant); a union
+///   whose members all coalesce to one identity IS that member (no
+///   singleton union descriptor exists).
+/// * **Erased** — bare `any` resolves as the frozen erased leaf; trait
+///   objects are `erased:dyn A+B` with the bound set sorted + deduped by
+///   source path name (traits carry no frozen identity — Dec 50/94 erases
+///   them to a bound set). S5: every bound must be a trait frozen in this
+///   compilation unit (named freeze input, `known_traits`); an unknown
+///   bound is a named rejection in the unknown-identity family.
+/// * **Applied generic** — `applied:h<h,h,…>`; the head must resolve to a
+///   `Nominal` leaf (applying arguments to primitives or parameters is a
+///   named rejection); category is `Nominal` (Dec 50/94: applied builtin and
+///   user types are nominal with typed arguments); distinct from the bare
+///   nominal head. `T[]` / `Array<T>` spellings share one identity. S5: the
+///   head's declared arity (builtin table + user-struct type parameters;
+///   identity-keyed, alias-transparent) is enforced — a mismatch is a named
+///   rejection; enum heads carry no recoverable arity and are unchecked.
+/// * **Intersection** — all-object intersections flatten to the Record form
+///   above (field collisions are named rejections); all-trait intersections
+///   erase to the SAME `erased:dyn` bound-set descriptor as the `dyn`
+///   spelling; every other intersection is a named rejection (Dec 50/94
+///   rule 3).
+/// * **Structural leaves** — `void`/`()`/`never`/`null`/`undefined` resolve
+///   through the freeze's synonym table like any other leaf.
+///
+/// # Rejections
+///
+/// * Unresolved leaf name at any depth → named error in the
+///   `unknown semantic type identity` family, naming the leaf (Dec 48/52).
+/// * Inference hole at any depth (analyzer tyvar marker, detected by the
+///   ONE freeze-boundary predicate
+///   `annotation_has_unresolved_inference_variable`) → named error in the
+///   Dec 52 `cannot be frozen … unresolved inference variable` family.
+pub(super) fn canonicalize_type_annotation(
+    annotation: &TypeAnnotation,
+    overlay: &FreezeOverlay,
+) -> Result<CanonicalType, String> {
+    let resolve = |name: &str| {
+        let identity = overlay.identity_of(name)?;
+        let category = overlay.category_of(identity).ok()?;
+        Some((identity, category))
+    };
+    let index = overlay.base().index();
+    let is_trait = |name: &str| index.trait_names.contains(name);
+    let applied_arity = |identity: FrozenTypeIdentity| index.generic_arities.get(&identity).copied();
+    canonicalize_with(
+        annotation,
+        &LeafScope {
+            resolve: &resolve,
+            is_trait: &is_trait,
+            applied_arity: &applied_arity,
+        },
+    )
+}
+
+/// Leaf resolution context for the canonicalizer. Two contexts exist, both
+/// projections of the ONE freeze table: the public entry point resolves
+/// through a [`FreezeOverlay`], and the alias fixpoint inside
+/// [`FrozenTypeIndex::rebuild_frozen_type_index`] resolves through the
+/// module-scope base table it is constructing (an overlay cannot exist
+/// mid-freeze). Same code path, no second derivation.
+///
+/// ADR-009 A2 (slice S5): the scope carries THREE projections of the one
+/// freeze table — leaf identity/category, the frozen trait-name set (`dyn`
+/// bounds / trait intersections), and the identity-keyed declared arity of
+/// applicable nominal heads.
+struct LeafScope<'a> {
+    resolve: &'a dyn Fn(&str) -> Option<(FrozenTypeIdentity, FrozenTypeCategory)>,
+    is_trait: &'a dyn Fn(&str) -> bool,
+    applied_arity: &'a dyn Fn(FrozenTypeIdentity) -> Option<usize>,
+}
+
+fn canonicalize_with(
+    annotation: &TypeAnnotation,
+    scope: &LeafScope<'_>,
+) -> Result<CanonicalType, String> {
+    // Dec 52 freeze boundary: an inference hole anywhere in the expression is
+    // a named rejection before any descriptor is formed. The predicate is the
+    // same exhaustive walk the freeze barrier uses.
+    if annotation_has_unresolved_inference_variable(annotation) {
+        return Err(
+            "semantic freeze rejected: this type expression cannot be frozen because \
+             it contains an unresolved inference variable"
+                .to_string(),
         );
     }
-    snapshot
-        .known_type_params
-        .extend(enclosing_type_params.iter().cloned());
-    if let Some(function) = compiler
-        .current_function
-        .and_then(|index| compiler.program.functions.get(index))
-        && let Some(definition) = compiler.function_defs.get(&function.name)
-    {
-        snapshot.parameter_owner = Some(function.name.clone());
-        if let Some(parameters) = &definition.type_params {
-            snapshot.known_type_params.extend(
-                parameters
-                    .iter()
-                    .map(|parameter| parameter.name().to_string()),
-            );
+    canonicalize_resolved(annotation, scope)
+}
+
+fn canonicalize_resolved(
+    annotation: &TypeAnnotation,
+    scope: &LeafScope<'_>,
+) -> Result<CanonicalType, String> {
+    match annotation {
+        TypeAnnotation::Basic(name) => canonical_leaf(name, scope),
+        TypeAnnotation::Reference(path) => canonical_leaf(path.as_str(), scope),
+        TypeAnnotation::Void => canonical_leaf("void", scope),
+        TypeAnnotation::Never => canonical_leaf("never", scope),
+        TypeAnnotation::Null => canonical_leaf("null", scope),
+        TypeAnnotation::Undefined => canonical_leaf("undefined", scope),
+        TypeAnnotation::Array(inner) => {
+            canonical_applied("Array", std::slice::from_ref(inner), scope)
+        }
+        TypeAnnotation::Generic { name, args } if args.is_empty() => {
+            canonical_leaf(name.as_str(), scope)
+        }
+        TypeAnnotation::Generic { name, args } => canonical_applied(name.as_str(), args, scope),
+        TypeAnnotation::Tuple(items) => {
+            let mut embedded = Vec::with_capacity(items.len());
+            for item in items {
+                embedded.push(identity_hex(canonicalize_resolved(item, scope)?.identity));
+            }
+            Ok(composite(
+                format!("tuple:[{}]", embedded.join(",")),
+                FrozenTypeCategory::Tuple,
+            ))
+        }
+        TypeAnnotation::Object(fields) => canonical_record(fields, scope),
+        TypeAnnotation::Function { params, returns } => {
+            let mut embedded = Vec::with_capacity(params.len());
+            for param in params {
+                let member = canonicalize_resolved(&param.type_annotation, scope)?;
+                embedded.push(format!(
+                    "{}{}",
+                    identity_hex(member.identity),
+                    if param.optional { "?" } else { "" }
+                ));
+            }
+            let returns = canonicalize_resolved(returns, scope)?;
+            Ok(composite(
+                format!(
+                    "callable:({})->{}",
+                    embedded.join(","),
+                    identity_hex(returns.identity)
+                ),
+                FrozenTypeCategory::Callable,
+            ))
+        }
+        TypeAnnotation::Borrow { mutable, inner } => {
+            let member = canonicalize_resolved(inner, scope)?;
+            Ok(composite(
+                format!(
+                    "reference:&{}{}",
+                    if *mutable { "mut " } else { "" },
+                    identity_hex(member.identity)
+                ),
+                FrozenTypeCategory::Reference,
+            ))
+        }
+        TypeAnnotation::Union(items) => {
+            // Union membership is an associative set (descriptor grammar
+            // above): a syntactically nested union splices its members into
+            // the enclosing union BEFORE dedup/byte-sort, so
+            // `(int | string) | bool` and `int | string | bool` mint one
+            // identity and `int | (int | string)` cannot escape member
+            // dedup. Descriptors are the B4/B7 ABI substrate — an opaque
+            // nested-union embedding would fork semantically equal unions
+            // into distinct identities.
+            let mut flattened = Vec::with_capacity(items.len());
+            flatten_union_members(items, &mut flattened);
+            if flattened.is_empty() {
+                return Err("type_ref union type must name at least one member".to_string());
+            }
+            let mut members = Vec::with_capacity(flattened.len());
+            for item in flattened {
+                members.push(canonicalize_resolved(item, scope)?);
+            }
+            let mut embedded: Vec<String> = members
+                .iter()
+                .map(|member| identity_hex(member.identity))
+                .collect();
+            embedded.sort();
+            embedded.dedup();
+            if embedded.len() == 1 {
+                // All members coalesce to one identity: the union IS its
+                // member (int | i64 == int); no singleton union descriptor.
+                return Ok(members.into_iter().next().expect("non-empty union"));
+            }
+            Ok(composite(
+                format!("union:({})", embedded.join("|")),
+                FrozenTypeCategory::Union,
+            ))
+        }
+        TypeAnnotation::Intersection(items) => {
+            // Dec 50/94 rule 3, one classification rule (S5 R8): an
+            // intersection whose members are ALL structural object types
+            // normalizes to a Record; one whose members are ALL frozen trait
+            // names erases to the same bound-set descriptor as the `dyn`
+            // spelling; anything else is a named rejection.
+            if items
+                .iter()
+                .all(|item| matches!(item, TypeAnnotation::Object(_)))
+            {
+                let mut merged: Vec<ObjectTypeField> = Vec::new();
+                for item in items {
+                    let TypeAnnotation::Object(fields) = item else {
+                        unreachable!("all members checked as object types");
+                    };
+                    merged.extend(fields.iter().cloned());
+                }
+                return canonical_record(&merged, scope);
+            }
+            let mut bound_names = Vec::with_capacity(items.len());
+            for item in items {
+                let name = match item {
+                    TypeAnnotation::Basic(name) => Some(name.clone()),
+                    TypeAnnotation::Reference(path) => Some(path.to_string()),
+                    _ => None,
+                };
+                match name {
+                    Some(name) if (scope.is_trait)(&name) => bound_names.push(name),
+                    _ => {
+                        return Err(format!(
+                            "type_ref cannot canonicalize this intersection: members must \
+                             be either all structural object types (normalizing to a \
+                             record) or all trait bounds (erasing to a bound set) per \
+                             Dec 50/94; member '{}' is neither",
+                            item.to_type_string()
+                        ));
+                    }
+                }
+            }
+            canonical_erased_bounds(bound_names)
+        }
+        TypeAnnotation::Dyn(bounds) => {
+            if bounds.is_empty() {
+                return Err(
+                    "type_ref erased dyn type must name at least one trait bound".to_string(),
+                );
+            }
+            // S5 R2 (dyn case): bounds resolve against the frozen trait-name
+            // set — an unknown bound is a named rejection in the
+            // unknown-identity family, naming the bound.
+            let mut names = Vec::with_capacity(bounds.len());
+            for path in bounds {
+                let name = path.to_string();
+                if !(scope.is_trait)(&name) {
+                    return Err(format!(
+                        "type_ref received an unknown semantic type identity: trait bound \
+                         '{name}' is not a trait frozen in this compilation unit"
+                    ));
+                }
+                names.push(name);
+            }
+            canonical_erased_bounds(names)
         }
     }
-    snapshot.rebuild_frozen_type_index();
-    snapshot
+}
+
+/// Union members splice associatively (set semantics — see the descriptor
+/// grammar on [`canonicalize_type_annotation`]): a syntactically nested
+/// union contributes its members to the enclosing union, never an opaque
+/// child identity. Purely structural — leaves (including alias names) are
+/// untouched and still resolve through the one freeze query API.
+fn flatten_union_members<'a>(items: &'a [TypeAnnotation], out: &mut Vec<&'a TypeAnnotation>) {
+    for item in items {
+        match item {
+            TypeAnnotation::Union(nested) => flatten_union_members(nested, out),
+            other => out.push(other),
+        }
+    }
+}
+
+/// Shared erased-bound-set constructor (Dec 50/94): `dyn A + B` and the
+/// trait-intersection spelling `A + B` reach ONE descriptor — bound names
+/// sorted + deduped, so the bound set is source-order independent.
+fn canonical_erased_bounds(mut names: Vec<String>) -> Result<CanonicalType, String> {
+    names.sort();
+    names.dedup();
+    Ok(composite(
+        format!("erased:dyn {}", names.join("+")),
+        FrozenTypeCategory::Erased,
+    ))
+}
+
+fn composite(descriptor: String, category: FrozenTypeCategory) -> CanonicalType {
+    let identity = FrozenTypeIdentity::from_canonical_descriptor(&descriptor);
+    CanonicalType {
+        descriptor,
+        category,
+        identity,
+    }
+}
+
+fn canonical_leaf(name: &str, scope: &LeafScope<'_>) -> Result<CanonicalType, String> {
+    let Some((identity, category)) = (scope.resolve)(name) else {
+        return Err(format!(
+            "type_ref received an unknown semantic type identity: type name '{name}' \
+             is not frozen in this compilation unit"
+        ));
+    };
+    Ok(CanonicalType {
+        descriptor: identity_hex(identity),
+        category,
+        identity,
+    })
+}
+
+fn canonical_record(
+    fields: &[ObjectTypeField],
+    scope: &LeafScope<'_>,
+) -> Result<CanonicalType, String> {
+    let mut entries = Vec::with_capacity(fields.len());
+    for field in fields {
+        let member = canonicalize_resolved(&field.type_annotation, scope)?;
+        entries.push((
+            field.name.as_str(),
+            field.optional,
+            identity_hex(member.identity),
+        ));
+    }
+    // Field-name byte sort: record identity is declaration-order independent.
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    for window in entries.windows(2) {
+        if window[0].0 == window[1].0 {
+            return Err(format!(
+                "type_ref record type declares duplicate field '{}'",
+                window[0].0
+            ));
+        }
+    }
+    let rendered: Vec<String> = entries
+        .iter()
+        .map(|(name, optional, hex)| {
+            format!("{name}{}:{hex}", if *optional { "?" } else { "" })
+        })
+        .collect();
+    Ok(composite(
+        format!("record:{{{}}}", rendered.join(",")),
+        FrozenTypeCategory::Record,
+    ))
+}
+
+fn canonical_applied(
+    head: &str,
+    args: &[TypeAnnotation],
+    scope: &LeafScope<'_>,
+) -> Result<CanonicalType, String> {
+    let head_leaf = canonical_leaf(head, scope)?;
+    if head_leaf.category != FrozenTypeCategory::Nominal {
+        return Err(format!(
+            "type_ref cannot apply type arguments to '{head}': only nominal type \
+             constructors accept type arguments (found category {})",
+            head_leaf.category.variant_name()
+        ));
+    }
+    // S5 R5: declared arity is a freeze fact (builtin table + user-struct
+    // type parameters), identity-keyed so alias heads inherit it. Heads with
+    // no recoverable arity (enums today) are unchecked — surfaced decision,
+    // never a guess.
+    if let Some(expected) = (scope.applied_arity)(head_leaf.identity)
+        && expected != args.len()
+    {
+        return Err(format!(
+            "type_ref applied type '{head}' expects {expected} type argument(s), but {} \
+             were provided",
+            args.len()
+        ));
+    }
+    let mut embedded = Vec::with_capacity(args.len());
+    for arg in args {
+        embedded.push(identity_hex(canonicalize_resolved(arg, scope)?.identity));
+    }
+    Ok(composite(
+        format!(
+            "applied:{}<{}>",
+            identity_hex(head_leaf.identity),
+            embedded.join(",")
+        ),
+        FrozenTypeCategory::Nominal,
+    ))
 }
 
 pub(crate) fn build_frozen_type_ref_heap_value(
     identity: FrozenTypeIdentity,
-    snapshot: &TypeReflectionSnapshot,
+    freeze: &FreezeOverlay,
 ) -> Result<HeapValue, String> {
-    snapshot.category_for_identity(identity)?;
+    // Rejection R1 (ADR-009 B2 slice S5, Dec 49): traits are not value
+    // types. A frozen TRAIT identity (freeze input 4 — a distinct identity
+    // kind, never interned into the type-identity map) reaching the TypeRef
+    // builder is the NAMED trait rejection, not the generic
+    // unknown-identity error a genuinely-unknown name keeps (A1 row 2).
+    if freeze.is_frozen_trait_identity(identity) {
+        return Err(super::trait_evidence::TRAIT_NOT_A_VALUE_TYPE_DIAGNOSTIC.to_string());
+    }
+    freeze.category_of(identity)?;
     typed_slot_into_heap_value(typed_object_for_named_schema(
         COMPTIME_FROZEN_TYPE_REF_SCHEMA,
         &[
@@ -309,28 +844,30 @@ pub(crate) fn build_frozen_type_ref_heap_value(
     ))
 }
 
-pub(crate) fn frozen_type_category_from_ref(
+/// Read the frozen semantic identity out of an opaque `TypeRef` argument
+/// slot. The ONE TypeRef-argument reader shared by every TypeRef-consuming
+/// intrinsic (`type_category`, `reflect` — ADR-009 B1 S3); `caller` names
+/// the intrinsic in each R4 diagnostic ("<caller> expects a TypeRef value"
+/// family), so both intrinsics reject malformed arguments identically.
+fn frozen_identity_from_ref(
     slot: &KindedSlot,
-    snapshot: &TypeReflectionSnapshot,
-) -> Result<FrozenTypeCategory, String> {
+    caller: &str,
+) -> Result<FrozenTypeIdentity, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
-        return Err("type_category expects a TypeRef value".to_string());
+        return Err(format!("{caller} expects a TypeRef value"));
     }
     let storage = slot
         .as_typed_object_storage()
-        .ok_or_else(|| "type_category received a null TypeRef value".to_string())?;
+        .ok_or_else(|| format!("{caller} received a null TypeRef value"))?;
     let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
         .ok_or_else(|| {
         format!(
-            "type_category could not resolve TypeRef schema id {}",
+            "{caller} could not resolve TypeRef schema id {}",
             storage.schema_id
         )
     })?;
     if schema.name != COMPTIME_FROZEN_TYPE_REF_SCHEMA {
-        return Err(format!(
-            "type_category expects TypeRef, got '{}'",
-            schema.name
-        ));
+        return Err(format!("{caller} expects TypeRef, got '{}'", schema.name));
     }
     let identity_field = |name: &str| -> Result<i64, String> {
         let field = schema
@@ -341,11 +878,31 @@ pub(crate) fn frozen_type_category_from_ref(
             .and_then(|value| value.as_i64())
             .ok_or_else(|| format!("TypeRef {name} is not an integer"))
     };
-    let identity = FrozenTypeIdentity {
+    Ok(FrozenTypeIdentity {
         high: identity_field("identity_high")?,
         low: identity_field("identity_low")?,
-    };
-    snapshot.category_for_identity(identity)
+    })
+}
+
+pub(crate) fn frozen_type_category_from_ref(
+    slot: &KindedSlot,
+    freeze: &FreezeOverlay,
+) -> Result<FrozenTypeCategory, String> {
+    let identity = frozen_identity_from_ref(slot, "type_category")?;
+    freeze.category_of(identity)
+}
+
+/// ADR-009 B1 S3: `reflect(TypeRef<T>) -> FrozenType<T>` — identity from
+/// the TypeRef argument (same reader as `type_category`, reflect-named R4
+/// diagnostics), payload from the ONE freeze query API (`payload_of`),
+/// carrier from the S2 payload builders. R1 per-category rejections and
+/// the unknown-identity freeze-boundary rejection propagate unchanged.
+pub(crate) fn frozen_type_from_ref(
+    slot: &KindedSlot,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    let identity = frozen_identity_from_ref(slot, "reflect")?;
+    payloads::build_frozen_type_heap_value(identity, freeze)
 }
 
 pub(crate) fn build_frozen_type_category_heap_value(
@@ -367,7 +924,11 @@ pub(crate) fn build_frozen_type_category_heap_value(
     ))
 }
 
-fn typed_slot_into_heap_value(slot: KindedSlot) -> Result<HeapValue, String> {
+// `pub(super)`-within-`comptime_builtins`: the S3 trait-evidence carriers
+// (`trait_evidence.rs`) reuse the SAME slot→heap-value ownership transfer as
+// the TypeRef/FrozenTypeCategory carriers — one construction path, no second
+// derivation.
+pub(super) fn typed_slot_into_heap_value(slot: KindedSlot) -> Result<HeapValue, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) || slot.raw() == 0 {
         return Err("typed reflection carrier was not a typed object".to_string());
     }
@@ -382,6 +943,10 @@ fn typed_slot_into_heap_value(slot: KindedSlot) -> Result<HeapValue, String> {
     Ok(HeapValue::TypedObject(TypedObjectPtr::new(ptr)))
 }
 
+// E5-deletes: legacy `type_info` string kind vocabulary. Confined to this
+// module + the single path-qualified intrinsic caller in the parent module
+// (ADR-009 §4.1 "one kind vocabulary"); ticket E5 deletes it. Sentinel:
+// `tests::legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`.
 #[derive(Debug, Clone, Copy)]
 enum TypeKindLabel {
     Int,
@@ -411,10 +976,17 @@ impl TypeKindLabel {
     }
 }
 
-fn classify_legacy_type_info(name: &str, snapshot: &TypeReflectionSnapshot) -> TypeKindLabel {
-    if snapshot.known_type_params.contains(name) {
+/// Legacy `type_info` classification (`TypeKindLabel` string vocabulary).
+/// E5 deletes this path; until then it consumes the SAME freeze handle as
+/// the typed reflection surface — scoped generic parameters come from the
+/// overlay, nominal/alias/enum membership from the freeze's index. No
+/// per-site table survives.
+// E5-deletes: reachable only from `build_type_info_heap_value` below.
+fn classify_legacy_type_info(name: &str, freeze: &FreezeOverlay) -> TypeKindLabel {
+    if freeze.is_scoped_parameter(name) {
         return TypeKindLabel::Unresolved;
     }
+    let index = freeze.base().index();
     match name {
         "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => TypeKindLabel::Int,
         "number" | "f64" | "f32" | "float" => TypeKindLabel::Number,
@@ -423,9 +995,9 @@ fn classify_legacy_type_info(name: &str, snapshot: &TypeReflectionSnapshot) -> T
         "decimal" => TypeKindLabel::Decimal,
         "bigint" => TypeKindLabel::BigInt,
         "()" | "unit" | "void" => TypeKindLabel::Unit,
-        _ if snapshot.struct_defs.contains_key(name)
-            || snapshot.alias_defs.contains_key(name)
-            || snapshot.enum_defs.contains_key(name) =>
+        _ if index.struct_defs.contains_key(name)
+            || index.alias_defs.contains_key(name)
+            || index.enum_defs.contains_key(name) =>
         {
             TypeKindLabel::TypedObject
         }
@@ -433,12 +1005,19 @@ fn classify_legacy_type_info(name: &str, snapshot: &TypeReflectionSnapshot) -> T
     }
 }
 
-pub(crate) fn build_type_info_heap_value(
+// E5-deletes: legacy `type_info` record builder (`__ComptimeTypeInfo`
+// carrier). `pub(super)` — the parent module's `type_info` intrinsic is the
+// ONLY caller (path-qualified, never re-exported); ticket E5 deletes the path
+// together with `TypeKindLabel` / `classify_legacy_type_info` and the
+// `__ComptimeTypeInfo` schema registration in `builtin_schemas.rs`.
+pub(super) fn build_type_info_heap_value(
     type_name: &str,
-    snapshot: &TypeReflectionSnapshot,
+    freeze: &FreezeOverlay,
 ) -> Result<HeapValue, String> {
-    let label = classify_legacy_type_info(type_name, snapshot);
-    let field_rows: Vec<(String, String, Vec<comptime_target::FieldAnnotation>)> = snapshot
+    let label = classify_legacy_type_info(type_name, freeze);
+    let field_rows: Vec<(String, String, Vec<comptime_target::FieldAnnotation>)> = freeze
+        .base()
+        .index()
         .struct_defs
         .get(type_name)
         .map(|fields| {

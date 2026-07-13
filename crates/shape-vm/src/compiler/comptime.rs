@@ -17,12 +17,47 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 const TYPE_REF_FORWARDER: &str = "\u{1}comptime:forward-type-ref";
+// ADR-009 B2 (slice S4): `trait_ref(TraitName)` lowers to this unspellable
+// forwarder carrying the FROZEN trait identity as int literals — the same
+// identity-literal transport as `type_ref`; a trait name string never
+// crosses into the mini-VM (Dec 49).
+const TRAIT_REF_FORWARDER: &str = "\u{1}comptime:forward-trait-ref";
 
-/// (name, arity, target_method, return_fields, named_return_type)
-const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option<&str>)] = &[
-    ("implements", 2, "implements", None, None),
-    ("warning", 1, "warning", None, None),
-    ("error", 1, "error", None, None),
+/// `find_impl`'s forwarder return annotation: `Option<ImplRef-carrier>`.
+/// Must stay byte-identical to
+/// `format!("Option<{COMPTIME_FROZEN_IMPL_REF_SCHEMA}>")` — pinned by
+/// `find_impl_forwarder_return_marker_matches_the_impl_ref_schema`.
+const FIND_IMPL_RETURN_MARKER: &str = "Option<\u{1}comptime:ImplRef>";
+
+/// (name, arity, target_method, return_fields, named_return_type,
+/// param_annotations)
+///
+/// `param_annotations` (slice S5): concrete parameter annotations for the
+/// generated forwarder fn. Forwarder params default to UNANNOTATED
+/// (inference vars), which routes mini-VM calls through the
+/// value-binding-call path (`infer_function_value_binding_call`) where any
+/// argument unifies — bypassing the named rejection matrix in
+/// `infer_comptime_builtin_call`. `find_impl` annotates its params with the
+/// reserved carrier schemas so the mini-VM analyzer routes the call through
+/// the comptime-builtin arm and the R3/R4/R8 named diagnostics fire at
+/// check time instead of decaying to generic intrinsic errors.
+const COMPTIME_BUILTIN_FORWARDERS: &[(
+    &str,
+    usize,
+    &str,
+    Option<&[&str]>,
+    Option<&str>,
+    Option<&[&str]>,
+)] = &[
+    // `implements` declares its real `bool` return (S5): the R4 rejection
+    // ("a boolean cannot authorize...") needs the legacy boolean's type to
+    // be CONCRETE at the `find_impl` argument position in the mini-VM —
+    // an unannotated fresh var would silently unify with the TraitRef
+    // carrier schema. Typing truth only; the legacy string-key semantics
+    // in `comptime_builtins.rs` are untouched (E5 deletes them).
+    ("implements", 2, "implements", None, Some("bool"), None),
+    ("warning", 1, "warning", None, None, None),
+    ("error", 1, "error", None, None, None),
     (
         "build_config",
         0,
@@ -40,6 +75,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
             "version",
         ]),
         None,
+        None,
     ),
     // W7 (2026-05-17) — `type_info(T)` comptime builtin per
     // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
@@ -55,6 +91,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
         "type_info",
         Some(&["kind", "name", "fields", "type_ref"]),
         None,
+        None,
     ),
     (
         TYPE_REF_FORWARDER,
@@ -62,6 +99,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
         super::comptime_builtins::TYPE_REF_INTRINSIC,
         None,
         Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
+        None,
     ),
     (
         "type_category",
@@ -69,13 +107,51 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
         super::comptime_builtins::TYPE_CATEGORY_INTRINSIC,
         None,
         Some("FrozenTypeCategory"),
+        None,
+    ),
+    // ADR-009 B2 (slice S4): trait identity + implementation evidence.
+    // The trait_ref forwarder is reached only through the site rewrite
+    // (identity-literal transport); find_impl is called by name and answers
+    // ONLY from frozen impl evidence (R9: unimplemented pair = None).
+    (
+        TRAIT_REF_FORWARDER,
+        2,
+        super::comptime_builtins::TRAIT_REF_INTRINSIC,
+        None,
+        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TRAIT_REF_SCHEMA),
+        None,
+    ),
+    (
+        "find_impl",
+        2,
+        super::comptime_builtins::FIND_IMPL_INTRINSIC,
+        None,
+        Some(FIND_IMPL_RETURN_MARKER),
+        // S5: concrete carrier-schema params — see `param_annotations` note
+        // in the table doc above.
+        Some(&[
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
+        ]),
+    ),
+    // ADR-009 B1 S3 — `reflect(TypeRef<T>) -> FrozenType<T>`: forwards to
+    // the fourth freeze-consuming intrinsic. The named return type is the
+    // injected payload-model enum (`frozen_type_enum_item`), so `match`
+    // over the result resolves the sealed sum's variants and payloads.
+    (
+        "reflect",
+        1,
+        super::comptime_builtins::REFLECT_INTRINSIC,
+        None,
+        Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
+        None,
     ),
     // First typed generation fragment surface. `item_fn(...)` returns a
     // typed fragment carrier accepted by `extend (expr)`.
-    ("item_fn", 3, "item_fn", None, None),
+    ("item_fn", 3, "item_fn", None, None, None),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
-    ("string_lit", 1, "string_lit", None, None),
+    ("string_lit", 1, "string_lit", None, None, None),
 ];
 
 /// Comptime execution result.
@@ -95,6 +171,14 @@ pub(crate) struct ComptimeExecutionResult {
     /// re-emits each with the driving construct's source span
     /// (comptime-excellence §4.4).
     pub warnings: Vec<super::comptime_builtins::ComptimeDiagnostic>,
+    /// ADR-009 B1 S4: the mini-VM program's schema registry, carried out so
+    /// the stage boundary can resolve schema ids the mini-VM registered
+    /// (injected payload-model enums, comptime object literals). Without it
+    /// the lift wall cannot NAME a descriptor nested inside (or forged as)
+    /// a mini-VM-registered schema value — the id would miss (or collide)
+    /// in the outer registry and the value would silently swallow to
+    /// `Null`. Consumed by [`comptime_result_lift_rejection`].
+    pub schema_registry: std::sync::Arc<shape_runtime::type_schema::TypeSchemaRegistry>,
 }
 
 /// §4.4 comptime-handler `ctx` param type. Field NAMES + ORDER match the
@@ -276,8 +360,9 @@ fn comptime_target_param_type() -> TypeAnnotation {
 
 fn comptime_builtin_forwarders() -> Vec<Item> {
     let mut items = vec![frozen_type_category_enum_item()];
+    items.extend(frozen_type_payload_model_items());
     items.extend(COMPTIME_BUILTIN_FORWARDERS.iter().map(
-        |(name, arity, target_method, return_fields, named_return_type)| {
+        |(name, arity, target_method, return_fields, named_return_type, param_annotations)| {
             let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
                 .map(|i| shape_ast::ast::FunctionParameter {
                     pattern: shape_ast::ast::DestructurePattern::Identifier(
@@ -288,7 +373,9 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     is_reference: false,
                     is_mut_reference: false,
                     is_out: false,
-                    type_annotation: None,
+                    type_annotation: param_annotations
+                        .and_then(|annotations| annotations.get(i))
+                        .map(|annotation| TypeAnnotation::Basic((*annotation).to_string())),
                     default_value: None,
                 })
                 .collect();
@@ -309,8 +396,22 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
             // If the forwarder has known return fields, generate an Object
             // type annotation so the compiler can emit GetFieldTyped for
             // property access on the return value.
+            //
+            // ADR-009 B2 (slice S4): a named return type of the form
+            // `Option<inner>` (find_impl's `Option<ImplRef-carrier>`)
+            // becomes a real `Option` generic annotation so `match` with
+            // `Some(..)` / `None` patterns type-checks in the mini-VM.
             let return_type = named_return_type
-                .map(|name| TypeAnnotation::Basic((*name).to_string()))
+                .map(|name| {
+                    if let Some(inner) = name
+                        .strip_prefix("Option<")
+                        .and_then(|rest| rest.strip_suffix('>'))
+                    {
+                        TypeAnnotation::option(TypeAnnotation::Basic(inner.to_string()))
+                    } else {
+                        TypeAnnotation::Basic((*name).to_string())
+                    }
+                })
                 .or_else(|| {
                     return_fields.map(|fields| {
                         TypeAnnotation::Object(
@@ -385,6 +486,125 @@ fn frozen_type_category_enum_item() -> Item {
     )
 }
 
+/// ADR-009 B1 S3 — the payload-model type Items injected into every
+/// mini-VM program beside `frozen_type_category_enum_item`, ALL generated
+/// from the S1 shared runtime catalog (no hand-written variant lists):
+///
+/// - `FrozenType` — the sealed sum with ONLY the enabled payload variants
+///   (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`), each a tuple variant
+///   carrying its `Frozen*` payload descriptor type. Variant ids are
+///   ordinal-pinned by `register_enum` (statements.rs) to match the
+///   unspellable value-carrier schema — see
+///   `comptime_reflection::frozen_type_payload_variant_ordinal`.
+/// - `FrozenPrimitive` — the sealed sub-algebra; the integer/float FAMILY
+///   variants carry their width-domain enum payload
+///   (`FROZEN_PRIMITIVE_VARIANTS[..].payload_type`).
+/// - `IntegerWidth` / `FloatWidth` — the width-domain enums.
+/// - `FrozenNever` / `FrozenErased` — payload descriptor structs. The
+///   `FrozenErased.bounds` element type is `never`: `dyn Trait` spellings
+///   arrive with A2/B2, so the bound set is provably empty — the honest
+///   structural form of "complete for reachable forms" (spec §3.1/§3.7).
+fn frozen_type_payload_model_items() -> Vec<Item> {
+    use shape_ast::ast::{EnumDef, EnumMember, EnumMemberKind, StructField, StructTypeDef};
+    use shape_runtime::comptime_reflection::{
+        FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
+        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME, FloatWidth,
+        INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth, frozen_type_enabled_payload_type_name,
+    };
+
+    let enum_item = |name: &str, members: Vec<EnumMember>| {
+        Item::Enum(
+            EnumDef {
+                name: name.to_string(),
+                doc_comment: None,
+                type_params: None,
+                members,
+                annotations: Vec::new(),
+            },
+            Span::DUMMY,
+        )
+    };
+    let unit_member = |name: &str| EnumMember {
+        name: name.to_string(),
+        kind: EnumMemberKind::Unit { value: None },
+        span: Span::DUMMY,
+        doc_comment: None,
+    };
+    let tuple_member = |name: &str, payload_type: &str| EnumMember {
+        name: name.to_string(),
+        kind: EnumMemberKind::Tuple(vec![TypeAnnotation::Basic(payload_type.to_string())]),
+        span: Span::DUMMY,
+        doc_comment: None,
+    };
+    let struct_item = |name: &str, fields: Vec<StructField>| {
+        Item::StructType(
+            StructTypeDef {
+                name: name.to_string(),
+                doc_comment: None,
+                type_params: None,
+                fields,
+                methods: Vec::new(),
+                annotations: Vec::new(),
+                native_layout: None,
+            },
+            Span::DUMMY,
+        )
+    };
+
+    vec![
+        enum_item(
+            FROZEN_TYPE_PAYLOAD_ENUM_NAME,
+            FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
+                .into_iter()
+                .map(|category| {
+                    tuple_member(
+                        category.variant_name(),
+                        frozen_type_enabled_payload_type_name(category)
+                            .expect("enabled payload categories carry a descriptor type name"),
+                    )
+                })
+                .collect(),
+        ),
+        enum_item(
+            "FrozenPrimitive",
+            FROZEN_PRIMITIVE_VARIANTS
+                .iter()
+                .map(|variant| match variant.payload_type {
+                    Some(payload_type) => tuple_member(variant.name, payload_type),
+                    None => unit_member(variant.name),
+                })
+                .collect(),
+        ),
+        enum_item(
+            INTEGER_WIDTH_SCHEMA_NAME,
+            IntegerWidth::ALL
+                .into_iter()
+                .map(|width| unit_member(width.variant_name()))
+                .collect(),
+        ),
+        enum_item(
+            FLOAT_WIDTH_SCHEMA_NAME,
+            FloatWidth::ALL
+                .into_iter()
+                .map(|width| unit_member(width.variant_name()))
+                .collect(),
+        ),
+        struct_item("FrozenNever", Vec::new()),
+        struct_item(
+            "FrozenErased",
+            vec![StructField {
+                annotations: Vec::new(),
+                is_comptime: false,
+                name: "bounds".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
+                type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Never)),
+                default_value: None,
+            }],
+        ),
+    ]
+}
+
 /// Ensure that the last statement in a body is a tail value (returns its result).
 ///
 /// When the last statement is `Statement::If`, its value is discarded by the
@@ -422,61 +642,65 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
 /// compiler-issued identity. The walk is fully recursive so natural nested forms
 /// work too — `print(type_info(User).name)`, `if implements(T, "Ord") { ... }`,
 /// `let n = type_info(field.type).name`, etc. — not only a bare top-level
-/// statement. The outer type-checker accepts the same bare-identifier form
-/// (inference/access.rs `type_symbol_ident_args`), so the two paths agree.
+/// statement. The outer type-checker accepts exactly the same `type_ref`
+/// argument shapes — a bare identifier OR the checked type-expression carrier
+/// `Expr::TypeSyntax` (inference/access.rs `is_type_ref_builtin` gate) — so
+/// the two paths agree; change both together (ADR-009 A2 lockstep contract).
+///
+/// ADR-009 A2 (slice S4): returns `Err` when a checked type expression fails
+/// canonicalization (unresolved leaf at any depth, inference hole, Dec 50/94
+/// normalization rejection). The error propagates out of the comptime entry
+/// points BEFORE the user's comptime code compiles or executes (Dec 52 freeze
+/// boundary) — never an `INVALID` sentinel, never a partial descriptor.
 fn rewrite_comptime_type_symbol_args(
     stmt: &mut Statement,
-    type_snapshot: &super::comptime_builtins::TypeReflectionSnapshot,
-) {
+    freeze: &super::comptime_builtins::FreezeOverlay,
+) -> Result<()> {
     match stmt {
-        Statement::Expression(expr, _) => {
-            rewrite_comptime_type_symbol_args_expr(expr, type_snapshot)
-        }
-        Statement::Return(Some(expr), _) => {
-            rewrite_comptime_type_symbol_args_expr(expr, type_snapshot)
-        }
+        Statement::Expression(expr, _) => rewrite_comptime_type_symbol_args_expr(expr, freeze)?,
+        Statement::Return(Some(expr), _) => rewrite_comptime_type_symbol_args_expr(expr, freeze)?,
         Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
         Statement::VariableDecl(decl, _) => {
             if let Some(init) = &mut decl.value {
-                rewrite_comptime_type_symbol_args_expr(init, type_snapshot);
+                rewrite_comptime_type_symbol_args_expr(init, freeze)?;
             }
         }
         Statement::Assignment(assign, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut assign.value, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(&mut assign.value, freeze)?;
         }
         Statement::For(for_loop, _) => {
             match &mut for_loop.init {
                 shape_ast::ast::ForInit::ForIn { iter, .. } => {
-                    rewrite_comptime_type_symbol_args_expr(iter, type_snapshot);
+                    rewrite_comptime_type_symbol_args_expr(iter, freeze)?;
                 }
                 shape_ast::ast::ForInit::ForC {
                     init,
                     condition,
                     update,
                 } => {
-                    rewrite_comptime_type_symbol_args(init, type_snapshot);
-                    rewrite_comptime_type_symbol_args_expr(condition, type_snapshot);
-                    rewrite_comptime_type_symbol_args_expr(update, type_snapshot);
+                    rewrite_comptime_type_symbol_args(init, freeze)?;
+                    rewrite_comptime_type_symbol_args_expr(condition, freeze)?;
+                    rewrite_comptime_type_symbol_args_expr(update, freeze)?;
                 }
             }
             for s in &mut for_loop.body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
         }
         Statement::While(while_loop, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, freeze)?;
             for s in &mut while_loop.body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
         }
         Statement::If(if_stmt, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, freeze)?;
             for s in &mut if_stmt.then_body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
             if let Some(else_body) = &mut if_stmt.else_body {
                 for s in else_body {
-                    rewrite_comptime_type_symbol_args(s, type_snapshot);
+                    rewrite_comptime_type_symbol_args(s, freeze)?;
                 }
             }
         }
@@ -485,11 +709,11 @@ fn rewrite_comptime_type_symbol_args(
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }
         | Statement::ExtendItemsExpr { expression, .. } => {
-            rewrite_comptime_type_symbol_args_expr(expression, type_snapshot);
+            rewrite_comptime_type_symbol_args_expr(expression, freeze)?;
         }
         Statement::ReplaceBody { body, .. } => {
             for s in body {
-                rewrite_comptime_type_symbol_args(s, type_snapshot);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
         }
         // Directives with no embedded expression / already-parsed payloads.
@@ -498,12 +722,13 @@ fn rewrite_comptime_type_symbol_args(
         | Statement::SetParamType { .. }
         | Statement::SetReturnType { .. } => {}
     }
+    Ok(())
 }
 
 fn rewrite_comptime_type_symbol_args_expr(
     expr: &mut Expr,
-    type_snapshot: &super::comptime_builtins::TypeReflectionSnapshot,
-) {
+    freeze: &super::comptime_builtins::FreezeOverlay,
+) -> Result<()> {
     // Rewrite this call's own bare-identifier args if it is a reflection call.
     if let Expr::FunctionCall { name, args, .. } = expr {
         if name == "type_info" || name == "implements" {
@@ -513,12 +738,59 @@ fn rewrite_comptime_type_symbol_args_expr(
                 }
             }
         } else if name == "type_ref" {
+            // ADR-009 A2 (S4): two accepted argument shapes, one identity
+            // scheme. A bare identifier resolves through the freeze's
+            // name-keyed query (A1 behavior, unchanged — unresolved names
+            // flow the INVALID sentinel to the intrinsic's named rejection);
+            // the checked type-expression carrier canonicalizes through the
+            // SAME overlay (leaves resolve via `identity_of`, so a leaf
+            // spelled bare or inside a composite reaches one identity) and
+            // rejects HERE, at compile time, with the canonicalizer's named
+            // error before user comptime executes (Dec 52).
+            // Rejection R1 fall-through (B2 slice S5): a bare identifier that
+            // is not a frozen VALUE type but IS a frozen trait transports the
+            // trait identity — still an identity literal, never a string —
+            // so the TypeRef carrier builder can answer the NAMED
+            // traits-are-not-value-types rejection. Genuinely-unknown names
+            // keep transporting INVALID (A1 row 2's generic diagnostic).
+            let lowered = match args.as_slice() {
+                [Expr::Identifier(ident, span)] => Some((
+                    freeze
+                        .identity_of(ident)
+                        .or_else(|| freeze.trait_identity_of(ident))
+                        .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID),
+                    *span,
+                )),
+                [Expr::TypeSyntax(annotation, span)] => Some((
+                    freeze.canonicalize_type(annotation).map_err(|message| {
+                        ShapeError::SemanticError {
+                            message,
+                            location: None,
+                        }
+                    })?,
+                    *span,
+                )),
+                _ => None,
+            };
+            if let Some((identity, span)) = lowered {
+                *name = TYPE_REF_FORWARDER.to_string();
+                *args = vec![
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.low), span),
+                ];
+            }
+        } else if name == "trait_ref" {
+            // ADR-009 B2 (slice S4): the bare trait identifier lowers to the
+            // FROZEN trait identity (freeze input 4 — a DISTINCT identity
+            // kind from value types; `identity_of` never resolves a trait).
+            // A name with no frozen trait identity transports INVALID and the
+            // intrinsic answers with the named not-a-trait rejection.
             if let [Expr::Identifier(ident, span)] = args.as_slice() {
-                let identity = type_snapshot
-                    .frozen_type_id(ident)
+                let identity = freeze
+                    .trait_identity_of(ident)
                     .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
                 let span = *span;
-                *name = TYPE_REF_FORWARDER.to_string();
+                *name = TRAIT_REF_FORWARDER.to_string();
                 *args = vec![
                     Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
                     Expr::Literal(shape_ast::ast::Literal::Int(identity.low), span),
@@ -529,18 +801,18 @@ fn rewrite_comptime_type_symbol_args_expr(
 
     // Recurse into every child expression so nested reflection calls
     // (`print(type_info(User).name)`) are rewritten too.
-    let recur = |child: &mut Expr| {
-        rewrite_comptime_type_symbol_args_expr(child, type_snapshot);
+    let recur = |child: &mut Expr| -> Result<()> {
+        rewrite_comptime_type_symbol_args_expr(child, freeze)
     };
     match expr {
         Expr::FunctionCall {
             args, named_args, ..
         } => {
             for a in args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
         }
         Expr::MethodCall {
@@ -549,82 +821,96 @@ fn rewrite_comptime_type_symbol_args_expr(
             named_args,
             ..
         } => {
-            recur(receiver);
+            recur(receiver)?;
             for a in args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
         }
         Expr::QualifiedFunctionCall {
             args, named_args, ..
         } => {
             for a in args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
         }
-        Expr::PropertyAccess { object, .. } => recur(object),
+        Expr::PropertyAccess { object, .. } => recur(object)?,
         Expr::IndexAccess {
             object,
             index,
             end_index,
             ..
         } => {
-            recur(object);
-            recur(index);
+            recur(object)?;
+            recur(index)?;
             if let Some(end) = end_index {
-                recur(end);
+                recur(end)?;
             }
         }
         Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
-            recur(left);
-            recur(right);
+            recur(left)?;
+            recur(right)?;
         }
-        Expr::UnaryOp { operand, .. } => recur(operand),
+        Expr::UnaryOp { operand, .. } => recur(operand)?,
         Expr::Conditional {
             condition,
             then_expr,
             else_expr,
             ..
         } => {
-            recur(condition);
-            recur(then_expr);
+            recur(condition)?;
+            recur(then_expr)?;
             if let Some(e) = else_expr {
-                recur(e);
+                recur(e)?;
             }
         }
         Expr::Match(match_expr, _) => {
-            recur(&mut match_expr.scrutinee);
+            recur(&mut match_expr.scrutinee)?;
             for arm in &mut match_expr.arms {
                 if let Some(guard) = &mut arm.guard {
-                    recur(guard);
+                    recur(guard)?;
                 }
-                recur(&mut arm.body);
+                recur(&mut arm.body)?;
             }
         }
         Expr::Array(elems, _) => {
             for e in elems.iter_mut() {
-                recur(e);
+                recur(e)?;
             }
         }
         Expr::Object(entries, _) => {
             for entry in entries.iter_mut() {
                 match entry {
-                    shape_ast::ast::ObjectEntry::Field { value, .. } => recur(value),
-                    shape_ast::ast::ObjectEntry::Spread(e) => recur(e),
+                    shape_ast::ast::ObjectEntry::Field { value, .. } => recur(value)?,
+                    shape_ast::ast::ObjectEntry::Spread(e) => recur(e)?,
                 }
             }
         }
         Expr::Block(block, _) => {
+            // Exhaustive over `BlockItem` — annotation-handler bodies are
+            // block EXPRESSIONS, so `let` / assignment items arrive as
+            // `BlockItem::VariableDecl` / `BlockItem::Assignment`, not as
+            // `BlockItem::Statement` (S3: `let flag = type_category(
+            // type_ref(User))` inside a handler body).
             for item in &mut block.items {
-                if let shape_ast::ast::BlockItem::Statement(s) = item {
-                    rewrite_comptime_type_symbol_args(s, type_snapshot);
-                } else if let shape_ast::ast::BlockItem::Expression(e) = item {
-                    recur(e);
+                match item {
+                    shape_ast::ast::BlockItem::Statement(s) => {
+                        rewrite_comptime_type_symbol_args(s, freeze)?;
+                    }
+                    shape_ast::ast::BlockItem::Expression(e) => recur(e)?,
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                        if let Some(init) = &mut decl.value {
+                            recur(init)?;
+                        }
+                    }
+                    shape_ast::ast::BlockItem::Assignment(assign) => {
+                        recur(&mut assign.value)?;
+                    }
                 }
             }
         }
@@ -632,20 +918,21 @@ fn rewrite_comptime_type_symbol_args_expr(
         | Expr::Await(inner, _)
         | Expr::Spread(inner, _)
         | Expr::AsyncScope(inner, _)
-        | Expr::Reference { expr: inner, .. } => recur(inner),
-        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => recur(inner),
+        | Expr::Reference { expr: inner, .. } => recur(inner)?,
+        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => recur(inner)?,
         Expr::Range { start, end, .. } => {
             if let Some(s) = start {
-                recur(s);
+                recur(s)?;
             }
             if let Some(e) = end {
-                recur(e);
+                recur(e)?;
             }
         }
         // Leaves and constructs that do not embed a reflection call in
         // practical comptime code are left untouched.
         _ => {}
     }
+    Ok(())
 }
 
 /// Execute statements at compile time (comptime) and return the result.
@@ -665,7 +952,7 @@ pub(crate) fn execute_comptime(
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
-    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
+    freeze: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
 ) -> Result<ComptimeExecutionResult> {
     execute_comptime_with_context(
         statements,
@@ -676,7 +963,7 @@ pub(crate) fn execute_comptime(
         extensions,
         trait_impl_keys,
         known_type_symbols,
-        type_snapshot,
+        freeze,
     )
 }
 
@@ -701,7 +988,7 @@ pub(crate) fn execute_comptime_with_context(
     extensions: &[shape_runtime::module_exports::ModuleExports],
     trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
-    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
+    freeze: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
 ) -> Result<ComptimeExecutionResult> {
     // Wrap statements in a function so the compiler produces a callable entry point.
     // Ensure the last statement is a tail return so if/else values aren't discarded.
@@ -710,7 +997,7 @@ pub(crate) fn execute_comptime_with_context(
     // internal string payloads. `type_ref(T)` instead receives a compiler-issued
     // semantic identity; user-provided strings never construct a TypeRef.
     for stmt in &mut body {
-        rewrite_comptime_type_symbol_args(stmt, &type_snapshot);
+        rewrite_comptime_type_symbol_args(stmt, freeze.as_ref())?;
     }
     ensure_tail_return(&mut body);
 
@@ -745,7 +1032,16 @@ pub(crate) fn execute_comptime_with_context(
     // comptime mode; the outer-skip discipline doesn't apply within the
     // mini-VM).
     for trait_def in comptime_context_trait_defs {
-        items.push(Item::Trait(trait_def.clone(), Span::DUMMY));
+        let mut def = trait_def.clone();
+        // Same discipline as the impl-block clearing below (S5): inside the
+        // mini-VM everything IS comptime, so a `comptime trait` compiles as
+        // a plain trait. Without this a `comptime trait` + `comptime impl`
+        // pair failed the J-CT.1 alignment check in the mini (threaded
+        // trait kept is_comptime=true while the impl's flag was cleared).
+        // The OUTER env's trait def keeps its flag — J-CT.1 runtime-call
+        // rejection outside comptime blocks is unaffected.
+        def.is_comptime = false;
+        items.push(Item::Trait(def, Span::DUMMY));
     }
     for struct_def in comptime_context_struct_defs {
         items.push(Item::StructType(struct_def.clone(), Span::DUMMY));
@@ -777,30 +1073,56 @@ pub(crate) fn execute_comptime_with_context(
         docs: shape_ast::ast::ProgramDocs::default(),
     };
 
+    // ADR-009 §4.1 (S2): the reflection intrinsics consume the shared
+    // freeze handle — the Arc moves into the builtins module's closures.
+    //
+    // S5: the site-time key set for the Dec 52 ordering diagnostic is the
+    // live key snapshot PLUS the J-CT.2 `comptime impl` pairs threaded into
+    // this mini-program (those register only in the mini-VM's env, so the
+    // outer live keys never see them). Diagnostic-only — the legacy
+    // `implements` set is passed through unchanged, and no evidence is ever
+    // produced from either set.
+    let mut site_time_impl_keys = trait_impl_keys.clone();
+    for impl_block in comptime_impl_blocks {
+        let trait_name = match &impl_block.trait_name {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        let type_name = match &impl_block.target_type {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        site_time_impl_keys.insert(format!("{trait_name}::{type_name}"));
+    }
+    let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
+        trait_impl_keys,
+        site_time_impl_keys,
+        freeze,
+    );
     compile_and_execute_comptime_program(
         &program,
         vec!["__comptime__".to_string()],
         Vec::new(),
         extensions,
-        trait_impl_keys,
         known_type_symbols,
-        type_snapshot,
+        comptime_builtins,
     )
 }
 
+/// Compile and execute one comptime mini-program with a caller-supplied
+/// `__comptime__` builtins module (the freeze-consuming module from
+/// `create_comptime_builtins_module` — the only flavor; the S2-era
+/// pre-pass rejection module is deleted, S3).
 fn compile_and_execute_comptime_program(
     program: &Program,
     mut known_bindings: Vec<String>,
     mut runtime_module_bindings: Vec<(String, KindedSlot)>,
     extensions: &[shape_runtime::module_exports::ModuleExports],
-    trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
-    type_snapshot: super::comptime_builtins::TypeReflectionSnapshot,
+    comptime_builtins: shape_runtime::module_exports::ModuleExports,
 ) -> Result<ComptimeExecutionResult> {
     // Build the full extension list first so module namespace bindings
     // (e.g. `__comptime__`) are typed during compilation.
-    let comptime_builtins =
-        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys, type_snapshot);
     let mut all_extensions: Vec<shape_runtime::module_exports::ModuleExports> = extensions.to_vec();
     all_extensions.push(comptime_builtins);
 
@@ -1082,6 +1404,11 @@ pub(crate) fn execute_comptime_with_target(
         name: handler_param.to_string(),
         is_variadic: false,
     }];
+    // Test-only entry: a real freeze over an empty compilation unit through
+    // the single freeze barrier (no empty-snapshot construction exists).
+    let freeze = super::comptime_builtins::semantic_freeze::overlay_for_tests(
+        &crate::compiler::BytecodeCompiler::new(),
+    );
     execute_comptime_with_annotation_handler(
         handler_body,
         &handler_params,
@@ -1091,10 +1418,11 @@ pub(crate) fn execute_comptime_with_target(
         &[],
         &[],
         extensions,
-        trait_impl_keys,
         known_type_symbols,
         "",
         "",
+        trait_impl_keys,
+        freeze,
     )
 }
 
@@ -1124,6 +1452,17 @@ pub(crate) fn execute_comptime_with_target(
 /// `statements.rs` / `expressions/mod.rs` continue to compile, but the
 /// body panics until the rebuild lands rather than synthesizing a
 /// placeholder result that would silently mis-bind handler params.
+///
+/// ADR-009 §4.1 (S2, ABI closed in S3): every caller supplies the REAL
+/// per-compilation-unit freeze handle (`compiler.comptime_freeze_overlay()?`)
+/// — the barrier runs before the first comptime site of the unit, including
+/// the two speculative annotation pre-passes. The `__comptime__` builtins
+/// module is built here from that handle, and the handler body receives the
+/// same `type_ref`/`type_info`/`implements` type-symbol rewrite as comptime
+/// blocks (`rewrite_comptime_type_symbol_args`), so frozen reflection
+/// resolves inside annotation handlers too. No default/empty snapshot, no
+/// `Option<freeze>`, exists on any path (rejection-matrix row 9).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_comptime_with_annotation_handler(
     handler_body: &Expr,
     handler_params: &[AnnotationHandlerParam],
@@ -1133,10 +1472,11 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     const_bindings: &[(String, KindedSlot)],
     comptime_helpers: &[FunctionDef],
     extensions: &[shape_runtime::module_exports::ModuleExports],
-    trait_impl_keys: std::collections::HashSet<String>,
     known_type_symbols: std::collections::HashSet<String>,
     ctx_module_path: &str,
     ctx_file: &str,
+    trait_impl_keys: std::collections::HashSet<String>,
+    freeze: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
 ) -> Result<ComptimeExecutionResult> {
     if handler_params.iter().filter(|p| p.is_variadic).count() > 1 {
         return Err(ShapeError::RuntimeError {
@@ -1262,6 +1602,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         ],
     );
 
+    // ADR-009 §4.1 (S3): annotation-handler bodies get the same frozen
+    // type-symbol rewrite as comptime blocks — `type_ref(User)` becomes the
+    // compiler-issued identity forwarder resolved against the shared freeze.
+    let mut body_statement = Statement::Return(Some(handler_body.clone()), Span::DUMMY);
+    rewrite_comptime_type_symbol_args(&mut body_statement, freeze.as_ref())?;
+
     // Wrap the handler body in a function that takes the target parameter.
     let func_name = "__comptime_handler_fn__".to_string();
     let func_def = FunctionDef {
@@ -1271,7 +1617,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         doc_comment: None,
         params,
         return_type: None,
-        body: vec![Statement::Return(Some(handler_body.clone()), Span::DUMMY)],
+        body: vec![body_statement],
         type_params: Some(Vec::new()),
         annotations: Vec::new(),
         where_clause: None,
@@ -1322,6 +1668,21 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         docs: shape_ast::ast::ProgramDocs::default(),
     };
 
+    // ADR-009 §4.1 (S2/S3): the `__comptime__` builtins module carries the
+    // reflection surface resolved against the shared freeze handle — for the
+    // speculative pre-pass runs exactly as for the authoritative pass-2
+    // runs. The old `TypeReflectionSnapshot::default()` empty-snapshot
+    // defect and its S2 successor (the pre-pass reflection-rejection
+    // module) are deleted.
+    // S5: annotation-handler runs thread no J-CT.2 comptime impl blocks, so
+    // the site-time key set for the Dec 52 ordering diagnostic is exactly
+    // the live key snapshot (diagnostic-only; never evidence).
+    let site_time_impl_keys = trait_impl_keys.clone();
+    let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
+        trait_impl_keys,
+        site_time_impl_keys,
+        freeze,
+    );
     compile_and_execute_comptime_program(
         &program,
         vec![
@@ -1334,13 +1695,8 @@ pub(crate) fn execute_comptime_with_annotation_handler(
             ("__ctx_arg__".to_string(), ctx_nb),
         ],
         extensions,
-        trait_impl_keys,
         known_type_symbols,
-        // Annotation-handler comptime execution does not yet snapshot
-        // user type definitions; `type_info(T)` from an annotation body
-        // resolves only built-in primitives until the handler-context
-        // type snapshot lands as a follow-up.
-        super::comptime_builtins::TypeReflectionSnapshot::default(),
+        comptime_builtins,
     )
 }
 
@@ -1418,6 +1774,7 @@ fn execute_in_runtime_with_module_bindings(
             value,
             directives,
             warnings,
+            schema_registry: Arc::new(vm.program.type_schema_registry.clone()),
         })
     };
 
@@ -1432,6 +1789,124 @@ fn execute_in_runtime_with_module_bindings(
                 location: None,
             })?;
         rt.block_on(async { run(module_bindings) })
+    }
+}
+
+/// ADR-009 B1 S4 — the VALUE-DEEP stage-boundary lift wall for comptime
+/// results that enter runtime code (`Expr::Comptime`).
+///
+/// The shallow `runtime_lift_rejection` call only saw the top-level slot,
+/// so a descriptor NESTED inside an object/array result (or forged as a
+/// mini-VM-registered spellable model value) slipped past the wall and was
+/// silently swallowed to `Null` by the `nb_to_expr` fallback (scout risk 4
+/// — the materialization bypass channel). This extends the CHANNEL to call
+/// `runtime_lift_rejection` on every reachable typed-object node — never
+/// the reverse (the wall is not weakened).
+///
+/// The walk runs with the mini-VM program's schema registry installed as
+/// the ambient scope: descriptor carriers built by the intrinsics use the
+/// order-stable builtin schema ids, but the injected spellable model enums
+/// and comptime object-literal schemas exist only in the mini-VM registry —
+/// without it their ids miss (or collide) in the outer registry and the
+/// wall cannot name them.
+pub(crate) fn comptime_result_lift_rejection(
+    value: &KindedSlot,
+    schema_registry: &std::sync::Arc<shape_runtime::type_schema::TypeSchemaRegistry>,
+) -> Option<&'static str> {
+    let _scope =
+        shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry.clone());
+    deep_descriptor_lift_rejection(value)
+}
+
+/// Recursive half of [`comptime_result_lift_rejection`]: the shared
+/// name-matched wall (`runtime_lift_rejection`) at every node, recursing
+/// through typed-object fields and typed-array elements — the only carrier
+/// shapes a comptime descriptor can nest in on the materialization channel.
+fn deep_descriptor_lift_rejection(value: &KindedSlot) -> Option<&'static str> {
+    if let Some(message) = shape_runtime::comptime_reflection::runtime_lift_rejection(value) {
+        return Some(message);
+    }
+    let bits = value.slot().raw();
+    if bits == 0 {
+        return None;
+    }
+    match value.kind() {
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            // SAFETY: `NativeKind::Ptr(HeapKind::TypedObject)` is the kind
+            // witness that these bits point to a live `TypedObjectStorage`
+            // (§2.7.16 receiver-recovery soundness rule — direct typed
+            // pointer, never `as_heap_value()`); `value` owns one
+            // strong-count share for the duration of the walk.
+            let storage: &shape_value::TypedObjectStorage =
+                unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
+            let field_count = storage.slots().len().min(storage.field_kinds.len());
+            for idx in 0..field_count {
+                let field = read_typed_object_field(
+                    storage.slots()[idx],
+                    storage.field_kinds[idx],
+                    storage.heap_mask,
+                    idx,
+                );
+                if let Some(message) = deep_descriptor_lift_rejection(&field) {
+                    return Some(message);
+                }
+            }
+            None
+        }
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            typed_array_descriptor_lift_rejection(bits as *const u8)
+        }
+        _ => None,
+    }
+}
+
+/// Typed-array arm of the deep wall: walk `TypedObjectPtr` elements (and
+/// nested arrays) through the elem-type stamp. Scalar element types cannot
+/// carry descriptors and are skipped.
+fn typed_array_descriptor_lift_rejection(array: *const u8) -> Option<&'static str> {
+    use shape_value::v2::typed_array::{
+        ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, TypedArray, read_elem_type,
+    };
+    // SAFETY (all blocks below): the caller's `NativeKind::Ptr(
+    // HeapKind::TypedArray)` kind witness proves `array` points to a live
+    // `TypedArray<T>`; the elem-type stamp selects the monomorphized
+    // element layout before any element is read.
+    let elem_type = unsafe { read_elem_type(array) };
+    match elem_type {
+        ELEM_TYPE_TYPED_OBJECT => {
+            let arr = array as *const TypedArray<*const shape_value::TypedObjectStorage>;
+            for &elem in unsafe { TypedArray::as_slice(arr) } {
+                if elem.is_null() {
+                    continue;
+                }
+                // Take one independent share so the element slot's Drop is
+                // balanced (same retain discipline as
+                // `read_typed_object_field`).
+                unsafe {
+                    shape_value::v2::refcount::v2_retain(&(*elem).header);
+                }
+                let slot = KindedSlot::from_typed_object_raw(elem);
+                let rejection = deep_descriptor_lift_rejection(&slot);
+                if rejection.is_some() {
+                    return rejection;
+                }
+            }
+            None
+        }
+        ELEM_TYPE_TYPED_ARRAY => {
+            let arr = array as *const TypedArray<*const u8>;
+            for &elem in unsafe { TypedArray::as_slice(arr) } {
+                if elem.is_null() {
+                    continue;
+                }
+                let rejection = typed_array_descriptor_lift_rejection(elem);
+                if rejection.is_some() {
+                    return rejection;
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -1848,11 +2323,447 @@ fn read_typed_object_field(
 // plus the deleted `vm.execute()` synthesis path. The whole module is
 // stubbed and ignored until the comptime rebuild lands; re-enable
 // per-test as the rebuild walks each path.
+/// Test-only freeze handle: a REAL freeze of an empty compilation unit
+/// through the single freeze barrier (never an empty-snapshot construction).
+#[cfg(test)]
+pub(crate) fn test_freeze_overlay() -> std::sync::Arc<super::comptime_builtins::FreezeOverlay> {
+    super::comptime_builtins::semantic_freeze::overlay_for_tests(
+        &crate::compiler::BytecodeCompiler::new(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     #[ignore = "phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4"]
     fn placeholder_phase_2c_comptime_tests() {}
+
+    /// ADR-009 S3 probe: `type_ref(User)` inside an ANNOTATION HANDLER body
+    /// receives the same frozen type-symbol rewrite as comptime blocks.
+    #[test]
+    fn annotation_handler_body_type_ref_is_rewritten_against_the_freeze() {
+        let program = shape_ast::parse_program(
+            r#"
+annotation reflect() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let flag = match type_category(type_ref(User)) {
+      FrozenTypeCategory::Nominal => 1
+      _ => 0
+    }
+    flag
+  }
+}
+"#,
+        )
+        .expect("annotation parses");
+        let handler_body = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::AnnotationDef(def, _) => Some(def.handlers[0].body.clone()),
+                _ => None,
+            })
+            .expect("annotation handler present");
+
+        let freeze = crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(
+            &crate::compiler::BytecodeCompiler::new(),
+        );
+        let mut statement = Statement::Return(Some(handler_body), Span::DUMMY);
+        super::rewrite_comptime_type_symbol_args(&mut statement, freeze.as_ref())
+            .expect("bare-identifier rewrite cannot fail");
+        let rendered = format!("{statement:?}");
+        assert!(
+            !rendered.contains("\"type_ref\""),
+            "handler-body type_ref call must be rewritten to the identity forwarder: {rendered}"
+        );
+    }
+
+    /// ADR-009 A2 (S3): the `Expr::TypeSyntax` carrier is grammatically
+    /// producible only as the `type_ref(...)` argument, but AST producers
+    /// (transforms, comptime-generated code) could misplace it. Outside the
+    /// type_ref argument position it must be a NAMED compile error — never
+    /// a silently compiled value (surface-and-stop).
+    #[test]
+    fn type_syntax_outside_type_ref_is_a_named_compile_error() {
+        let mut program = shape_ast::parse_program("let x = 1;").expect("baseline parses");
+        // Swap the initializer for a hand-built type-syntax carrier —
+        // no source spelling can produce this placement.
+        match program.items.get_mut(0) {
+            Some(shape_ast::ast::Item::Statement(
+                shape_ast::ast::Statement::VariableDecl(decl, _),
+                _,
+            )) => {
+                decl.value = Some(shape_ast::ast::Expr::TypeSyntax(
+                    shape_ast::ast::TypeAnnotation::Tuple(vec![
+                        shape_ast::ast::TypeAnnotation::Basic("int".to_string()),
+                        shape_ast::ast::TypeAnnotation::Basic("string".to_string()),
+                    ]),
+                    Span::DUMMY,
+                ));
+            }
+            other => panic!("expected variable decl item, got {other:?}"),
+        }
+        let err = crate::compiler::BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("type syntax outside type_ref must not compile");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("type syntax is only valid as the type_ref argument"),
+            "expected the named surface-and-stop diagnostic, got: {rendered}"
+        );
+    }
+
+    // =====================================================================
+    // ADR-009 A2 (slice S4): rewrite-arm unit tests — the checked
+    // type-expression carrier lowers through the shared overlay canonicalizer
+    // to the SAME identity forwarder as the bare-identifier arm, and
+    // canonicalization failure is a compile-time error out of the rewrite
+    // (Dec 52 — before user comptime executes).
+    // =====================================================================
+
+    /// Parse `let x = <expr>;`, rewrite against a fresh test freeze overlay,
+    /// and return the lowered initializer expression.
+    fn rewrite_type_ref_initializer(
+        source: &str,
+    ) -> std::result::Result<Expr, shape_ast::error::ShapeError> {
+        let mut program = shape_ast::parse_program(source).expect("source parses");
+        let mut stmt = match program.items.remove(0) {
+            shape_ast::ast::Item::Statement(stmt, _) => stmt,
+            other => panic!("expected statement item, got {other:?}"),
+        };
+        let freeze = super::test_freeze_overlay();
+        super::rewrite_comptime_type_symbol_args(&mut stmt, freeze.as_ref())?;
+        match stmt {
+            Statement::VariableDecl(decl, _) => Ok(decl.value.expect("initializer present")),
+            other => panic!("expected variable decl, got {other:?}"),
+        }
+    }
+
+    /// Assert the expression is the lowered identity forwarder and return its
+    /// `(identity_high, identity_low)` literal pair.
+    fn forwarder_identity_literals(expr: &Expr) -> (i64, i64) {
+        match expr {
+            Expr::FunctionCall { name, args, .. } => {
+                assert_eq!(
+                    name,
+                    super::TYPE_REF_FORWARDER,
+                    "must lower to the identity forwarder"
+                );
+                match args.as_slice() {
+                    [
+                        Expr::Literal(Literal::Int(high), _),
+                        Expr::Literal(Literal::Int(low), _),
+                    ] => (*high, *low),
+                    other => panic!("expected two int identity literals, got {other:?}"),
+                }
+            }
+            other => panic!("expected forwarder call, got {other:?}"),
+        }
+    }
+
+    /// Cross-site identity equality: the same composite spelled at two sites
+    /// (and rewritten through two independent overlays over the same freeze
+    /// input) lowers to bit-identical identity literals; a structurally
+    /// different spelling (member order) lowers to a distinct identity.
+    #[test]
+    fn composite_type_ref_identity_is_equal_across_rewrite_sites() {
+        let first = rewrite_type_ref_initializer("let a = type_ref([int, string]);")
+            .expect("composite form rewrites");
+        let second = rewrite_type_ref_initializer("let b = type_ref([int,   string]);")
+            .expect("composite form rewrites");
+        assert_eq!(
+            forwarder_identity_literals(&first),
+            forwarder_identity_literals(&second),
+            "same composite spelled at two sites must share one frozen identity"
+        );
+        let swapped = rewrite_type_ref_initializer("let c = type_ref([string, int]);")
+            .expect("composite form rewrites");
+        assert_ne!(
+            forwarder_identity_literals(&first),
+            forwarder_identity_literals(&swapped),
+            "tuple member order is identity-significant"
+        );
+    }
+
+    /// Dec 52 rejection placement: an unresolved leaf at depth inside a
+    /// checked type expression is a NAMED compile error out of the rewrite
+    /// itself — user comptime never executes, no INVALID sentinel flows.
+    #[test]
+    fn composite_type_ref_with_unresolved_leaf_is_a_compile_error_before_comptime_runs() {
+        let err = rewrite_type_ref_initializer("let a = type_ref(Option<Bogus>);")
+            .expect_err("unresolved leaf must reject at rewrite time");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("unknown semantic type identity"),
+            "expected the named unknown-identity family, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Bogus"),
+            "the diagnostic must name the unresolved leaf, got: {rendered}"
+        );
+    }
+
+    /// Two-arm agreement: a leaf spelled bare (`type_ref(int)`, the
+    /// historical Identifier lowering) and the same leaf hand-built as the
+    /// type-syntax carrier resolve to ONE identity — the canonicalizer
+    /// resolves leaf names through the same `identity_of` query the
+    /// bare-identifier arm uses. (No source spelling produces `TypeSyntax`
+    /// for a bare name; S3 keeps the Identifier lowering.)
+    #[test]
+    fn bare_identifier_and_type_syntax_leaf_share_one_identity() {
+        let bare =
+            rewrite_type_ref_initializer("let a = type_ref(int);").expect("bare form rewrites");
+
+        let mut stmt = Statement::Expression(
+            Expr::FunctionCall {
+                name: "type_ref".to_string(),
+                const_args: Vec::new(),
+                args: vec![Expr::TypeSyntax(
+                    shape_ast::ast::TypeAnnotation::Basic("int".to_string()),
+                    Span::DUMMY,
+                )],
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            },
+            Span::DUMMY,
+        );
+        let freeze = super::test_freeze_overlay();
+        super::rewrite_comptime_type_symbol_args(&mut stmt, freeze.as_ref())
+            .expect("leaf type syntax rewrites");
+        let Statement::Expression(syntax_form, _) = stmt else {
+            panic!("expected expression statement");
+        };
+
+        assert_eq!(
+            forwarder_identity_literals(&bare),
+            forwarder_identity_literals(&syntax_form),
+            "bare-identifier and type-syntax arms must agree on leaf identity"
+        );
+    }
+
+    // =====================================================================
+    // ADR-009 A2 (slice S5): identity-stability proofs through the REAL
+    // predeclare + freeze-barrier path. Unlike `rewrite_type_ref_initializer`
+    // (empty test freeze), this helper runs the production registration-
+    // complete sequence over the program's own declarations, then rewrites
+    // the LAST statement's initializer — so alias fixpoints, trait
+    // predeclare, and struct generic info all flow exactly as in `compile()`.
+    // =====================================================================
+
+    /// Predeclare every item of `source` (structs + semantic-freeze inputs),
+    /// install the freeze barrier, then rewrite the last statement's
+    /// `let ... = type_ref(...)` initializer through the site overlay.
+    fn rewrite_program_type_ref_initializer(
+        source: &str,
+    ) -> std::result::Result<Expr, shape_ast::error::ShapeError> {
+        let mut program = shape_ast::parse_program(source).expect("source parses");
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        for pass in [
+            crate::compiler::statements::SemanticFreezePredeclarePass::TypesAndTraits,
+            crate::compiler::statements::SemanticFreezePredeclarePass::Impls,
+        ] {
+            for item in &program.items {
+                if pass == crate::compiler::statements::SemanticFreezePredeclarePass::TypesAndTraits
+                {
+                    compiler.predeclare_item_struct_schemas(item);
+                }
+                compiler
+                    .predeclare_item_semantic_freeze_inputs(item, pass)
+                    .expect("freeze inputs predeclare");
+            }
+        }
+        compiler
+            .install_semantic_freeze()
+            .expect("registration-complete state freezes");
+        let freeze = compiler
+            .comptime_freeze_overlay()
+            .expect("post-barrier site obtains the handle");
+        let mut stmt = match program.items.pop() {
+            Some(shape_ast::ast::Item::Statement(stmt, _)) => stmt,
+            other => panic!("expected trailing statement item, got {other:?}"),
+        };
+        super::rewrite_comptime_type_symbol_args(&mut stmt, freeze.as_ref())?;
+        match stmt {
+            Statement::VariableDecl(decl, _) => Ok(decl.value.expect("initializer present")),
+            other => panic!("expected variable decl, got {other:?}"),
+        }
+    }
+
+    fn program_identity_literals(source: &str) -> (i64, i64) {
+        let expr = rewrite_program_type_ref_initializer(source)
+            .unwrap_or_else(|error| panic!("program must rewrite: {error:?}"));
+        forwarder_identity_literals(&expr)
+    }
+
+    /// S5 R7 (Dec 53): alias normalization holds THROUGH applied forms on the
+    /// production path — `type Ids = Array<UserId>` (bare alias name, the
+    /// Identifier arm) and `type_ref(Array<int>)` (checked type syntax) lower
+    /// to bit-identical frozen identities.
+    #[test]
+    fn alias_identity_normalizes_through_applied_forms_end_to_end() {
+        let preamble = "type UserId = int\ntype Ids = Array<UserId>\n";
+        assert_eq!(
+            program_identity_literals(&format!("{preamble}let a = type_ref(Ids);")),
+            program_identity_literals(&format!("{preamble}let a = type_ref(Array<int>);")),
+            "alias-through-applied identity must equal the spelled applied form"
+        );
+        // The alias spelled INSIDE a checked type expression agrees too.
+        assert_eq!(
+            program_identity_literals(&format!("{preamble}let a = type_ref(Array<UserId>);")),
+            program_identity_literals(&format!("{preamble}let a = type_ref(Array<int>);")),
+        );
+    }
+
+    /// S5 R11: identity is declaration-order independent — inserting an
+    /// unrelated type declaration, reordering record fields, and reordering
+    /// union members all leave the identity literals bit-identical.
+    #[test]
+    fn composite_identity_is_declaration_order_independent_across_program_variants() {
+        let record = program_identity_literals("let a = type_ref({x: int, y: string});");
+        assert_eq!(
+            record,
+            program_identity_literals(
+                "type Unrelated { z: int }\nlet a = type_ref({x: int, y: string});"
+            ),
+            "an unrelated type declaration must not perturb a composite identity"
+        );
+        assert_eq!(
+            record,
+            program_identity_literals(
+                "type Unrelated { z: int }\nlet a = type_ref({y: string, x: int});"
+            ),
+            "record-field source order must not perturb the identity"
+        );
+
+        assert_eq!(
+            program_identity_literals("let a = type_ref(int | string);"),
+            program_identity_literals("let a = type_ref(string | int);"),
+            "union-member source order must not perturb the identity"
+        );
+    }
+
+    /// Review round 1 (A2): the grammar admits parenthesized type
+    /// annotations (`non_array_type ::= … | "(" type_annotation ")"`), and
+    /// `parse_type_annotation` collapses a union only at len==1, so
+    /// `(int | string) | bool` reaches the canonicalizer as a NESTED union.
+    /// Union membership is an associative set — the parenthesized spelling
+    /// must mint the SAME frozen identity as the flat spelling, and members
+    /// reached through nesting must not escape dedup.
+    #[test]
+    fn parenthesized_union_spelling_mints_the_flat_union_identity() {
+        assert_eq!(
+            program_identity_literals("let a = type_ref((int | string) | bool);"),
+            program_identity_literals("let a = type_ref(int | string | bool);"),
+            "nested union spelling must flatten to the flat set-semantic identity"
+        );
+        assert_eq!(
+            program_identity_literals("let a = type_ref(int | (int | string));"),
+            program_identity_literals("let a = type_ref(int | string);"),
+            "a member reached through nesting must not escape dedup"
+        );
+    }
+
+    /// S5 R8 (Dec 50/94 rule 3): a trait intersection in type position
+    /// (`Speak + Walk`) erases to the SAME identity as the `dyn` spelling,
+    /// and an object intersection reaches the directly-spelled record's
+    /// identity — both through the production predeclare path (traits are a
+    /// named freeze input registered BEFORE the barrier).
+    #[test]
+    fn intersection_identities_normalize_per_dec_50_94_end_to_end() {
+        let traits =
+            "trait Speak { fn speak(self) -> string; }\ntrait Walk { fn walk(self) -> string; }\n";
+        assert_eq!(
+            program_identity_literals(&format!("{traits}let a = type_ref(Speak + Walk);")),
+            program_identity_literals(&format!("{traits}let a = type_ref(dyn Walk + Speak);")),
+            "trait intersection must erase to the dyn bound-set identity"
+        );
+
+        assert_eq!(
+            program_identity_literals("let a = type_ref({a: int} + {b: string});"),
+            program_identity_literals("let a = type_ref({b: string, a: int});"),
+            "object intersection must reach the directly-spelled record identity"
+        );
+    }
+
+    /// ADR-009 B2 (slice S4, Dec 49): `trait_ref(Greetable)` lowers to the
+    /// unspellable trait-identity forwarder carrying EXACTLY the freeze's
+    /// canonical trait identity as INT LITERALS — identity-literal transport
+    /// into the compiled comptime artifact. No string transport: the trait
+    /// NAME must not survive the rewrite.
+    #[test]
+    fn trait_ref_rewrite_transports_the_frozen_trait_identity_literals() {
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler
+            .type_inference
+            .env
+            .define_trait(&shape_ast::ast::TraitDef {
+                name: "Greetable".to_string(),
+                doc_comment: None,
+                type_params: None,
+                super_traits: Vec::new(),
+                members: Vec::new(),
+                annotations: Vec::new(),
+                is_comptime: false,
+            });
+        let freeze =
+            crate::compiler::comptime_builtins::semantic_freeze::SemanticFreeze::freeze(&compiler)
+                .expect("resolved state freezes");
+        let overlay = std::sync::Arc::new(crate::compiler::comptime_builtins::FreezeOverlay::new(
+            freeze,
+            "<module>",
+            &[],
+        ));
+        let identity = overlay
+            .trait_identity_of("Greetable")
+            .expect("trait identity frozen at the barrier");
+
+        let mut statement = Statement::Return(
+            Some(Expr::FunctionCall {
+                name: "trait_ref".to_string(),
+                const_args: Vec::new(),
+                args: vec![Expr::Identifier("Greetable".to_string(), Span::DUMMY)],
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        );
+        super::rewrite_comptime_type_symbol_args(&mut statement, overlay.as_ref());
+
+        let Statement::Return(Some(Expr::FunctionCall { name, args, .. }), _) = &statement else {
+            panic!("rewrite must keep the return-call shape: {statement:?}");
+        };
+        assert_eq!(
+            name, "\u{1}comptime:forward-trait-ref",
+            "trait_ref must lower to the unspellable trait-identity forwarder"
+        );
+        assert_eq!(
+            args.as_slice(),
+            &[
+                Expr::Literal(Literal::Int(identity.high), Span::DUMMY),
+                Expr::Literal(Literal::Int(identity.low), Span::DUMMY),
+            ],
+            "the forwarder args must be the frozen trait identity as int literals"
+        );
+        let rendered = format!("{statement:?}");
+        assert!(
+            !rendered.contains("Greetable"),
+            "no string transport: the trait name must not survive the rewrite: {rendered}"
+        );
+    }
+
+    /// Drift pin: the find_impl forwarder's `Option<...>` return marker must
+    /// wrap exactly the reserved ImplRef carrier schema name.
+    #[test]
+    fn find_impl_forwarder_return_marker_matches_the_impl_ref_schema() {
+        assert_eq!(
+            super::FIND_IMPL_RETURN_MARKER,
+            format!(
+                "Option<{}>",
+                shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_IMPL_REF_SCHEMA
+            )
+        );
+    }
 
     // Regression (2026-06-21): a comptime block evaluating to `false` (and
     // `build_config().debug` in a release build) was baked as `null` at the
@@ -1930,7 +2841,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -1971,7 +2882,7 @@ mod tests {
                 &[],
                 Default::default(),
                 Default::default(),
-                Default::default(),
+                super::test_freeze_overlay(),
             )
         }));
         match result {
@@ -2031,7 +2942,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .expect("build_config() comptime evaluation should succeed");
 
@@ -2115,7 +3026,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .expect("implements() should dispatch end-to-end");
         assert_eq!(result.value.as_bool(), Some(false));
@@ -2141,7 +3052,7 @@ mod tests {
             &[],
             trait_impl_keys,
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .expect("implements() should see typed string args and registered impl keys");
         assert_eq!(result.value.as_bool(), Some(true));
@@ -2171,7 +3082,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -2205,7 +3116,7 @@ mod tests {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_err(),
@@ -2293,18 +3204,14 @@ mod tests {
     fn assert_dispatch_reached(
         stmts: Vec<Statement>,
         trait_impl_keys: std::collections::HashSet<String>,
-        snapshot: crate::compiler::comptime_builtins::TypeReflectionSnapshot,
+        (freeze, known_types): (
+            std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
+            std::collections::HashSet<String>,
+        ),
         ctx: &str,
     ) {
-        let known_types: std::collections::HashSet<String> = snapshot
-            .struct_defs
-            .keys()
-            .chain(snapshot.alias_defs.keys())
-            .chain(snapshot.enum_defs.keys())
-            .cloned()
-            .collect();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_comptime(&stmts, &[], &[], trait_impl_keys, known_types, snapshot)
+            execute_comptime(&stmts, &[], &[], trait_impl_keys, known_types, freeze)
         }));
         match result {
             Ok(Ok(_)) => {}
@@ -2331,29 +3238,66 @@ mod tests {
         }
     }
 
-    fn snapshot_with_struct(
+    /// S2 fabricator: populate a real compiler with one struct and freeze
+    /// it through the single barrier (replaces the deleted field-poked
+    /// snapshot construction). Returns the freeze handle plus the
+    /// known-type-symbol set the sites derive from compiler tables.
+    fn freeze_with_struct(
         name: &str,
         fields: &[(&str, TypeAnn)],
-    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
-        let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
-        let ordered: Vec<(String, TypeAnn)> = fields
-            .iter()
-            .map(|(n, t)| (n.to_string(), t.clone()))
-            .collect();
-        snapshot.struct_defs.insert(name.to_string(), ordered);
-        snapshot
+    ) -> (
+        std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
+        std::collections::HashSet<String>,
+    ) {
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler.struct_types.insert(
+            name.to_string(),
+            (
+                fields.iter().map(|(n, _)| n.to_string()).collect(),
+                Span::DUMMY,
+            ),
+        );
+        compiler.struct_generic_info.insert(
+            name.to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: Vec::new(),
+                runtime_field_types: fields
+                    .iter()
+                    .map(|(n, t)| (n.to_string(), t.clone()))
+                    .collect(),
+            },
+        );
+        let overlay =
+            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(&compiler);
+        (overlay, [name.to_string()].into_iter().collect())
     }
 
-    fn snapshot_with_enum(
+    /// S2 fabricator: enum variant of `freeze_with_struct` — the enum goes
+    /// through the canonical schema registry (named freeze input 3).
+    fn freeze_with_enum(
         name: &str,
         variants: &[&str],
-    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
-        let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
-        snapshot.enum_defs.insert(
-            name.to_string(),
-            variants.iter().map(|v| v.to_string()).collect(),
-        );
-        snapshot
+    ) -> (
+        std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
+        std::collections::HashSet<String>,
+    ) {
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler
+            .type_tracker
+            .schema_registry_mut()
+            .register_enum_scoped(
+                name,
+                variants
+                    .iter()
+                    .enumerate()
+                    .map(|(id, variant)| {
+                        shape_runtime::type_schema::EnumVariantInfo::new(*variant, id as u16, 0)
+                    })
+                    .collect(),
+            );
+        let overlay =
+            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(&compiler);
+        (overlay, [name.to_string()].into_iter().collect())
     }
 
     // -------- (1) chained_access -----------------------------------------
@@ -2383,7 +3327,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct(
+        let snapshot = freeze_with_struct(
             "Point",
             &[
                 ("x", TypeAnn::Basic("int".to_string())),
@@ -2421,7 +3365,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2468,7 +3412,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2518,7 +3462,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2576,7 +3520,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2613,7 +3557,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_on_array_generic",
         );
     }
@@ -2636,7 +3580,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
+        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2667,7 +3611,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_on_result_two_params",
         );
     }
@@ -2699,7 +3643,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_chained_kind_on_hashmap_generic",
         );
     }
@@ -2726,7 +3670,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_enum("Color", &["Red", "Green", "Blue"]);
+        let snapshot = freeze_with_enum("Color", &["Red", "Green", "Blue"]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2759,7 +3703,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_enum("Color", &["Red", "Green", "Blue"]);
+        let snapshot = freeze_with_enum("Color", &["Red", "Green", "Blue"]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2796,7 +3740,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_on_undefined_type_returns_unknown",
         );
     }
@@ -2825,7 +3769,7 @@ mod tests {
         assert_dispatch_reached(
             stmts,
             Default::default(),
-            Default::default(),
+            (super::test_freeze_overlay(), Default::default()),
             "w14_2_c1_type_info_bare_ident_rewrites_for_unknown",
         );
     }
@@ -3049,6 +3993,346 @@ const X = comptime {
             result.err()
         );
     }
+
+    // =====================================================================
+    // ADR-009 B1 S3 — `reflect()` wired end-to-end in the comptime path:
+    // intrinsic, forwarder, payload-model item injection, outer type-check,
+    // runtime-name-collision fence.
+    // =====================================================================
+
+    /// Parse a comptime block body from Shape source (wrapper-fn trick so
+    /// the statements parse in function-body position, matching how a
+    /// `comptime { ... }` block body reaches `execute_comptime`).
+    fn parse_comptime_body(body: &str) -> Vec<Statement> {
+        let program = shape_ast::parser::parse_program(&format!("fn __t__() {{\n{body}\n}}"))
+            .expect("comptime body must parse");
+        program
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Function(def, _) if def.name == "__t__" => Some(def.body),
+                _ => None,
+            })
+            .expect("wrapper fn present")
+    }
+
+    fn run_comptime_body(
+        body: &str,
+    ) -> shape_ast::error::Result<super::ComptimeExecutionResult> {
+        execute_comptime(
+            &parse_comptime_body(body),
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            super::test_freeze_overlay(),
+        )
+    }
+
+    /// `run_comptime_body` that must reject (the result carrier has no
+    /// `Debug`, so `expect_err` is not available on it).
+    fn run_comptime_body_err(body: &str, ctx: &str) -> shape_ast::error::ShapeError {
+        match run_comptime_body(body) {
+            Err(error) => error,
+            Ok(_) => panic!("{ctx}: comptime body must be rejected"),
+        }
+    }
+
+    /// The full enabled-payload vertical: `reflect(type_ref(int))` inside
+    /// the mini-VM resolves to the injected forwarder (NEVER lowering to
+    /// the runtime `BuiltinFunction::Reflect` stub — collision pin (b): the
+    /// stub would surface `NotImplemented phase-1b-vm-wave-5e-reflect`),
+    /// the sealed `FrozenType` sum matches through the injected payload
+    /// model, and the nested `FrozenPrimitive` / `IntegerWidth` payloads
+    /// carry the exact width/domain data.
+    #[test]
+    fn reflect_primitive_payload_matches_through_the_injected_model_enums() {
+        let result = run_comptime_body(
+            r#"
+match reflect(type_ref(int)) {
+  FrozenType::Primitive(p) => match p {
+    FrozenPrimitive::SignedInteger(w) => match w {
+      IntegerWidth::W64 => 1
+      _ => 2
+    }
+    _ => 3
+  }
+  FrozenType::Never(n) => 4
+  FrozenType::Erased(e) => 5
+}
+"#,
+        )
+        .expect("reflect over an enabled payload category must succeed");
+        assert_eq!(
+            result.value.as_i64(),
+            Some(1),
+            "int must reflect to FrozenType::Primitive(SignedInteger(W64))"
+        );
+    }
+
+    /// `bigint` is the named SignedInteger(Arbitrary) decision — the
+    /// width-domain payload distinguishes it from `int`/W64 in user code.
+    #[test]
+    fn reflect_bigint_payload_carries_the_arbitrary_width_domain() {
+        let result = run_comptime_body(
+            r#"
+match reflect(type_ref(bigint)) {
+  FrozenType::Primitive(p) => match p {
+    FrozenPrimitive::SignedInteger(w) => match w {
+      IntegerWidth::Arbitrary => 1
+      _ => 2
+    }
+    _ => 3
+  }
+  FrozenType::Never(n) => 4
+  FrozenType::Erased(e) => 5
+}
+"#,
+        )
+        .expect("bigint reflects through the enabled Primitive payload");
+        assert_eq!(result.value.as_i64(), Some(1));
+    }
+
+    /// Never and Erased payload arms select through the ordinal-pinned
+    /// variant ids (Never=1, Erased=9 — the Erased arm is the load-bearing
+    /// proof that the injected model enum and the unspellable value carrier
+    /// agree on catalog ORDINALS, not dense ids).
+    #[test]
+    fn reflect_never_and_erased_arms_use_the_ordinal_pinned_variant_ids() {
+        for (spelling, expected) in [("never", 4), ("any", 5)] {
+            let result = run_comptime_body(&format!(
+                r#"
+match reflect(type_ref({spelling})) {{
+  FrozenType::Primitive(p) => 1
+  FrozenType::Never(n) => 4
+  FrozenType::Erased(e) => 5
+}}
+"#
+            ))
+            .unwrap_or_else(|error| {
+                panic!("reflect(type_ref({spelling})) must succeed: {error:?}")
+            });
+            assert_eq!(
+                result.value.as_i64(),
+                Some(expected),
+                "reflect(type_ref({spelling})) must select the {expected} arm"
+            );
+        }
+    }
+
+    /// R1 (sanctioned tracer): reflecting a category whose payload ticket
+    /// has not landed is the NAMED per-category compile-time rejection —
+    /// never a partial descriptor. `Array` is frozen as Nominal in every
+    /// compilation unit.
+    #[test]
+    fn reflect_non_enabled_category_is_the_named_r1_rejection() {
+        let error = run_comptime_body_err(
+            "reflect(type_ref(Array))",
+            "Nominal payload has not landed; reflect must reject",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("reflect: the Nominal payload descriptor has not landed"),
+            "R1 rejection must name the category and the pending ticket family: {message}"
+        );
+        assert!(
+            message.contains("use type_category"),
+            "R1 rejection must point at the exhaustive category layer: {message}"
+        );
+    }
+
+    /// R6: a non-exhaustive match over the sealed reflect sum is the
+    /// existing exhaustiveness error (the injected model enum feeds the
+    /// mini-VM inference engine's enum registry).
+    #[test]
+    fn reflect_match_exhaustiveness_is_enforced_over_the_injected_model() {
+        let error = run_comptime_body_err(
+            r#"
+match reflect(type_ref(int)) {
+  FrozenType::Primitive(p) => 1
+}
+"#,
+            "a Primitive-only match over FrozenType is non-exhaustive",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Non-exhaustive match"),
+            "R6 must surface the existing exhaustiveness error: {message}"
+        );
+    }
+
+    /// R6 twin: no Unknown/Any arm is nameable on the sealed sum.
+    #[test]
+    fn no_unknown_variant_is_nameable_on_the_reflect_sum() {
+        let error = run_comptime_body_err(
+            r#"
+match reflect(type_ref(int)) {
+  FrozenType::Primitive(p) => 1
+  FrozenType::Never(n) => 2
+  FrozenType::Erased(e) => 3
+  FrozenType::Unknown(u) => 4
+}
+"#,
+            "FrozenType has no Unknown variant to name",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Unknown"),
+            "the rejection must name the unknown variant: {message}"
+        );
+    }
+
+    /// R5 + collision fence: outside comptime, `reflect` hits the
+    /// comptime-only rejection path (identical in shape to
+    /// `type_ref_is_comptime_only`) — the runtime stub never receives
+    /// comptime descriptors from source-level calls.
+    #[test]
+    fn reflect_is_comptime_only_at_runtime_position() {
+        let program =
+            shape_ast::parser::parse_program("let x = reflect(42)").expect("parse");
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program);
+        assert!(result.is_err(), "runtime-position reflect must be rejected");
+        let message = format!("{}", result.unwrap_err());
+        assert!(
+            message.contains("comptime-only builtin"),
+            "R5 must surface the comptime-only rejection: {message}"
+        );
+    }
+
+    /// Collision pin (a): the runtime builtin-name mapping and the executor
+    /// SURFACE stub are untouched by ADR-009 B1 — `reflect` still resolves
+    /// to `BuiltinFunction::Reflect` at the name-mapping layer, and the
+    /// `phase-1b-vm-wave-5e-reflect` NotImplemented stub arm survives. The
+    /// comptime path shadows by resolution ORDER (user forwarder before
+    /// builtin classification), never by renaming.
+    #[test]
+    fn runtime_reflect_name_mapping_and_stub_arm_are_untouched() {
+        let compiler = crate::compiler::BytecodeCompiler::new();
+        let resolution = compiler
+            .classify_builtin_function("reflect")
+            .expect("runtime reflect name mapping must stay intact");
+        match resolution {
+            crate::compiler::BuiltinNameResolution::Surface { builtin, .. } => {
+                assert_eq!(builtin, crate::bytecode::BuiltinFunction::Reflect)
+            }
+            crate::compiler::BuiltinNameResolution::InternalOnly { .. } => {
+                panic!("reflect must stay a surface builtin mapping")
+            }
+        }
+
+        let executor_source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/executor/vm_impl/builtins.rs"
+        ))
+        .expect("executor builtins source readable");
+        assert!(
+            executor_source.contains("phase-1b-vm-wave-5e-reflect"),
+            "the BuiltinFunction::Reflect SURFACE stub arm must stay untouched by B1"
+        );
+    }
+
+    /// R4: reflect's argument forms are rejected with NAMED diagnostics at
+    /// the outer type-check (mirroring the type_ref arg-form rejections) —
+    /// wrong arity, string arg, int arg, and the legacy `__ComptimeTypeRef`
+    /// descriptor (`type_info(T).type_ref`).
+    #[test]
+    fn reflect_arg_forms_are_rejected_with_named_diagnostics() {
+        for (code, expected) in [
+            (
+                "let x = comptime { reflect() }",
+                "reflect expects exactly one TypeRef argument",
+            ),
+            (
+                "let x = comptime { reflect(type_ref(int), type_ref(int)) }",
+                "reflect expects exactly one TypeRef argument",
+            ),
+            (
+                r#"let x = comptime { reflect("int") }"#,
+                "reflect expects a TypeRef value",
+            ),
+            (
+                "let x = comptime { reflect(42) }",
+                "reflect expects a TypeRef value",
+            ),
+            (
+                "let x = comptime { reflect(type_info(int).type_ref) }",
+                "reflect expects a TypeRef value",
+            ),
+        ] {
+            let program = shape_ast::parser::parse_program(code).expect("parse");
+            let result = crate::compiler::BytecodeCompiler::new().compile(&program);
+            assert!(result.is_err(), "must reject: {code}");
+            let message = format!("{}", result.unwrap_err());
+            assert!(
+                message.contains(expected),
+                "R4 for `{code}` must surface `{expected}`, got: {message}"
+            );
+        }
+    }
+
+    /// R2 (Dec 50/94 required rejection): the reflect result exposes NO
+    /// string `kind` field — the `info.kind == "record"` legacy form is a
+    /// named rejection, not a nullable/stringly access.
+    #[test]
+    fn reflect_result_has_no_string_kind_field() {
+        let error = run_comptime_body_err(
+            r#"reflect(type_ref(int)).kind"#,
+            "FrozenType exposes no string kind field",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("kind"),
+            "R2 rejection must name the missing field: {message}"
+        );
+    }
+
+    // =====================================================================
+    // ADR-009 B1 S4 — the value-DEEP stage-boundary lift wall
+    // (`comptime_result_lift_rejection`): descriptors nested inside
+    // objects/arrays and spellable-model forgeries are NAMED at the
+    // boundary, never silently swallowed to `Null` by the `nb_to_expr`
+    // materialization fallback (scout risk 4 bypass channel).
+    // =====================================================================
+
+    /// A descriptor nested inside an object-literal result is caught by the
+    /// deep wall with the descriptor's own named message.
+    #[test]
+    fn deep_lift_wall_names_a_descriptor_nested_in_an_object_result() {
+        let result = run_comptime_body(r#"{ inner: reflect(type_ref(int)) }"#)
+            .expect("building a descriptor-bearing object INSIDE comptime is allowed");
+        assert_eq!(
+            super::comptime_result_lift_rejection(&result.value, &result.schema_registry),
+            Some("FrozenType is comptime-only reflection data and cannot enter runtime code"),
+            "the nested descriptor must be named at the stage boundary"
+        );
+    }
+
+    /// A user-forged SPELLABLE payload-model value (constructable inside
+    /// comptime exactly like `FrozenTypeCategory`) resolves through the
+    /// carried mini-VM registry and hits the spellable-name lift arm.
+    #[test]
+    fn deep_lift_wall_names_a_forged_spellable_model_value() {
+        let result = run_comptime_body("FrozenType::Primitive(FrozenPrimitive::Bool)")
+            .expect("constructing a spellable model value INSIDE comptime is allowed");
+        assert_eq!(
+            super::comptime_result_lift_rejection(&result.value, &result.schema_registry),
+            Some("FrozenType is comptime-only reflection data and cannot enter runtime code"),
+        );
+    }
+
+    /// Ordinary comptime results (scalars, plain objects) pass the deep
+    /// wall untouched — the wall names descriptors only.
+    #[test]
+    fn deep_lift_wall_ignores_ordinary_comptime_results() {
+        for body in ["42", r#"{ name: "shape", count: 2 }"#, "[1, 2, 3]"] {
+            let result = run_comptime_body(body).expect("ordinary comptime body succeeds");
+            assert_eq!(
+                super::comptime_result_lift_rejection(&result.value, &result.schema_registry),
+                None,
+                "ordinary result must remain liftable: {body}"
+            );
+        }
+    }
 }
 
 #[cfg(any())]
@@ -3072,7 +4356,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3098,7 +4382,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3131,7 +4415,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3283,7 +4567,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),
@@ -3320,7 +4604,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         )
         .map(|r| r.value);
         assert!(
@@ -3368,7 +4652,7 @@ mod tests_deferred {
             &[],
             Default::default(),
             Default::default(),
-            Default::default(),
+            super::test_freeze_overlay(),
         );
         assert!(
             result.is_ok(),

@@ -99,6 +99,7 @@ fn get_expr_span(expr: &Expr) -> Option<Span> {
         | Expr::FuzzyComparison { span, .. }
         | Expr::EnumConstructor { span, .. }
         | Expr::TypeAssertion { span, .. }
+        | Expr::TypeSyntax(_, span)
         | Expr::InstanceOf { span, .. }
         | Expr::Range { span, .. }
         | Expr::DataRelativeAccess { span, .. }
@@ -652,6 +653,10 @@ impl BytecodeCompiler {
                 } else {
                     target_desc.name.clone()
                 };
+                // ADR-009 D1 (S2): expansion site for this expression-target
+                // handler application.
+                let expansion_site =
+                    self.annotation_expansion_site(annotation, &handler, &target_desc);
                 // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                 // Result; surface the V3-S5 ckpt-5 SURFACE through the
                 // caller's Result chain instead of panicking.
@@ -666,13 +671,19 @@ impl BytecodeCompiler {
                 )?;
 
                 let removed = self
-                    .process_comptime_directives(execution.directives, &target_name)
-                    .map_err(|e| ShapeError::RuntimeError {
-                        message: format!(
-                            "Comptime handler '{}' directive processing failed: {}",
-                            annotation.name, e
-                        ),
-                        location: Some(self.span_to_source_location(handler_span)),
+                    .process_comptime_directives(
+                        execution.directives,
+                        &target_name,
+                        &expansion_site,
+                    )
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(
+                            e,
+                            &format!("Comptime handler '{}'", annotation.name),
+                            handler_span,
+                        )
                     })?;
 
                 if removed {
@@ -1655,6 +1666,16 @@ impl BytecodeCompiler {
                 self.compile_expr_unary_op(op, operand, *span)
             }
 
+            // ADR-009 A2: the type-syntax carrier is consumed by the
+            // comptime type_ref rewrite before codegen. Reaching codegen
+            // means it sits outside the type_ref argument position (or the
+            // rewrite did not run) — a named surface-and-stop error, never
+            // a silently compiled value.
+            Expr::TypeSyntax(_, _) => Err(ShapeError::SemanticError {
+                message: "type syntax is only valid as the type_ref argument".to_string(),
+                location: None,
+            }),
+
             // Type operations
             Expr::TypeAssertion {
                 expr,
@@ -1874,12 +1895,13 @@ impl BytecodeCompiler {
                     .cloned()
                     .collect();
                 let comptime_helpers = self.collect_comptime_helpers();
-                // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
-                // resolution from a comptime expression.
-                let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
-                    self,
-                    &[],
-                );
+                // ADR-009 §4.1 (S2): comptime expressions consume the
+                // per-compilation-unit freeze handle; the enclosing generic
+                // function's type parameters enter via the scoped overlay
+                // (`comptime_freeze_overlay` discovers `current_function`).
+                // No per-site rebuild; a site without a handle is a compile
+                // error (row 3).
+                let freeze = self.comptime_freeze_overlay()?;
                 // J-CT.2 — comptime-context items: trait defs, struct defs,
                 // and comptime impl blocks are prepended to the mini-VM
                 // program so `instance.method()` inside the comptime block
@@ -1902,21 +1924,33 @@ impl BytecodeCompiler {
                     &extensions,
                     trait_impls,
                     known_type_symbols,
-                    type_snapshot,
+                    freeze,
                 )
                 .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
                 // §4.4: re-emit any `warning()` output anchored at this block.
                 self.surface_comptime_warnings(&execution.warnings, *span);
                 // Comptime blocks can emit directives via direct syntax.
                 // They are processed with no implicit target binding.
-                self.process_comptime_directives(execution.directives, "")
-                    .map_err(|e| shape_ast::error::ShapeError::RuntimeError {
-                        message: format!("Comptime block directive processing failed: {}", e),
-                        location: Some(self.span_to_source_location(*span)),
+                // ADR-009 D1 (S2): the block is its own expansion site.
+                let module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+                let expansion_site = self.comptime_block_expansion_site(*span, &module_path);
+                self.process_comptime_directives(execution.directives, "", &expansion_site)
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(e, "Comptime block", *span)
                     })?;
-                if let Some(message) =
-                    shape_runtime::comptime_reflection::runtime_lift_rejection(&execution.value)
-                {
+                // ADR-009 B1 S4: value-DEEP lift wall — the shared
+                // `runtime_lift_rejection` fires on every reachable
+                // typed-object node (nested objects/arrays, spellable model
+                // forgeries), resolved against the mini-VM's own schema
+                // registry so mini-VM-registered ids can be NAMED instead of
+                // silently swallowing to `Null` on the materialization
+                // fallback (scout risk 4 bypass channel).
+                if let Some(message) = super::comptime::comptime_result_lift_rejection(
+                    &execution.value,
+                    &execution.schema_registry,
+                ) {
                     return Err(shape_ast::error::ShapeError::SemanticError {
                         message: message.to_string(),
                         location: Some(self.span_to_source_location(*span)),

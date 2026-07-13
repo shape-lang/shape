@@ -2525,6 +2525,16 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
         Expr::ListComprehension(comp, _) => {
             lower_list_comprehension_expr(builder, comp, temp, span);
         }
+        // ADR-009 A2: the type-syntax carrier reads no slots — for the
+        // borrow solver / storage planner it is an empty aggregate (this
+        // lowering runs on the pre-comptime-rewrite AST, so the carrier is
+        // still present inside `type_ref(...)` here). This is analysis
+        // tier only: the authoritative value-position rejection ("type
+        // syntax is only valid as the type_ref argument") lives in the
+        // bytecode compiler's `compile_expr` surface-and-stop arm.
+        Expr::TypeSyntax(_, _) => {
+            lower_exprs_to_aggregate(builder, temp, std::iter::empty(), span);
+        }
         Expr::TypeAssertion {
             expr,
             type_annotation,

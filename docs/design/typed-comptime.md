@@ -87,7 +87,236 @@ real exhaustive enum, and transparent aliases reuse the underlying identity.
 Raw type refs and category values cannot cross into runtime code; they must be
 consumed inside comptime. Completion, hover, signature help, enum-variant
 completion, and compile diagnostics use the same catalog and compiler path.
-This is the category layer, not yet the payload-bearing `FrozenType<T>` sum.
+This is the category layer; the payload-bearing `FrozenType<T>` sum is
+CURRENT-partial via `reflect()` (ADR009-B1, below).
+
+**CURRENT / VM+JIT - `Parameter` category from generic bodies (ADR009-A3)**
+
+```shape
+fn describe<T>(value: T) -> string {
+    comptime {
+        match type_category(type_ref(T)) {
+            FrozenTypeCategory::Parameter => "parameter"
+            FrozenTypeCategory::Primitive => "primitive"
+            FrozenTypeCategory::Never => "never"
+            FrozenTypeCategory::Nominal => "nominal"
+            FrozenTypeCategory::Tuple => "tuple"
+            FrozenTypeCategory::Record => "record"
+            FrozenTypeCategory::Callable => "callable"
+            FrozenTypeCategory::Reference => "reference"
+            FrozenTypeCategory::Union => "union"
+            FrozenTypeCategory::Erased => "erased"
+        }
+    }
+}
+
+print(describe(1))  // "parameter"
+```
+
+A generic function whose body reflects on its own declared type parameter now
+compiles and runs on VM and JIT. `type_ref(T)` inside the generic body yields
+the declared pre-substitution `Parameter` identity (Decision 52: declared
+generic parameters are typed parameter identities, not inference holes), never
+the substituted concrete category. The identity is scoped to the BASE generic
+function name — stable across instantiations of one function (`identity(1)`
+and `identity("s")` observe the same identity) and distinct across owning
+functions. The specialization compiler carries the base definition's declared
+type parameters into the reflection snapshot via an explicit scoped overlay
+(spec §4.1: overlay, not rebuild — a single derivation, no second parameter
+table).
+
+Execution semantics: a generic body's comptime block executes once PER
+instantiation (generic template bodies never compile at definition;
+`identity(1)` + `identity("s")` = two comptime runs). Side-effectful comptime
+(`warning()`, directives) in generic bodies therefore duplicates per
+instantiation by design; it is not deduplicated.
+
+Rejections re-fire on the specialized-compile path with their named
+diagnostics: an undeclared name (`type_ref(U)` inside `fn f<T>`) fails the
+freeze with "unknown semantic type identity" — hard specialized-body compile
+errors now propagate out of monomorphization instead of being masked as
+"cannot infer type argument(s)"; soft resolution failures (unresolved type
+args, specialization cycles) keep their non-error fallback. String
+construction, arity, comptime-only stage, runtime escape, and match
+exhaustiveness rejections all hold inside generic bodies. `Parameter`
+descriptor payloads (`TypeParamDescriptor<T>`) are B7, not yet enabled.
+
+Book status: behavior is gate-runnable green on VM and JIT; the gate-runnable
+book example lands with F1 or earlier per spec §3.7 (book examples only after
+gate-runnable green — satisfied for this slice).
+
+**CURRENT / VM+JIT - canonical semantic freeze (ticket A1, 2026-07-12).** The
+reflection surface above is served by ONE `SemanticFreeze` built per
+compilation unit at the registration-complete barrier
+(`shape-vm/src/compiler/comptime_builtins/semantic_freeze.rs`), never rebuilt
+per comptime site. Scoped generic parameters enter through `FreezeOverlay`
+layers; every comptime site — inline blocks, comptime expressions, and
+annotation handlers, speculative pre-pass included — consumes the same
+`Arc<FreezeOverlay>` handle, and a site that cannot obtain one is a named
+compile error (`NO_FREEZE_HANDLE_DIAGNOSTIC`), never an empty snapshot.
+Freeze-boundary failures fire before any user comptime executes (Decision 52).
+Aliases and enums declared after a comptime block are visible to it
+(registration-complete freeze). The LSP `type_ref`/`type_category` metadata
+rows are generated from the shared runtime-owned catalog
+(`shape-runtime/src/comptime_reflection.rs`), not a parallel static table.
+The legacy `type_info` path (`TypeKindLabel` string vocabulary,
+`__ComptimeTypeInfo` carrier) consumes the same freeze handle and is confined
+to the legacy intrinsic behind an `E5-deletes` marker + sentinel test until
+ticket E5 deletes it. Evidence:
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md` (A1 addendum).
+Book status: A1-enabled behaviors are gate-runnable in ShapeTest
+(`tools/shape-test/tests/comptime/frozen_type.rs`,
+`tests/annotations_comptime/frozen_reflection.rs`, VM+JIT); book-chapter
+examples land in stage F1 per the program spec.
+
+**CURRENT-partial / VM+JIT - payload-bearing `FrozenType<T>` via `reflect()`
+(ADR009-B1, 2026-07-13)**
+
+```shape
+let label = comptime {
+    match reflect(type_ref(bigint)) {
+        FrozenType::Primitive(p) => match p {
+            FrozenPrimitive::SignedInteger(w) => match w {
+                IntegerWidth::Arbitrary => "signed:arbitrary"
+                _ => "signed:fixed"
+            }
+            _ => "other-primitive"
+        }
+        FrozenType::Never(n) => "never"
+        FrozenType::Erased(e) => "erased"
+    }
+}
+print(label)  // "signed:arbitrary"
+```
+
+`reflect(TypeRef<T>) -> FrozenType<T>` returns the sealed payload-bearing
+indexed sum (Decision 50/94) with the FIRST complete payload categories:
+
+- **`Primitive(FrozenPrimitive)`** — the sealed 10-member sub-algebra (Unit,
+  Bool, Char, SignedInteger, UnsignedInteger, BinaryFloat, Decimal, String,
+  Null, Undefined) with exact width/domain payloads (`IntegerWidth` W8-W64 +
+  `Arbitrary`, `FloatWidth` W32/W64). Synonym families coalesce to one
+  payload (`int`/`i64`, `number`/`f64`/`float`, `string`/`str`,
+  `unit`/`void`/`()`); `bigint` is `SignedInteger(IntegerWidth::Arbitrary)`
+  by named decision. Payloads are typed descriptor data, never rendered
+  type-name strings.
+- **`Never(FrozenNever)`** and **`Erased(FrozenErased)`** — the Erased bound
+  set is complete and provably empty for `any`, the only reachable erased
+  spelling until A2 lands trait-bound `type_ref` syntax.
+
+The three enabled variants carry the Dec 50/94 catalog ORDINALS (Primitive=0,
+Never=1, Erased=9), not dense ids, so later B tickets add payload variants
+without renumbering (comptime-ABI stability, spec §3.3). Reflecting a
+category whose payload ticket has not landed is a NAMED compile-time
+rejection ("reflect: the `<Category>` payload descriptor has not landed
+(pending payload ticket); use type_category for the exhaustive category") —
+never a partial descriptor — while `type_category` stays exhaustive over all
+10 categories in the same program. Descriptors have no string `kind` field
+and no nullable category fields; the sealed sum has no `Unknown`/`Any` arm
+and match exhaustiveness is enforced. Descriptors (unspellable carriers AND
+the spellable comptime model values) cannot cross into runtime code on any
+lift channel — the comptime-result wall is a value-deep walk over nested
+objects/arrays calling the shared `runtime_lift_rejection`. `reflect` is
+comptime-only (the pre-existing runtime `reflect` surface stub is untouched
+and unit-pinned); it works inside generic bodies per instantiation (A3
+overlay) and inside annotation `@comptime` hooks. LSP hover, comptime-only
+completion visibility, closed `FrozenType`/`FrozenPrimitive` variant
+completion, and semantic diagnostics all derive from the shared runtime
+catalog (`shape-runtime/src/comptime_reflection.rs`), no hand-written
+parallel rows.
+
+Evidence: `tools/shape-test/tests/comptime/reflect.rs` (VM+JIT, every
+positive program on both engines), `tests/annotations_comptime/
+frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit matrices in
+`crates/shape-vm/src/compiler/comptime_builtins/type_reflection/tests.rs`
+and `crates/shape-runtime/src/comptime_reflection.rs`; rejection-matrix
+mapping in the wave46 audit B1 addendum
+(`docs/cluster-audits/wave46-typed-comptime-first-tracers.md`).
+Book status: B1-enabled behavior is gate-runnable green on VM and JIT in
+ShapeTest; the book-chapter example lands in stage F1 per spec §3.7 (book
+examples only after gate-runnable green — satisfied for this slice; the book
+lives in shape-web, outside this worktree and this ticket).
+
+**CURRENT / VM+JIT - checked type-expression syntax for `type_ref` (ticket A2, 2026-07-13)**
+
+```shape
+let label = comptime {
+    match type_category(type_ref([int, string])) {
+        FrozenTypeCategory::Tuple => "tuple"
+        FrozenTypeCategory::Primitive => "primitive"
+        FrozenTypeCategory::Never => "never"
+        FrozenTypeCategory::Parameter => "parameter"
+        FrozenTypeCategory::Nominal => "nominal"
+        FrozenTypeCategory::Record => "record"
+        FrozenTypeCategory::Callable => "callable"
+        FrozenTypeCategory::Reference => "reference"
+        FrozenTypeCategory::Union => "union"
+        FrozenTypeCategory::Erased => "erased"
+    }
+}
+```
+
+`type_ref(...)` now accepts the full checked type grammar, not only bare
+compiler-resolved names. Accepted spellings: tuples `[T, U]`, records
+`{field: T}` / `{field?: T}`, callables `(T) -> R`, references `&T` /
+`&mut T`, unions `T | U`, erased domains `any` / `dyn Trait` /
+`dyn A + B`, and applied generics (`Option<int>`, `Array<User>`, user
+generics, nested applications like `Option<Array<int>>`). One canonicalizer
+(`shape-vm/src/compiler/comptime_builtins/type_reflection.rs`) produces a
+deterministic, declaration-order-independent canonical descriptor per form
+(record fields byte-sorted by name; union members deduped and byte-sorted;
+`&T` vs `&mut T` significant; field optionality significant); its SHA-256
+identity is the VM/JIT-shared ABI substrate for B4/B7. Normalization per
+Decisions 50/94: transparent aliases normalize away through applied forms
+(`type Ids = Array<UserId>` with `UserId = int` yields
+`identity(Array<int>)`), structural object intersections canonicalize to
+`Record`, trait intersections to `Erased` bound sets. Unresolved names at
+any depth and inference holes are named freeze rejections at compile time,
+before user comptime executes (Decision 52); applied arity is enforced from
+freeze facts; const-generic applications are a named parse-time rejection
+until B4/Dec-54 lands the const carrier. LSP completion inside the
+`type_ref(` type position routes to the type-annotation provider
+(primitives, user types, in-scope generic parameters — never value
+bindings); hover/signature stay generated from the shared catalog row. The
+surface spelling remains `type_ref(T)` (not the Dec-48 turbofish
+`type_ref<T>()`) — the constructor-identity reclassification is ticket B4.
+Evidence: `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`
+(A2 addendum); e2e in `tools/shape-test/tests/comptime/frozen_type.rs`
+(per-form VM+JIT matrix + rejection matrix) and
+`tools/shape-test/tests/lsp/typed_comptime.rs`.
+Book status: A2-enabled behaviors are gate-runnable in ShapeTest (VM+JIT);
+book-chapter examples land in stage F1 per the program spec.
+
+**CURRENT / VM+JIT - typed trait identity and implementation evidence
+(ticket B2, 2026-07-13).** `trait_ref(Trait)` yields an opaque
+compiler-issued `TraitRef` — a DISTINCT identity kind from `TypeRef` (Dec 49:
+a trait is not a value type; trait identities are never interned as type
+identities, and there is no `FrozenTypeCategory::Trait` variant per Dec 50
+rule 5). `find_impl(type_ref, trait_ref) -> Option<ImplRef<T, Tr>>` answers
+ONLY from implementation evidence frozen at the same registration-complete
+barrier (freeze inputs 4/5 in `semantic_freeze.rs`, read once from the
+analyzer env registry via a two-sub-pass trait-then-impl predeclare walk over
+both compile entry points); an unimplemented pair is `None` — never an error,
+never partial evidence. The canonical descriptors (`trait:{name}`,
+`impl:{trait}:{type}:{impl_name_or_default}`) enter the same 128-bit SHA-256
+identity scheme as type identities, so canonical trait and implementation
+identities enter generated-artifact fingerprints. Evidence is consumed in the
+`Some(proof)` match arm (Dec 49 positive form, proven VM+JIT); branch scoping
+is enforced as stage-boundary lift rejection plus Some-arm-only issuance (the
+schema-name-checked opaque decode blocks forged evidence structurally).
+Rejection matrix R1-R9 named-diagnostic-asserted with LSP semantic-diagnostic
+twins; blanket-impl satisfaction, legacy numeric widening, ambiguous
+unqualified-impl attribution, and post-barrier (comptime-generated/derived)
+implementations are named surface-and-stops, never silent `None`. Spelling:
+the landed surface is positional `trait_ref(Serializable)` matching the
+landed `type_ref(int)`; Dec 49's `trait_ref<Serializable>()` turbofish lands
+with ticket A2 (deviation logged in `docs/defections.md`). Legacy
+`implements(T, Trait)` remains untouched until E5 deletes it. Evidence:
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md` (B2 addendum).
+Book status: B2-enabled behaviors are gate-runnable in ShapeTest
+(`tools/shape-test/tests/comptime/trait_evidence.rs`,
+`tests/lsp/typed_comptime.rs`, VM+JIT); the gate-runnable book example lands
+with F1 or earlier per spec §3.7.
 
 **CURRENT / compiler - generated implicit capture rejection**
 
@@ -120,6 +349,41 @@ print(User { name: "Ada" }.summary())
 
 Direct `extend target { ... }` has applied VM/JIT evidence. This does not prove
 that computed source-string generation is acceptable.
+
+**CURRENT / compiler+LSP - generated symbol identities, expansion provenance,
+source anchors, and identity-driven tooling (Decision 68, ticket ADR009-D1,
+2026-07-13).** Scope: the EXISTING extend/materialization path; the
+declaration-discovery fixed point (Decision 67) and `shape-expansion://`
+virtual views remain TARGET (ticket D2). Every declaration generated on that
+path is an ordinary compiler symbol: the compiler issues a content-derived
+`SymbolId` with full `ExpansionIdentity { generator, application, target,
+stage, arguments_hash, dependencies_hash }` + `GeneratedOrigin { expansion,
+node_path, source_anchor }` provenance
+(`shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs`, hashing
+per the A1 canonical-descriptor SHA-256 scheme — never rendered text, never a
+counter). The speculative pre-pass and the authoritative pass-2 compile agree
+on ONE identity per application (idempotent re-issue); dedup is
+identity-keyed — the name-string `materialized_comptime_fns` set is deleted,
+and one generated name under two identities or one identity with conflicting
+output is a named compile error carrying both expansions' provenance.
+Generated declarations anchor at real source spans (`Span::DUMMY` is the
+named row-1 rejection). Tooling consumes the ONE compiler query surface
+(`BytecodeCompiler::generated_symbol_query()`), never a text scan: go-to-def
+on a generated-method call site opens the checked declaration and links the
+application + generator definition; references/workspace+document symbols
+answer via `SymbolId`; diagnostics inside generated declarations carry
+generated-node (with node path) + application + generator locations as
+related information; rename on an explicit source binder edits ONLY the
+source binder occurrences (the expansion recomputes; zero edits land in
+generated ranges), and a wholly generator-controlled name is NEVER a text
+edit — rename reports generator control and links the generator definition.
+Evidence: `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`
+(D1 addendum, rejection matrix rows 1-10 + verification counts).
+Book status: D1-enabled behaviors are gate-runnable in ShapeTest
+(`tools/shape-test/tests/lsp/{generated_navigation.rs,
+generated_provenance.rs, generated_rename.rs}` and
+`tests/annotations_comptime/generated_method_runtime.rs`, VM+JIT);
+book-chapter examples land in stage F1 per the program spec.
 
 ### Implemented But Under-Proven
 
@@ -157,13 +421,12 @@ examples, rejection requirements, and implementation implications.
 | Structure | Stage | Purpose | Status |
 |---|---|---|---|
 | `ConstValue<T>` / literal lifting | comptime | Move closed values into generated code | accepted |
-| `TypeRef<T>` | comptime | Canonical type identity | accepted |
-| `TraitRef<Trait>` | comptime | Canonical trait identity | accepted |
-| `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted |
+| `TypeRef<T>` | comptime | Canonical type identity | accepted; CURRENT / VM+JIT — A1 canonical semantic freeze: one per-unit freeze barrier, shared query API, annotation-handler handle threading (wave46 A1 addendum); A2 checked type-expression surface CURRENT / VM+JIT — tuples `[T, U]`, records `{field: T}`, callables `(T) -> R`, references `&T`/`&mut T`, unions `T \| U`, erased `any`/`dyn Trait`, applied generics `Option<int>` incl. alias normalization through applied forms (wave46 A2 addendum) |
+| `TraitRef<Trait>` | comptime | Canonical trait identity | accepted; CURRENT / VM+JIT — B2 distinct frozen trait identity (`trait:{name}` SHA-256 descriptors, never interned as type identities; positional `trait_ref(Trait)` surface, turbofish pending A2) (wave46 B2 addendum) |
+| `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted; CURRENT / VM+JIT — B2 `find_impl(type_ref, trait_ref) -> Option<ImplRef<T, Tr>>` over barrier-frozen evidence, Some-arm consumption + None arm proven VM+JIT; branch scoping = stage-boundary lift rejection + Some-arm-only issuance (wave46 B2 addendum) |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |
-| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94 |
-| `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted |
-| `AliasDescriptor<A, T>` | comptime declaration | Transparent-alias provenance and underlying type | accepted |
+| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, and Erased payloads at catalog-pinned ordinals 0/1/9; the 7 remaining categories reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 addendum); remaining payloads TARGET (B2/B4-B7) |
+| `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
 | `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted |
 | `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted |
 | `NamePolicy<Domain, Namespace>` | comptime generation | Deterministic external identifier to hygienic symbol mapping | accepted |
@@ -206,6 +469,8 @@ examples, rejection requirements, and implementation implications.
 - [Nominals And Members](typed-comptime/nominals-and-members.md): Decisions 55-60.
 - [Annotations And Hooks](typed-comptime/annotations-and-hooks.md): Decisions 61-65.
 - [Expansion And Tooling](typed-comptime/expansion-and-tooling.md): Decisions 66-69.
+  Decision 68 is CURRENT on the existing extend/materialization path
+  (ADR009-D1, 2026-07-13); the fixed point + virtual views remain TARGET (D2).
 - [Resources And Fragments](typed-comptime/resources-and-fragments.md): Decisions 70-73 and 95.
 - [Patterns And Control Flow](typed-comptime/patterns-and-control-flow.md): Decisions 74-76.
 - [Guards And Exhaustiveness](typed-comptime/guards-and-exhaustiveness.md): Decisions 77-79.

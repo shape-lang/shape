@@ -270,6 +270,16 @@ impl TypeInferenceEngine {
         {
             return None;
         }
+        // ADR-009 B1 S3: comptime builtins always route through
+        // `infer_function_call` → `infer_comptime_builtin_call`, whose
+        // rejections are NAMED (R4/R5). Inside the comptime mini-VM the
+        // builtin name also resolves to an injected same-named forwarder
+        // fn with unannotated params, which this fast path would otherwise
+        // capture — surfacing an unnamed generic arity error before the
+        // named diagnostic can fire.
+        if crate::builtin_metadata::is_comptime_builtin_function(name) {
+            return None;
+        }
 
         let scheme = self.env.lookup(name).cloned()?;
         let func_type = scheme.instantiate(&mut self.type_var_gen);
@@ -1177,6 +1187,15 @@ impl TypeInferenceEngine {
                     Ok(then_type)
                 }
             }
+
+            // ADR-009 A2: the type-syntax carrier is not a value expression.
+            // It is consumed structurally by the `type_ref` argument gate
+            // (`inference/access.rs`) before argument inference runs; any
+            // other position is a named surface-and-stop error, never a
+            // silently synthesized value type.
+            Expr::TypeSyntax(_, _) => Err(TypeError::ConstraintViolation(
+                "type syntax is only valid as the type_ref argument".to_string(),
+            )),
 
             Expr::TypeAssertion {
                 expr,

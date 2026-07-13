@@ -242,12 +242,13 @@ impl ShapeLanguageServer {
         match parse_program(parse_source.as_ref()) {
             Ok(program) => {
                 let module_cache = self.documents.get_module_cache();
-                let mut diagnostics = crate::analysis::analyze_program_semantics(
+                let mut diagnostics = crate::analysis::analyze_program_semantics_for_document(
                     &program,
                     &text,
                     uri.to_file_path().as_deref(),
                     Some(&module_cache),
                     self.project_root.get().map(|p| p.as_path()),
+                    Some(uri),
                 );
                 diagnostics.extend(crate::doc_diagnostics::validate_program_docs(
                     &program,
@@ -390,12 +391,13 @@ impl ShapeLanguageServer {
                     .await;
 
                 let module_cache = self.documents.get_module_cache();
-                let mut diagnostics = crate::analysis::analyze_program_semantics(
+                let mut diagnostics = crate::analysis::analyze_program_semantics_for_document(
                     &program,
                     &text,
                     uri.to_file_path().as_deref(),
                     Some(&module_cache),
                     self.project_root.get().map(|p| p.as_path()),
+                    Some(uri),
                 );
                 diagnostics.extend(crate::doc_diagnostics::validate_program_docs(
                     &program,
@@ -1819,12 +1821,32 @@ impl LanguageServer for ShapeLanguageServer {
 
         let text = doc.text();
 
+        let cached = self.last_good_programs.get(&uri);
+        let cached_ref = cached.as_ref().map(|r| r.value());
+
+        // ADR-009 D1 (S6, Decision 68): rename over GENERATED symbols is
+        // answered from the compiler query surface first. A source-binder
+        // name renames by recomputation (source occurrences only); a
+        // wholly generator-controlled name is NEVER a text edit — the
+        // named report (with the generator-definition location in its
+        // message) is surfaced to the editor as the request's error
+        // response.
+        match crate::rename::generated_rename(&text, &uri, position, &new_name, cached_ref) {
+            Some(crate::rename::GeneratedRename::GeneratorControlled(report)) => {
+                return Err(tower_lsp_server::jsonrpc::Error::invalid_params(
+                    report.message,
+                ));
+            }
+            Some(crate::rename::GeneratedRename::Edits(edit)) => {
+                return Ok(Some(edit));
+            }
+            None => {}
+        }
+
         // W2.6 — cross-file rename via ScopeTree-driven scan over open
         // documents + workspace .shape files. Same-file path remains
         // scope-aware; cross-file restricted to module-scope-visible
         // top-level symbols.
-        let cached = self.last_good_programs.get(&uri);
-        let cached_ref = cached.as_ref().map(|r| r.value());
         let module_cache = self.documents.get_module_cache();
         let workspace_root = self.project_root.get().map(|p| p.as_path());
         let edit = rename_cross_file(

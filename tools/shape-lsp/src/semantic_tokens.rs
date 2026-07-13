@@ -1754,6 +1754,9 @@ impl<'a> Visitor for TokenCollector<'a> {
             | Expr::PatternRef(_, _)
             | Expr::ListComprehension(_, _)
             | Expr::TypeAssertion { .. }
+            // ADR-009 A2: type-syntax tokens inside type_ref(...) — typed
+            // highlighting is S6 (LSP slice) territory; neutral for now.
+            | Expr::TypeSyntax(_, _)
             | Expr::InstanceOf { .. }
             | Expr::Duration(_, _)
             | Expr::Spread(_, _)

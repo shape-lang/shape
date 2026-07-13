@@ -943,6 +943,9 @@ impl BytecodeCompiler {
             | Expr::Duration(..)
             | Expr::Continue(..)
             | Expr::Break(None, _)
+            // ADR-009 A2: type syntax is a leaf — no reference-model
+            // mutations inside.
+            | Expr::TypeSyntax(..)
             | Expr::Return(None, _) => {}
         }
     }
@@ -1969,6 +1972,22 @@ impl BytecodeCompiler {
 
     /// Compile a program to bytecode
     pub fn compile(mut self, program: &Program) -> Result<BytecodeProgram> {
+        self.compile_in_place(program)?;
+        Ok(std::mem::take(&mut self.program))
+    }
+
+    /// The full `compile` driver, borrowing the compiler so post-compile
+    /// state (e.g. the ADR-009 D1 `generated_symbols` provenance table)
+    /// remains inspectable — the compiler-owned surface the tooling queries
+    /// (Decision 66) and unit tests assert against. `compile` is the thin
+    /// consuming wrapper above; the compiled program lands in
+    /// `self.program`.
+    ///
+    /// `pub` since D1 slice S5: the LSP compiles the document through this
+    /// entry and then answers generated-symbol navigation from
+    /// `generated_symbol_query()` — the ONE query API of spec §4.1, never a
+    /// second evaluator.
+    pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
         // First: desugar the program (converts FromQuery to method chains, etc.)
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);
@@ -2010,6 +2029,66 @@ impl BytecodeCompiler {
             crate::compiler::expressions::closures::collect_returned_closure_callsite_param_hints(
                 &program,
             );
+        // WS-9b pass-1 prepass (runs before the comptime pre-passes since
+        // S3): pre-register the runtime `TypeSchema` + `struct_types` /
+        // `struct_generic_info` rows of every struct type declared anywhere
+        // in the program, so struct schemas are available before any
+        // function body compiles AND the semantic-freeze barrier below sees
+        // registration-complete struct state.
+        for item in &program.items {
+            self.predeclare_item_struct_schemas(item);
+        }
+
+        // ADR-009 §4.1 (ticket A1, S2): pre-register the remaining named
+        // freeze inputs (type aliases + enum schemas) so the barrier below
+        // freezes REGISTRATION-COMPLETE state. Aliases/enums previously
+        // registered only in their pass-2 item arms — after the barrier —
+        // which would leave the freeze partial (Dec 52). Side effect
+        // (intended, tested by
+        // `later_declared_alias_and_enum_are_visible_to_earlier_comptime_blocks`):
+        // aliases and enums become order-independent for comptime reflection,
+        // matching functions and struct schemas.
+        //
+        // ADR-009 (ticket B2, S1): the walk now also pre-registers
+        // barrier-time trait/impl truth into `type_inference.env`, in two
+        // sub-passes (all traits first, then impls — see
+        // `SemanticFreezePredeclarePass`). Without this, trait defs
+        // registered only in `register_item_functions` (post-barrier) and
+        // impls in pass-2 `Item::Impl` arms — S2's trait-identity /
+        // impl-evidence freeze inputs would freeze an empty table.
+        for pass in [
+            super::statements::SemanticFreezePredeclarePass::TypesAndTraits,
+            super::statements::SemanticFreezePredeclarePass::Impls,
+        ] {
+            for item in &program.items {
+                self.predeclare_item_semantic_freeze_inputs(item, pass)?;
+            }
+        }
+
+        // ADR-009 §4.1 (ticket A1, S1 barrier; moved ahead of the annotation
+        // pre-passes in S3): the single per-compilation-unit semantic-freeze
+        // barrier. Registration of every named freeze input is complete
+        // (struct-schema predeclare + alias/enum freeze-input predeclare
+        // above; the freeze reads no function tables), so the barrier runs
+        // BEFORE the first comptime site of the unit — including the two
+        // speculative annotation pre-passes below, which consume the SAME
+        // registration-complete handle as the authoritative pass-2 handler
+        // execution (S3 pre-pass freeze rule, functions_annotations.rs). A
+        // freeze-boundary rejection surfaces here as a compile error BEFORE
+        // any comptime handler body executes (Dec 52). Every comptime site
+        // consumes this handle via `comptime_freeze_overlay` (S2).
+        //
+        // A1 review round 1 (findings 1+2): on the graph-driven pipeline the
+        // compilation unit is root + dependency modules, and its single
+        // barrier already ran at the graph entry point BEFORE Phase 1
+        // (`compile_with_graph_and_prelude`) — dependency-module comptime
+        // sites execute there. In that case this site must NOT install a
+        // second freeze (the barrier runs exactly once per unit); it only
+        // fires when `compile()` IS the entry point (single-module unit).
+        if self.semantic_freeze.is_none() {
+            self.install_semantic_freeze()?;
+        }
+
         // comptime-excellence §4.5.1 whole-program pre-pass: run type-targeting
         // comptime handlers that emit computed `extend (f"fn ...")` free
         // functions, and hoist the generated functions into `program.items` as
@@ -2238,20 +2317,10 @@ impl BytecodeCompiler {
             self.register_item_functions(item)?;
         }
 
-        // WS-9b: pre-register struct type SCHEMAS (runtime fields only — no
-        // comptime-handler execution, that stays in the pass-2
-        // `register_struct_type`). This makes `type` definitions
-        // order-independent the same way `register_item_functions` makes
-        // function definitions order-independent: a function declared
-        // *before* the `type` it takes as a parameter (`fn ov(a, b) { a.lo
-        // <= b.hi }` ahead of `type Box`) can now resolve `a.lo` against the
-        // `Box` schema during its body compilation. Without the prepass the
-        // schema is registered only when the later `type` item compiles, so
-        // `tracker_schema_id_for_expr` misses it and the property access
-        // types as `unknown`.
-        for item in &program.items {
-            self.predeclare_item_struct_schemas(item);
-        }
+        // (WS-9b struct-schema predeclare + ADR-009 freeze-input predeclare +
+        // the semantic-freeze barrier ran earlier, before the §4.5.1
+        // annotation pre-passes — see the S3 block above
+        // `materialize_computed_comptime_extends`.)
 
         // U4-5b: register inferred return ConcreteTypes so function-call
         // compilation can recover the return type STRUCTURALLY even for sources
@@ -2364,7 +2433,9 @@ impl BytecodeCompiler {
             if self.errors.len() == 1 {
                 return Err(self.errors.remove(0));
             }
-            return Err(shape_ast::error::ShapeError::MultiError(self.errors));
+            return Err(shape_ast::error::ShapeError::MultiError(std::mem::take(
+                &mut self.errors,
+            )));
         }
 
         // Emit drops for top-level locals (from the top-level drop scope)
@@ -2977,7 +3048,7 @@ impl BytecodeCompiler {
         }
 
         // Transfer source text for error messages
-        if let Some(source) = self.source_text {
+        if let Some(source) = self.source_text.take() {
             // Set in legacy field for backward compatibility
             self.program.debug_info.source_text = source.clone();
             // Also set in source map if not already set
@@ -3007,7 +3078,7 @@ impl BytecodeCompiler {
         // carrier for the permanent classes) anchor the discipline.
         crate::compiler::post_inference_verify::verify_no_post_inference_any(&self.program)?;
 
-        Ok(self.program)
+        Ok(())
     }
 
     /// Compile a program to bytecode with source text for error messages
@@ -3048,6 +3119,80 @@ impl BytecodeCompiler {
         use crate::module_graph::ModuleSourceKind;
 
         self.module_graph = Some(graph.clone());
+
+        // ADR-009 §4.1 (A1 review round 1, findings 1+2): the semantic-freeze
+        // barrier is per COMPILATION UNIT — and on this pipeline the unit is
+        // root + graph dependencies. Phase 1 below compiles dependency
+        // modules, including any comptime site they contain (a top-level
+        // `comptime { }` item, an `Expr::Comptime` in an imported fn body, or
+        // an annotation comptime handler on an imported item), so the barrier
+        // must run BEFORE Phase 1 — the barrier inside `compile()` (Phase 2,
+        // root) alone left every dependency-module comptime site without a
+        // handle (row-3 NO_FREEZE_HANDLE diagnostic). Predeclare the named
+        // freeze inputs (struct schemas, type aliases, enum schemas) of every
+        // graph module under their qualified names — mirroring
+        // `compile_module_from_graph`'s own qualification — then the root's,
+        // then install the single freeze. The freeze reads no function
+        // tables, so running it ahead of body compilation loses nothing;
+        // predeclare registration is idempotent with the pass-2 item arms.
+        // This is the ONE unit barrier, not a per-module re-freeze:
+        // `compile()` skips its install when the graph entry point already
+        // ran it.
+        // ADR-009 (ticket B2, S1): the freeze-input predeclare runs as two
+        // sub-passes over the WHOLE unit (every graph module, then the
+        // root) — all type/trait definitions first, then all impls — so an
+        // impl anywhere in the unit registers with its trait def already
+        // present regardless of source or topo position (see
+        // `SemanticFreezePredeclarePass`). Struct schemas predeclare once,
+        // during the first sub-pass.
+        for pass in [
+            super::statements::SemanticFreezePredeclarePass::TypesAndTraits,
+            super::statements::SemanticFreezePredeclarePass::Impls,
+        ] {
+            for &dep_id in graph.topo_order() {
+                let dep_node = graph.node(dep_id);
+                if !matches!(
+                    dep_node.source_kind,
+                    ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid
+                ) {
+                    continue;
+                }
+                let Some(dep_ast) = dep_node.ast.clone() else {
+                    continue;
+                };
+                let module_path = dep_node.canonical_path.clone();
+                self.module_scope_stack.push(module_path.clone());
+                let predeclare_result = (|| -> Result<()> {
+                    for item in &dep_ast.items {
+                        if matches!(item, shape_ast::ast::Item::Import(..)) {
+                            continue;
+                        }
+                        // Only freeze-input-bearing items need qualification
+                        // here (the kinds the two predeclare walks act on);
+                        // skipping the rest avoids deep-cloning every
+                        // imported fn body a second time.
+                        if !Self::item_can_carry_semantic_freeze_inputs(item) {
+                            continue;
+                        }
+                        let qualified = self.qualify_module_item(item, &module_path)?;
+                        if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
+                            self.predeclare_item_struct_schemas(&qualified);
+                        }
+                        self.predeclare_item_semantic_freeze_inputs(&qualified, pass)?;
+                    }
+                    Ok(())
+                })();
+                self.module_scope_stack.pop();
+                predeclare_result?;
+            }
+            for item in &root_program.items {
+                if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
+                    self.predeclare_item_struct_schemas(item);
+                }
+                self.predeclare_item_semantic_freeze_inputs(item, pass)?;
+            }
+        }
+        self.install_semantic_freeze()?;
 
         // Phase 1: Compile dependency modules in topological order.
         for &dep_id in graph.topo_order() {

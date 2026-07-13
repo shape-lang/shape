@@ -755,6 +755,9 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
         }
 
         // Leaves with no sub-expressions.
+        // ADR-009 A2: `TypeSyntax` is a const-substitution leaf — its
+        // TypeAnnotation has no const carrier (const-generic applications
+        // are a named parse-time rejection in type_ref).
         Expr::Literal(_, _)
         | Expr::DataRef(_, _)
         | Expr::DataDateTimeRef(_, _)
@@ -764,6 +767,7 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
         | Expr::Duration(_, _)
         | Expr::Continue(_)
         | Expr::Unit(_)
+        | Expr::TypeSyntax(_, _)
         | Expr::TableRows(_, _) => expr.clone(),
 
         Expr::DataRelativeAccess {
@@ -1657,6 +1661,13 @@ fn substitute_method_def(m: &MethodDef, subs: &HashMap<String, ConcreteType>) ->
 fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
     match expr {
         // Leaves: nothing to recurse into.
+        // ADR-009 A2: `TypeSyntax` is deliberately NOT type-substituted.
+        // Applied forms over generic parameters (`type_ref(Array<T>)`)
+        // keep their pre-substitution spelling so the comptime rewrite
+        // resolves `T` through the A3 specialization overlay
+        // (`parameter:{owner}:{name}` identities, stable across
+        // instantiations) — mirroring the bare `type_ref(T)` identifier
+        // path, which is likewise untouched by substitution.
         Expr::Literal(_, _)
         | Expr::Identifier(_, _)
         | Expr::DataRef(_, _)
@@ -1667,6 +1678,7 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
         | Expr::Duration(_, _)
         | Expr::Continue(_)
         | Expr::Unit(_)
+        | Expr::TypeSyntax(_, _)
         | Expr::TableRows(_, _) => expr.clone(),
 
         Expr::DataRelativeAccess {

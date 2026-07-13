@@ -981,6 +981,133 @@ fn test_comptime_builtin_hover_type_info_removed() {
     assert!(hover.is_none(), "type_info hover should not exist");
 }
 
+/// ADR-009 A1 S4: the `type_category` hover must surface the category
+/// enumeration generated from the shared reflection catalog
+/// (`shape_runtime::comptime_reflection::FrozenTypeCategory::ALL`) — the same
+/// catalog enum-variant completion consumes — proving the hover path is
+/// driven by the shared query surface, not a hand-written parallel row.
+#[test]
+fn test_comptime_builtin_hover_type_category_uses_shared_catalog() {
+    let hover = get_comptime_builtin_hover("type_category");
+    assert!(hover.is_some(), "Should get hover for type_category");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(markup.value.contains("exhaustive semantic category"));
+            for category in shape_runtime::comptime_reflection::FrozenTypeCategory::ALL {
+                assert!(
+                    markup.value.contains(category.variant_name()),
+                    "type_category hover should enumerate catalog variant `{}`, got: {}",
+                    category.variant_name(),
+                    markup.value
+                );
+            }
+        }
+    }
+}
+
+/// ADR-009 B1 S5: the `reflect` hover flows from the catalog-owned
+/// `REFLECT_BUILTIN_ROW` (`shape_runtime::comptime_reflection`) — typed
+/// signature, comptime-only stage note, and the enabled-payload enumeration
+/// generated from `FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES` — proving the
+/// hover path is driven by the shared catalog, not a hand-written parallel
+/// row.
+#[test]
+fn test_comptime_builtin_hover_reflect_uses_shared_catalog() {
+    let hover = get_comptime_builtin_hover("reflect");
+    assert!(hover.is_some(), "Should get hover for reflect");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(
+                markup
+                    .value
+                    .contains("reflect(type_ref: TypeRef<T>) -> FrozenType<T>"),
+                "reflect hover should carry the typed signature, got: {}",
+                markup.value
+            );
+            for category in
+                shape_runtime::comptime_reflection::FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
+            {
+                assert!(
+                    markup.value.contains(category.variant_name()),
+                    "reflect hover should enumerate enabled payload variant `{}`, got: {}",
+                    category.variant_name(),
+                    markup.value
+                );
+            }
+            assert!(
+                markup.value.contains("named compile-time rejection"),
+                "reflect hover should carry the stage note, got: {}",
+                markup.value
+            );
+            assert!(
+                markup.value.contains("comptime"),
+                "reflect hover should note the comptime-only stage, got: {}",
+                markup.value
+            );
+        }
+    }
+}
+
+/// ADR-009 ticket B2 (S6): the `trait_ref` hover must be driven verbatim by
+/// the shared reflection-catalog row
+/// (`shape_runtime::comptime_reflection::TRAIT_REF_BUILTIN_ROW`) — the same
+/// descriptor the compiler gates on — proving the hover path consumes the
+/// shared query surface, never a hand-written parallel row.
+#[test]
+fn test_comptime_builtin_hover_trait_ref_uses_shared_catalog() {
+    use shape_runtime::comptime_reflection::TRAIT_REF_BUILTIN_ROW;
+    let hover = get_comptime_builtin_hover("trait_ref");
+    assert!(hover.is_some(), "Should get hover for trait_ref");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(
+                markup.value.contains(TRAIT_REF_BUILTIN_ROW.signature),
+                "trait_ref hover must embed the catalog row signature, got: {}",
+                markup.value
+            );
+            assert!(
+                markup.value.contains(TRAIT_REF_BUILTIN_ROW.description),
+                "trait_ref hover must embed the catalog row description, got: {}",
+                markup.value
+            );
+            assert!(markup.value.contains("a trait is not a value type"));
+            assert!(
+                markup
+                    .value
+                    .contains("Only available inside `comptime { }` blocks")
+            );
+        }
+    }
+}
+
+/// ADR-009 ticket B2 (S6): the `find_impl` hover must be driven verbatim by
+/// the shared reflection-catalog row
+/// (`shape_runtime::comptime_reflection::FIND_IMPL_BUILTIN_ROW`), carrying
+/// the load-bearing evidence phrases (Option-shaped evidence; unimplemented
+/// pair = None, never an error, never partial; boolean cannot authorize).
+#[test]
+fn test_comptime_builtin_hover_find_impl_uses_shared_catalog() {
+    use shape_runtime::comptime_reflection::FIND_IMPL_BUILTIN_ROW;
+    let hover = get_comptime_builtin_hover("find_impl");
+    assert!(hover.is_some(), "Should get hover for find_impl");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(
+                markup.value.contains(FIND_IMPL_BUILTIN_ROW.signature),
+                "find_impl hover must embed the catalog row signature, got: {}",
+                markup.value
+            );
+            assert!(
+                markup.value.contains(FIND_IMPL_BUILTIN_ROW.description),
+                "find_impl hover must embed the catalog row description, got: {}",
+                markup.value
+            );
+            assert!(markup.value.contains("Option<ImplRef<T, Tr>>"));
+            assert!(markup.value.contains("boolean cannot authorize"));
+        }
+    }
+}
+
 #[test]
 fn test_comptime_builtin_hover_build_config() {
     let hover = get_comptime_builtin_hover("build_config");

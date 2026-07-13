@@ -761,6 +761,10 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr) {
                 }
             }
         }
+        // ADR-009 A2: type syntax is a leaf — it carries a TypeAnnotation,
+        // not child expressions. The generic `visit_expr` hook above has
+        // already fired for it.
+        Expr::TypeSyntax(_, _) => {}
         Expr::TypeAssertion {
             expr: inner, span, ..
         } => {

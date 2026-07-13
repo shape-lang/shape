@@ -1639,7 +1639,20 @@ impl BytecodeCompiler {
         self.const_specializations
             .insert(specialization_key.clone(), specialized_idx);
 
+        // ADR-009 A3 (review round 1) — scope the specialization type-param
+        // overlay to THIS const-specialized body. The const-specialized def
+        // keeps the base declaration's `type_params`, but the overlay must
+        // still be INSTALLED (owner = BASE name for declaration-stable
+        // Parameter identities when the base is also generic; `None`
+        // otherwise) so an ENCLOSING specialization's overlay does not leak
+        // into this nested body (spec §3.1 surface-and-stop). Restored
+        // unconditionally below so the Err path restores too.
+        let saved_type_param_overlay = std::mem::replace(
+            &mut self.specialization_type_param_overlay,
+            Self::call_site_specialization_overlay(name, &specialized_def),
+        );
         let compile_result = self.compile_function(&specialized_def);
+        self.specialization_type_param_overlay = saved_type_param_overlay;
 
         if let Err(err) = compile_result {
             self.specialization_const_bindings.remove(&specialized_name);
@@ -1745,8 +1758,7 @@ impl BytecodeCompiler {
                 .resolve_canonical_module_path(name)
                 .unwrap_or_else(|| name.to_string());
             let canonical_scoped = format!("{}::{}", canonical, name);
-            let exports_same_named = self.module_member_is_exported(&canonical, name)
-                == Some(true)
+            let exports_same_named = self.module_member_is_exported(&canonical, name) == Some(true)
                 || self.find_function(&canonical_scoped).is_some();
             if exports_same_named {
                 return self.compile_module_namespace_call(name, span, name, const_args, args);
@@ -5013,46 +5025,57 @@ impl BytecodeCompiler {
         // surfaces a clean NotImplemented error from the PHF method
         // registry (e.g. ckpt2_surface for typed-array methods), preserving
         // the surface-and-stop discipline rather than silently hanging.
-        let is_generic_unmonomorphizable = extend_func_idx
+        let ufcs_candidate_idx = extend_func_idx
             .or(free_func_idx)
-            .filter(|&idx| self.current_function != Some(idx))
-            .and_then(|idx| {
-                let func_name = self.program.functions[idx].name.clone();
-                let is_generic = self
-                    .function_defs
-                    .get(&func_name)
-                    .and_then(|d| d.type_params.as_ref())
-                    .is_some_and(|tps| !tps.is_empty());
-                if !is_generic {
-                    return None;
-                }
+            .filter(|&idx| self.current_function != Some(idx));
+        let is_generic_unmonomorphizable = if let Some(idx) = ufcs_candidate_idx {
+            let func_name = self.program.functions[idx].name.clone();
+            let is_generic = self
+                .function_defs
+                .get(&func_name)
+                .and_then(|d| d.type_params.as_ref())
+                .is_some_and(|tps| !tps.is_empty());
+            if !is_generic {
+                None
+            } else {
                 // Probe monomorphization without compiling default args yet.
                 // If it succeeds, the UFCS branch below will re-run it and
                 // hit the cache; if it fails, we know to skip the UFCS
-                // branch entirely.
-                let static_idx = self
-                    .try_specialize_concrete_user_method_call(
+                // branch entirely. ADR-009 A3 (S2): a HARD specialized-body
+                // compile error propagates out of the probe (`?`) — it is
+                // the user's real diagnostic, not a reason to fall back.
+                let static_idx = match self.try_specialize_concrete_user_method_call(
+                    &func_name,
+                    receiver,
+                    args,
+                    call_site_span,
+                ) {
+                    Ok(Some(i)) => Some(i),
+                    Ok(None) => self.try_monomorphize_method_call(
                         &func_name,
                         receiver,
                         args,
                         call_site_span,
-                    )
-                    .ok()
-                    .flatten()
-                    .or_else(|| {
-                        self.try_monomorphize_method_call(
-                            &func_name,
-                            receiver,
-                            args,
-                            call_site_span,
-                        )
-                    });
+                    )?,
+                    // ADR-009 A3 (review round 1) — a HARD specialized-body
+                    // compile error from the call-site specialization path is
+                    // ALSO the user's real diagnostic; swallowing it here and
+                    // falling through to `try_monomorphize_method_call` let
+                    // the two resolution paths diverge (one failing, one
+                    // succeeding), after which the second resolution attempt
+                    // reused the registered-but-never-compiled specialization
+                    // (empty body → silent wrong output). Propagate.
+                    Err(err) => return Err(err),
+                };
                 if static_idx.is_none() {
                     Some(idx)
                 } else {
                     None
                 }
-            });
+            }
+        } else {
+            None
+        };
         if let Some(func_idx) = extend_func_idx
             .or(free_func_idx)
             .filter(|&idx| self.current_function != Some(idx))
@@ -5096,17 +5119,17 @@ impl BytecodeCompiler {
             // non-generic functions (whose generic-empty body is the actual
             // compiled body) or for generic functions where the probe
             // succeeded (so monomorphization here will hit the cache).
-            let call_func_idx = self
-                .try_specialize_concrete_user_method_call(
-                    &func_name,
-                    receiver,
-                    args,
-                    call_site_span,
-                )?
-                .or_else(|| {
-                    self.try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
-                })
-                .unwrap_or(func_idx);
+            let call_func_idx = match self.try_specialize_concrete_user_method_call(
+                &func_name,
+                receiver,
+                args,
+                call_site_span,
+            )? {
+                Some(idx) => idx,
+                None => self
+                    .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)?
+                    .unwrap_or(func_idx),
+            };
 
             let arg_count = self.program.add_constant(Constant::Int(call_arity as i64));
             self.emit(Instruction::new(
@@ -5193,27 +5216,32 @@ impl BytecodeCompiler {
             // fails, skip this branch so the standard `CallMethod` runtime
             // dispatch handles it (clean NotImplemented error vs. silent
             // hang from the linker's `current_function_id` fallback).
-            let scoped_is_generic_unmonomorphizable = scoped_func_idx
+            let scoped_candidate_idx = scoped_func_idx
                 .or(trait_func_idx)
-                .filter(|&idx| self.current_function != Some(idx))
-                .and_then(|idx| {
-                    let func_name = self.program.functions[idx].name.clone();
-                    let is_generic = self
-                        .function_defs
-                        .get(&func_name)
-                        .and_then(|d| d.type_params.as_ref())
-                        .is_some_and(|tps| !tps.is_empty());
-                    if !is_generic {
-                        return None;
-                    }
+                .filter(|&idx| self.current_function != Some(idx));
+            let scoped_is_generic_unmonomorphizable = if let Some(idx) = scoped_candidate_idx {
+                let func_name = self.program.functions[idx].name.clone();
+                let is_generic = self
+                    .function_defs
+                    .get(&func_name)
+                    .and_then(|d| d.type_params.as_ref())
+                    .is_some_and(|tps| !tps.is_empty());
+                if !is_generic {
+                    None
+                } else {
+                    // ADR-009 A3 (S2): HARD specialized-body compile errors
+                    // propagate out of the probe (`?`).
                     let mono_idx = self.try_monomorphize_method_call(
                         &func_name,
                         receiver,
                         args,
                         call_site_span,
-                    );
+                    )?;
                     if mono_idx.is_none() { Some(idx) } else { None }
-                });
+                }
+            } else {
+                None
+            };
             if let Some(func_idx) = scoped_func_idx
                 .or(trait_func_idx)
                 .filter(|&idx| self.current_function != Some(idx))
@@ -5247,22 +5275,17 @@ impl BytecodeCompiler {
                 // but the D-γ guard above ensures we only reach this fallback
                 // for non-generic functions or generic functions where the
                 // probe succeeded (cache hit).
-                let call_func_idx = self
-                    .try_specialize_concrete_user_method_call(
-                        &func_name,
-                        receiver,
-                        args,
-                        call_site_span,
-                    )?
-                    .or_else(|| {
-                        self.try_monomorphize_method_call(
-                            &func_name,
-                            receiver,
-                            args,
-                            call_site_span,
-                        )
-                    })
-                    .unwrap_or(func_idx);
+                let call_func_idx = match self.try_specialize_concrete_user_method_call(
+                    &func_name,
+                    receiver,
+                    args,
+                    call_site_span,
+                )? {
+                    Some(idx) => idx,
+                    None => self
+                        .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)?
+                        .unwrap_or(func_idx),
+                };
 
                 let arg_count = self.program.add_constant(Constant::Int(call_arity as i64));
                 self.emit(Instruction::new(
@@ -6052,9 +6075,8 @@ impl BytecodeCompiler {
         let module = registry.iter().rev().find(|m| m.name == canonical_module)?;
         let schema = module.get_schema(method)?;
         let return_type = schema.return_type.as_ref()?.trim();
-        let canonical = shape_runtime::type_system::BuiltinTypes::canonical_script_alias(
-            return_type,
-        )?;
+        let canonical =
+            shape_runtime::type_system::BuiltinTypes::canonical_script_alias(return_type)?;
         Some(Type::Concrete(TypeAnnotation::Basic(canonical.to_string())))
     }
 
@@ -6112,11 +6134,9 @@ impl BytecodeCompiler {
                 let Some(return_type) = schema.return_type.as_ref() else {
                     continue;
                 };
-                let Some(scalar) =
-                    shape_runtime::type_system::BuiltinTypes::canonical_script_alias(
-                        return_type.trim(),
-                    )
-                else {
+                let Some(scalar) = shape_runtime::type_system::BuiltinTypes::canonical_script_alias(
+                    return_type.trim(),
+                ) else {
                     continue;
                 };
                 for ns in &namespaces {
@@ -6510,13 +6530,15 @@ impl BytecodeCompiler {
     ///
     /// Returns:
     ///   - `Ok(Some(idx))` — specialized function compiled, dispatch directly
-    ///   - `Ok(None)`     — soft fallback: resolution incomplete, cycle, or
-    ///                      benign compile error in the body. Caller falls
-    ///                      back to the generic template.
-    ///   - `Err(e)`       — hard error: trait-bound violation. Phase 3a
-    ///                      surfaces these so the user sees a precise
-    ///                      diagnostic instead of "stack overflow" from a
-    ///                      silently-empty generic body.
+    ///   - `Ok(None)`     — soft fallback: resolution incomplete or cycle.
+    ///                      Caller falls back to the generic template.
+    ///   - `Err(e)`       — hard error: trait-bound violation (Phase 3a) or
+    ///                      a specialized-body compile error (ADR-009 A3 S2,
+    ///                      `SpecializationFailure::Hard`). Surfaced so the
+    ///                      user sees the precise diagnostic — e.g. a comptime
+    ///                      semantic-freeze rejection — instead of a masked
+    ///                      "cannot infer type argument(s)" or a stack
+    ///                      overflow from a silently-empty generic body.
     pub(crate) fn try_monomorphize_free_function_call(
         &mut self,
         func_name: &str,
@@ -6639,9 +6661,11 @@ impl BytecodeCompiler {
             self.check_trait_bounds_at_specialization(func_name, &original_def, &subs)?;
         }
 
-        // 5. Produce / reuse the specialization. On cycle or compile error,
-        //    the cache returns Err and we fall back to the unspecialized
-        //    template.
+        // 5. Produce / reuse the specialization. On a SOFT failure (cycle,
+        //    resolution bookkeeping) fall back to the unspecialized template;
+        //    a HARD failure (the specialized body itself failed to compile)
+        //    propagates — it carries the user's real diagnostic
+        //    (ADR-009 A3 S2, surface-and-stop).
         let caller_function = self.current_function;
         let saved_expected_call_return_type = self.pending_expected_call_return_type.take();
         let specialization_result = if explicit_const_args.is_empty() {
@@ -6670,7 +6694,14 @@ impl BytecodeCompiler {
                 // re-enters compilation.
                 Ok(Some(specialized_idx as usize))
             }
-            Err(_) => Ok(None),
+            // ADR-009 A3 (S2): a specialized-body compile error is the
+            // user's REAL diagnostic — propagate it instead of falling back
+            // to the generic template (which would re-report the unrelated
+            // "cannot infer type argument(s)" at the call site).
+            Err(crate::compiler::monomorphization::cache::SpecializationFailure::Hard(e)) => Err(e),
+            Err(crate::compiler::monomorphization::cache::SpecializationFailure::Soft(_)) => {
+                Ok(None)
+            }
         }
     }
 
@@ -6744,6 +6775,21 @@ impl BytecodeCompiler {
         specialized_def.type_params = Some(Vec::new());
 
         if let Some(idx) = self.find_function(&specialized_def.name) {
+            // ADR-009 A3 (review round 1) — never reuse a
+            // registered-but-never-compiled specialization (empty body);
+            // see the twin guard in `try_specialize_concrete_user_method_call`.
+            if self
+                .failed_call_site_specializations
+                .contains(&specialized_def.name)
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "implicit-generic specialization '{}' failed to compile at an earlier call site; the registered specialization has no body and cannot be dispatched",
+                        specialized_def.name
+                    ),
+                    location: Some(self.span_to_source_location(call_site_span)),
+                });
+            }
             self.program
                 .monomorphized_method_call_sites
                 .insert((call_site_span, self.current_function), idx);
@@ -6765,11 +6811,27 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+        // ADR-009 A3 (review round 1) — an implicit generic declares NO named
+        // type params (that is the predicate gating this path), so the overlay
+        // for its specialized body is `None` — but it must still be INSTALLED
+        // via `mem::take` so an ENCLOSING specialization's overlay does not
+        // leak into this nested body (comptime `type_ref(T)` naming the outer
+        // fn's parameter must fail the freeze, not falsely resolve —
+        // spec §3.1 surface-and-stop). Restored unconditionally below.
+        let saved_type_param_overlay = std::mem::take(&mut self.specialization_type_param_overlay);
         let compile_result = self.compile_function(&specialized_def);
+        self.specialization_type_param_overlay = saved_type_param_overlay;
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
-        compile_result?;
+        if let Err(err) = compile_result {
+            // Registration is positional and cannot be rolled back — remember
+            // the failure so the reuse short-circuit above refuses the empty
+            // registered body.
+            self.failed_call_site_specializations
+                .insert(specialized_def.name.clone());
+            return Err(err);
+        }
 
         self.program
             .monomorphized_method_call_sites
@@ -7584,6 +7646,23 @@ impl BytecodeCompiler {
         specialized_def.type_params = Some(Vec::new());
 
         if let Some(idx) = self.find_function(&specialized_def.name) {
+            // ADR-009 A3 (review round 1) — a registered specialization whose
+            // body compile FAILED must never be reused: its Function entry has
+            // zero instructions, so a `Call` would silently dispatch an empty
+            // body (or trip the linker's `remap_fid` self-recursion). Re-raise
+            // a hard error instead (surface-and-stop).
+            if self
+                .failed_call_site_specializations
+                .contains(&specialized_def.name)
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "method call specialization '{}' failed to compile at an earlier call site; the registered specialization has no body and cannot be dispatched",
+                        specialized_def.name
+                    ),
+                    location: Some(self.span_to_source_location(call_site_span)),
+                });
+            }
             self.program
                 .monomorphized_method_call_sites
                 .insert((call_site_span, self.current_function), idx);
@@ -7605,17 +7684,68 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+        // ADR-009 A3 (review round 1) — scope the specialization type-param
+        // overlay to THIS body: the specialized def carries
+        // `type_params = Some(vec![])` (substitution strips them), so comptime
+        // `type_ref(N)` inside the BASE generic method's body needs the base
+        // declaration's type-param names re-supplied, with the owner scoped to
+        // the BASE name (declaration-stable identities, ADR-009 Decision 52) —
+        // exactly the discipline of the three `monomorphization/cache.rs`
+        // compile sites. `mem::replace` also MASKS any ENCLOSING
+        // specialization's overlay: a call-site-nested specialization
+        // compiling inside a generic body must not resolve the outer
+        // function's parameters (false accept vs the semantic freeze,
+        // spec §3.1 surface-and-stop). Restored unconditionally below so the
+        // Err path restores too.
+        let saved_type_param_overlay = std::mem::replace(
+            &mut self.specialization_type_param_overlay,
+            Self::call_site_specialization_overlay(func_name, &original_def),
+        );
         let compile_result = self.compile_function(&specialized_def);
+        self.specialization_type_param_overlay = saved_type_param_overlay;
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
-        compile_result?;
+        if let Err(err) = compile_result {
+            // ADR-009 A3 (review round 1) — the registration above cannot be
+            // rolled back (function indices are positional); remember the
+            // failure so the reuse short-circuit refuses to dispatch the
+            // empty registered body.
+            self.failed_call_site_specializations
+                .insert(specialized_def.name.clone());
+            return Err(err);
+        }
 
         self.program
             .monomorphized_method_call_sites
             .insert((call_site_span, self.current_function), specialized_idx);
 
         Ok(Some(specialized_idx))
+    }
+
+    /// ADR-009 A3 (review round 1) — the `specialization_type_param_overlay`
+    /// value for a call-site specialization (`__w24_method_*`,
+    /// `__w27_implicit_*`, `__const_*`) of `base_def`: the BASE declaration's
+    /// non-const type-param names owned by the BASE name when the base is
+    /// generic, `None` otherwise. Mirrors the derivation in
+    /// `monomorphization/cache.rs` (one derivation shape, spec §4.1). Always
+    /// installed via `mem::replace` so an ENCLOSING specialization's overlay
+    /// never leaks into a nested call-site-specialized body.
+    fn call_site_specialization_overlay(
+        base_name: &str,
+        base_def: &shape_ast::ast::FunctionDef,
+    ) -> Option<(String, Vec<String>)> {
+        let declared: Vec<String> = base_def
+            .type_params
+            .as_ref()?
+            .iter()
+            .filter(|tp| !tp.is_const())
+            .map(|tp| tp.name().to_string())
+            .collect();
+        if declared.is_empty() {
+            return None;
+        }
+        Some((base_name.to_string(), declared))
     }
 
     fn concrete_user_method_body_return_type(
@@ -7668,6 +7798,12 @@ impl BytecodeCompiler {
         true
     }
 
+    // ADR-009 A3 (S2): returns `Result<Option<usize>>` — `Ok(None)` is the
+    // soft fallback (resolution incomplete, cycle, self-call guard) where the
+    // caller dispatches the generic path; `Err(e)` propagates a HARD
+    // specialized-body compile error (`SpecializationFailure::Hard`) so the
+    // user's real diagnostic (e.g. a comptime semantic-freeze rejection)
+    // surfaces instead of being masked by the generic-path fallback.
     fn try_monomorphize_method_call(
         &mut self,
         func_name: &str,
@@ -7682,7 +7818,7 @@ impl BytecodeCompiler {
         // specialized_idx]` into the destination slot's ConcreteType at
         // the matching `MirConstant::Method` Call-terminator site.
         call_site_span: Span,
-    ) -> Option<usize> {
+    ) -> Result<Option<usize>> {
         // 1. Check if the function has type parameters. Only type-kind
         //    generics participate in the call-site annotation-unification
         //    resolver — const-kind generics (B.3) are bound separately via
@@ -7691,10 +7827,14 @@ impl BytecodeCompiler {
         //    by `ensure_monomorphic_function` on step 7 when the callee has
         //    any const params.
         let type_params: Vec<String> = {
-            let def = self.function_defs.get(func_name)?;
-            let tps = def.type_params.as_ref()?;
+            let Some(def) = self.function_defs.get(func_name) else {
+                return Ok(None);
+            };
+            let Some(tps) = def.type_params.as_ref() else {
+                return Ok(None);
+            };
             if tps.is_empty() {
-                return None;
+                return Ok(None);
             }
             tps.iter()
                 .filter(|tp| !tp.is_const())
@@ -7705,7 +7845,9 @@ impl BytecodeCompiler {
         // 2. Build combined arg_types: [receiver_concrete_type, arg1_ct, ...].
         //    The function's first param is `self` (the receiver), followed by
         //    the explicit method arguments.
-        let receiver_ct = concrete_type_for_expr(self, receiver)?;
+        let Some(receiver_ct) = concrete_type_for_expr(self, receiver) else {
+            return Ok(None);
+        };
         let method_arg_cts = extract_arg_concrete_types(self, args);
         let mut combined_arg_types: Vec<Option<shape_value::v2::ConcreteType>> =
             Vec::with_capacity(1 + method_arg_cts.len());
@@ -7730,25 +7872,34 @@ impl BytecodeCompiler {
                 &combined_args,
                 call_site_span,
             ) {
-                return Some(idx);
+                return Ok(Some(idx));
             }
             // Fall-through: either resolution bailed, inlining failed, or the
             // budget was exhausted. Hand off to the type-only path which
             // produces a `Call(fn_id)` direct dispatch rather than an
-            // inlined body — still better than `CallValue`.
+            // inlined body — still better than `CallValue`. ADR-009 A3 (S2):
+            // this fall-through is also what guarantees a genuine user-body
+            // compile error swallowed by the closure-INLINING path re-fires
+            // below on the un-inlined body and propagates as `Err`.
         }
 
         // 5. Type-only resolver — existing behaviour.
-        let resolution =
-            resolve_call_site_type_args(self, func_name, &combined_arg_types, &type_params)?;
+        let Some(resolution) =
+            resolve_call_site_type_args(self, func_name, &combined_arg_types, &type_params)
+        else {
+            return Ok(None);
+        };
 
         // 6. All type args must be concrete (no unresolved variables).
         if resolution.type_args.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // 7. Call ensure_monomorphic_function to get/create the specialization.
-        //    On failure, return None to fall back to the generic version.
+        //    ADR-009 A3 (S2): a SOFT failure (cycle, resolution bookkeeping)
+        //    returns Ok(None) to fall back to the generic version; a HARD
+        //    failure (the specialized body itself failed to compile)
+        //    propagates the user's real diagnostic.
         match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
             Ok(specialized_idx) => {
                 let idx = specialized_idx as usize;
@@ -7758,7 +7909,7 @@ impl BytecodeCompiler {
                 // return None so the caller falls through to the built-in
                 // method dispatch, preventing infinite recursion at runtime.
                 if self.current_function == Some(idx) {
-                    return None;
+                    return Ok(None);
                 }
                 // ADR-006 §2.7.5 V3-S6b conduit population: stamp the
                 // `(call_site_span, calling_function) → specialized_idx`
@@ -7775,9 +7926,12 @@ impl BytecodeCompiler {
                 self.program
                     .monomorphized_method_call_sites
                     .insert((call_site_span, self.current_function), idx);
-                Some(idx)
+                Ok(Some(idx))
             }
-            Err(_) => None,
+            Err(crate::compiler::monomorphization::cache::SpecializationFailure::Hard(e)) => Err(e),
+            Err(crate::compiler::monomorphization::cache::SpecializationFailure::Soft(_)) => {
+                Ok(None)
+            }
         }
     }
 

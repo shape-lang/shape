@@ -30,8 +30,9 @@ pub use methods::{
 pub use providers::provider_completions;
 pub use snippets::{create_snippet, snippet_completions};
 pub use types::{
-    is_column_type, pipe_target_completions, property_completion_item, property_completions,
-    resolve_base_type, resolve_object_type, resolve_property_type, type_completions,
+    in_scope_type_param_completions, is_column_type, pipe_target_completions,
+    primitive_type_completions, property_completion_item, property_completions, resolve_base_type,
+    resolve_object_type, resolve_property_type, type_completions,
 };
 
 use crate::annotation_discovery::AnnotationDiscovery;
@@ -238,6 +239,20 @@ pub fn get_completions_with_context(
         CompletionContext::TypeAnnotation => {
             // Show type names
             completions.extend(type_completions());
+            // ADR-009 A2 (S6): type positions (`let x: |`, `type_ref(|`)
+            // also offer primitive spellings, user-declared type names, and
+            // in-scope generic type parameters — and never value bindings.
+            completions.extend(types::primitive_type_completions());
+            let type_symbols: Vec<_> = user_symbols
+                .iter()
+                .filter(|s| s.kind == SymbolKind::Type)
+                .cloned()
+                .collect();
+            completions.extend(symbols_to_completions(&type_symbols));
+            completions.extend(types::in_scope_type_param_completions(
+                text,
+                position.line as usize,
+            ));
         }
         CompletionContext::FunctionCall {
             function,
@@ -1068,11 +1083,17 @@ fn enum_variant_completions(
     prefix: &str,
     program: Option<&Program>,
 ) -> Vec<CompletionItem> {
-    let names = if enum_name == "FrozenTypeCategory" {
-        shape_runtime::comptime_reflection::FrozenTypeCategory::ALL
-            .into_iter()
-            .map(|category| category.variant_name().to_string())
-            .collect()
+    // ADR-009 B1 S5: the typed-comptime reflection enums (FrozenTypeCategory,
+    // the enabled FrozenType payload sum, FrozenPrimitive, and the
+    // width-domain enums) complete through ONE catalog-keyed lookup over the
+    // shared runtime constants — closed lists with no Unknown arm, and
+    // deliberately no hand-written variant list here (the exact defect the
+    // A1 close-out deleted). Non-catalog names fall back to program-derived
+    // enum members.
+    let names = if let Some(catalog_names) =
+        shape_runtime::comptime_reflection::reflection_enum_variant_names(enum_name)
+    {
+        catalog_names.into_iter().map(str::to_string).collect()
     } else {
         program
             .and_then(|program| enum_members_in_items(&program.items, enum_name))
@@ -2392,6 +2413,121 @@ let x = 1
             "Should NOT suggest runtime field 'amount'. Got: {:?}",
             labels
         );
+    }
+
+    // =====================================================================
+    // ADR-009 B1 (S5): reflect + payload descriptor types complete from the
+    // shared runtime catalog — one catalog-keyed lookup, no hand-written
+    // parallel variant list (the exact defect the A1 close-out deleted).
+    // =====================================================================
+
+    /// `reflect` visibility is metadata-driven (`is_comptime_builtin_function`
+    /// via the `comptime_only` flag): offered by the comptime completion set,
+    /// absent from the runtime builtin set.
+    #[test]
+    fn test_reflect_completion_is_comptime_only_and_metadata_driven() {
+        let comptime_labels: Vec<_> = comptime_builtin_function_completions()
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert!(
+            comptime_labels.iter().any(|l| l == "reflect"),
+            "comptime completions must offer reflect, got: {comptime_labels:?}"
+        );
+        assert!(comptime_labels.iter().any(|l| l == "type_ref"));
+        assert!(comptime_labels.iter().any(|l| l == "type_category"));
+
+        let runtime_labels: Vec<_> = builtin_function_completions()
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert!(
+            !runtime_labels.iter().any(|l| l == "reflect"),
+            "runtime completions must NOT offer the comptime-only reflect"
+        );
+    }
+
+    /// The `FrozenType` payload sum completes exactly its ENABLED payload
+    /// variants (catalog-derived), with no Unknown arm and no arm for a
+    /// pending payload category.
+    #[test]
+    fn test_frozen_type_variant_completion_is_closed_to_enabled_payloads() {
+        let labels: Vec<_> = enum_variant_completions("FrozenType", "", None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        let expected: Vec<String> =
+            shape_runtime::comptime_reflection::FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
+                .into_iter()
+                .map(|category| category.variant_name().to_string())
+                .collect();
+        assert_eq!(
+            labels, expected,
+            "FrozenType completion must be exactly the catalog-enabled payload variants"
+        );
+        assert!(!labels.iter().any(|l| l == "Unknown"));
+        assert!(!labels.iter().any(|l| l == "Nominal"));
+        assert!(!labels.iter().any(|l| l == "Parameter"));
+    }
+
+    /// The `FrozenPrimitive` sub-algebra completes its full sealed catalog
+    /// (10 variants), sourced from the shared descriptor table.
+    #[test]
+    fn test_frozen_primitive_variant_completion_is_catalog_sourced() {
+        let labels: Vec<_> = enum_variant_completions("FrozenPrimitive", "", None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        let expected: Vec<String> =
+            shape_runtime::comptime_reflection::FROZEN_PRIMITIVE_VARIANTS
+                .iter()
+                .map(|v| v.name.to_string())
+                .collect();
+        assert_eq!(labels, expected);
+        assert!(!labels.iter().any(|l| l == "Unknown"));
+        assert!(!labels.iter().any(|l| l == "Any"));
+    }
+
+    /// The width-domain enums (`IntegerWidth`/`FloatWidth` — the
+    /// `FrozenPrimitive` family payloads users match on) complete from the
+    /// same shared catalog constants.
+    #[test]
+    fn test_width_domain_variant_completion_is_catalog_sourced() {
+        let integer_labels: Vec<_> = enum_variant_completions("IntegerWidth", "", None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(integer_labels, ["W8", "W16", "W32", "W64", "Arbitrary"]);
+
+        let float_labels: Vec<_> = enum_variant_completions("FloatWidth", "", None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(float_labels, ["W32", "W64"]);
+    }
+
+    /// Prefix filtering applies to the catalog-sourced lists the same way it
+    /// does to program-derived enums.
+    #[test]
+    fn test_frozen_primitive_variant_completion_filters_prefix() {
+        let labels: Vec<_> = enum_variant_completions("FrozenPrimitive", "Signed", None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(labels, ["SignedInteger"]);
+    }
+
+    /// Non-catalog enum names still resolve through the program-derived
+    /// fallback — the catalog hook must not shadow user enums.
+    #[test]
+    fn test_non_catalog_enum_names_fall_back_to_program_members() {
+        assert!(enum_variant_completions("Color", "", None).is_empty());
+        let program = parse_program("enum Color { Red, Green }\n").expect("parses");
+        let labels: Vec<_> = enum_variant_completions("Color", "", Some(&program))
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(labels, ["Red", "Green"]);
     }
 
     #[test]

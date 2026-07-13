@@ -10,8 +10,160 @@ use shape_ast::parser::parse_program;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tower_lsp_server::ls_types::{
-    Position, PrepareRenameResponse, Range, TextEdit, Uri, WorkspaceEdit,
+    Location, Position, PrepareRenameResponse, Range, TextEdit, Uri, WorkspaceEdit,
 };
+
+/// ADR-009 D1 (S6, Decision 68, rejection row 4): the named report returned
+/// when a rename request targets a WHOLLY GENERATOR-CONTROLLED generated
+/// name (a name the generator computes; it never appears as a source binder
+/// token in the generator or application). Such a name is NEVER renamed by
+/// text edit — the response reports generator control and links the
+/// generator definition.
+pub const GENERATOR_CONTROLLED_NAME_RENAME_REPORT: &str = "this generated name is generator-controlled: it is computed by its \
+     generator and is never renamed by text edit; change the generator \
+     definition instead (ADR-009 Decision 68)";
+
+/// The generator-controlled rename report: the named message plus the
+/// generator-definition location (from the compiler's provenance query
+/// surface) the editor navigates to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratorControlledRename {
+    pub message: String,
+    pub generator: Location,
+}
+
+/// Outcome of a rename request that targets a GENERATED symbol (answered
+/// from the compiler's SymbolId/provenance query surface — Decision 66:
+/// never a text scan). `None` from [`generated_rename`] = not a
+/// generated-symbol rename; the caller falls through to ordinary rename.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GeneratedRename {
+    /// The name is an explicit source binder: edits cover ONLY the source
+    /// binder occurrences (generator/application binder token + call
+    /// sites); the expansion recomputes. Call-site edits never land inside
+    /// generated ranges (binder tokens live inside compiler-resolved
+    /// source anchors, which in D1 coincide with the checked-decl anchors).
+    Edits(WorkspaceEdit),
+    /// The name is wholly generator-controlled: never a text edit.
+    GeneratorControlled(GeneratorControlledRename),
+}
+
+/// Classify and answer a rename request over a generated symbol from the
+/// compiler query surface. `None` = the position does not target a
+/// generated symbol (ordinary rename applies).
+///
+/// Source-binder names (the expansion takes them from source) rename by
+/// RECOMPUTATION: the edits cover only the source binder occurrences
+/// (generator/application binder token + AST call sites); call-site edits
+/// never land inside generated ranges. Generator-controlled names are
+/// never a text edit.
+pub fn generated_rename(
+    text: &str,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+    cached_program: Option<&Program>,
+) -> Option<GeneratedRename> {
+    if !is_valid_identifier(new_name) {
+        return None;
+    }
+    let old_name = get_word_at_position(text, position)?;
+    if is_keyword(&old_name) || is_builtin_function(&old_name) {
+        return None;
+    }
+    let offset = position_to_offset(text, position)?;
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => cached_program?.clone(),
+    };
+    match crate::generated_symbols::classify_generated_rename(&program, text, &old_name, offset)? {
+        crate::generated_symbols::GeneratedRenameClassification::SourceBinder {
+            binder_spans,
+            call_site_spans,
+            generated_ranges,
+        } => {
+            // Rejection row 5 enforcement: a CALL-SITE edit may never land
+            // inside a generated range (the generated declaration
+            // recomputes). BINDER spans are exempt by construction: they
+            // are name tokens found inside compiler-resolved SOURCE anchors
+            // (generator definition / application site), and in D1 the
+            // checked-decl anchor COINCIDES with the application anchor —
+            // guarding binders too would cancel exactly the
+            // application-anchored source binders (`@gen("answer")`),
+            // leaving a partial, corrupting rename: call sites renamed,
+            // expansion still generating the old name (round-2 review
+            // finding 1).
+            let mut spans: Vec<_> = call_site_spans;
+            spans.retain(|span| {
+                !generated_ranges
+                    .iter()
+                    .any(|generated| span.start < generated.end && generated.start < span.end)
+            });
+            spans.extend(binder_spans);
+            spans.sort_by_key(|span| span.start);
+            spans.dedup();
+            if spans.is_empty() {
+                return None;
+            }
+            let edits: Vec<TextEdit> = spans
+                .into_iter()
+                .map(|span| {
+                    let (start_line, start_col) = offset_to_line_col(text, span.start);
+                    let (end_line, end_col) = offset_to_line_col(text, span.end);
+                    TextEdit {
+                        range: Range {
+                            start: Position {
+                                line: start_line,
+                                character: start_col,
+                            },
+                            end: Position {
+                                line: end_line,
+                                character: end_col,
+                            },
+                        },
+                        new_text: new_name.to_string(),
+                    }
+                })
+                .collect();
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), edits);
+            Some(GeneratedRename::Edits(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }))
+        }
+        crate::generated_symbols::GeneratedRenameClassification::GeneratorControlled {
+            decl_names,
+            generator_span,
+        } => {
+            let (start_line, start_col) = offset_to_line_col(text, generator_span.start);
+            let (end_line, end_col) = offset_to_line_col(text, generator_span.end);
+            let generator = Location {
+                uri: uri.clone(),
+                range: Range {
+                    start: Position {
+                        line: start_line,
+                        character: start_col,
+                    },
+                    end: Position {
+                        line: end_line,
+                        character: end_col,
+                    },
+                },
+            };
+            let message = format!(
+                "{GENERATOR_CONTROLLED_NAME_RENAME_REPORT}: `{}` is named by the \
+                 generator defined at line {}",
+                decl_names.join("`, `"),
+                start_line + 1,
+            );
+            Some(GeneratedRename::GeneratorControlled(
+                GeneratorControlledRename { message, generator },
+            ))
+        }
+    }
+}
 
 /// Prepare for rename - check if the symbol at the position can be renamed
 pub fn prepare_rename(text: &str, position: Position) -> Option<PrepareRenameResponse> {
@@ -27,6 +179,18 @@ pub fn prepare_rename(text: &str, position: Position) -> Option<PrepareRenameRes
     // Check if it's a built-in function
     if is_builtin_function(&word) {
         return None;
+    }
+
+    // ADR-009 D1 (S6, rejection row 4): a wholly generator-controlled
+    // generated name is never renameable as a text edit — decline at
+    // prepare time so the editor does not offer the rename at all.
+    if let (Some(offset), Ok(program)) = (position_to_offset(text, position), parse_program(text)) {
+        if let Some(
+            crate::generated_symbols::GeneratedRenameClassification::GeneratorControlled { .. },
+        ) = crate::generated_symbols::classify_generated_rename(&program, text, &word, offset)
+        {
+            return None;
+        }
     }
 
     Some(PrepareRenameResponse::Range(range))
@@ -46,6 +210,17 @@ pub fn rename(
     // Validate new name
     if !is_valid_identifier(new_name) {
         return None;
+    }
+
+    // ADR-009 D1 (S6): generated symbols are classified from the compiler
+    // query surface FIRST. A source-binder name renames by recomputation
+    // (source occurrences only); a generator-controlled name is never a
+    // text edit (the server surfaces the report; at this Option level the
+    // answer is "no edit"). Ordinary symbols fall through untouched.
+    match generated_rename(text, uri, position, new_name, cached_program) {
+        Some(GeneratedRename::Edits(edit)) => return Some(edit),
+        Some(GeneratedRename::GeneratorControlled(_)) => return None,
+        None => {}
     }
 
     // Get the current name
@@ -574,6 +749,192 @@ mod tests {
         assert!(
             !changes.contains_key(&other_uri),
             "local-scope `local` rename must NOT touch /other.shape"
+        );
+    }
+
+    // -- ADR-009 D1 (S6): rename semantics over generated symbols ---------
+
+    /// `method answer()` is written in the generator: explicit source binder.
+    const SOURCE_BINDER_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+// decoy: the word answer appears in this comment
+let decoy = "answer"
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+let b = p.answer()
+"#;
+
+    /// The method name is COMPUTED (`an{suffix}`): generator-controlled.
+    const GENERATOR_CONTROLLED_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let suffix = "swer"
+    extend (f"extend {target.name} \{ method an{suffix}() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let x = p.answer()
+"#;
+
+    fn call_site_position(text: &str) -> Position {
+        let offset = text.find("p.answer()").expect("call site") + 2;
+        let (line, character) = offset_to_line_col(text, offset);
+        Position { line, character }
+    }
+
+    /// Rejection row 5: rename on a source-binder generated name edits the
+    /// generator binder token + the call sites; decoy comment/string
+    /// occurrences are NOT edited (never a text scan).
+    #[test]
+    fn generated_source_binder_rename_edits_binder_and_call_sites_only() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let position = call_site_position(SOURCE_BINDER_PROGRAM);
+        let edit = rename(SOURCE_BINDER_PROGRAM, &uri, position, "solution", None)
+            .expect("source-binder rename produces edits");
+        let edits = &edit.changes.expect("changes")[&uri];
+        let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
+        assert!(
+            lines.contains(&5),
+            "generator binder token edited: {lines:?}"
+        );
+        assert!(lines.contains(&17), "first call site edited: {lines:?}");
+        assert!(lines.contains(&18), "second call site edited: {lines:?}");
+        assert!(
+            !lines.contains(&10),
+            "decoy comment must not be edited: {lines:?}"
+        );
+        assert!(
+            !lines.contains(&11),
+            "decoy string must not be edited: {lines:?}"
+        );
+    }
+
+    /// Rejection row 4: a generator-controlled name is never a text edit —
+    /// `generated_rename` answers the named report linking the generator
+    /// definition, and `rename` declines.
+    #[test]
+    fn generator_controlled_rename_is_the_named_report_and_never_an_edit() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let position = call_site_position(GENERATOR_CONTROLLED_PROGRAM);
+        let outcome = generated_rename(
+            GENERATOR_CONTROLLED_PROGRAM,
+            &uri,
+            position,
+            "solution",
+            None,
+        )
+        .expect("generated-symbol position classifies");
+        let GeneratedRename::GeneratorControlled(report) = outcome else {
+            panic!("computed name must be generator-controlled, got {outcome:?}");
+        };
+        assert!(
+            report
+                .message
+                .contains(GENERATOR_CONTROLLED_NAME_RENAME_REPORT),
+            "report carries the named const: {}",
+            report.message
+        );
+        assert!(
+            report.message.contains("Point.answer"),
+            "report names the generated declaration: {}",
+            report.message
+        );
+        assert_eq!(
+            report.generator.range.start.line, 3,
+            "report links the generator definition"
+        );
+        assert!(
+            rename(
+                GENERATOR_CONTROLLED_PROGRAM,
+                &uri,
+                position,
+                "solution",
+                None
+            )
+            .is_none(),
+            "rename must decline a generator-controlled name"
+        );
+    }
+
+    /// Round-2 review finding 1: the method name is bound at the
+    /// APPLICATION site (`@gen("answer")` — the annotation argument the
+    /// handler splices into the extend snippet). In D1 the checked-decl
+    /// anchor COINCIDES with the application anchor, so the row-5
+    /// "no edits inside generated ranges" guard must not cancel
+    /// application-anchored binder edits — they are source text.
+    const APPLICATION_BINDER_PROGRAM: &str = r#"
+annotation gen(mname) {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method {mname}() -> int \{ 1 \} \}")
+  }
+}
+
+@gen("answer")
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+"#;
+
+    /// Round-2 review finding 1: rename on an application-anchored source
+    /// binder edits BOTH the application binder token (line 8) and the call
+    /// site (line 12). The pre-fix retain-guard dropped the binder edit
+    /// (binder span inside the coincident checked-decl anchor), renaming
+    /// only the call sites — after recomputation the generated symbol kept
+    /// its old name while every call site used the new one.
+    #[test]
+    fn application_binder_rename_edits_the_application_token_and_call_sites() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let position = call_site_position(APPLICATION_BINDER_PROGRAM);
+        let edit = rename(APPLICATION_BINDER_PROGRAM, &uri, position, "solution", None)
+            .expect("application-binder rename produces edits");
+        let edits = &edit.changes.expect("changes")[&uri];
+        let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
+        assert!(
+            lines.contains(&8),
+            "the application binder token (`@gen(\"answer\")`) must be \
+             edited — dropping it makes the rename partial and corrupting: {lines:?}"
+        );
+        assert!(lines.contains(&12), "call site edited: {lines:?}");
+    }
+
+    /// Rejection row 4 (prepare): prepare-rename declines on a
+    /// generator-controlled name; a source-binder name stays renameable.
+    #[test]
+    fn prepare_rename_declines_generator_controlled_but_allows_source_binder() {
+        assert!(
+            prepare_rename(
+                GENERATOR_CONTROLLED_PROGRAM,
+                call_site_position(GENERATOR_CONTROLLED_PROGRAM)
+            )
+            .is_none(),
+            "generator-controlled name must not be offered for rename"
+        );
+        assert!(
+            prepare_rename(
+                SOURCE_BINDER_PROGRAM,
+                call_site_position(SOURCE_BINDER_PROGRAM)
+            )
+            .is_some(),
+            "source-binder generated name stays renameable"
         );
     }
 
