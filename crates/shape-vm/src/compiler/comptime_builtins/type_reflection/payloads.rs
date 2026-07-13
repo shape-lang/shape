@@ -32,12 +32,15 @@ use shape_value::{KindedSlot, NativeKind, ValueSlot};
 
 /// Bound-set element carried by [`FrozenPayloadDescriptor::Erased`].
 ///
-/// `dyn Trait` / trait-intersection spellings arrive with ticket A2; until
-/// then the only reachable erased type is `any` — the EMPTY bound set — so
-/// this element type is deliberately uninhabited: a non-empty bound set is
-/// unrepresentable, which is the structural form of "complete for reachable
-/// forms, no partial descriptors" (spec §3.1/§3.7). Ticket B2 retypes the
-/// element to the trait-reference descriptor.
+/// Ticket A2 made `dyn Trait` / trait-intersection spellings reachable
+/// (they classify as the ENABLED Erased category), but their bound-set
+/// elements are the trait-reference descriptors that land with ticket B2 —
+/// so this element type is deliberately uninhabited: a non-empty bound set
+/// is unrepresentable, which is the structural form of "no partial
+/// descriptors" (spec §3.1). The ONLY erased identity whose payload query
+/// succeeds is the base-frozen `any` leaf (the complete AND empty bound
+/// set); every bounded erased identity is the named
+/// [`bounded_erased_payload_rejection`] until B2 retypes this element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrozenErasedBound {}
 
@@ -83,6 +86,21 @@ pub(crate) fn pending_payload_rejection(category: FrozenTypeCategory) -> String 
          ticket); use type_category for the exhaustive category",
         category.variant_name()
     )
+}
+
+/// The A2×B1 seam's Erased disposition (sanctioned tracer pattern, same R1
+/// family as [`pending_payload_rejection`]): `dyn Trait` /
+/// trait-intersection spellings classify as the ENABLED Erased category,
+/// but their bound-set payload elements are the trait-reference descriptors
+/// that land with ticket B2 ([`FrozenErasedBound`] is deliberately
+/// uninhabited until then). Reflecting a BOUNDED erased identity is
+/// therefore this named rejection — never an empty (partial) bound set.
+/// Only the base-frozen `any` leaf answers the Erased payload today.
+pub(crate) fn bounded_erased_payload_rejection() -> String {
+    "reflect: the Erased bound-set payload for trait-object bounds has not \
+     landed (pending ticket B2 trait-reference descriptors); use \
+     type_category for the exhaustive category"
+        .to_string()
 }
 
 /// Build the `FrozenType` comptime value for a frozen identity: the sealed
@@ -145,7 +163,7 @@ fn frozen_primitive_descriptor_slot(primitive: FrozenPrimitive) -> Result<Kinded
 }
 
 /// The nested `FrozenErased` descriptor object carrying the bound-set
-/// array. [`FrozenErasedBound`] is uninhabited until A2/B2, so the array is
+/// array. [`FrozenErasedBound`] is uninhabited until B2, so the array is
 /// provably empty — the exhaustive match below is the structural proof, not
 /// an assumption.
 fn frozen_erased_descriptor_slot(bounds: &[FrozenErasedBound]) -> KindedSlot {

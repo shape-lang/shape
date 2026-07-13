@@ -158,9 +158,20 @@ impl FrozenTypeIndex {
                         .to_string()
                 }),
             FrozenTypeCategory::Never => Ok(FrozenPayloadDescriptor::Never),
-            // `any` is the only reachable erased spelling until A2 lands
-            // trait-bound syntax: the bound set is complete AND empty.
-            FrozenTypeCategory::Erased => Ok(FrozenPayloadDescriptor::Erased { bounds: Vec::new() }),
+            FrozenTypeCategory::Erased => {
+                // The base-frozen `any` leaf carries the complete AND empty
+                // bound set. Every OTHER Erased identity the base can hold
+                // is an alias-fixpoint-interned `erased:dyn …` bound set
+                // (A2): its typed bound elements land with ticket B2
+                // (`FrozenErasedBound` is uninhabited until then), so it is
+                // the named bounded-erased rejection — never an empty
+                // (partial) bound set.
+                if self.frozen_type_id("any") == Some(identity) {
+                    Ok(FrozenPayloadDescriptor::Erased { bounds: Vec::new() })
+                } else {
+                    Err(payloads::bounded_erased_payload_rejection())
+                }
+            }
             pending => Err(payloads::pending_payload_rejection(pending)),
         }
     }

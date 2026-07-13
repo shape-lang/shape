@@ -1288,6 +1288,154 @@ mod payload_query {
         );
     }
 
+    // ── A2×B1 seam: payload query over the site-interned composites layer ─
+
+    /// A2×B1 seam: `payload_of` resolves the site-interned composites layer
+    /// symmetrically with `category_of` (one query, three layers — spec
+    /// §4.1). Every pending composite category answers its NAMED R1
+    /// per-category rejection — never the wrong-family unknown-identity
+    /// diagnostic (the identity IS known: the same overlay minted it).
+    #[test]
+    fn site_interned_pending_composites_reject_with_named_per_category_diagnostics() {
+        let overlay = module_overlay(|compiler| add_struct(compiler, "User"));
+        let forms: Vec<(TypeAnnotation, FrozenTypeCategory)> = vec![
+            (
+                TypeAnnotation::Tuple(vec![basic("int"), basic("string")]),
+                FrozenTypeCategory::Tuple,
+            ),
+            (
+                TypeAnnotation::Object(vec![record_field("x", false, basic("int"))]),
+                FrozenTypeCategory::Record,
+            ),
+            (
+                callable(vec![basic("int")], basic("bool")),
+                FrozenTypeCategory::Callable,
+            ),
+            (
+                TypeAnnotation::Borrow {
+                    mutable: false,
+                    inner: Box::new(basic("User")),
+                },
+                FrozenTypeCategory::Reference,
+            ),
+            (
+                TypeAnnotation::Union(vec![basic("int"), basic("string")]),
+                FrozenTypeCategory::Union,
+            ),
+            (
+                applied("Option", vec![basic("int")]),
+                FrozenTypeCategory::Nominal,
+            ),
+        ];
+        for (annotation, category) in forms {
+            let identity = overlay
+                .canonicalize_type(&annotation)
+                .expect("composite type expression canonicalizes");
+            assert_eq!(overlay.category_of(identity), Ok(category));
+            assert_eq!(
+                overlay.payload_of(identity),
+                Err(pending_payload_rejection(category)),
+                "payload_of must answer the composites layer for {category:?}"
+            );
+        }
+    }
+
+    /// A2×B1 seam, Erased disposition: a site-interned `dyn` /
+    /// trait-intersection composite classifies as the ENABLED Erased
+    /// category, but its bound-set payload elements are the B2
+    /// trait-reference descriptors (`FrozenErasedBound` is uninhabited until
+    /// then) — the payload query is the NAMED bounded-erased rejection,
+    /// never an empty (partial) bound set, never unknown-identity.
+    #[test]
+    fn site_interned_dyn_erased_composite_rejects_with_the_named_bounded_diagnostic() {
+        let overlay = module_overlay(|compiler| {
+            add_trait(compiler, "Walk");
+            add_trait(compiler, "Swim");
+        });
+        for annotation in [
+            TypeAnnotation::Dyn(vec![TypePath::simple("Walk")]),
+            TypeAnnotation::Dyn(vec![TypePath::simple("Walk"), TypePath::simple("Swim")]),
+            TypeAnnotation::Intersection(vec![basic("Walk"), basic("Swim")]),
+        ] {
+            let identity = overlay
+                .canonicalize_type(&annotation)
+                .expect("erased composite canonicalizes");
+            assert_eq!(overlay.category_of(identity), Ok(FrozenTypeCategory::Erased));
+            let error = overlay
+                .payload_of(identity)
+                .expect_err("bounded erased must reject until B2");
+            assert!(
+                error.contains("Erased bound-set payload")
+                    && error.contains("use type_category"),
+                "named bounded-erased diagnostic missing: {error}"
+            );
+        }
+    }
+
+    /// Union coalescing memoizes base LEAF identities (`int | i64` → the
+    /// `int` leaf, `any | any` → the `any` leaf): through the memo layer the
+    /// payload query answers the member's COMPLETE payload from the base
+    /// index — same payload, one derivation.
+    #[test]
+    fn coalesced_union_identities_answer_the_member_payload_through_the_memo() {
+        let overlay = module_overlay(|_| {});
+        let int_identity = overlay
+            .canonicalize_type(&TypeAnnotation::Union(vec![basic("int"), basic("i64")]))
+            .expect("coalescing union canonicalizes");
+        assert_eq!(
+            overlay.payload_of(int_identity),
+            Ok(FrozenPayloadDescriptor::Primitive(
+                FrozenPrimitive::SignedInteger(IntegerWidth::W64)
+            ))
+        );
+        let any_identity = overlay
+            .canonicalize_type(&TypeAnnotation::Union(vec![basic("any"), basic("any")]))
+            .expect("coalescing union canonicalizes");
+        match overlay.payload_of(any_identity) {
+            Ok(FrozenPayloadDescriptor::Erased { bounds }) => {
+                assert!(bounds.is_empty(), "`any` keeps the complete empty bound set");
+            }
+            other => panic!("`any` must keep its Erased payload, got {other:?}"),
+        }
+    }
+
+    /// Finding-2 latent hazard at the BASE index: an alias-fixpoint-interned
+    /// `erased:dyn …` identity (category Erased, base-resolvable) must NOT
+    /// reflect to an empty bound set — the named bounded-erased rejection
+    /// fires at the base level too; only the `any` leaf answers the complete
+    /// empty bound set.
+    #[test]
+    fn alias_interned_dyn_erased_identity_rejects_at_the_base_index() {
+        let dyn_show = TypeAnnotation::Dyn(vec![TypePath::simple("Show")]);
+        let freeze = freeze_of(|compiler| {
+            add_trait(compiler, "Show");
+            compiler
+                .type_aliases
+                .insert("Erasable".to_string(), "dyn Show".to_string());
+            compiler
+                .type_inference
+                .env
+                .define_type_alias("Erasable", &dyn_show, None);
+        });
+        let identity = freeze
+            .identity_of("Erasable")
+            .expect("alias fixpoint interns the dyn target");
+        assert_eq!(freeze.category_of(identity), Ok(FrozenTypeCategory::Erased));
+        let error = freeze
+            .payload_of(identity)
+            .expect_err("bounded erased must reject until B2");
+        assert!(
+            error.contains("Erased bound-set payload"),
+            "named bounded-erased diagnostic missing: {error}"
+        );
+        // `any` keeps answering the complete AND empty bound set.
+        let any = freeze.identity_of("any").expect("any identity");
+        assert!(matches!(
+            freeze.payload_of(any),
+            Ok(FrozenPayloadDescriptor::Erased { .. })
+        ));
+    }
+
     // ── heap-value builders ──────────────────────────────────────────────
 
     fn storage_of(value: &HeapValue) -> &TypedObjectStorage {

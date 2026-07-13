@@ -405,23 +405,68 @@ impl FreezeOverlay {
         self.base.category_of(identity)
     }
 
-    /// Shared query API (ADR-009 B1 S2): overlay-scoped generic parameters
-    /// classify as [`FrozenTypeCategory::Parameter`], whose payload ticket
-    /// has not landed — they reject with the named R1 per-category
-    /// diagnostic; everything else defers to the base freeze.
+    /// Shared query API (ADR-009 B1 S2): the payload half resolves the SAME
+    /// three layers as [`FreezeOverlay::category_of`] — one query, three
+    /// layers (spec §4.1). Overlay-scoped generic parameters classify as
+    /// [`FrozenTypeCategory::Parameter`], whose payload ticket has not
+    /// landed — the named R1 per-category rejection. Site-interned
+    /// composites (A2) answer by their memoized structural category: a
+    /// base-frozen identity (union coalescing memoizes leaf members, e.g.
+    /// `int | i64` → the `int` leaf) answers its complete payload from the
+    /// base; an Erased composite is a `dyn`/trait-intersection bound set
+    /// whose typed bound elements land with ticket B2 — the named
+    /// bounded-erased rejection, never an empty (partial) bound set; every
+    /// pending composite category is its named R1 rejection. Everything
+    /// else defers to the base freeze.
     pub(crate) fn payload_of(
         &self,
         identity: FrozenTypeIdentity,
     ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
     {
+        use super::type_reflection::payloads;
         if self
             .parameters
             .values()
             .any(|&parameter| parameter == identity)
         {
-            return Err(super::type_reflection::payloads::pending_payload_rejection(
+            return Err(payloads::pending_payload_rejection(
                 FrozenTypeCategory::Parameter,
             ));
+        }
+        let composite_category = self
+            .composites
+            .lock()
+            .expect("freeze-overlay composite memo lock poisoned")
+            .get(&identity)
+            .copied();
+        if let Some(category) = composite_category {
+            // A memoized identity the base ALSO froze (union coalescing onto
+            // a base leaf, or a spelled composite that an alias fixpoint
+            // interned into the base) answers from the base index — same
+            // payload/rejection, one derivation.
+            if self.base.category_of(identity).is_ok() {
+                return self.base.payload_of(identity);
+            }
+            return match category {
+                // Only reachable via coalescing onto a base leaf, which the
+                // base-frozen arm above already answered.
+                FrozenTypeCategory::Primitive | FrozenTypeCategory::Never => Err(
+                    "internal invariant: a base-leaf payload category was site-interned \
+                     without a base-frozen identity"
+                        .to_string(),
+                ),
+                // Site-interned Erased composites are `dyn`/trait-intersection
+                // bound sets — non-empty by construction (`canonical_erased_bounds`
+                // rejects the empty set); unrepresentable until B2.
+                FrozenTypeCategory::Erased => Err(payloads::bounded_erased_payload_rejection()),
+                pending @ (FrozenTypeCategory::Parameter
+                | FrozenTypeCategory::Nominal
+                | FrozenTypeCategory::Tuple
+                | FrozenTypeCategory::Record
+                | FrozenTypeCategory::Callable
+                | FrozenTypeCategory::Reference
+                | FrozenTypeCategory::Union) => Err(payloads::pending_payload_rejection(pending)),
+            };
         }
         self.base.payload_of(identity)
     }

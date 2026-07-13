@@ -5,16 +5,17 @@
 //! `expect_vm_and_jit_output` (the frozen_type.rs VM+JIT entry-proof
 //! pattern). Negative programs assert their NAMED diagnostics.
 //!
-//! Reachability note (invariant §3.7 — no tests for non-enabled categories'
-//! payload structures, and no tests pretending unreachable forms exist):
-//! `type_ref` accepts bare identifiers only until ticket A2 lands, so of the
-//! 7 non-enabled categories exactly TWO are publicly reachable — Parameter
-//! (a generic body's own type parameter) and Nominal (user structs/enums +
-//! builtin containers). Both R1 rejections are asserted end-to-end below.
-//! The remaining five (Tuple / Record / Callable / Reference / Union) have
-//! no `type_ref` spelling yet; their named per-category diagnostics are
-//! pinned at the unit level
-//! (`type_reflection/tests.rs::non_enabled_categories_reject_with_named_per_category_diagnostics`).
+//! Reachability note (invariant §3.7): ticket A2 landed checked
+//! type-expression syntax for `type_ref`, so ALL 7 non-enabled categories
+//! are publicly reachable — Parameter (a generic body's own type parameter),
+//! Nominal (user structs/enums + builtin containers + applied generics), and
+//! the five composite categories (Tuple / Record / Callable / Reference /
+//! Union). Every R1 rejection is asserted end-to-end below, over both the
+//! site-interned composite path and the alias-fixpoint base path. Bounded
+//! erased spellings (`dyn Trait`, trait intersections) classify as the
+//! ENABLED Erased category but their bound-set payload elements land with
+//! ticket B2 — reflecting one is the named bounded-erased rejection, never
+//! an empty (partial) bound set.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -158,8 +159,11 @@ fn never_and_erased_payload_arms_execute_on_vm_and_jit() {
     expect_vm_and_jit_output(&payload_label_program("any"), "erased");
 }
 
-/// The Erased bound set is complete AND empty for `any` — the only
-/// reachable erased spelling until A2 lands trait-bound syntax.
+/// The Erased bound set is complete AND empty for `any` — the only erased
+/// spelling whose payload query SUCCEEDS. Bounded erased spellings
+/// (`dyn Trait`, A2) are the named bounded-erased rejection until B2 lands
+/// the trait-reference bound descriptors — see
+/// `reflect_on_dyn_erased_spellings_is_the_named_bounded_erased_rejection`.
 #[test]
 fn erased_bound_set_is_empty_for_any() {
     let source = r#"
@@ -173,6 +177,15 @@ let bound_count = comptime {
 print(bound_count)
 "#;
     expect_vm_and_jit_output(source, "0");
+}
+
+/// A union whose members all coalesce to one identity IS that member
+/// (`int | i64` == `int`, no singleton union descriptor): reflecting the
+/// coalesced spelling answers the member's COMPLETE payload through the
+/// site-interned memo layer, on both engines.
+#[test]
+fn coalesced_union_reflects_the_member_payload() {
+    expect_vm_and_jit_output(&payload_label_program("int | i64"), "signed:w64");
 }
 
 /// reflect() inside a generic body (the A3 specialization pattern):
@@ -285,6 +298,88 @@ let reflected = comptime { reflect(type_ref(Status)) }
 fn r1_rejection_points_at_the_exhaustive_category_layer() {
     ShapeTest::new("let reflected = comptime { reflect(type_ref(Array)) }")
         .expect_run_err_contains("use type_category for the exhaustive category");
+}
+
+/// R1 over the A2 composite type-expression forms (the A2×B1 seam):
+/// reflecting a site-interned composite is the SAME named per-category
+/// rejection — never the wrong-family unknown-identity diagnostic (the
+/// identity IS known: `type_ref` minted it through the same overlay handle
+/// one call earlier).
+#[test]
+fn reflect_on_composite_type_expressions_is_the_named_r1_rejection() {
+    for (preamble, spelling, category) in [
+        ("", "[int, string]", "Tuple"),
+        ("", "{x: int}", "Record"),
+        ("", "(int) -> bool", "Callable"),
+        ("type User { id: int }", "&User", "Reference"),
+        ("type User { id: int }", "&mut User", "Reference"),
+        ("", "int | string", "Union"),
+        ("", "Option<int>", "Nominal"),
+    ] {
+        let source = format!(
+            "{preamble}\nlet reflected = comptime {{ reflect(type_ref({spelling})) }}"
+        );
+        ShapeTest::new(&source).expect_run_err_contains(&format!(
+            "reflect: the {category} payload descriptor has not landed"
+        ));
+    }
+}
+
+/// R1 through the alias-fixpoint BASE path: a bare alias name whose target
+/// is a composite reaches the same named per-category rejection as the
+/// spelled composite (two-path agreement, mirroring
+/// `composite_alias_bare_name_agrees_with_spelled_composite`).
+#[test]
+fn reflect_on_composite_alias_is_the_same_named_r1_rejection() {
+    ShapeTest::new(
+        r#"
+type Pair = [int, string]
+let reflected = comptime { reflect(type_ref(Pair)) }
+"#,
+    )
+    .expect_run_err_contains("reflect: the Tuple payload descriptor has not landed");
+}
+
+/// Bounded-erased disposition (A2×B1 seam): `dyn Trait` and trait
+/// intersections classify as the ENABLED Erased category, but their
+/// bound-set payload elements are the B2 trait-reference descriptors —
+/// reflecting one is the NAMED bounded-erased rejection, never an empty
+/// (partial) bound set, never the unknown-identity diagnostic.
+#[test]
+fn reflect_on_dyn_erased_spellings_is_the_named_bounded_erased_rejection() {
+    for (preamble, spelling) in [
+        ("trait Speak { fn speak(self) -> string; }", "dyn Speak"),
+        (
+            "trait Walk { fn walk(self) -> string; }\ntrait Swim { fn swim(self) -> string; }",
+            "dyn Walk + Swim",
+        ),
+        (
+            "trait Walk { fn walk(self) -> string; }\ntrait Swim { fn swim(self) -> string; }",
+            "Walk + Swim",
+        ),
+    ] {
+        let source = format!(
+            "{preamble}\nlet reflected = comptime {{ reflect(type_ref({spelling})) }}"
+        );
+        ShapeTest::new(&source)
+            .expect_run_err_contains("reflect: the Erased bound-set payload");
+    }
+}
+
+/// Bounded-erased disposition through the alias-fixpoint BASE path: an
+/// alias whose target is a `dyn` bound set carries a base-interned Erased
+/// identity — it must reject exactly like the spelled form, never reflect
+/// to an empty bound set.
+#[test]
+fn reflect_on_dyn_erased_alias_is_the_named_bounded_erased_rejection() {
+    ShapeTest::new(
+        r#"
+trait Speak { fn speak(self) -> string; }
+type Speaker = dyn Speak
+let reflected = comptime { reflect(type_ref(Speaker)) }
+"#,
+    )
+    .expect_run_err_contains("reflect: the Erased bound-set payload");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
