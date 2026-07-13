@@ -224,6 +224,7 @@ impl BytecodeCompiler {
             generated_symbols:
                 crate::compiler::comptime_builtins::expansion_provenance::GeneratedSymbolTable::new(
                 ),
+            generated_analysis_items: Vec::new(),
             failed_call_site_specializations: std::collections::HashSet::new(),
             next_monomorphization_id: 0,
             closure_specialization_count: 0,

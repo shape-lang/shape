@@ -1490,7 +1490,7 @@ fn split_top_level_union_for_ref_check(type_str: &str) -> Vec<String> {
 
 /// Run TypeInferenceEngine and extract per-function parameter/return types.
 pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionTypeInfo> {
-    let augmented = shape_ast::transform::augment_program_with_generated_extends(program);
+    let augmented = shape_vm::compiler::augment_program_with_executed_extends(program);
     let mut engine = TypeInferenceEngine::new();
     let mut result = HashMap::new();
     let inferred_param_pass_modes = shape_vm::compiler::infer_param_pass_modes(&augmented);
@@ -1709,7 +1709,7 @@ pub fn infer_impl_method_return_type(
     // are registered in the engine's type environment. Without this, a
     // `self: User` binding cannot resolve `self.name` because `User`'s
     // field schema is not yet known to the engine.
-    let augmented = shape_ast::transform::augment_program_with_generated_extends(program);
+    let augmented = shape_vm::compiler::augment_program_with_executed_extends(program);
     let _ = engine.infer_program_best_effort(&augmented);
 
     // Bind `self` to the target type so `self.field` resolves.
@@ -1875,7 +1875,7 @@ pub fn infer_program_types_with_context(
     workspace_root: Option<&Path>,
     current_source: Option<&str>,
 ) -> HashMap<String, String> {
-    let augmented = shape_ast::transform::augment_program_with_generated_extends(program);
+    let augmented = shape_vm::compiler::augment_program_with_executed_extends(program);
     let mut engine = TypeInferenceEngine::new();
     let mut types = HashMap::new();
 
@@ -2392,7 +2392,7 @@ pub struct MethodCompletionInfo {
 /// (not just those with bodies in the impl block), since the impl means the type has them all.
 /// For `extend Type` blocks, the explicitly defined methods are collected.
 pub fn extract_type_methods(program: &Program) -> HashMap<String, Vec<MethodCompletionInfo>> {
-    let augmented = shape_ast::transform::augment_program_with_generated_extends(program);
+    let augmented = shape_vm::compiler::augment_program_with_executed_extends(program);
     let mut result: HashMap<String, Vec<MethodCompletionInfo>> = HashMap::new();
 
     // First pass: collect trait definitions (name → method signatures)

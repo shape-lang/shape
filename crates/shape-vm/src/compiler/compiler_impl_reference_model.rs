@@ -2101,14 +2101,27 @@ impl BytecodeCompiler {
         // point (graph phase 1), so their handlers and helpers are reachable.
         let generated_comptime_items = self.materialize_computed_comptime_extends(&program)?;
 
-        let mut analysis_program =
-            shape_ast::transform::augment_program_with_generated_extends(&program);
-        // Make the generated free functions visible to the analyzer and
-        // inference — their signatures are already registered in the function
-        // table (so pass-2 user bodies resolve them); the compiled program's
-        // items are unchanged (the bodies are compiled by pass-2 exactly as
-        // before). Prepend so the annotated type's definition still follows.
+        // ADR-009 E3 (slice S1): the executed pre-pass above is the SINGLE
+        // authority for generated `extend`/free-function items. The former
+        // parallel static AST scan
+        // (`shape_ast::transform::augment_program_with_generated_extends`,
+        // deleted) re-derived extends WITHOUT executing the handler — it could
+        // observe false-guarded edits and never saw computed
+        // `extend (f"…")` snippets — so both paths are collapsed onto the
+        // executed result. The analysis program starts as a plain clone; the
+        // executed generated items are prepended below.
+        let mut analysis_program = program.clone();
+        // Make the generated free functions and extend methods visible to the
+        // analyzer and inference — their signatures are already registered in
+        // the function table (so pass-2 user bodies resolve them); the
+        // compiled program's items are unchanged (the bodies are compiled by
+        // pass-2 exactly as before). Prepend so the annotated type's
+        // definition still follows.
         if !generated_comptime_items.is_empty() {
+            // Record the executed authority's output so static consumers (LSP
+            // inference helpers, the `expand-comptime` CLI report) augment
+            // from the same result rather than a parallel scan.
+            self.generated_analysis_items = generated_comptime_items.clone();
             let mut merged = generated_comptime_items;
             merged.extend(analysis_program.items.drain(..));
             analysis_program.items = merged;
