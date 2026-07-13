@@ -59,26 +59,55 @@ pub(crate) fn compile_for_generated_symbol_queries(
     compiler
 }
 
+/// The syntactic kind of a callable use-site or declaration. A generated
+/// METHOD (`Point.answer`) is only reachable through method-call syntax
+/// (`receiver.answer(..)`); a generated free FUNCTION only through plain or
+/// qualified call syntax. Kind-matching call sites against generated
+/// declarations keeps a hand-written `fn answer()` (function kind) from
+/// being hijacked by a generated `Point.answer` (method kind) that shares
+/// the bare name — the round-1 review finding: the pre-fix bare-name gate
+/// classified the ordinary function's call sites as generated, dropping
+/// the true definition from goto-definition and producing a corrupting
+/// rename edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallableKind {
+    Method,
+    Function,
+}
+
+/// The callable kind a generated declaration answers to: a qualified
+/// declaration name (`Point.answer`) is a method; a bare name is a free
+/// function.
+fn generated_decl_kind(decl_name: &str) -> CallableKind {
+    if decl_name.contains('.') {
+        CallableKind::Method
+    } else {
+        CallableKind::Function
+    }
+}
+
 /// AST call-site collector for one callable name: method calls
 /// (`receiver.name(..)`), function calls (`name(..)`), and qualified calls
 /// (`ns::name(..)`). AST-node based — comments and string literals are
-/// invisible here (rejection row 6).
+/// invisible here (rejection row 6). Each site carries its syntactic
+/// [`CallableKind`] so generated declarations only claim kind-compatible
+/// sites.
 struct CallSiteCollector<'a> {
     name: &'a str,
-    call_spans: Vec<Span>,
+    call_spans: Vec<(Span, CallableKind)>,
 }
 
 impl Visitor for CallSiteCollector<'_> {
     fn visit_expr(&mut self, expr: &Expr) -> bool {
         match expr {
             Expr::MethodCall { method, span, .. } if method == self.name => {
-                self.call_spans.push(*span);
+                self.call_spans.push((*span, CallableKind::Method));
             }
             Expr::FunctionCall { name, span, .. } if name == self.name => {
-                self.call_spans.push(*span);
+                self.call_spans.push((*span, CallableKind::Function));
             }
             Expr::QualifiedFunctionCall { function, span, .. } if function == self.name => {
-                self.call_spans.push(*span);
+                self.call_spans.push((*span, CallableKind::Function));
             }
             _ => {}
         }
@@ -86,23 +115,77 @@ impl Visitor for CallSiteCollector<'_> {
     }
 }
 
-/// The name-token spans of every AST call site of `name` in the program.
-/// The token span is refined WITHIN each AST-resolved call node (the last
-/// occurrence of `name` followed by `(`) — a span refinement of a resolved
-/// node, not symbol discovery by text.
-pub(crate) fn call_site_name_spans(program: &Program, text: &str, name: &str) -> Vec<Span> {
+/// The name-token spans of every AST call site of `name` in the program,
+/// each tagged with its syntactic [`CallableKind`]. The token span is
+/// refined WITHIN each AST-resolved call node (the last occurrence of
+/// `name` followed by `(`) — a span refinement of a resolved node, not
+/// symbol discovery by text.
+pub(crate) fn call_site_name_spans(
+    program: &Program,
+    text: &str,
+    name: &str,
+) -> Vec<(Span, CallableKind)> {
     let mut collector = CallSiteCollector {
         name,
         call_spans: Vec::new(),
     };
     walk_program(&mut collector, program);
-    let mut spans: Vec<Span> = collector
+    let mut spans: Vec<(Span, CallableKind)> = collector
         .call_spans
         .into_iter()
-        .filter_map(|call_span| name_token_span_in_call(text, call_span, name))
+        .filter_map(|(call_span, kind)| {
+            name_token_span_in_call(text, call_span, name).map(|span| (span, kind))
+        })
         .collect();
-    spans.sort_by_key(|span| span.start);
-    spans.dedup();
+    spans.sort_by_key(|(span, _)| span.start);
+    spans.dedup_by(|a, b| a.0 == b.0);
+    spans
+}
+
+/// Hand-written (non-generated) declarations of `name` with the given
+/// callable kind: top-level `fn` / foreign-fn definitions (function kind),
+/// and methods in hand-written `impl` / `extend` blocks (method kind).
+/// These share call syntax with a same-named generated declaration, so
+/// their existence makes bare-name call sites ambiguous — the guard the
+/// three entry points consult before claiming a site exclusively.
+fn ordinary_declaration_spans(program: &Program, name: &str, kind: CallableKind) -> Vec<Span> {
+    let mut spans = Vec::new();
+    for item in &program.items {
+        match (kind, item) {
+            (CallableKind::Function, Item::Function(def, _)) if def.name == name => {
+                spans.push(def.name_span);
+            }
+            (CallableKind::Function, Item::ForeignFunction(def, _)) if def.name == name => {
+                spans.push(def.name_span);
+            }
+            (CallableKind::Function, Item::Module(module, _)) => {
+                for module_item in &module.items {
+                    match module_item {
+                        Item::Function(def, _) if def.name == name => spans.push(def.name_span),
+                        Item::ForeignFunction(def, _) if def.name == name => {
+                            spans.push(def.name_span);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (CallableKind::Method, Item::Impl(block, _)) => {
+                for method in &block.methods {
+                    if method.name == name {
+                        spans.push(method.span);
+                    }
+                }
+            }
+            (CallableKind::Method, Item::Extend(extend, _)) => {
+                for method in &extend.methods {
+                    if method.name == name {
+                        spans.push(method.span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     spans
 }
 
@@ -158,21 +241,33 @@ fn push_unique(locations: &mut Vec<Location>, location: Location) {
     }
 }
 
-/// Is the cursor on an AST call site of `word`? The gate that keeps
-/// ordinary symbols (same name text, different position) on the existing
-/// text/scope providers.
-fn cursor_on_call_site(sites: &[Span], offset: usize) -> bool {
+/// The syntactic kind of the AST call site under the cursor, if any. The
+/// gate that keeps ordinary symbols (same name text, different position or
+/// different call syntax) on the existing text/scope providers: `None` =
+/// not a call-site position; the kind lets the caller claim only generated
+/// declarations reachable through that call syntax.
+fn call_site_kind_at(sites: &[(Span, CallableKind)], offset: usize) -> Option<CallableKind> {
     sites
         .iter()
-        .any(|span| offset >= span.start && offset <= span.end)
+        .find(|(span, _)| offset >= span.start && offset <= span.end)
+        .map(|(_, kind)| *kind)
 }
 
 /// Go-to-definition over generated symbols (Decision 68 LSP behavior 1):
-/// when the cursor sits on a call site of a generated declaration, the
-/// response opens the CHECKED generated declaration (anchored at its
-/// application site until D2 virtual documents) and links the source
-/// application + the generator definition. `None` = not a generated-symbol
-/// position; the caller falls through to the existing providers.
+/// when the cursor sits on a KIND-COMPATIBLE call site of a generated
+/// declaration, the response opens the CHECKED generated declaration
+/// (anchored at its application site until D2 virtual documents) and links
+/// the source application + the generator definition. `None` = not a
+/// generated-symbol position (including a call site whose syntax cannot
+/// reach any generated declaration — e.g. a plain `answer()` call when
+/// only the METHOD `Point.answer` is generated); the caller falls through
+/// to the existing providers.
+///
+/// When a hand-written declaration of the SAME callable kind shares the
+/// bare name (a hand-written method colliding with a generated method),
+/// the call site is ambiguous without receiver-type resolution: the answer
+/// is the coarse-but-sound candidate SET — generated provenance PLUS the
+/// hand-written declaration — so the true definition is never excluded.
 pub fn generated_definition(
     program: &Program,
     text: &str,
@@ -184,11 +279,14 @@ pub fn generated_definition(
         return None;
     }
     let sites = call_site_name_spans(program, text, word);
-    if !cursor_on_call_site(&sites, offset) {
-        return None;
-    }
+    let cursor_kind = call_site_kind_at(&sites, offset)?;
     let compiler = compile_for_generated_symbol_queries(program, text);
-    let matches = compiler.generated_symbol_query().symbols_named(word);
+    let matches: Vec<_> = compiler
+        .generated_symbol_query()
+        .symbols_named(word)
+        .into_iter()
+        .filter(|provenance| generated_decl_kind(provenance.decl_name) == cursor_kind)
+        .collect();
     if matches.is_empty() {
         return None;
     }
@@ -207,13 +305,23 @@ pub fn generated_definition(
             location_from_span(uri, text, provenance.generator.span()),
         );
     }
+    for span in ordinary_declaration_spans(program, word, cursor_kind) {
+        push_unique(&mut locations, location_from_span(uri, text, span));
+    }
     Some(GotoDefinitionResponse::Array(locations))
 }
 
 /// Find-references over generated symbols (Decision 68 LSP behavior 3):
-/// every AST call site of the generated declaration plus its application
-/// site, resolved via the compiler-issued SymbolId — never the text-scan
-/// fallback (rejection row 6). `None` = not a generated-symbol position.
+/// every KIND-COMPATIBLE AST call site of the generated declaration plus
+/// its application site, resolved via the compiler-issued SymbolId — never
+/// the text-scan fallback (rejection row 6). `None` = not a
+/// generated-symbol position (call sites whose syntax cannot reach a
+/// generated declaration fall through to the existing providers).
+///
+/// When a hand-written declaration of the SAME callable kind shares the
+/// bare name, the sites are ambiguous without receiver-type resolution:
+/// the generated path abstains (`None`) rather than claim references that
+/// may belong to the hand-written symbol.
 pub fn generated_references(
     program: &Program,
     text: &str,
@@ -225,17 +333,25 @@ pub fn generated_references(
         return None;
     }
     let sites = call_site_name_spans(program, text, word);
-    if !cursor_on_call_site(&sites, offset) {
-        return None;
-    }
+    let cursor_kind = call_site_kind_at(&sites, offset)?;
     let compiler = compile_for_generated_symbol_queries(program, text);
-    let matches = compiler.generated_symbol_query().symbols_named(word);
+    let matches: Vec<_> = compiler
+        .generated_symbol_query()
+        .symbols_named(word)
+        .into_iter()
+        .filter(|provenance| generated_decl_kind(provenance.decl_name) == cursor_kind)
+        .collect();
     if matches.is_empty() {
         return None;
     }
+    if !ordinary_declaration_spans(program, word, cursor_kind).is_empty() {
+        return None;
+    }
     let mut locations: Vec<Location> = Vec::new();
-    for span in &sites {
-        push_unique(&mut locations, location_from_span(uri, text, *span));
+    for (span, kind) in &sites {
+        if *kind == cursor_kind {
+            push_unique(&mut locations, location_from_span(uri, text, *span));
+        }
     }
     for provenance in &matches {
         push_unique(
@@ -325,12 +441,23 @@ pub fn classify_generated_rename(
         return None;
     }
     let sites = call_site_name_spans(program, text, word);
-    if !cursor_on_call_site(&sites, offset) {
+    let cursor_kind = call_site_kind_at(&sites, offset)?;
+    let compiler = compile_for_generated_symbol_queries(program, text);
+    let matches: Vec<_> = compiler
+        .generated_symbol_query()
+        .symbols_named(word)
+        .into_iter()
+        .filter(|provenance| generated_decl_kind(provenance.decl_name) == cursor_kind)
+        .collect();
+    if matches.is_empty() {
         return None;
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
-    let matches = compiler.generated_symbol_query().symbols_named(word);
-    if matches.is_empty() {
+    // A hand-written declaration of the SAME callable kind shares the bare
+    // name: without receiver-type resolution the call sites are ambiguous
+    // between the generated and the hand-written symbol — a text edit over
+    // that set would corrupt one of them (round-1 review finding). The
+    // generated classification abstains; ordinary rename applies.
+    if !ordinary_declaration_spans(program, word, cursor_kind).is_empty() {
         return None;
     }
     let mut binder_spans: Vec<Span> = Vec::new();
@@ -354,9 +481,18 @@ pub fn classify_generated_rename(
     if every_match_is_source_bound {
         binder_spans.sort_by_key(|span| span.start);
         binder_spans.dedup();
+        // Only KIND-COMPATIBLE call sites belong to the generated symbol:
+        // a plain/qualified `answer()` call next to a generated METHOD
+        // `Point.answer` references a different (hand-written) symbol and
+        // must never receive a rename edit.
+        let call_site_spans: Vec<Span> = sites
+            .iter()
+            .filter(|(_, kind)| *kind == cursor_kind)
+            .map(|(span, _)| *span)
+            .collect();
         Some(GeneratedRenameClassification::SourceBinder {
             binder_spans,
-            call_site_spans: sites,
+            call_site_spans,
             generated_ranges,
         })
     } else {
@@ -474,11 +610,16 @@ let b = p.answer()
             2,
             "both p.answer() call sites resolve; got {sites:?}"
         );
-        for span in &sites {
+        for (span, kind) in &sites {
             assert_eq!(
                 &GENERATING_PROGRAM[span.start..span.end],
                 "answer",
                 "the refined token span covers exactly the method name"
+            );
+            assert_eq!(
+                *kind,
+                CallableKind::Method,
+                "p.answer() is method-call syntax"
             );
         }
     }
@@ -571,6 +712,213 @@ let x = p.answer()
         assert!(
             classify_generated_rename(&program, &source, "Point", decl_offset).is_none(),
             "the extend target's declaration position is ordinary rename territory"
+        );
+    }
+
+    /// Round-1 review finding: hand-written functions COLLIDE with the
+    /// generated method `Point.answer` on the bare name. Plain `answer()`
+    /// and qualified `m::answer()` calls are FUNCTION-kind syntax — they
+    /// can only resolve to the hand-written functions, never to the
+    /// generated METHOD — so the generated gate must fall through and
+    /// generated navigation must not leak the ordinary call sites.
+    const COLLIDING_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+fn answer() -> int { 7 }
+
+mod m {
+  fn answer() -> int { 8 }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+let plain = answer()
+let qualified = m::answer()
+"#;
+
+    /// Byte offset inside the `answer` token of the plain `answer()` call.
+    fn plain_call_offset(text: &str) -> usize {
+        text.rfind("= answer()").expect("plain call site") + 3
+    }
+
+    /// Byte offset inside the `answer` token of the qualified
+    /// `m::answer()` call.
+    fn qualified_call_offset(text: &str) -> usize {
+        text.rfind("m::answer()").expect("qualified call site") + 4
+    }
+
+    #[test]
+    fn ordinary_function_call_does_not_classify_as_generated_despite_name_collision() {
+        let program = parse_program(COLLIDING_PROGRAM).expect("parses");
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        for offset in [
+            plain_call_offset(COLLIDING_PROGRAM),
+            qualified_call_offset(COLLIDING_PROGRAM),
+        ] {
+            assert!(
+                generated_definition(&program, COLLIDING_PROGRAM, "answer", offset, &uri)
+                    .is_none(),
+                "a function-kind `answer` call (offset {offset}) resolves to \
+                 a hand-written function: the generated gate must fall \
+                 through so the ordinary providers serve the true definition"
+            );
+            assert!(
+                generated_references(&program, COLLIDING_PROGRAM, "answer", offset, &uri)
+                    .is_none(),
+                "references on the ordinary call (offset {offset}) must fall through"
+            );
+            assert!(
+                classify_generated_rename(&program, COLLIDING_PROGRAM, "answer", offset).is_none(),
+                "rename on the ordinary call (offset {offset}) must fall \
+                 through (a generated classification would edit the \
+                 generator binder + method call sites and never the \
+                 hand-written declarations)"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_method_references_exclude_colliding_ordinary_call_sites() {
+        let program = parse_program(COLLIDING_PROGRAM).expect("parses");
+        let method_offset = COLLIDING_PROGRAM.find("p.answer()").expect("method call") + 2;
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let locations =
+            generated_references(&program, COLLIDING_PROGRAM, "answer", method_offset, &uri)
+                .expect("the generated method call site classifies");
+        let (plain_line, _) =
+            offset_to_line_col(COLLIDING_PROGRAM, plain_call_offset(COLLIDING_PROGRAM));
+        let (qualified_line, _) =
+            offset_to_line_col(COLLIDING_PROGRAM, qualified_call_offset(COLLIDING_PROGRAM));
+        assert!(
+            locations
+                .iter()
+                .all(|location| location.range.start.line != plain_line
+                    && location.range.start.line != qualified_line),
+            "generated references must not include the ordinary `answer()` / \
+             `m::answer()` call sites (they reference hand-written functions, \
+             not `Point.answer`): {locations:?}"
+        );
+    }
+
+    #[test]
+    fn generated_rename_call_sites_exclude_colliding_ordinary_call_sites() {
+        let program = parse_program(COLLIDING_PROGRAM).expect("parses");
+        let method_offset = COLLIDING_PROGRAM.find("p.answer()").expect("method call") + 2;
+        let classification =
+            classify_generated_rename(&program, COLLIDING_PROGRAM, "answer", method_offset)
+                .expect("the generated method call site classifies");
+        let GeneratedRenameClassification::SourceBinder {
+            call_site_spans, ..
+        } = classification
+        else {
+            panic!("`answer` is written in the generator: source binder");
+        };
+        for ordinary_offset in [
+            plain_call_offset(COLLIDING_PROGRAM),
+            qualified_call_offset(COLLIDING_PROGRAM),
+        ] {
+            assert!(
+                call_site_spans
+                    .iter()
+                    .all(|span| !(span.start <= ordinary_offset && ordinary_offset <= span.end)),
+                "a generated-method rename must never edit an ordinary \
+                 function-kind call site (offset {ordinary_offset}): \
+                 {call_site_spans:?}"
+            );
+        }
+        assert_eq!(
+            call_site_spans.len(),
+            1,
+            "only the method call site belongs to the generated symbol"
+        );
+    }
+
+    /// A hand-written `extend Other { method answer() }` shares the bare
+    /// method name with the generated `Point.answer`: without receiver-type
+    /// resolution the method-call sites are ambiguous. Goto-definition
+    /// answers the coarse-but-sound candidate SET (generated provenance +
+    /// the hand-written declaration — the true definition is never excluded
+    /// from the answer set); references and rename abstain (a text edit or
+    /// reference claim over an ambiguous set would corrupt/mislead one of
+    /// the two symbols).
+    const METHOD_COLLIDING_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+type Other { id: int }
+extend Other {
+  method answer() -> int { 7 }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let o = Other { id: 2 }
+let a = p.answer()
+let b = o.answer()
+"#;
+
+    #[test]
+    fn method_name_collision_keeps_hand_written_declaration_in_definition_answer_set() {
+        let program = parse_program(METHOD_COLLIDING_PROGRAM).expect("parses");
+        let offset = METHOD_COLLIDING_PROGRAM
+            .find("p.answer()")
+            .expect("method call")
+            + 2;
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let response =
+            generated_definition(&program, METHOD_COLLIDING_PROGRAM, "answer", offset, &uri)
+                .expect("the generated method still answers at a method call site");
+        let GotoDefinitionResponse::Array(locations) = response else {
+            panic!("generated definition answers a location array");
+        };
+        let hand_written = METHOD_COLLIDING_PROGRAM
+            .find("method answer() -> int { 7 }")
+            .expect("hand-written method");
+        let (decl_line, _) = offset_to_line_col(METHOD_COLLIDING_PROGRAM, hand_written);
+        assert!(
+            locations
+                .iter()
+                .any(|location| location.range.start.line == decl_line),
+            "the hand-written `Other.answer` declaration must stay in the \
+             coarse-but-sound answer set: {locations:?}"
+        );
+    }
+
+    #[test]
+    fn method_name_collision_abstains_for_references_and_rename() {
+        let program = parse_program(METHOD_COLLIDING_PROGRAM).expect("parses");
+        let offset = METHOD_COLLIDING_PROGRAM
+            .find("p.answer()")
+            .expect("method call")
+            + 2;
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        assert!(
+            generated_references(&program, METHOD_COLLIDING_PROGRAM, "answer", offset, &uri)
+                .is_none(),
+            "an ambiguous method-call site must not claim references"
+        );
+        assert!(
+            classify_generated_rename(&program, METHOD_COLLIDING_PROGRAM, "answer", offset)
+                .is_none(),
+            "an ambiguous method-call site must not classify for rename"
         );
     }
 

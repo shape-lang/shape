@@ -7427,3 +7427,49 @@ share the compiling unit's file id (pre-existing file-less-Span model limit).
 scanning (the decoy-edit defect died with this slice), D2's fixed
 point/virtual documents keep a clean seam (grep sentinels pin the exclusion),
 and the identity table remains the single provenance authority end to end.
+
+## 2026-07-13 — ADR009-D1 review round 1: generated-symbol LSP gate no longer hijacks bare-name-colliding ordinary symbols
+
+**Defect fixed (review finding 1, major):** the S5/S6 gate matched call
+sites and generated declarations by BARE-NAME equality only
+(`CallSiteCollector` collected FunctionCall/MethodCall/QualifiedFunctionCall
+alike; `symbols_named()` matches the method segment of `Point.answer`), so
+a hand-written `fn answer()` coexisting with the generated method
+`Point.answer` had its call sites classified as generated: goto-definition
+dropped the real `fn answer` declaration from the answer set, and the
+SourceBinder rename edited the generator binder plus the ordinary call
+sites while never editing the ordinary declaration (a corrupting workspace
+edit). Reproduced red via QUALIFIED calls (`m::answer()` — the plain
+`FunctionCall` AST span covers only the argument list, so plain-call sites
+were dropped by token refinement and masked the defect; the tests now pin
+both forms) and via hand-written `extend Other { method answer() }`
+method-kind collisions. Fix: every call site carries its syntactic
+`CallableKind` (Method vs Function), and a generated declaration only
+answers KIND-COMPATIBLE sites (`Point.answer` is method-kind; it can never
+claim `answer()` / `m::answer()`). For a SAME-KIND hand-written collision
+(hand-written method vs generated method — unresolvable without
+receiver-type analysis, which is D2+ territory): goto-definition answers
+the coarse-but-sound candidate SET (generated provenance + the hand-written
+declaration — the true definition is never excluded); references and rename
+ABSTAIN (`None` → the pre-D1 providers), since a reference claim or text
+edit over an ambiguous site set would corrupt/mislead one of the two
+symbols.
+
+**Considered and rejected:** (a) receiver-type resolution to disambiguate
+method-kind collisions exactly — a second type-inference evaluator inside
+the LSP gate (Dec 66 violation); the compiler query surface is the only
+evaluator, and the coarse union/abstain split is sound without it; (b)
+abstaining on goto-definition too — excludes the generated true definition
+at a genuinely-generated call site (the same unsoundness class the finding
+names, mirrored); (c) tightening ORDINARY rename so its text fallback stops
+touching same-named generator-binder/method tokens — pre-existing
+text-based-rename over-reach that predates D1 (rename.rs is documented
+text-based), self-consistent under recomputation, and out of this ticket's
+territory; the integration test pins the discriminator instead (the
+ordinary declaration IS edited, which the hijacking classification never
+did).
+
+**Cost saved:** the generated gate is now sound in both directions —
+generated symbols keep compiler-table navigation, ordinary symbols with
+colliding bare names keep their pre-D1 providers — before D2 builds the
+declaration-discovery fixed point on top of this gate.

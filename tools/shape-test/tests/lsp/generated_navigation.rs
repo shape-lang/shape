@@ -169,3 +169,83 @@ fn ordinary_function_navigation_is_unchanged_in_a_generating_document() {
         .at(pos(17, 9))
         .expect_definition_includes_lines(&[10]);
 }
+
+/// Round-1 review finding: ordinary symbols COLLIDE with the generated
+/// method on the bare name. Zero-based lines:
+///  3    comptime post(target, ctx) {          <- generator definition
+///  5      method answer() -> int { 42 }       <- generator binder token
+/// 10  fn answer() -> int { 7 }                <- ordinary fn, SAME bare name
+/// 12  @gen()                                  <- application site
+/// 16  let a = p.answer()                      <- generated method call site
+/// 17  let plain = answer()                    <- ordinary call site
+/// 19    fn answer() -> int { 8 }              <- ordinary module fn
+/// 21  let qualified = m::answer()             <- ordinary qualified call site
+const COLLIDING_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+fn answer() -> int { 7 }
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+let plain = answer()
+mod m {
+  fn answer() -> int { 8 }
+}
+let qualified = m::answer()
+"#;
+
+/// A plain `answer()` call is FUNCTION-kind syntax: it resolves to the
+/// hand-written `fn answer` (line 10), never to the generated METHOD
+/// `Point.answer` — the generated gate must not hijack it, and the true
+/// definition must be in the answer set.
+#[test]
+fn goto_definition_on_colliding_ordinary_call_finds_the_ordinary_declaration() {
+    ShapeTest::new(COLLIDING_PROGRAM)
+        .at(pos(17, 13))
+        .expect_definition_includes_lines(&[10])
+        .expect_definition_excludes_line(12)
+        .expect_definition_excludes_line(3);
+}
+
+/// A qualified `m::answer()` call is FUNCTION-kind syntax too: the
+/// generated METHOD must not answer for it (no application/generator
+/// links on an ordinary call).
+#[test]
+fn goto_definition_on_colliding_qualified_call_is_not_hijacked() {
+    ShapeTest::new(COLLIDING_PROGRAM)
+        .at(pos(21, 20))
+        .expect_definition_excludes_line(12)
+        .expect_definition_excludes_line(3);
+}
+
+/// The generated method keeps answering at its METHOD call site even when
+/// an ordinary function shares the bare name.
+#[test]
+fn goto_definition_on_generated_method_still_answers_despite_name_collision() {
+    ShapeTest::new(COLLIDING_PROGRAM)
+        .at(pos(16, 11))
+        .expect_definition_includes_lines(&[12, 3]);
+}
+
+/// References on the generated method must not leak the ordinary
+/// function's call sites (plain line 17, qualified line 21) or its
+/// declaration (line 10).
+#[test]
+fn references_on_generated_method_exclude_colliding_ordinary_call_sites() {
+    ShapeTest::new(COLLIDING_PROGRAM)
+        .at(pos(16, 11))
+        .expect_references_include_lines(&[16, 12])
+        .expect_references_exclude_line(17)
+        .expect_references_exclude_line(21)
+        .expect_references_exclude_line(10);
+}

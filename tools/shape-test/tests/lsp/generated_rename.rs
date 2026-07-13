@@ -182,3 +182,65 @@ fn ordinary_function_rename_is_unchanged_in_a_generating_document() {
         .at(pos(17, 9))
         .expect_rename_edits_include_lines("assistant", &[10, 17]);
 }
+
+/// Round-1 review finding: ordinary symbols COLLIDE with the generated
+/// method on the bare name. Zero-based lines:
+///  5      method answer() -> int { 42 }       <- generator binder token
+/// 10  fn answer() -> int { 7 }                <- ordinary fn, SAME bare name
+/// 16  let a = p.answer()                      <- generated method call site
+/// 17  let plain = answer()                    <- ordinary call site
+/// 19    fn answer() -> int { 8 }              <- ordinary module fn
+/// 21  let qualified = m::answer()             <- ordinary qualified call site
+const COLLIDING_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+fn answer() -> int { 7 }
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+let plain = answer()
+mod m {
+  fn answer() -> int { 8 }
+}
+let qualified = m::answer()
+"#;
+
+/// Rename on the ORDINARY `answer()` call site is ordinary rename: the
+/// hand-written declaration (line 10) and its call site (line 17) ARE
+/// edited. The pre-fix generated classification hijacked this position and
+/// produced a corrupting workspace edit — generator binder + every
+/// bare-name call site, NEVER the ordinary declaration — so line 10 being
+/// edited is the discriminator proving the generated gate abstained.
+/// (The pre-existing text-based ordinary rename may additionally touch
+/// other same-named identifier tokens in the document; that over-reach
+/// predates D1 and is ordinary-rename territory, not the generated gate.)
+#[test]
+fn rename_on_colliding_ordinary_call_edits_the_ordinary_declaration() {
+    ShapeTest::new(COLLIDING_PROGRAM)
+        .at(pos(17, 13))
+        .expect_rename_edits_include_lines("solution", &[10, 17]);
+}
+
+/// Rename on the GENERATED method call site edits the generator binder
+/// token (line 5) and the method call site (line 16) only — the ordinary
+/// declarations (lines 10, 19) and call sites (plain line 17, qualified
+/// line 21) belong to different symbols and receive zero edits.
+#[test]
+fn rename_on_generated_method_excludes_colliding_ordinary_call_sites() {
+    ShapeTest::new(COLLIDING_PROGRAM)
+        .at(pos(16, 11))
+        .expect_rename_edits_include_lines("solution", &[5, 16])
+        .expect_rename_edits_exclude_line("solution", 10)
+        .expect_rename_edits_exclude_line("solution", 17)
+        .expect_rename_edits_exclude_line("solution", 21);
+}
