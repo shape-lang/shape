@@ -1178,6 +1178,15 @@ impl TypeInferenceEngine {
                 }
             }
 
+            // ADR-009 A2: the type-syntax carrier is not a value expression.
+            // It is consumed structurally by the `type_ref` argument gate
+            // (`inference/access.rs`) before argument inference runs; any
+            // other position is a named surface-and-stop error, never a
+            // silently synthesized value type.
+            Expr::TypeSyntax(_, _) => Err(TypeError::ConstraintViolation(
+                "type syntax is only valid as the type_ref argument".to_string(),
+            )),
+
             Expr::TypeAssertion {
                 expr,
                 type_annotation,

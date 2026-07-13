@@ -13,4 +13,5 @@ pub mod grammar_coverage;
 #[cfg(feature = "deep-tests")]
 pub mod module_deep_tests;
 pub mod strings;
+pub mod type_ref_syntax;
 pub mod types;

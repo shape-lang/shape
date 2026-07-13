@@ -237,6 +237,16 @@ pub fn analyze_context(text: &str, position: Position) -> CompletionContext {
         return CompletionContext::EnumVariant { enum_name, prefix };
     }
 
+    // ADR-009 A2 (S6): inside `type_ref(` the argument is checked TYPE
+    // syntax, not an expression — route to the type-annotation completion
+    // provider. Textual detection (same discipline as
+    // is_inside_comptime_block: comptime sites in generic fn bodies never
+    // compile at definition), checked before the comptime-block context so
+    // type completions win inside comptime blocks where type_ref is valid.
+    if !inside_interpolation && is_in_type_ref_type_position(&text_before_cursor) {
+        return CompletionContext::TypeAnnotation;
+    }
+
     // Check if we're after "find" keyword (pattern reference)
     if !inside_interpolation && text_before_cursor.trim_end().ends_with("find") {
         return CompletionContext::PatternReference;
@@ -1406,6 +1416,48 @@ fn is_in_trait_bound_position(text: &str) -> bool {
     false
 }
 
+/// ADR-009 A2 (S6): checked type-expression argument position inside
+/// `type_ref(...)`.
+///
+/// The argument of `type_ref` is TYPE syntax (bare names, tuples, records,
+/// callables, references, unions, `any` / `dyn Trait`, applied generics), so
+/// the cursor there is a type position: while a word-boundary `type_ref(`
+/// parenthesis on the current line is still open (the callable form
+/// `(int) -> R` balances its own inner parentheses) and the cursor is not
+/// inside a string-literal argument (R1: strings cannot construct TypeRef),
+/// completion routes to the type-annotation provider.
+fn is_in_type_ref_type_position(text_before_cursor: &str) -> bool {
+    let mut search_end = text_before_cursor.len();
+    while let Some(idx) = text_before_cursor[..search_end].rfind("type_ref(") {
+        // Keyword boundary: reject `my_type_ref(`.
+        let boundary_ok = text_before_cursor[..idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+        if boundary_ok {
+            let after = &text_before_cursor[idx + "type_ref(".len()..];
+            let mut depth: i32 = 1;
+            let mut in_string = false;
+            for c in after.chars() {
+                match c {
+                    '"' => in_string = !in_string,
+                    '(' if !in_string => depth += 1,
+                    ')' if !in_string => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+            }
+            if depth > 0 && !in_string {
+                return true;
+            }
+        }
+        search_end = idx;
+    }
+    false
+}
+
 /// Check if the cursor is inside a `comptime { }` block.
 ///
 /// Scans backwards through lines to find an unmatched `comptime {` opening.
@@ -2392,6 +2444,132 @@ mod tests {
             "Should not be ComptimeBlock after the block closed inside a fn body, got {:?}",
             context
         );
+    }
+
+    // =================================================================
+    // ADR-009 A2 (S6): the argument of `type_ref(` is a TYPE position.
+    // Detection is textual (same discipline as is_inside_comptime_block —
+    // comptime sites in generic fn bodies never compile at definition) and
+    // must win over the ComptimeBlock context so the type-annotation
+    // completion provider serves type names inside `type_ref(...)`.
+    // =================================================================
+
+    #[test]
+    fn test_type_ref_argument_position_is_type_annotation_context() {
+        let context = analyze_context(
+            "let reflected = comptime { type_ref( ) }",
+            Position {
+                line: 0,
+                character: 36,
+            },
+        );
+        assert_eq!(context, CompletionContext::TypeAnnotation);
+    }
+
+    #[test]
+    fn test_type_ref_argument_position_with_partial_type_prefix() {
+        let context = analyze_context(
+            "let reflected = comptime { type_ref(Op ) }",
+            Position {
+                line: 0,
+                character: 38,
+            },
+        );
+        assert_eq!(context, CompletionContext::TypeAnnotation);
+    }
+
+    #[test]
+    fn test_type_ref_applied_generic_argument_is_type_annotation_context() {
+        let context = analyze_context(
+            "let reflected = comptime { type_ref(Option<in ) }",
+            Position {
+                line: 0,
+                character: 45,
+            },
+        );
+        assert_eq!(context, CompletionContext::TypeAnnotation);
+    }
+
+    #[test]
+    fn test_type_ref_callable_argument_keeps_type_position_across_inner_parens() {
+        // The callable form `(int) -> R` balances its own parentheses; the
+        // `type_ref(` parenthesis is still open.
+        let context = analyze_context(
+            "let reflected = comptime { type_ref((int) -> ",
+            Position {
+                line: 0,
+                character: 45,
+            },
+        );
+        assert_eq!(context, CompletionContext::TypeAnnotation);
+    }
+
+    #[test]
+    fn test_type_ref_closed_call_is_not_type_position() {
+        // Cursor AFTER the closing `)` — back to ordinary comptime completions.
+        let text = "comptime {\n    type_ref(int) \n}";
+        let context = analyze_context(
+            text,
+            Position {
+                line: 1,
+                character: 18,
+            },
+        );
+        assert_eq!(context, CompletionContext::ComptimeBlock);
+    }
+
+    #[test]
+    fn test_type_ref_string_argument_is_not_type_position() {
+        // R1 pins that strings cannot construct TypeRef — a cursor inside a
+        // string literal argument must not get type completions.
+        let context = analyze_context(
+            "let reflected = comptime { type_ref(\"in",
+            Position {
+                line: 0,
+                character: 39,
+            },
+        );
+        assert_ne!(context, CompletionContext::TypeAnnotation);
+    }
+
+    #[test]
+    fn test_prefixed_type_ref_name_does_not_trigger_type_position() {
+        // Keyword boundary: `my_type_ref(` is an ordinary call.
+        let context = analyze_context(
+            "let x = comptime { my_type_ref(",
+            Position {
+                line: 0,
+                character: 31,
+            },
+        );
+        assert_ne!(context, CompletionContext::TypeAnnotation);
+    }
+
+    #[test]
+    fn test_type_ref_type_position_inside_generic_fn_body_comptime_block() {
+        let text =
+            "fn describe<T>(value: T) -> string {\n  let label = comptime {\n    type_ref(\n  }\n}";
+        let context = analyze_context(
+            text,
+            Position {
+                line: 2,
+                character: 13,
+            },
+        );
+        assert_eq!(context, CompletionContext::TypeAnnotation);
+    }
+
+    #[test]
+    fn test_type_ref_type_position_inside_nested_comptime_block() {
+        let text = "comptime {\n  if true {\n    type_ref(\n  }\n}";
+        let context = analyze_context(
+            text,
+            Position {
+                line: 2,
+                character: 13,
+            },
+        );
+        assert_eq!(context, CompletionContext::TypeAnnotation);
     }
 
     #[test]

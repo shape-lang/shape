@@ -368,6 +368,7 @@ fn parse_primary_expr_inner(pair: Pair<Rule>) -> Result<Expr> {
         Rule::from_query_expr => super::control_flow::parse_from_query_expr(pair),
         Rule::comptime_for_expr => parse_comptime_for_expr(pair),
         Rule::comptime_block => parse_comptime_block(pair),
+        Rule::type_ref_call => parse_type_ref_call(pair),
         Rule::annotated_expr => parse_annotated_expr(pair),
         Rule::datetime_range => {
             // Parse datetime range - return Range expression if end is present
@@ -387,6 +388,91 @@ fn parse_primary_expr_inner(pair: Pair<Rule>) -> Result<Expr> {
             location: None,
         }),
     }
+}
+
+/// Lower the checked type-argument position of `type_ref(...)` (ADR-009 A2).
+///
+/// The `type_ref_call` grammar rule routes the argument through the
+/// checked `type_annotation` grammar first (ordered choice with `&")"`
+/// commitment), falling back to the ordinary argument list. Lowering
+/// contract:
+/// - bare identifier arguments (`type_ref(int)`, `type_ref(User)`,
+///   `type_ref(any)`, `type_ref(T)`) keep the historical
+///   `Expr::Identifier` lowering, so the A1 bare-Identifier rewrite arm
+///   (`compiler/comptime.rs`) and its diagnostics are byte-identical;
+/// - composite type expressions (tuples, records, callables, references,
+///   unions, `dyn` bounds, applied generics) lower to the
+///   `Expr::TypeSyntax(TypeAnnotation, Span)` carrier;
+/// - const-generic applications are a named parse-time rejection (no
+///   TypeAnnotation const carrier exists yet — spec §3.7 prove-or-reject);
+/// - non-type arguments stay a plain `Expr::FunctionCall` so the A1 named
+///   diagnostics keep firing.
+fn parse_type_ref_call(pair: Pair<Rule>) -> Result<Expr> {
+    let span = pair_span(&pair);
+    let mut args: Vec<Expr> = Vec::new();
+    let mut named_args: Vec<(String, Expr)> = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::type_ref_kw => {}
+            Rule::type_ref_type_arg => {
+                let arg_span = pair_span(&inner);
+                let arg_src = inner.as_str().trim();
+                let inner_loc = pair_location(&inner);
+                let type_pair =
+                    inner
+                        .clone()
+                        .into_inner()
+                        .next()
+                        .ok_or_else(|| ShapeError::ParseError {
+                            message: "expected type annotation in type_ref argument".to_string(),
+                            location: Some(inner_loc),
+                        })?;
+                let annotation = crate::parser::parse_type_annotation(type_pair)?;
+                if is_bare_identifier(arg_src) {
+                    // Historical A1 lowering: a bare compiler-resolved name
+                    // stays an identifier argument.
+                    args.push(Expr::Identifier(arg_src.to_string(), arg_span));
+                } else {
+                    args.push(Expr::TypeSyntax(annotation, arg_span));
+                }
+            }
+            Rule::type_ref_const_generic_reject => {
+                return Err(ShapeError::ParseError {
+                    message: "const-generic type applications are not yet supported in type_ref"
+                        .to_string(),
+                    location: Some(pair_location(&inner)),
+                });
+            }
+            Rule::arg_list => {
+                let (positional, named) = super::functions::parse_arg_list_pairs(inner)?;
+                args = positional;
+                named_args = named;
+            }
+            other => {
+                return Err(ShapeError::ParseError {
+                    message: format!("unexpected element in type_ref call: {other:?}"),
+                    location: Some(pair_location(&inner)),
+                });
+            }
+        }
+    }
+
+    Ok(Expr::FunctionCall {
+        name: "type_ref".to_string(),
+        const_args: Vec::new(),
+        args,
+        named_args,
+        span,
+    })
+}
+
+/// A bare identifier token: `[A-Za-z_][A-Za-z0-9_]*` (no `::`, no
+/// composite type syntax).
+fn is_bare_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn parse_qualified_function_call_expr(pair: Pair<Rule>) -> Result<Expr> {

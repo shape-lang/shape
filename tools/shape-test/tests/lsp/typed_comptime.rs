@@ -54,6 +54,48 @@ fn typed_reflection_offers_signature_help() {
         .expect_signature_help();
 }
 
+// =====================================================================
+// ADR-009 A2 (S6): completion inside the `type_ref(` TYPE position.
+// The argument of type_ref is checked type syntax, so completion routes
+// to the type-annotation provider: type names (primitives, user types,
+// in-scope generic parameters) — never value bindings.
+// =====================================================================
+
+#[test]
+fn type_ref_argument_completion_offers_type_names_not_value_bindings() {
+    ShapeTest::new(
+        "type Point {\n  x: int\n}\nlet count = 1\nlet reflected = comptime { type_ref( ) }\n",
+    )
+    .at(pos(4, 36))
+    .expect_completion("int")
+    .expect_completion("Point")
+    .expect_completion("Option")
+    .expect_no_completion("count")
+    .expect_no_completion("reflected");
+}
+
+#[test]
+fn generic_body_type_ref_argument_completion_offers_type_parameters() {
+    ShapeTest::new(
+        "fn describe<T>(value: T) -> string {\n  let label = comptime { type_ref( ) }\n  label\n}\n",
+    )
+    .at(pos(1, 34))
+    .expect_completion("T")
+    .expect_completion("int")
+    .expect_no_completion("value")
+    .expect_no_completion("label");
+}
+
+#[test]
+fn type_ref_hover_documents_the_checked_type_expression_surface() {
+    // The catalog-owned builtin row (comptime_reflection.rs) documents the
+    // A2 checked type-expression forms; hover renders that row.
+    ShapeTest::new("let reflected = comptime { type_ref(int) }\n")
+        .at(pos(0, 29))
+        .expect_hover_contains("applied generics")
+        .expect_hover_contains("opaque compiler-issued identity");
+}
+
 #[test]
 fn string_type_ref_construction_has_semantic_diagnostic() {
     ShapeTest::new("let reflected = comptime { type_ref(\"int\") }\n")
@@ -63,6 +105,24 @@ fn string_type_ref_construction_has_semantic_diagnostic() {
 #[test]
 fn unresolved_type_ref_has_semantic_diagnostic() {
     ShapeTest::new("let reflected = comptime { type_ref(DoesNotExist) }\n")
+        .expect_semantic_diagnostic_contains("unknown semantic type identity");
+}
+
+/// ADR-009 A2 (S5) LSP mirror: a STRING spelling a composite type is still a
+/// string — the named rejection reaches LSP semantic diagnostics through the
+/// S3 expression fallback.
+#[test]
+fn composite_string_type_ref_has_semantic_diagnostic() {
+    ShapeTest::new("let reflected = comptime { type_ref(\"Option<int>\") }\n")
+        .expect_semantic_diagnostic_contains("strings cannot construct TypeRef");
+}
+
+/// ADR-009 A2 (S5) LSP mirror: an unresolved leaf NESTED inside a checked
+/// type expression surfaces the named freeze rejection as a semantic
+/// diagnostic (compile-time, before user comptime executes — Dec 52).
+#[test]
+fn nested_unresolved_type_ref_has_semantic_diagnostic() {
+    ShapeTest::new("let reflected = comptime { type_ref(Option<Bogus>) }\n")
         .expect_semantic_diagnostic_contains("unknown semantic type identity");
 }
 

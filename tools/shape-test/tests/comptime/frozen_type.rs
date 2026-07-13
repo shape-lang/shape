@@ -443,6 +443,323 @@ print(enum_label)
     expect_vm_and_jit_output(source, "primitive\nnominal");
 }
 
+// =========================================================================
+// ADR-009 A2 (slice S4): checked type-expression syntax — every composite
+// form lowers to a canonical frozen identity at COMPILE time (the rewrite
+// canonicalizes through the shared freeze overlay before user comptime
+// executes) and its TypeRef is consumable through the EXHAUSTIVE
+// FrozenTypeCategory match under both VM and JIT execution.
+// =========================================================================
+
+/// Positive per-form proof template: `type_ref({spelling})` consumed via the
+/// full 10-arm exhaustive `type_category` match, asserted on VM and JIT.
+fn expect_type_ref_category(preamble: &str, spelling: &str, expected: &str) {
+    let source = format!(
+        r#"
+{preamble}
+let label = comptime {{
+  match type_category(type_ref({spelling})) {{
+    FrozenTypeCategory::Primitive => "primitive"
+    FrozenTypeCategory::Never => "never"
+    FrozenTypeCategory::Parameter => "parameter"
+    FrozenTypeCategory::Nominal => "nominal"
+    FrozenTypeCategory::Tuple => "tuple"
+    FrozenTypeCategory::Record => "record"
+    FrozenTypeCategory::Callable => "callable"
+    FrozenTypeCategory::Reference => "reference"
+    FrozenTypeCategory::Union => "union"
+    FrozenTypeCategory::Erased => "erased"
+  }}
+}}
+
+print(label)
+"#
+    );
+    expect_vm_and_jit_output(&source, expected);
+}
+
+#[test]
+fn tuple_type_expression_category_is_tuple() {
+    expect_type_ref_category("", "[int, string]", "tuple");
+}
+
+#[test]
+fn record_type_expression_category_is_record() {
+    expect_type_ref_category("", "{x: int}", "record");
+}
+
+#[test]
+fn record_optional_field_type_expression_category_is_record() {
+    expect_type_ref_category("", "{x?: int}", "record");
+}
+
+#[test]
+fn callable_type_expression_category_is_callable() {
+    expect_type_ref_category("", "(int) -> bool", "callable");
+}
+
+#[test]
+fn shared_reference_type_expression_category_is_reference() {
+    expect_type_ref_category("type User { id: int }", "&User", "reference");
+}
+
+#[test]
+fn mutable_reference_type_expression_category_is_reference() {
+    expect_type_ref_category("type User { id: int }", "&mut User", "reference");
+}
+
+#[test]
+fn union_type_expression_category_is_union() {
+    expect_type_ref_category("", "int | string", "union");
+}
+
+#[test]
+fn erased_dyn_trait_type_expression_category_is_erased() {
+    expect_type_ref_category(
+        "trait Speak { fn speak(self) -> string; }",
+        "dyn Speak",
+        "erased",
+    );
+}
+
+#[test]
+fn erased_dyn_trait_bound_set_category_is_erased() {
+    expect_type_ref_category(
+        "trait Walk { fn walk(self) -> string; }\ntrait Swim { fn swim(self) -> string; }",
+        "dyn Walk + Swim",
+        "erased",
+    );
+}
+
+#[test]
+fn applied_builtin_generic_type_expression_category_is_nominal() {
+    expect_type_ref_category("", "Option<int>", "nominal");
+}
+
+#[test]
+fn applied_array_over_user_type_category_is_nominal() {
+    expect_type_ref_category("type User { id: int }", "Array<User>", "nominal");
+}
+
+#[test]
+fn applied_user_generic_type_expression_category_is_nominal() {
+    expect_type_ref_category("type Box<T> { value: T }", "Box<int>", "nominal");
+}
+
+#[test]
+fn nested_applied_generic_type_expression_category_is_nominal() {
+    expect_type_ref_category("", "Option<Array<int>>", "nominal");
+}
+
+// ADR-009 A2 (S4): an applied form over the enclosing generic fn's own type
+// parameter composes the A3 specialization overlay (pre-substitution
+// `parameter:{owner}:{name}` identity embedded in the applied descriptor) —
+// stable across instantiations, mirroring the A3 *_inside_generic_bodies
+// pattern.
+#[test]
+fn applied_generic_over_parameter_is_stable_across_instantiations() {
+    let source = r#"
+fn describe<T>(value: T) -> string {
+  let label = comptime {
+    match type_category(type_ref(Array<T>)) {
+      FrozenTypeCategory::Nominal => "nominal"
+      _ => "wrong"
+    }
+  }
+  label
+}
+
+print(describe(1))
+print(describe("s"))
+"#;
+    expect_vm_and_jit_output(source, "nominal\nnominal");
+}
+
+// ADR-009 A2 (S4, two-path agreement through the S1 alias fixpoint graft):
+// a bare alias NAME whose target is a composite (`type Pair = [int, string]`)
+// resolves through the bare-Identifier arm to the SAME structural category
+// the spelled composite reaches through the type-syntax arm.
+#[test]
+fn composite_alias_bare_name_agrees_with_spelled_composite() {
+    let source = r#"
+type Pair = [int, string]
+
+let alias_label = comptime {
+  match type_category(type_ref(Pair)) {
+    FrozenTypeCategory::Tuple => "tuple"
+    _ => "wrong"
+  }
+}
+let spelled_label = comptime {
+  match type_category(type_ref([int, string])) {
+    FrozenTypeCategory::Tuple => "tuple"
+    _ => "wrong"
+  }
+}
+
+print(alias_label)
+print(spelled_label)
+"#;
+    expect_vm_and_jit_output(source, "tuple\ntuple");
+}
+
+// ADR-009 A2 (S4, Dec 52 rejection placement): an unresolved leaf at depth
+// inside a composite form rejects at COMPILE time with the named
+// unknown-identity diagnostic (the Result-ified rewrite fires before user
+// comptime executes; the leaf is named). Full rejection matrix is slice S5.
+#[test]
+fn unresolved_leaf_inside_composite_cannot_cross_freeze_boundary() {
+    ShapeTest::new("let reflected = comptime { type_ref(Option<Bogus>) }")
+        .expect_run_err_contains("unknown semantic type identity");
+}
+
+// =========================================================================
+// ADR-009 A2 (slice S5): the full rejection matrix re-fired over composite
+// type-expression forms, plus positive normalization proofs. Every rejection
+// asserts its NAMED diagnostic; identity-stability proofs live at the unit
+// level (compiler/comptime.rs + type_reflection/tests.rs) where identity
+// literals are observable.
+// =========================================================================
+
+/// S5 R1: a string spelling a composite type is still a string — the A1
+/// row-1 rejection re-fires through the S3 expression fallback.
+#[test]
+fn composite_spelling_strings_cannot_construct_type_refs() {
+    ShapeTest::new(r#"let reflected = comptime { type_ref("Option<int>") }"#)
+        .expect_run_err_contains("strings cannot construct TypeRef");
+}
+
+/// S5 R2: an unresolved leaf at ANY depth inside a composite form is a
+/// compile-time freeze rejection in the unknown-identity family, naming the
+/// leaf — tuple, callable, and applied positions alike.
+#[test]
+fn unresolved_leaf_at_depth_is_rejected_naming_the_leaf_across_composite_forms() {
+    for spelling in ["Option<Bogus>", "[int, Bogus]", "(Bogus) -> int"] {
+        ShapeTest::new(&format!(
+            "let reflected = comptime {{ type_ref({spelling}) }}"
+        ))
+        .expect_run_err_contains("unknown semantic type identity")
+        .expect_run_err_contains("Bogus");
+    }
+}
+
+/// S5 R2 (dyn case): erased trait objects resolve their bounds against the
+/// frozen trait-name set — an undeclared trait is the same named rejection.
+#[test]
+fn unknown_trait_in_dyn_bound_cannot_cross_freeze_boundary() {
+    ShapeTest::new("let reflected = comptime { type_ref(dyn NoSuchTrait) }")
+        .expect_run_err_contains("unknown semantic type identity")
+        .expect_run_err_contains("NoSuchTrait");
+}
+
+/// S5 R3: `_` is NOT inference-hole syntax in Shape — it parses as an
+/// ordinary (never-frozen) type name, so both the bare and the nested
+/// spelling reject in the unknown-identity family naming `_`. The Dec-52
+/// unresolved-inference-variable family is pinned at the unit level
+/// (type_reflection/tests.rs::inference_holes_reject_with_freeze_boundary_
+/// diagnostic) because no source spelling can smuggle an analyzer tyvar
+/// into type_ref's checked type position.
+#[test]
+fn underscore_is_an_unresolved_type_name_not_an_inference_hole() {
+    ShapeTest::new("let reflected = comptime { type_ref(Option<_>) }")
+        .expect_run_err_contains("unknown semantic type identity")
+        .expect_run_err_contains("_");
+    ShapeTest::new("let reflected = comptime { type_ref(_) }")
+        .expect_run_err_contains("unknown semantic type identity");
+}
+
+/// S5 R5: applied-generic arity mismatches are named compile-time
+/// rejections — builtin heads from the freeze's arity table, user-generic
+/// heads from their declared type parameters.
+#[test]
+fn applied_generic_arity_mismatch_is_a_named_rejection() {
+    ShapeTest::new("let reflected = comptime { type_ref(Option<int, string>) }")
+        .expect_run_err_contains("expects 1 type argument(s), but 2 were provided");
+    ShapeTest::new("let reflected = comptime { type_ref(HashMap<int>) }")
+        .expect_run_err_contains("expects 2 type argument(s), but 1 were provided");
+    ShapeTest::new(
+        "type Box<T> { value: T }\nlet reflected = comptime { type_ref(Box<int, string>) }",
+    )
+    .expect_run_err_contains("expects 1 type argument(s), but 2 were provided");
+    ShapeTest::new("type User { id: int }\nlet reflected = comptime { type_ref(User<int>) }")
+        .expect_run_err_contains("expects 0 type argument(s), but 1 were provided");
+}
+
+/// S5 R6 (per the S3 prove-or-reject decision): const-generic type
+/// applications are a named parse-time rejection — no descriptor bytes are
+/// minted for a carrier the language cannot yet prove.
+#[test]
+fn const_generic_application_is_a_named_rejection() {
+    ShapeTest::new("let reflected = comptime { type_ref(Array<3>) }")
+        .expect_run_err_contains("const-generic type applications are not yet supported in type_ref");
+}
+
+/// S5 R8 (Dec 50/94 rule 3): a trait intersection in type position erases to
+/// a bound set — same closed category as the dyn spelling.
+#[test]
+fn trait_intersection_type_expression_category_is_erased() {
+    expect_type_ref_category(
+        "trait Walk { fn walk(self) -> string; }\ntrait Swim { fn swim(self) -> string; }",
+        "Walk + Swim",
+        "erased",
+    );
+}
+
+/// S5 R8: a structural object intersection normalizes to a Record.
+#[test]
+fn object_intersection_type_expression_category_is_record() {
+    expect_type_ref_category("", "{a: int} + {b: string}", "record");
+}
+
+/// S5 R8: a mixed object/trait intersection is a named rejection.
+#[test]
+fn mixed_intersection_is_a_named_rejection() {
+    ShapeTest::new(
+        "trait Walk { fn walk(self) -> string; }\nlet reflected = comptime { type_ref({a: int} + Walk) }",
+    )
+    .expect_run_err_contains("intersection");
+}
+
+/// S5 R9: non-type expressions re-fire the A1 row-7 rejections through the
+/// S3 expression fallback (arithmetic), and a VALUE binding's name is not a
+/// frozen TYPE name — it rejects at the freeze boundary.
+#[test]
+fn arithmetic_and_value_bindings_cannot_construct_type_refs() {
+    ShapeTest::new("let reflected = comptime { type_ref(1 + 2) }")
+        .expect_run_err_contains("expects compiler-resolved type syntax");
+    ShapeTest::new("let x = 5\nlet reflected = comptime { type_ref(x) }")
+        .expect_run_err_contains("unknown semantic type identity");
+}
+
+/// S5 R12: a TypeRef minted from a composite form is still comptime-only —
+/// the escape guards re-fire for the new forms.
+#[test]
+fn raw_composite_type_refs_cannot_escape_to_runtime_code() {
+    ShapeTest::new("let reflected = comptime { type_ref([int, string]) }\nprint(reflected)")
+        .expect_run_err_contains("TypeRef is a comptime-only compiler capability");
+}
+
+/// S5 R12: same for the category carrier over a composite-formed TypeRef.
+#[test]
+fn raw_composite_frozen_categories_cannot_escape_to_runtime_code() {
+    ShapeTest::new(
+        "let category = comptime { type_category(type_ref({x: int})) }\nprint(category)",
+    )
+    .expect_run_err_contains("FrozenTypeCategory is comptime-only reflection data");
+}
+
+/// S5 R14 (legacy confinement): the E5-confined `type_info` path learned
+/// NOTHING from A2 — the checked type-argument grammar exists ONLY for
+/// `type_ref(`, so a composite spelling under `type_info` parses as a VALUE
+/// array literal whose elements are undefined value names (named rejection,
+/// never a classified legacy descriptor). The unit-level confinement
+/// sentinel (type_reflection/tests.rs) pins the source-level vocabulary.
+#[test]
+fn legacy_type_info_does_not_learn_composite_forms() {
+    ShapeTest::new("let info = comptime { type_info([int, string]) }")
+        .expect_run_err_contains("Undefined variable");
+}
+
 #[test]
 fn strings_cannot_construct_type_refs() {
     ShapeTest::new(

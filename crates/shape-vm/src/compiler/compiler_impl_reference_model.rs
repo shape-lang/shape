@@ -943,6 +943,9 @@ impl BytecodeCompiler {
             | Expr::Duration(..)
             | Expr::Continue(..)
             | Expr::Break(None, _)
+            // ADR-009 A2: type syntax is a leaf — no reference-model
+            // mutations inside.
+            | Expr::TypeSyntax(..)
             | Expr::Return(None, _) => {}
         }
     }

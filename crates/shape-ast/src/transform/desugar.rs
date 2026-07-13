@@ -447,6 +447,10 @@ fn desugar_expr(expr: &mut Expr) {
                 }
             }
         }
+        // ADR-009 A2: type syntax carries a TypeAnnotation, not child
+        // expressions — nothing to desugar. Validity (only as the type_ref
+        // argument) is enforced by the compiler, not the desugarer.
+        Expr::TypeSyntax(_, _) => {}
         Expr::TypeAssertion { expr: inner, .. } => desugar_expr(inner),
         Expr::InstanceOf { expr: inner, .. } => desugar_expr(inner),
         Expr::FunctionExpr { body, .. } => {

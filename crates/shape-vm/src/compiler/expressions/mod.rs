@@ -99,6 +99,7 @@ fn get_expr_span(expr: &Expr) -> Option<Span> {
         | Expr::FuzzyComparison { span, .. }
         | Expr::EnumConstructor { span, .. }
         | Expr::TypeAssertion { span, .. }
+        | Expr::TypeSyntax(_, span)
         | Expr::InstanceOf { span, .. }
         | Expr::Range { span, .. }
         | Expr::DataRelativeAccess { span, .. }
@@ -1654,6 +1655,16 @@ impl BytecodeCompiler {
             Expr::UnaryOp { op, operand, span } => {
                 self.compile_expr_unary_op(op, operand, *span)
             }
+
+            // ADR-009 A2: the type-syntax carrier is consumed by the
+            // comptime type_ref rewrite before codegen. Reaching codegen
+            // means it sits outside the type_ref argument position (or the
+            // rewrite did not run) — a named surface-and-stop error, never
+            // a silently compiled value.
+            Expr::TypeSyntax(_, _) => Err(ShapeError::SemanticError {
+                message: "type syntax is only valid as the type_ref argument".to_string(),
+                location: None,
+            }),
 
             // Type operations
             Expr::TypeAssertion {

@@ -168,6 +168,56 @@ Book status: A1-enabled behaviors are gate-runnable in ShapeTest
 `tests/annotations_comptime/frozen_reflection.rs`, VM+JIT); book-chapter
 examples land in stage F1 per the program spec.
 
+**CURRENT / VM+JIT - checked type-expression syntax for `type_ref` (ticket A2, 2026-07-13)**
+
+```shape
+let label = comptime {
+    match type_category(type_ref([int, string])) {
+        FrozenTypeCategory::Tuple => "tuple"
+        FrozenTypeCategory::Primitive => "primitive"
+        FrozenTypeCategory::Never => "never"
+        FrozenTypeCategory::Parameter => "parameter"
+        FrozenTypeCategory::Nominal => "nominal"
+        FrozenTypeCategory::Record => "record"
+        FrozenTypeCategory::Callable => "callable"
+        FrozenTypeCategory::Reference => "reference"
+        FrozenTypeCategory::Union => "union"
+        FrozenTypeCategory::Erased => "erased"
+    }
+}
+```
+
+`type_ref(...)` now accepts the full checked type grammar, not only bare
+compiler-resolved names. Accepted spellings: tuples `[T, U]`, records
+`{field: T}` / `{field?: T}`, callables `(T) -> R`, references `&T` /
+`&mut T`, unions `T | U`, erased domains `any` / `dyn Trait` /
+`dyn A + B`, and applied generics (`Option<int>`, `Array<User>`, user
+generics, nested applications like `Option<Array<int>>`). One canonicalizer
+(`shape-vm/src/compiler/comptime_builtins/type_reflection.rs`) produces a
+deterministic, declaration-order-independent canonical descriptor per form
+(record fields byte-sorted by name; union members deduped and byte-sorted;
+`&T` vs `&mut T` significant; field optionality significant); its SHA-256
+identity is the VM/JIT-shared ABI substrate for B4/B7. Normalization per
+Decisions 50/94: transparent aliases normalize away through applied forms
+(`type Ids = Array<UserId>` with `UserId = int` yields
+`identity(Array<int>)`), structural object intersections canonicalize to
+`Record`, trait intersections to `Erased` bound sets. Unresolved names at
+any depth and inference holes are named freeze rejections at compile time,
+before user comptime executes (Decision 52); applied arity is enforced from
+freeze facts; const-generic applications are a named parse-time rejection
+until B4/Dec-54 lands the const carrier. LSP completion inside the
+`type_ref(` type position routes to the type-annotation provider
+(primitives, user types, in-scope generic parameters — never value
+bindings); hover/signature stay generated from the shared catalog row. The
+surface spelling remains `type_ref(T)` (not the Dec-48 turbofish
+`type_ref<T>()`) — the constructor-identity reclassification is ticket B4.
+Evidence: `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`
+(A2 addendum); e2e in `tools/shape-test/tests/comptime/frozen_type.rs`
+(per-form VM+JIT matrix + rejection matrix) and
+`tools/shape-test/tests/lsp/typed_comptime.rs`.
+Book status: A2-enabled behaviors are gate-runnable in ShapeTest (VM+JIT);
+book-chapter examples land in stage F1 per the program spec.
+
 **CURRENT / compiler - generated implicit capture rejection**
 
 Annotation-generated functions are marked before body compilation. A closure
@@ -236,7 +286,7 @@ examples, rejection requirements, and implementation implications.
 | Structure | Stage | Purpose | Status |
 |---|---|---|---|
 | `ConstValue<T>` / literal lifting | comptime | Move closed values into generated code | accepted |
-| `TypeRef<T>` | comptime | Canonical type identity | accepted; CURRENT / VM+JIT — A1 canonical semantic freeze: one per-unit freeze barrier, shared query API, annotation-handler handle threading (wave46 A1 addendum) |
+| `TypeRef<T>` | comptime | Canonical type identity | accepted; CURRENT / VM+JIT — A1 canonical semantic freeze: one per-unit freeze barrier, shared query API, annotation-handler handle threading (wave46 A1 addendum); A2 checked type-expression surface CURRENT / VM+JIT — tuples `[T, U]`, records `{field: T}`, callables `(T) -> R`, references `&T`/`&mut T`, unions `T \| U`, erased `any`/`dyn Trait`, applied generics `Option<int>` incl. alias normalization through applied forms (wave46 A2 addendum) |
 | `TraitRef<Trait>` | comptime | Canonical trait identity | accepted |
 | `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |

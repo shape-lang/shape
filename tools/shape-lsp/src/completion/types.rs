@@ -7,7 +7,7 @@ use crate::type_inference::MethodCompletionInfo;
 use crate::type_inference::{parse_object_shape_fields, unified_metadata};
 use shape_runtime::metadata::{LanguageMetadata, PropertyInfo};
 use shape_runtime::type_system::checking::method_table::MethodTable;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tower_lsp_server::ls_types::{
     CompletionItem, CompletionItemKind, Documentation, InsertTextFormat,
@@ -233,6 +233,154 @@ pub fn type_completions() -> Vec<CompletionItem> {
             ..CompletionItem::default()
         })
         .collect()
+}
+
+/// ADR-009 A2 (S6): primitive type-name completions for TYPE positions
+/// (`let x: |`, `type_ref(|`).
+///
+/// The canonical primitive vocabulary lives in the compiler's frozen type
+/// index (`shape-vm/src/compiler/comptime_builtins/type_reflection.rs`);
+/// this list mirrors the primary spellings only (synonyms like `i64`/`f64`
+/// resolve but are not offered) — the same bounded-list precedent as
+/// `definition.rs::is_builtin_primitive`.
+pub fn primitive_type_completions() -> Vec<CompletionItem> {
+    [
+        "int", "number", "bool", "string", "decimal", "bigint", "unit", "never", "any",
+    ]
+    .into_iter()
+    .map(|name| CompletionItem {
+        label: name.to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        detail: Some("primitive type".to_string()),
+        ..CompletionItem::default()
+    })
+    .collect()
+}
+
+/// ADR-009 A2 (S6): in-scope generic type parameters (`T` inside `fn f<T>`)
+/// for TYPE positions.
+///
+/// Textual, same discipline as `context::is_inside_comptime_block`: generic
+/// template bodies never compile at definition, so scope comes from
+/// brace-tracked `fn` headers, never from a compiled body.
+pub fn in_scope_type_param_completions(text: &str, current_line: usize) -> Vec<CompletionItem> {
+    let mut scopes: Vec<(i32, Vec<String>)> = Vec::new();
+    let mut depth: i32 = 0;
+    for (i, line) in text.lines().enumerate() {
+        if i > current_line {
+            break;
+        }
+        if let Some(params) = generic_fn_header_type_params(line) {
+            scopes.push((depth, params));
+        }
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+        if line.contains('}') {
+            while scopes.last().is_some_and(|(entry, _)| depth <= *entry) {
+                scopes.pop();
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    scopes
+        .into_iter()
+        .flat_map(|(_, params)| params)
+        .filter(|name| seen.insert(name.clone()))
+        .map(|name| CompletionItem {
+            label: name,
+            kind: Some(CompletionItemKind::TYPE_PARAMETER),
+            detail: Some("type parameter".to_string()),
+            ..CompletionItem::default()
+        })
+        .collect()
+}
+
+/// Extract declared generic type parameters from a `fn` header line
+/// (`fn name<T, U: Into<T>>(...)` → `["T", "U"]`). `const` parameters are
+/// value-kind, not type names, and are excluded.
+fn generic_fn_header_type_params(line: &str) -> Option<Vec<String>> {
+    // Find a word-boundary `fn` token.
+    let mut search = 0;
+    let fn_idx = loop {
+        let rel = line[search..].find("fn")?;
+        let idx = search + rel;
+        let before_ok = idx == 0
+            || !line[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let after_ok = line[idx + 2..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace);
+        if before_ok && after_ok {
+            break idx;
+        }
+        search = idx + 2;
+    };
+
+    let rest = line[fn_idx + 2..].trim_start();
+    let name_len = rest
+        .char_indices()
+        .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
+        .map_or(rest.len(), |(i, _)| i);
+    if name_len == 0 {
+        return None;
+    }
+    let params_src = rest[name_len..].strip_prefix('<')?;
+
+    // Depth-match the closing `>` (bounds may nest generics: `T: Into<U>`).
+    let mut angle_depth = 1;
+    let mut end = None;
+    for (i, c) in params_src.char_indices() {
+        match c {
+            '<' => angle_depth += 1,
+            '>' => {
+                angle_depth -= 1;
+                if angle_depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inner = &params_src[..end?];
+
+    fn push_segment(segment: &str, names: &mut Vec<String>) {
+        let segment = segment.trim();
+        if segment.is_empty() || segment.starts_with("const ") {
+            return;
+        }
+        let name = segment.split(':').next().unwrap_or("").trim();
+        let valid = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if valid {
+            names.push(name.to_string());
+        }
+    }
+
+    let mut names = Vec::new();
+    let mut nest = 0i32;
+    let mut segment_start = 0;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '<' | '(' | '[' => nest += 1,
+            '>' | ')' | ']' => nest -= 1,
+            ',' if nest == 0 => {
+                push_segment(&inner[segment_start..i], &mut names);
+                segment_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    push_segment(&inner[segment_start..], &mut names);
+
+    if names.is_empty() { None } else { Some(names) }
 }
 
 pub fn resolve_object_type(
@@ -888,6 +1036,56 @@ fn namespace_api_completions(object: &str) -> Option<Vec<CompletionItem>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ADR-009 A2 (S6): in-scope generic type parameters in TYPE positions.
+
+    fn labels(items: &[CompletionItem]) -> Vec<String> {
+        items.iter().map(|i| i.label.clone()).collect()
+    }
+
+    #[test]
+    fn type_params_visible_inside_generic_fn_body() {
+        let text = "fn describe<T>(value: T) -> string {\n  let label = comptime { type_ref( ) }\n  label\n}";
+        let items = in_scope_type_param_completions(text, 1);
+        assert_eq!(labels(&items), vec!["T".to_string()]);
+    }
+
+    #[test]
+    fn type_params_not_visible_after_fn_body_closes() {
+        let text = "fn describe<T>(value: T) -> string {\n  value\n}\nlet x = 1";
+        let items = in_scope_type_param_completions(text, 3);
+        assert!(items.is_empty(), "got {:?}", labels(&items));
+    }
+
+    #[test]
+    fn multiple_and_bounded_type_params_are_extracted() {
+        // Bounds nesting generics (`U: Into<T>`) must not truncate the list.
+        let text = "fn merge<T, U: Into<T>>(a: T, b: U) -> T {\n  \n}";
+        let items = in_scope_type_param_completions(text, 1);
+        assert_eq!(labels(&items), vec!["T".to_string(), "U".to_string()]);
+    }
+
+    #[test]
+    fn const_generic_params_are_not_type_names() {
+        let text = "fn page<T, const N: int>(value: T) -> T {\n  \n}";
+        let items = in_scope_type_param_completions(text, 1);
+        assert_eq!(labels(&items), vec!["T".to_string()]);
+    }
+
+    #[test]
+    fn non_generic_fn_offers_no_type_params() {
+        let text = "fn plain(value: int) -> int {\n  \n}";
+        let items = in_scope_type_param_completions(text, 1);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn primitive_type_completions_cover_the_primary_spellings() {
+        let names = labels(&primitive_type_completions());
+        for expected in ["int", "number", "bool", "string", "decimal", "bigint", "any"] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
 
     #[test]
     fn test_resolve_property_type_struct_fields() {
