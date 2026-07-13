@@ -469,6 +469,54 @@ plus the `expansion_views.rs` in-file view/source-map suite and the
 `expansion_provenance.rs` rejection-matrix + deterministic-identity units;
 book-chapter examples land in stage F1 per the program spec.
 
+**CURRENT / VM+JIT - fully checked callable descriptors (Decisions 52 + 63,
+ticket ADR009-B6, 2026-07-13).** `reflect(TypeRef<callable>)` yields
+`FrozenType::Callable(FrozenCallable)` (catalog ordinal 6, pinned; no ordinal
+renumber) carrying the callable's ordered structural descriptor: one
+`ParamDescriptor` per parameter — value-type frozen identity, `optional` flag,
+and the sealed `PassingMode` axis (`Move` / `SharedBorrow` / `ExclusiveBorrow`,
+derived from the parameter's borrow annotation, since mode is not encoded in the
+one-way SHA-256 identity string) — plus the return-type identity. The descriptor
+is reconstructed from the freeze's WIDENED composite memo
+(`semantic_freeze.rs` `CompositeMemoEntry { category, callable }`) rather than a
+parallel identity-keyed side-table, so category and structure are one write, one
+read, one lock (see `docs/defections.md`). Per Decision 52 (R3), a descriptor is
+issued only AFTER the signature freezes: a signature carrying an unresolved
+inference variable at any depth is the named freeze-boundary rejection — fired by
+the single `annotation_has_unresolved_inference_variable` predicate BEFORE any
+user comptime hook runs, never a partial descriptor. Public surface:
+`callable.param(I)` (signature-indexed positional, computed indices accepted) and
+`callable.parameters` (ordered collection, iterated via the B3 `comptime for some`
+existential machinery — no second protocol), both desugaring at comptime-prep to
+the single S1 descriptor carrier (one producer, no second freeze query). Rejection
+matrix (each a named diagnostic): R1 string-keyed selection
+(`callable.param("name")` → `PARAM_STRING_SELECTOR_DIAGNOSTIC`; names are
+identity-insignificant hygiene facts, never a runtime string key), R2 params typed
+`Array<Any>` / bare capital `Any`
+(`CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC`, reusing the single
+`annotation_erases_witness_to_any` walk; lowercase `any` still reaches the Erased
+leaf), R3 unresolved-signature issuance (above). LSP completion and `reflect(`
+signature help for the new payload types flow through the ONE shared
+`reflection_enum_variant_names` catalog lookup (auto-extended by the enabled-payload
+macro): `PassingMode` completes its sealed axis from `PassingMode::ALL`, while the
+`FrozenCallable` / `ParamDescriptor` payload STRUCTS return `None` and fall through
+cleanly (no fabricated variants); the LSP `ParamReferenceMode { Shared, Exclusive }`
+axis is a machine-checked projection of the shared ADR `PassingMode` axis
+(`from_passing_mode` / `to_passing_mode`, exhaustive over `PassingMode::ALL`,
+`Move -> None`) — no hand-written LSP table, no parallel mode enum. The
+hygienic-token `param(#name)` and turbofish `param<I>()` SPELLINGS depend on
+grammar the parser does not yet carry (`#ident` token / method-call const-arg
+slot); they are TARGET, surfaced-and-stopped, with the same positional selection
+already CURRENT as `param(I)` and the names preserved in the freeze structure ready
+for them. Considered-but-rejected compromises (composite-memo widening vs parallel
+side-table, string `param()` selector, `Array<Any>` param modeling, faked hygienic
+spellings, hand-written LSP variant list) are logged in `docs/defections.md`.
+Book status: B6-enabled behaviors are gate-runnable green on VM and JIT in
+ShapeTest (`tools/shape-test/tests/comptime/{reflect.rs,callable.rs,annotations.rs}`)
+and LSP (`tools/shape-test/tests/lsp/typed_comptime.rs` plus `shape-lsp`
+`completion/mod.rs` + `type_inference.rs` units); book-chapter examples land in
+stage F1 per the program spec.
+
 ### Implemented But Under-Proven
 
 The compiler contains paths for `comptime pre`, `on_define`, `metadata`,
@@ -509,7 +557,7 @@ examples, rejection requirements, and implementation implications.
 | `TraitRef<Trait>` | comptime | Canonical trait identity | accepted; CURRENT / VM+JIT — B2 distinct frozen trait identity (`trait:{name}` SHA-256 descriptors, never interned as type identities; positional `trait_ref(Trait)` surface, turbofish pending A2) (wave46 B2 addendum) |
 | `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted; CURRENT / VM+JIT — B2 `find_impl(type_ref, trait_ref) -> Option<ImplRef<T, Tr>>` over barrier-frozen evidence, Some-arm consumption + None arm proven VM+JIT; branch scoping = stage-boundary lift rejection + Some-arm-only issuance (wave46 B2 addendum) |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted; CURRENT-partial / VM+JIT via B3 — `exists<W...> Descriptor<W...>` package type (positional de-Bruijn `exists:{arity}:{inner}` SHA-256 identity), existential introduction/subsumption in the unifier, and `comptime for some<W...> x in coll {}` iteration sugar over the single reflect()/payload surface (no second protocol): fresh per-iteration hidden witnesses scoped by the freeze overlay, witness-typed loop binding, escape + non-existential + no-freeze + erased-to-Any rejections. Proven over the B1 `Array<exists<T> FrozenType<T>>` reflect-payload substrate (evidence: `tools/shape-test/tests/comptime/existential.rs`, `tests/lsp/typed_comptime.rs`, unit `constraints.rs`/`comptime_builtins/existential.rs` — ADR009-B3 S1). Engine scope: the `comptime for some` iteration runs at compile time on the comptime VM interpreter (comptime never tiers up to the JIT); the VM/JIT dual-run proves the enclosing program lowers and runs identically under both tiers (JIT-tier-clean at the comptime→runtime boundary), NOT that the JIT iterates the collection. LSP hover/inlay over a `some`-bound witness binding renders the opened descriptor (`FrozenType<T>`) + stage + escape rule via the shared `open_comptime_some_descriptor` surface, and hovering a `some`-clause witness name renders the opened hidden witness (evidence: `tests/lsp/typed_comptime.rs::{hover_on_some_bound_loop_var_shows_opened_descriptor_and_stage, hover_on_some_witness_name_shows_opened_hidden_witness, inlay_on_some_bound_iteration_shows_opened_descriptor}` — ADR009-B3 S3). Descriptor families beyond B1 (fields/params/variants) TARGET pending B5-B7 |
-| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, and Erased payloads at catalog-pinned ordinals 0/1/9; the 7 remaining categories reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 addendum); remaining payloads TARGET (B2/B4-B7) |
+| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1+B6 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, Erased, and Callable (B6 `FrozenCallable`) payloads at catalog-pinned ordinals 0/1/9/6; the 6 remaining categories reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 + ADR009-B6 addenda); remaining payloads TARGET (B5/B7) |
 | `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
 | `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted; CURRENT / VM+JIT — B4 `type_constructor(C)` yields a compiler-issued constructor descriptor (`constructor:<head_hex>`, distinct from a bare nominal leaf), minted only for a frozen nominal head; R5 non-nominal / R6 unfrozen-head named rejections; parameter kinds projected from the single `param_kinds_of` freeze source, never a second table (wave46 B4 addendum) |
 | `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted; CURRENT / VM+JIT — B4 `.apply(...)` checks arity + type-vs-const kind then reproduces the A2 `applied:` descriptor byte-for-byte, so `identity(type_constructor(Option).apply(type_ref(int))) == identity(type_ref(Option<int>))` both directions; `const_arg(N)`, `nominal.refine(constructor)` round-trip, `applied.type_argument(I)` (wave46 B4 addendum) |
@@ -520,8 +568,8 @@ examples, rejection requirements, and implementation implications.
 | `NewtypeDescriptor<T, U>` | comptime | Nominal wrapper and underlying type | accepted |
 | `OpaqueTypeDescriptor<T>` | comptime | Explicitly non-decomposable nominal representation | accepted |
 | `RepresentationAccess<T>` | comptime authority | Complete nominal representation reflection | accepted |
-| `FrozenCallable<Sig>` | comptime | Fully checked callable descriptor | accepted |
-| `ParamDescriptor<Sig, I, T, Mode>` | comptime | Signature-indexed positional parameter identity | accepted |
+| `FrozenCallable<Sig>` | comptime | Fully checked callable descriptor | accepted; CURRENT / VM+JIT via B6 (S1–S3) — `reflect(TypeRef<callable>) -> FrozenType::Callable(FrozenCallable)` (catalog ordinal 6) carrying the ordered `params` array + return type identity, reconstructed from the freeze's WIDENED composite memo (the one-way SHA-256 identity drops names/modes by design; memo widened rather than a parallel side-table — see `docs/defections.md`). Issued only after the signature freezes: an unresolved-signature signature is the Dec-52 freeze-boundary rejection BEFORE any hook (R3). Evidence: `tools/shape-test/tests/comptime/reflect.rs::{callable_reflects_to_a_frozen_callable_with_param_count, callable_param_passing_modes_reflect_on_vm_and_jit}` VM+JIT, unit `type_reflection/tests.rs::payload_query` + `builtin_schemas.rs` — ADR009-B6 S1. Param accessor surface CURRENT / VM+JIT via B6 S2 — signature-indexed positional `callable.param(I)` (computed index accepted) + `callable.parameters` (ordered collection, comptime-iterable) desugar to the S1 descriptor carrier; R1 string-keyed selection (`param("name")`) + R2 `Array<Any>` params are named rejections; VM+JIT annotation entry proof reads param modes/arity at compile time (`tools/shape-test/tests/comptime/callable.rs`, `tests/comptime/annotations.rs::b6_*`); LSP `FrozenType::Callable`/`PassingMode` completion + `reflect(` signature help auto-derived from the shared catalog (`tests/lsp/typed_comptime.rs`). LSP surface CURRENT / via B6 S3 — enum-variant completion for the new payload types flows through the ONE shared `reflection_enum_variant_names` lookup (`PassingMode` completes its sealed axis; `FrozenCallable`/`ParamDescriptor` are structs → fall through, no fabricated variants), and the LSP `ParamReferenceMode { Shared, Exclusive }` axis is reconciled as a machine-checked projection of the shared ADR `PassingMode { Move, SharedBorrow, ExclusiveBorrow }` axis (`Move -> None`; `from_passing_mode`/`to_passing_mode`, exhaustive over `PassingMode::ALL`) — no hand-written LSP variant table, no parallel mode enum (`tools/shape-lsp/src/{completion/mod.rs,type_inference.rs}` unit tests). The hygienic-token `param(#name)` spelling depends on a `#ident` token the grammar does not yet carry (TARGET B6 S2+; names are preserved in the freeze structure ready for it) |
+| `ParamDescriptor<Sig, I, T, Mode>` | comptime | Signature-indexed positional parameter identity | accepted; CURRENT / VM+JIT via B6 (S1–S3) — one positional descriptor per param: value-type frozen identity, `optional` flag, and the sealed `PassingMode` axis (`Move`/`SharedBorrow`/`ExclusiveBorrow`, derived from the parameter's borrow annotation — mode is NOT in the identity string). Names identity-insignificant, preserved in the freeze structure for hygienic `param(#name)` (grammar-pending; positional `param(I)` CURRENT via B6 S2). Evidence as `FrozenCallable` above + `tools/shape-test/tests/comptime/callable.rs` — ADR009-B6 S1–S3 |
 | `FieldDescriptor<Owner, F, T>` | comptime | Owner-bound hygienic named-field identity | accepted |
 | `AssociatedConstDescriptor<Owner, C, T>` | comptime declaration | Typed associated constant, separate from fields | accepted |
 | `FieldInitialization<Owner, F, T>` | comptime | Required or typed-default construction policy | accepted algebra |

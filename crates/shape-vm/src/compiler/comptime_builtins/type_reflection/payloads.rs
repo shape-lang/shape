@@ -19,11 +19,13 @@ use crate::compiler::comptime_builtins::semantic_freeze::FreezeOverlay;
 
 use super::{FrozenTypeCategory, FrozenTypeIdentity};
 use shape_runtime::comptime_reflection::{
-    FLOAT_WIDTH_SCHEMA_NAME, FrozenPrimitive, INTEGER_WIDTH_SCHEMA_NAME,
+    FLOAT_WIDTH_SCHEMA_NAME, FrozenPrimitive, INTEGER_WIDTH_SCHEMA_NAME, PASSING_MODE_SCHEMA_NAME,
+    PassingMode,
 };
 use shape_runtime::type_schema::builtin_schemas::{
-    COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
-    COMPTIME_FROZEN_TYPE_SCHEMA,
+    COMPTIME_FROZEN_CALLABLE_SCHEMA, COMPTIME_FROZEN_ERASED_SCHEMA,
+    COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
+    COMPTIME_FROZEN_PRIMITIVE_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA,
 };
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
@@ -44,6 +46,37 @@ use shape_value::{KindedSlot, NativeKind, ValueSlot};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrozenErasedBound {}
 
+/// ADR-009 B6 (Stage 2, Dec 63) — one signature-indexed positional parameter of
+/// a [`FrozenPayloadDescriptor::Callable`] signature descriptor
+/// (`ParamDescriptor<Sig, I, T, Mode>`).
+///
+/// The full structural detail the one-way SHA-256 canonical identity CANNOT
+/// recover: the parameter NAME (identity-insignificant, kept for hygienic
+/// `param(#name)` resolution) and the [`PassingMode`] (not part of the identity
+/// string — reconstructed from the freeze's preserved structural descriptor).
+/// `type_identity` is the parameter's VALUE type (the referent when the
+/// parameter is borrowed; the mode carries the borrow), and `optional` marks a
+/// trailing-optional parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParamDescriptor {
+    pub(crate) name: Option<String>,
+    pub(crate) type_identity: FrozenTypeIdentity,
+    pub(crate) optional: bool,
+    pub(crate) mode: PassingMode,
+}
+
+/// ADR-009 B6 — the ordered structural descriptor of a callable signature: the
+/// positional parameters (in signature order) and the return type's frozen
+/// identity. Threaded from the canonicalizer's `Function` arm through the
+/// freeze's widened composite memo so [`FrozenPayloadDescriptor::Callable`] can
+/// be reconstructed WITHOUT inverting the identity hash (which drops names and
+/// modes by design).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallableDescriptor {
+    pub(crate) params: Vec<ParamDescriptor>,
+    pub(crate) returns: FrozenTypeIdentity,
+}
+
 /// Compiler-internal payload descriptor — the typed result of the semantic
 /// freeze's payload query (the ONE query API, beside `identity_of` /
 /// `category_of`). Covers exactly the enabled payload categories
@@ -62,6 +95,12 @@ pub(crate) enum FrozenPayloadDescriptor {
     /// Erased type with its bound set — reachable today solely as `any`
     /// (the empty set; see [`FrozenErasedBound`]).
     Erased { bounds: Vec<FrozenErasedBound> },
+    /// ADR-009 B6 (Dec 63): a fully-inferred callable signature descriptor —
+    /// ordered positional parameters (stable identity, type, optionality,
+    /// passing mode) and the return type identity. Issued only AFTER the
+    /// signature freezes (Dec 52: the freeze-boundary predicate rejects
+    /// issuance for an unresolved signature before any hook runs).
+    Callable(CallableDescriptor),
 }
 
 impl FrozenPayloadDescriptor {
@@ -72,6 +111,7 @@ impl FrozenPayloadDescriptor {
             Self::Primitive(_) => FrozenTypeCategory::Primitive,
             Self::Never => FrozenTypeCategory::Never,
             Self::Erased { .. } => FrozenTypeCategory::Erased,
+            Self::Callable(_) => FrozenTypeCategory::Callable,
         }
     }
 }
@@ -122,6 +162,9 @@ pub(crate) fn build_frozen_type_heap_value(
             typed_object_for_named_schema(COMPTIME_FROZEN_NEVER_SCHEMA, &[])
         }
         FrozenPayloadDescriptor::Erased { bounds } => frozen_erased_descriptor_slot(&bounds),
+        FrozenPayloadDescriptor::Callable(descriptor) => {
+            frozen_callable_descriptor_slot(&descriptor)?
+        }
     };
     let variant = enum_variant_id(COMPTIME_FROZEN_TYPE_SCHEMA, category.variant_name())?;
     super::typed_slot_into_heap_value(typed_object_for_named_schema(
@@ -186,6 +229,92 @@ fn frozen_erased_descriptor_slot(bounds: &[FrozenErasedBound]) -> KindedSlot {
             ),
         )],
     )
+}
+
+/// ADR-009 B6: build the `FrozenCallable` descriptor object — the ordered
+/// `params` array (each a `ParamDescriptor` object) plus the return type's
+/// frozen identity halves. Typed descriptor data all the way down: identities
+/// and nested typed objects, never rendered type-name strings.
+fn frozen_callable_descriptor_slot(
+    descriptor: &CallableDescriptor,
+) -> Result<KindedSlot, String> {
+    let mut param_objs: Vec<KindedSlot> = Vec::with_capacity(descriptor.params.len());
+    for param in &descriptor.params {
+        param_objs.push(param_descriptor_slot(param)?);
+    }
+    let params_array = object_array_slot(param_objs)?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_FROZEN_CALLABLE_SCHEMA,
+        &[
+            ("params", params_array),
+            (
+                "returns_identity_high",
+                KindedSlot::from_int(descriptor.returns.high),
+            ),
+            (
+                "returns_identity_low",
+                KindedSlot::from_int(descriptor.returns.low),
+            ),
+        ],
+    ))
+}
+
+/// ADR-009 B6: build one `ParamDescriptor` object — the parameter's value-type
+/// frozen identity halves, its `optional` flag, and its `PassingMode` enum
+/// carrier (`Move` / `SharedBorrow` / `ExclusiveBorrow`). Parameter names are
+/// identity-insignificant and stay a freeze fact — never a runtime string.
+fn param_descriptor_slot(param: &ParamDescriptor) -> Result<KindedSlot, String> {
+    let mode_slot = unit_enum_variant_slot(PASSING_MODE_SCHEMA_NAME, param.mode.variant_name())?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
+        &[
+            (
+                "type_identity_high",
+                KindedSlot::from_int(param.type_identity.high),
+            ),
+            (
+                "type_identity_low",
+                KindedSlot::from_int(param.type_identity.low),
+            ),
+            ("optional", KindedSlot::from_bool(param.optional)),
+            ("mode", mode_slot),
+        ],
+    ))
+}
+
+/// Build an `Array<TypedObject>` slot carried by a stamped v2-raw
+/// `TypedArray<*const TypedObjectStorage>`. Each element's refcount share is
+/// transferred into the array (mirrors `comptime_target::nb_object_array`,
+/// the sanctioned object-array construction pattern).
+fn object_array_slot(objs: Vec<KindedSlot>) -> Result<KindedSlot, String> {
+    let arr = TypedArray::<*const TypedObjectStorage>::with_capacity(objs.len() as u32);
+    // SAFETY: freshly allocated array pointer; stamping the element type +
+    // pushing owned `*const TypedObjectStorage` shares mirrors the sanctioned
+    // `nb_object_array` construction pattern.
+    unsafe {
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+    }
+    for obj in objs {
+        if obj.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
+            unsafe {
+                TypedArray::<*const TypedObjectStorage>::drop_array_heap(arr);
+            }
+            return Err(format!(
+                "FrozenCallable param descriptor array expected a TypedObject element, got {:?}",
+                obj.kind()
+            ));
+        }
+        let ptr = obj.raw() as *const TypedObjectStorage;
+        unsafe {
+            TypedArray::<*const TypedObjectStorage>::push(arr, ptr);
+        }
+        // Transfer the element's refcount share into the array.
+        std::mem::forget(obj);
+    }
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(arr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 /// A unit-variant value of a catalog-generated enum schema

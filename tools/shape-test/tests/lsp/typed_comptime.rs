@@ -67,6 +67,16 @@ fn typed_reflection_offers_signature_help() {
         .expect_signature_help();
 }
 
+/// ADR-009 B6: `reflect(` — the builtin whose return sum includes
+/// `FrozenType::Callable(FrozenCallable)` — offers signature help, driven from
+/// the shared catalog-owned reflection builtin row (not a hand-written table).
+#[test]
+fn reflect_builtin_offers_signature_help() {
+    ShapeTest::new("let payload = comptime { reflect( ) }\n")
+        .at(pos(0, 34))
+        .expect_signature_help();
+}
+
 // =====================================================================
 // ADR-009 A2 (S6): completion inside the `type_ref(` TYPE position.
 // The argument of type_ref is checked type syntax, so completion routes
@@ -225,13 +235,30 @@ fn reflect_hover_notes_the_enabled_payload_stage() {
 
 #[test]
 fn frozen_type_completion_is_closed_to_enabled_payload_variants() {
+    // ADR-009 B6: `Callable` joined the enabled payload catalog, so
+    // `FrozenType::` completion now offers it — auto-derived from the shared
+    // reflection catalog (no hand-written variant list in the LSP).
     ShapeTest::new("let payload = comptime { FrozenType:: }\n")
         .at(pos(0, 37))
         .expect_completion("Primitive")
         .expect_completion("Never")
         .expect_completion("Erased")
+        .expect_completion("Callable")
         .expect_no_completion("Unknown")
         .expect_no_completion("Nominal");
+}
+
+#[test]
+fn passing_mode_completion_is_closed_to_the_adr_mode_axis() {
+    // ADR-009 B6: the `PassingMode` sealed sub-algebra (the ADR mode axis)
+    // completes through the same catalog-keyed lookup — the exhaustive
+    // Move / SharedBorrow / ExclusiveBorrow set, no Unknown arm.
+    ShapeTest::new("let m = comptime { PassingMode:: }\n")
+        .at(pos(0, 32))
+        .expect_completion("Move")
+        .expect_completion("SharedBorrow")
+        .expect_completion("ExclusiveBorrow")
+        .expect_no_completion("Unknown");
 }
 
 #[test]

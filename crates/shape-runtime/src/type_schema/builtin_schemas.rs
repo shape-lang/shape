@@ -71,6 +71,27 @@ pub const COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA: &str = "\u{1}comptime:Typ
 /// descriptors (spec §3.1).
 pub const COMPTIME_APPLIED_TYPE_SCHEMA: &str = "\u{1}comptime:AppliedType";
 
+/// ADR-009 B6 (Stage 2, Dec 63) — unspellable schema identity for the
+/// `FrozenCallable` payload of `FrozenType::Callable` (the fully-inferred
+/// callable signature descriptor). Carries the ordered `params` array (each a
+/// [`COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA`] object) plus the return type's
+/// frozen identity halves. Identities + typed descriptor data only — no
+/// descriptor strings, no rendered type names (spec §3.1). The SOH prefix keeps
+/// it unspellable so source can never forge a signature. NOT the legacy E5
+/// `__ComptimeParamDescriptor` path.
+pub const COMPTIME_FROZEN_CALLABLE_SCHEMA: &str = "\u{1}comptime:FrozenCallable";
+
+/// ADR-009 B6 (Stage 2, Dec 63) — unspellable schema identity for one
+/// signature-indexed positional `ParamDescriptor` in a [`FrozenCallable`].
+/// Carries the parameter type's frozen identity halves, the `optional` flag,
+/// and the `PassingMode` enum carrier (`Move` / `SharedBorrow` /
+/// `ExclusiveBorrow`, derived from the parameter's borrow annotation). Parameter
+/// NAMES are identity-insignificant and stay a freeze fact (hygienic
+/// `param(#name)` resolution re-reads them from the freeze), never a runtime
+/// string field. DISTINCT from the legacy `__ComptimeParamDescriptor` (a
+/// string-typed E5 path — do NOT reuse).
+pub const COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:ParamDescriptor";
+
 // =========================================================================
 // Field index constants
 // =========================================================================
@@ -467,6 +488,52 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .array_field("arg_identities", FieldType::I64)
         .register(registry);
 
+    // -- ADR-009 B6 (Stage 2, Dec 63): callable signature descriptors ---------
+    //
+    // `PassingMode` is the sealed shared-catalog mode axis (`Move` |
+    // `SharedBorrow` | `ExclusiveBorrow`) derived at freeze time from a
+    // parameter's borrow annotation. Registered as a spellable enum (the
+    // `FrozenTypeCategory` / `ParamKind` precedent) so LSP completes its
+    // variants; walled by its own `runtime_lift_rejection` arm registered in
+    // the SAME commit. Generated from the shared runtime catalog
+    // (`PassingMode::ALL`); no second hand-written mode list.
+    let _passing_mode = registry.register_enum_scoped(
+        crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME,
+        crate::comptime_reflection::PassingMode::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, mode)| EnumVariantInfo::new(mode.variant_name(), id as u16, 0))
+            .collect(),
+    );
+
+    // `ParamDescriptor`: one signature-indexed positional parameter. Type
+    // identity halves + the optional flag + the `PassingMode` enum carrier.
+    // Registered before `FrozenCallable`, which references it as its array
+    // element. No string type-name / kind field (Dec 50/94 required rejection);
+    // parameter names stay a freeze fact, never a runtime string.
+    let _comptime_frozen_param_descriptor =
+        TypeSchemaBuilder::new(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA)
+            .int_field("type_identity_high")
+            .int_field("type_identity_low")
+            .bool_field("optional")
+            .object_field("mode", crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME)
+            .register(registry);
+
+    // `FrozenCallable`: the fully-inferred callable signature. Ordered `params`
+    // array (each a `ParamDescriptor` object) + the return type's frozen
+    // identity halves. Unlike `FrozenErased.bounds` (an uninhabited/empty set,
+    // whitelisted `FieldType::Any`), the params element is inhabited, so it is
+    // the TYPED `ParamDescriptor` object element — no `FieldType::Any`, no
+    // post-inference whitelist entry needed.
+    let _comptime_frozen_callable = TypeSchemaBuilder::new(COMPTIME_FROZEN_CALLABLE_SCHEMA)
+        .array_field(
+            "params",
+            FieldType::Object(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA.to_string()),
+        )
+        .int_field("returns_identity_high")
+        .int_field("returns_identity_low")
+        .register(registry);
+
     let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")
         .string_field("kind")
         .string_field("name")
@@ -636,6 +703,33 @@ mod tests {
             .unwrap();
         assert!(param_kind.variant_id("Type").is_some());
         assert!(param_kind.variant_id("Const").is_some());
+
+        // ADR-009 B6 (Stage 2, Dec 63): the callable signature descriptor
+        // carriers + the PassingMode mode axis.
+        assert!(registry.has_type(COMPTIME_FROZEN_CALLABLE_SCHEMA));
+        assert!(registry.has_type(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME));
+
+        let callable = registry.get(COMPTIME_FROZEN_CALLABLE_SCHEMA).unwrap();
+        assert_eq!(callable.field_count(), 3);
+        assert!(callable.get_field("params").is_some());
+        assert!(callable.get_field("returns_identity_high").is_some());
+        assert!(callable.get_field("returns_identity_low").is_some());
+
+        let param_descriptor = registry.get(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA).unwrap();
+        assert_eq!(param_descriptor.field_count(), 4);
+        assert!(param_descriptor.get_field("type_identity_high").is_some());
+        assert!(param_descriptor.get_field("type_identity_low").is_some());
+        assert!(param_descriptor.get_field("optional").is_some());
+        assert!(param_descriptor.get_field("mode").is_some());
+
+        // PassingMode is a three-variant enum (the ADR mode axis).
+        let passing_mode = registry
+            .get(crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME)
+            .unwrap();
+        assert!(passing_mode.variant_id("Move").is_some());
+        assert!(passing_mode.variant_id("SharedBorrow").is_some());
+        assert!(passing_mode.variant_id("ExclusiveBorrow").is_some());
 
         // Check field counts
         let any_error = registry.get_by_id(ids.any_error).unwrap();

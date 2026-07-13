@@ -110,7 +110,7 @@
 //! identity matrix in `type_reflection/tests.rs` are the ongoing tripwires.
 
 use super::type_reflection::{
-    FrozenTypeCategory, FrozenTypeIdentity, FrozenTypeIndex, canonicalize_type_annotation,
+    FrozenTypeCategory, FrozenTypeIdentity, FrozenTypeIndex, canonicalize_type_annotation, payloads,
 };
 use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::{TypeAnnotation, TypeParam};
@@ -422,6 +422,7 @@ impl SemanticFreeze {
             frozen_type_ids: HashMap::new(),
             frozen_type_categories: HashMap::new(),
             frozen_primitive_payloads: HashMap::new(),
+            frozen_callable_descriptors: HashMap::new(),
             generic_param_kinds: HashMap::new(),
         };
 
@@ -833,7 +834,28 @@ pub(crate) struct FreezeOverlay {
     /// Site-interned composite identities (S2). Interior-mutable because the
     /// overlay is shared as `Arc<FreezeOverlay>` between the rewrite and the
     /// intrinsics; populated ONLY by [`FreezeOverlay::canonicalize_type`].
-    composites: Mutex<HashMap<FrozenTypeIdentity, FrozenTypeCategory>>,
+    ///
+    /// ADR-009 B6 (Dec 63): the value is WIDENED from a bare category to
+    /// [`CompositeMemoEntry`] so a `Callable` composite carries its ordered
+    /// structural descriptor (param name/type-identity/optionality/passing-mode
+    /// + return). The one-way SHA-256 identity drops names and modes by design;
+    /// widening the memo value (rather than a parallel identity-keyed
+    /// side-table) is the load-bearing B6 change — a second table would drift
+    /// from this one. See `docs/defections.md` for the rejected side-table
+    /// alternative.
+    composites: Mutex<HashMap<FrozenTypeIdentity, CompositeMemoEntry>>,
+}
+
+/// ADR-009 B6 (Dec 63): the widened value of the site-interned composite memo.
+/// Every composite carries its exhaustive semantic [`FrozenTypeCategory`]; a
+/// `Callable` composite ALSO carries its ordered structural descriptor
+/// (`callable`) so [`FreezeOverlay::payload_of`] can reconstruct a
+/// `FrozenCallable` without inverting the identity hash. `callable` is `Some`
+/// iff `category == Callable`.
+#[derive(Debug, Clone)]
+struct CompositeMemoEntry {
+    category: FrozenTypeCategory,
+    callable: Option<payloads::CallableDescriptor>,
 }
 
 impl FreezeOverlay {
@@ -879,16 +901,24 @@ impl FreezeOverlay {
         annotation: &TypeAnnotation,
     ) -> std::result::Result<FrozenTypeIdentity, String> {
         let canonical = canonicalize_type_annotation(annotation, self)?;
+        let entry = CompositeMemoEntry {
+            category: canonical.category,
+            // ADR-009 B6: preserve the callable's ordered structural descriptor
+            // (name/type-identity/optionality/passing-mode + return) so
+            // `payload_of` reconstructs the `FrozenCallable` without inverting
+            // the identity hash.
+            callable: canonical.callable.clone(),
+        };
         let mut composites = self
             .composites
             .lock()
             .expect("freeze-overlay composite memo lock poisoned");
-        if let Some(previous) = composites.insert(canonical.identity, canonical.category) {
+        if let Some(previous) = composites.insert(canonical.identity, entry) {
             // Same collision discipline as `intern_identity`: one identity,
             // one category — a cross-category descriptor collision is an
             // internal-invariant violation, never silent.
             assert_eq!(
-                previous, canonical.category,
+                previous.category, canonical.category,
                 "canonical type identity collision across semantic categories"
             );
         }
@@ -928,7 +958,7 @@ impl FreezeOverlay {
             .lock()
             .expect("freeze-overlay composite memo lock poisoned")
             .get(&identity)
-            .copied()
+            .map(|entry| entry.category)
         {
             return Ok(category);
         }
@@ -953,7 +983,6 @@ impl FreezeOverlay {
         identity: FrozenTypeIdentity,
     ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
     {
-        use super::type_reflection::payloads;
         if self.witnesses.values().any(|&witness| witness == identity)
             || self
                 .parameters
@@ -964,13 +993,14 @@ impl FreezeOverlay {
                 FrozenTypeCategory::Parameter,
             ));
         }
-        let composite_category = self
+        let composite_entry = self
             .composites
             .lock()
             .expect("freeze-overlay composite memo lock poisoned")
             .get(&identity)
-            .copied();
-        if let Some(category) = composite_category {
+            .cloned();
+        if let Some(entry) = composite_entry {
+            let category = entry.category;
             // A memoized identity the base ALSO froze (union coalescing onto
             // a base leaf, or a spelled composite that an alias fixpoint
             // interned into the base) answers from the base index — same
@@ -990,11 +1020,22 @@ impl FreezeOverlay {
                 // bound sets — non-empty by construction (`canonical_erased_bounds`
                 // rejects the empty set); unrepresentable until B2.
                 FrozenTypeCategory::Erased => Err(payloads::bounded_erased_payload_rejection()),
+                // ADR-009 B6 (Dec 63): a site-interned callable answers its
+                // complete signature descriptor from the widened memo — never a
+                // partial descriptor. The entry carries the structure iff the
+                // category is Callable (canonicalizer invariant).
+                FrozenTypeCategory::Callable => entry
+                    .callable
+                    .map(payloads::FrozenPayloadDescriptor::Callable)
+                    .ok_or_else(|| {
+                        "internal invariant: a Callable composite was memoized without its \
+                         FrozenCallable structural descriptor"
+                            .to_string()
+                    }),
                 pending @ (FrozenTypeCategory::Parameter
                 | FrozenTypeCategory::Nominal
                 | FrozenTypeCategory::Tuple
                 | FrozenTypeCategory::Record
-                | FrozenTypeCategory::Callable
                 | FrozenTypeCategory::Reference
                 | FrozenTypeCategory::Union
                 // ADR-009 B3 (S2): a site-interned existential descriptor

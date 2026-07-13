@@ -55,6 +55,7 @@ let out = comptime {
       FrozenType::Primitive(p) => "P"
       FrozenType::Never(n) => "N"
       FrozenType::Erased(e) => "E"
+      FrozenType::Callable(c) => "C"
     }
   }
   acc

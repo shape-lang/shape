@@ -1,9 +1,10 @@
 use crate::builtin_metadata::{BuiltinMetadata, BuiltinParam};
 use crate::type_schema::builtin_schemas::{
-    COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_IMPL_REF_SCHEMA,
-    COMPTIME_FROZEN_NEVER_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
-    COMPTIME_FROZEN_TRAIT_REF_SCHEMA, COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
-    COMPTIME_FROZEN_TYPE_REF_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA,
+    COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_FROZEN_CALLABLE_SCHEMA, COMPTIME_FROZEN_ERASED_SCHEMA,
+    COMPTIME_FROZEN_IMPL_REF_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA, COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
+    COMPTIME_FROZEN_PRIMITIVE_SCHEMA, COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA, COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_SCHEMA,
 };
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind};
@@ -235,6 +236,48 @@ impl ParamKind {
 /// (ADR-009 B4). Same discipline as [`INTEGER_WIDTH_SCHEMA_NAME`].
 pub const PARAM_KIND_SCHEMA_NAME: &str = "ParamKind";
 
+/// ADR-009 B6 (Stage 2, Dec 63) — the ADR ownership/passing mode axis of one
+/// positional parameter in a [`FrozenCallable`] signature descriptor
+/// (`ParamDescriptor<Sig, I, T, Mode>`). Derived at freeze time from the
+/// parameter's type annotation: a `&T` borrow is [`PassingMode::SharedBorrow`],
+/// a `&mut T` borrow is [`PassingMode::ExclusiveBorrow`], everything else is
+/// by-value [`PassingMode::Move`]. This is the single mode vocabulary — the ADR
+/// mode axis (§4.2, `Move | SharedBorrow | ExclusiveBorrow`) reconciled with
+/// the LSP `ParamReferenceMode { Shared, Exclusive }` axis — a shared runtime
+/// catalog sibling of [`FrozenTypeCategory`] / [`ParamKind`]; no second
+/// hand-written mode enum anywhere. Passing mode is NOT part of the one-way
+/// canonical type identity — it is reconstructed from the freeze's preserved
+/// structural descriptor, never from inverting the SHA-256 hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PassingMode {
+    /// The parameter is passed by value (no borrow in the annotation).
+    Move,
+    /// The parameter is passed as a shared borrow (`&T`).
+    SharedBorrow,
+    /// The parameter is passed as an exclusive borrow (`&mut T`).
+    ExclusiveBorrow,
+}
+
+impl PassingMode {
+    /// Exhaustive catalog (exactly three members — the whole ADR mode axis).
+    /// Exhaustive so a new mode forces every consumer to update.
+    pub const ALL: [Self; 3] = [Self::Move, Self::SharedBorrow, Self::ExclusiveBorrow];
+
+    /// Catalog variant name (drives the `PassingMode` descriptor-schema
+    /// registration and LSP completion, following the [`ParamKind`] precedent).
+    pub const fn variant_name(self) -> &'static str {
+        match self {
+            Self::Move => "Move",
+            Self::SharedBorrow => "SharedBorrow",
+            Self::ExclusiveBorrow => "ExclusiveBorrow",
+        }
+    }
+}
+
+/// Schema/type name for the [`PassingMode`] parameter-mode enum carrier
+/// (ADR-009 B6). Same discipline as [`PARAM_KIND_SCHEMA_NAME`].
+pub const PASSING_MODE_SCHEMA_NAME: &str = "PassingMode";
+
 /// ADR-009 B1 S1 — single-source catalog macro for the sealed
 /// `FrozenPrimitive` sub-algebra (Dec 50/94), sibling of
 /// [`frozen_type_category_catalog!`].
@@ -379,7 +422,12 @@ macro_rules! frozen_type_enabled_payload_catalog {
     };
 }
 
-frozen_type_enabled_payload_catalog!(Primitive, Never, Erased);
+// ADR-009 B6 appends `Callable` to the enabled-payload set. `Callable` is
+// already catalog ordinal 6 (see `frozen_type_category_catalog!` above), so no
+// ordinal renumber (ABI stability §3.3) — appending here auto-derives the
+// `FrozenCallable` payload type name, the `FrozenType` enum variant, the schema
+// registration ordinal pin, and the LSP variant list.
+frozen_type_enabled_payload_catalog!(Primitive, Never, Erased, Callable);
 
 /// ADR-009 B1 S3: the SPELLABLE name of the payload-model enum the comptime
 /// mini-VM injects for `reflect()` results (`match FrozenType::Primitive(p)
@@ -462,6 +510,20 @@ pub fn reflection_enum_variant_names(enum_name: &str) -> Option<Vec<&'static str
     // `.apply(...)` consume (`ParamKind::ALL`) — no second variant list.
     if enum_name == PARAM_KIND_SCHEMA_NAME {
         return Some(ParamKind::ALL.into_iter().map(ParamKind::variant_name).collect());
+    }
+    // ADR-009 B6 (Stage 2, Dec 63): the `PassingMode` parameter-mode
+    // vocabulary, generated from the same shared catalog the freeze's
+    // structural descriptor and the LSP signature help consume
+    // (`PassingMode::ALL`) — no second variant list. `FrozenCallable` and
+    // `ParamDescriptor` are STRUCTS (not enums), so they have no arm here and
+    // fall through to `None` (matching `FrozenNever` / `FrozenErased`).
+    if enum_name == PASSING_MODE_SCHEMA_NAME {
+        return Some(
+            PassingMode::ALL
+                .into_iter()
+                .map(PassingMode::variant_name)
+                .collect(),
+        );
     }
     None
 }
@@ -681,6 +743,20 @@ pub fn runtime_lift_rejection(value: &KindedSlot) -> Option<&'static str> {
         }
         PARAM_KIND_SCHEMA_NAME => {
             Some("ParamKind is comptime-only reflection data and cannot enter runtime code")
+        }
+        // ADR-009 B6 (Stage 2, Dec 63): the callable signature descriptor
+        // carriers and the `PassingMode` vocabulary are comptime-only
+        // reflection data; arms registered in the SAME commit as their schemas
+        // (B1 discipline). The spellable payload-model names the mini-VM injects
+        // (`FrozenCallable` / `ParamDescriptor` / `PassingMode`) share each arm.
+        COMPTIME_FROZEN_CALLABLE_SCHEMA | "FrozenCallable" => {
+            Some("FrozenCallable is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA | "ParamDescriptor" => {
+            Some("ParamDescriptor is comptime-only reflection data and cannot enter runtime code")
+        }
+        PASSING_MODE_SCHEMA_NAME => {
+            Some("PassingMode is comptime-only reflection data and cannot enter runtime code")
         }
         _ => None,
     }
@@ -1166,7 +1242,15 @@ mod tests {
             .into_iter()
             .map(|category| (category.variant_name(), category.catalog_ordinal()))
             .collect();
-        assert_eq!(enabled, [("Primitive", 0), ("Never", 1), ("Erased", 9)]);
+        assert_eq!(
+            enabled,
+            [
+                ("Primitive", 0),
+                ("Never", 1),
+                ("Erased", 9),
+                ("Callable", 6),
+            ]
+        );
 
         // Ordinals ARE the catalog declaration positions.
         for category in FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES {
@@ -1189,6 +1273,27 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" | ");
         assert_eq!(FROZEN_TYPE_ENABLED_PAYLOADS_DOC, derived);
+    }
+
+    /// ADR-009 B6: the `PassingMode` sealed sub-algebra is the whole ADR mode
+    /// axis (`Move | SharedBorrow | ExclusiveBorrow`) — exhaustive, ordered,
+    /// unique, no Unknown arm — and `Callable` is now an enabled reflect()
+    /// payload category (ordinal 6, no renumber).
+    #[test]
+    fn passing_mode_catalog_is_the_adr_mode_axis_and_callable_is_enabled() {
+        let names: Vec<_> = PassingMode::ALL
+            .into_iter()
+            .map(PassingMode::variant_name)
+            .collect();
+        assert_eq!(names, ["Move", "SharedBorrow", "ExclusiveBorrow"]);
+        assert_eq!(names.iter().copied().collect::<HashSet<_>>().len(), 3);
+        assert!(!names.contains(&"Unknown"));
+
+        assert!(FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&FrozenTypeCategory::Callable));
+        assert_eq!(
+            frozen_type_enabled_payload_type_name(FrozenTypeCategory::Callable),
+            Some("FrozenCallable")
+        );
     }
 
     /// The LSP-visible `reflect` row is catalog-owned, keeps the typed
@@ -1312,6 +1417,35 @@ mod tests {
             }
         }
 
+        /// ADR-009 B6: the callable signature descriptor carriers and the
+        /// `PassingMode` vocabulary are comptime-only reflection data too —
+        /// each registered with its own named lift-rejection arm in the SAME
+        /// commit as its schema.
+        #[test]
+        fn callable_descriptor_schemas_have_their_own_named_lift_rejection() {
+            use crate::type_schema::builtin_schemas::{
+                COMPTIME_FROZEN_CALLABLE_SCHEMA, COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
+            };
+            for (schema, expected) in [
+                (
+                    COMPTIME_FROZEN_CALLABLE_SCHEMA,
+                    "FrozenCallable is comptime-only reflection data and cannot enter runtime code",
+                ),
+                (
+                    COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
+                    "ParamDescriptor is comptime-only reflection data and cannot enter runtime code",
+                ),
+                (
+                    PASSING_MODE_SCHEMA_NAME,
+                    "PassingMode is comptime-only reflection data and cannot enter runtime code",
+                ),
+            ] {
+                with_fabricated_descriptor_slot(schema, |slot| {
+                    assert_eq!(runtime_lift_rejection(slot), Some(expected));
+                });
+            }
+        }
+
         /// The pre-existing A1 arms keep firing after the B1 extension.
         #[test]
         fn lift_rejection_still_fires_for_type_ref_and_frozen_type_category() {
@@ -1420,7 +1554,10 @@ mod tests {
                     .expect("every enabled category carries a descriptor type name")
             })
             .collect();
-        assert_eq!(derived, ["FrozenPrimitive", "FrozenNever", "FrozenErased"]);
+        assert_eq!(
+            derived,
+            ["FrozenPrimitive", "FrozenNever", "FrozenErased", "FrozenCallable"]
+        );
         for category in FrozenTypeCategory::ALL {
             let enabled = FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&category);
             assert_eq!(
@@ -1444,12 +1581,13 @@ mod tests {
         assert_eq!(frozen_type_payload_variant_ordinal("Primitive"), Some(0));
         assert_eq!(frozen_type_payload_variant_ordinal("Never"), Some(1));
         assert_eq!(frozen_type_payload_variant_ordinal("Erased"), Some(9));
+        // ADR-009 B6: Callable is now enabled and pinned to its catalog ordinal.
+        assert_eq!(frozen_type_payload_variant_ordinal("Callable"), Some(6));
         for pending in [
             "Parameter",
             "Nominal",
             "Tuple",
             "Record",
-            "Callable",
             "Reference",
             "Union",
             "Unknown",
@@ -1491,9 +1629,23 @@ mod tests {
         );
         assert_eq!(
             reflection_enum_variant_names(FROZEN_TYPE_PAYLOAD_ENUM_NAME),
-            Some(vec!["Primitive", "Never", "Erased"]),
+            Some(vec!["Primitive", "Never", "Erased", "Callable"]),
             "the FrozenType payload sum completes only enabled payload variants"
         );
+        // ADR-009 B6: the PassingMode vocabulary completes from the shared
+        // catalog; the FrozenCallable / ParamDescriptor payload STRUCTS have no
+        // variants (like FrozenNever / FrozenErased).
+        assert_eq!(
+            reflection_enum_variant_names(PASSING_MODE_SCHEMA_NAME),
+            Some(
+                PassingMode::ALL
+                    .into_iter()
+                    .map(PassingMode::variant_name)
+                    .collect()
+            )
+        );
+        assert_eq!(reflection_enum_variant_names("FrozenCallable"), None);
+        assert_eq!(reflection_enum_variant_names("ParamDescriptor"), None);
         assert_eq!(
             reflection_enum_variant_names("FrozenPrimitive"),
             Some(FROZEN_PRIMITIVE_VARIANTS.iter().map(|v| v.name).collect())

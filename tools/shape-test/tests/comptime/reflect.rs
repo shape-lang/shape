@@ -62,6 +62,7 @@ let label = comptime {{
     }}
     FrozenType::Never(n) => "never"
     FrozenType::Erased(e) => "erased"
+    FrozenType::Callable(c) => "callable"
   }}
 }}
 
@@ -219,7 +220,7 @@ print(describe("s"))
 /// The category layer stays exhaustive at 11 alongside reflect in the SAME
 /// program: `type_category` still matches all 11 `FrozenTypeCategory`
 /// variants (ADR-009 B3 appended `Existential`) while `reflect` matches the
-/// 3-variant payload sum.
+/// 4-variant enabled payload sum (ADR-009 B6 appended `Callable`).
 #[test]
 fn type_category_stays_exhaustive_at_eleven_alongside_reflect() {
     let source = r#"
@@ -243,6 +244,7 @@ let payload = comptime {
     FrozenType::Primitive(p) => "primitive-payload"
     FrozenType::Never(n) => "never-payload"
     FrozenType::Erased(e) => "erased-payload"
+    FrozenType::Callable(c) => "callable-payload"
   }
 }
 
@@ -250,6 +252,66 @@ print(category)
 print(payload)
 "#;
     expect_vm_and_jit_output(source, "primitive\nprimitive-payload");
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ADR-009 B6 — reflect(TypeRef<callable>) yields a full FrozenCallable with
+// ordered param descriptors + passing modes, on BOTH engines.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// B6 headline proof: reflecting a callable type yields a `FrozenType::Callable`
+/// carrying the ordered parameter descriptors — the param count is read at
+/// comptime and observed identically under VM and JIT.
+#[test]
+fn callable_reflects_to_a_frozen_callable_with_param_count() {
+    let source = r#"
+let arity = comptime {
+  match reflect(type_ref((int, string) -> bool)) {
+    FrozenType::Callable(c) => c.params.len()
+    _ => -1
+  }
+}
+
+print(arity)
+"#;
+    expect_vm_and_jit_output(source, "2");
+}
+
+/// B6: the ADR passing-mode axis is reconstructed from each parameter's borrow
+/// annotation — `int` is `Move`, `&string` is `SharedBorrow`, `&mut int` is
+/// `ExclusiveBorrow`. Read at comptime through the injected `PassingMode`
+/// model on both engines. (Mode is NOT part of the one-way identity; it is
+/// recovered from the freeze's preserved structural descriptor.)
+#[test]
+fn callable_param_passing_modes_reflect_on_vm_and_jit() {
+    let source = r#"
+let modes = comptime {
+  match reflect(type_ref((int, &string, &mut int) -> bool)) {
+    FrozenType::Callable(c) => {
+      let a = match c.params[0].mode {
+        PassingMode::Move => "move"
+        PassingMode::SharedBorrow => "shared"
+        PassingMode::ExclusiveBorrow => "exclusive"
+      }
+      let b = match c.params[1].mode {
+        PassingMode::Move => "move"
+        PassingMode::SharedBorrow => "shared"
+        PassingMode::ExclusiveBorrow => "exclusive"
+      }
+      let d = match c.params[2].mode {
+        PassingMode::Move => "move"
+        PassingMode::SharedBorrow => "shared"
+        PassingMode::ExclusiveBorrow => "exclusive"
+      }
+      a + ":" + b + ":" + d
+    }
+    _ => "wrong"
+  }
+}
+
+print(modes)
+"#;
+    expect_vm_and_jit_output(source, "move:shared:exclusive");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -309,10 +371,11 @@ fn r1_rejection_points_at_the_exhaustive_category_layer() {
 /// one call earlier).
 #[test]
 fn reflect_on_composite_type_expressions_is_the_named_r1_rejection() {
+    // ADR-009 B6: Callable is no longer pending — reflecting a callable now
+    // yields a full FrozenCallable (see the B6 payload proofs below).
     for (preamble, spelling, category) in [
         ("", "[int, string]", "Tuple"),
         ("", "{x: int}", "Record"),
-        ("", "(int) -> bool", "Callable"),
         ("type User { id: int }", "&User", "Reference"),
         ("type User { id: int }", "&mut User", "Reference"),
         ("", "int | string", "Union"),
@@ -723,6 +786,7 @@ let label = comptime {{
     FrozenType::Primitive(p) => "primitive"
     FrozenType::Never(n) => "never"
     FrozenType::Erased(e) => "erased"
+    FrozenType::Callable(c) => "callable"
     FrozenType::{variant}(x) => "escape"
   }}
 }}

@@ -705,3 +705,97 @@ print(greet("World"))
 "#;
     ShapeTest::new(code).expect_run_err_contains("Undefined variable: 'extra'");
 }
+
+// ============================================================================
+// ADR-009 B6 (Stage 2, Dec 63) — VM + JIT entry proof: an annotation whose
+// comptime handler READS a callable's parameter types drives compilation
+// identically under the plain interpreter and the JIT tier.
+//
+// The annotation's `comptime post` block reflects a callable type, reads the
+// per-position passing modes through the B6 accessor surface
+// (`callable.param(I).mode` / `callable.parameters`), and gates a target
+// extension on what it observed. Comptime never tiers up, so the param-type
+// read runs on the comptime VM in both configurations; the enclosing program
+// then lowers and runs identically on both engines — the JIT-tier-clean proof
+// at the comptime→runtime boundary (same shape as the `reflect.rs` /
+// `callable.rs` dual-run proofs).
+// ============================================================================
+
+/// The comptime handler reads `callable.param(0).mode` and `param(1).mode` and
+/// only extends the target when the observed modes match the signature —
+/// proving the param TYPES were read at compile time. VM and JIT agree.
+#[test]
+fn b6_annotation_reads_callable_param_modes_on_vm_and_jit() {
+    let code = r#"
+annotation gate_by_signature() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let shape = match reflect(type_ref((int, &mut string) -> bool)) {
+      FrozenType::Callable(c) => {
+        let a = match c.param(0).mode {
+          PassingMode::Move => "m"
+          PassingMode::SharedBorrow => "s"
+          PassingMode::ExclusiveBorrow => "x"
+        }
+        let b = match c.param(1).mode {
+          PassingMode::Move => "m"
+          PassingMode::SharedBorrow => "s"
+          PassingMode::ExclusiveBorrow => "x"
+        }
+        a + b
+      }
+      _ => "no"
+    }
+    if shape == "mx" {
+      extend target {
+        method signature_tag() -> string { "move-exclusive" }
+      }
+    }
+  }
+}
+
+@gate_by_signature()
+type Widget { id: int }
+
+let w = Widget { id: 1 }
+print(w.signature_tag())
+"#;
+    ShapeTest::new(code).expect_output("move-exclusive");
+    ShapeTest::new(code).with_jit().expect_output("move-exclusive");
+}
+
+/// Companion: the handler iterates `callable.parameters` at comptime and gates
+/// on the parameter COUNT it read — the annotation observes the full ordered
+/// descriptor collection. VM and JIT agree.
+#[test]
+fn b6_annotation_iterates_callable_parameters_on_vm_and_jit() {
+    let code = r#"
+annotation gate_by_arity() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let mut count = 0
+    match reflect(type_ref((int, &string, bool) -> int)) {
+      FrozenType::Callable(c) => {
+        for p in c.parameters {
+          count = count + 1
+        }
+      }
+      _ => {}
+    }
+    if count == 3 {
+      extend target {
+        method arity_tag() -> string { "three-params" }
+      }
+    }
+  }
+}
+
+@gate_by_arity()
+type Gadget { id: int }
+
+let g = Gadget { id: 7 }
+print(g.arity_tag())
+"#;
+    ShapeTest::new(code).expect_output("three-params");
+    ShapeTest::new(code).with_jit().expect_output("three-params");
+}

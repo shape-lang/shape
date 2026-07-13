@@ -115,9 +115,16 @@ fn frozen_type_schema_has_exactly_the_ordinal_pinned_enabled_variants() {
         .iter()
         .map(|variant| (variant.name.as_str(), variant.id, variant.payload_fields))
         .collect();
+    // ADR-009 B6: Callable is now an enabled payload variant, pinned to its
+    // catalog ordinal 6 (never densely renumbered).
     assert_eq!(
         actual,
-        [("Primitive", 0, 1), ("Never", 1, 1), ("Erased", 9, 1)]
+        [
+            ("Primitive", 0, 1),
+            ("Never", 1, 1),
+            ("Erased", 9, 1),
+            ("Callable", 6, 1)
+        ]
     );
     assert_eq!(info.variant_id("Unknown"), None);
     assert_eq!(info.variant_id("Any"), None);
@@ -127,7 +134,6 @@ fn frozen_type_schema_has_exactly_the_ordinal_pinned_enabled_variants() {
         "Nominal",
         "Tuple",
         "Record",
-        "Callable",
         "Reference",
         "Union",
     ] {

@@ -2535,6 +2535,41 @@ let x = 1
         assert_eq!(labels, ["SignedInteger"]);
     }
 
+    /// ADR-009 B6: the `PassingMode` sealed sub-algebra (the ADR mode axis)
+    /// completes from the SAME shared catalog as every other reflection enum —
+    /// exactly `Move` / `SharedBorrow` / `ExclusiveBorrow`, no Unknown arm, no
+    /// hand-written variant list in the LSP.
+    #[test]
+    fn test_passing_mode_variant_completion_is_catalog_sourced() {
+        let labels: Vec<_> = enum_variant_completions("PassingMode", "", None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        let expected: Vec<String> = shape_runtime::comptime_reflection::PassingMode::ALL
+            .into_iter()
+            .map(|m| m.variant_name().to_string())
+            .collect();
+        assert_eq!(labels, expected);
+        assert!(!labels.iter().any(|l| l == "Unknown"));
+    }
+
+    /// ADR-009 B6: `FrozenCallable` and `ParamDescriptor` are payload STRUCTS,
+    /// not enums (like `FrozenNever` / `FrozenErased`). The shared catalog
+    /// returns `None` for them, so enum-variant completion falls through
+    /// cleanly — no fabricated variants, no Unknown arm, no crash — and (with
+    /// no program-derived enum of that name) yields nothing.
+    #[test]
+    fn test_frozen_callable_and_param_descriptor_have_no_enum_variant_completions() {
+        assert!(
+            enum_variant_completions("FrozenCallable", "", None).is_empty(),
+            "FrozenCallable is a struct payload — no enum-variant completion"
+        );
+        assert!(
+            enum_variant_completions("ParamDescriptor", "", None).is_empty(),
+            "ParamDescriptor is a struct payload — no enum-variant completion"
+        );
+    }
+
     /// Non-catalog enum names still resolve through the program-derived
     /// fallback — the catalog hook must not shadow user enums.
     #[test]

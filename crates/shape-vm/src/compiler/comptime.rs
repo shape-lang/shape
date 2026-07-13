@@ -46,6 +46,21 @@ const TYPE_ARGUMENT_FORWARDER: &str = "\u{1}comptime:forward-type-argument";
 /// pinned by `refine_forwarder_return_marker_matches_the_applied_type_schema`.
 const REFINE_RETURN_MARKER: &str = "Option<\u{1}comptime:AppliedType>";
 
+/// ADR-009 B6 R1 (Dec 63): a `FrozenCallable`'s parameters are selected by
+/// signature POSITION (`callable.param(I)`) or a hygienic token that resolves
+/// to a position — NEVER by a string key. A string-literal selector is this
+/// named rejection, mirroring the "no string keys / name-selected access"
+/// invariant (spec §3.1; cf. the B4 index-not-string posture). Fires at
+/// comptime-prep time, before any index is formed — never a partial descriptor.
+pub(crate) const PARAM_STRING_SELECTOR_DIAGNOSTIC: &str =
+    "callable.param expects a signature POSITION index, not a string key: a callable's \
+     parameters are position-indexed descriptors — select with param(i) (or a hygienic \
+     token resolving to a position), never param(\"name\")";
+
+/// ADR-009 B6: `callable.param(I)` takes exactly one positional index argument.
+pub(crate) const PARAM_ARITY_DIAGNOSTIC: &str =
+    "callable.param expects exactly one signature-position index argument";
+
 /// (name, arity, target_method, return_fields, named_return_type,
 /// param_annotations)
 ///
@@ -574,7 +589,8 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
     use shape_runtime::comptime_reflection::{
         FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
         FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME, FloatWidth,
-        INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth, frozen_type_enabled_payload_type_name,
+        INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth, PASSING_MODE_SCHEMA_NAME, PassingMode,
+        frozen_type_enabled_payload_type_name,
     };
 
     let enum_item = |name: &str, members: Vec<EnumMember>| {
@@ -615,6 +631,16 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
             Span::DUMMY,
         )
     };
+    let field = |name: &str, type_annotation: TypeAnnotation| StructField {
+        annotations: Vec::new(),
+        is_comptime: false,
+        name: name.to_string(),
+        span: Span::DUMMY,
+        doc_comment: None,
+        type_annotation,
+        default_value: None,
+    };
+    let int_ty = || TypeAnnotation::Basic("int".to_string());
 
     vec![
         enum_item(
@@ -667,6 +693,44 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
                 default_value: None,
             }],
         ),
+        // ADR-009 B6 (Dec 63): the callable signature descriptor payload model.
+        // `PassingMode` is the ADR mode axis; `ParamDescriptor` one positional
+        // parameter (type identity halves + optional + mode); `FrozenCallable`
+        // the ordered param array + return type identity halves. Generated from
+        // the shared runtime catalog (`PassingMode::ALL`) — no hand-written mode
+        // list.
+        enum_item(
+            PASSING_MODE_SCHEMA_NAME,
+            PassingMode::ALL
+                .into_iter()
+                .map(|mode| unit_member(mode.variant_name()))
+                .collect(),
+        ),
+        struct_item(
+            "ParamDescriptor",
+            vec![
+                field("type_identity_high", int_ty()),
+                field("type_identity_low", int_ty()),
+                field("optional", TypeAnnotation::Basic("bool".to_string())),
+                field(
+                    "mode",
+                    TypeAnnotation::Basic(PASSING_MODE_SCHEMA_NAME.to_string()),
+                ),
+            ],
+        ),
+        struct_item(
+            "FrozenCallable",
+            vec![
+                field(
+                    "params",
+                    TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                        "ParamDescriptor".to_string(),
+                    ))),
+                ),
+                field("returns_identity_high", int_ty()),
+                field("returns_identity_low", int_ty()),
+            ],
+        ),
     ]
 }
 
@@ -717,55 +781,129 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
 /// normalization rejection). The error propagates out of the comptime entry
 /// points BEFORE the user's comptime code compiles or executes (Dec 52 freeze
 /// boundary) — never an `INVALID` sentinel, never a partial descriptor.
+/// ADR-009 B6 (Dec 63): the set of identifiers currently bound to a
+/// `FrozenCallable` value, threaded through the comptime rewrite so the
+/// `.param(I)` / `.parameters` accessor desugarings fire ONLY on a real
+/// `FrozenCallable` receiver.
+///
+/// In the S1 compiler model a `FrozenCallable` value enters scope through
+/// exactly one route: a `FrozenType::Callable(<ident>)` match binding
+/// (`reflect(type_ref(<callable>))` → the payload sum → the Callable arm). The
+/// accessor rewrites lower to plain field / index access on the descriptor
+/// carrier's `params` array, which does NOT re-check that the receiver is a
+/// `FrozenCallable` — so an unguarded, receiver-blind rewrite would silently
+/// capture an arbitrary user receiver that happens to spell `.param(...)` or
+/// carry a `.parameters` field (wrong field / a misleading `PARAM_ARITY`
+/// diagnostic on a user `.param(a, b)`). Tracking the callable-bound
+/// identifiers per lexical arm scope keeps the surface precise
+/// (CLAUDE.md Forbidden Patterns — no collateral capture; ADR-009 §3
+/// precise-surface discipline). Genuine `FrozenCallable` uses in the enabled
+/// surface always spell the receiver as the bound identifier directly
+/// (`c.param(i)`, `c.parameters`), so the guard admits every enabled form.
+type CallableScope = std::collections::HashSet<String>;
+
+/// Add any identifier bound by a `FrozenType::Callable(<ident>)` match pattern
+/// to the callable scope. ONLY the reserved `FrozenType::Callable`
+/// single-binding tuple pattern qualifies — a user enum with a `Callable`
+/// variant (a different enum head) does not, nor does a struct/array
+/// destructuring shape.
+fn collect_frozen_callable_bindings(pattern: &shape_ast::ast::Pattern, scope: &mut CallableScope) {
+    if let shape_ast::ast::Pattern::Constructor {
+        enum_name,
+        variant,
+        fields,
+    } = pattern
+    {
+        let is_frozen_callable = variant == "Callable"
+            && enum_name
+                .as_ref()
+                .is_some_and(|path| path.name() == "FrozenType");
+        if is_frozen_callable {
+            if let shape_ast::ast::PatternConstructorFields::Tuple(pats) = fields {
+                if let [shape_ast::ast::Pattern::Identifier { name, .. }] = pats.as_slice() {
+                    scope.insert(name.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Whether `expr` is a bare identifier bound to a `FrozenCallable` in the
+/// current lexical scope — the precondition for the `.param(I)` / `.parameters`
+/// accessor rewrites (Dec 63).
+fn is_frozen_callable_receiver(expr: &Expr, scope: &CallableScope) -> bool {
+    matches!(expr, Expr::Identifier(name, _) if scope.contains(name))
+}
+
 fn rewrite_comptime_type_symbol_args(
     stmt: &mut Statement,
     freeze: &super::comptime_builtins::FreezeOverlay,
 ) -> Result<()> {
+    rewrite_comptime_type_symbol_args_scoped(stmt, freeze, &CallableScope::new())
+}
+
+fn rewrite_comptime_type_symbol_args_scoped(
+    stmt: &mut Statement,
+    freeze: &super::comptime_builtins::FreezeOverlay,
+    callables: &CallableScope,
+) -> Result<()> {
     match stmt {
-        Statement::Expression(expr, _) => rewrite_comptime_type_symbol_args_expr(expr, freeze)?,
-        Statement::Return(Some(expr), _) => rewrite_comptime_type_symbol_args_expr(expr, freeze)?,
+        Statement::Expression(expr, _) => {
+            rewrite_comptime_type_symbol_args_expr_scoped(expr, freeze, callables)?
+        }
+        Statement::Return(Some(expr), _) => {
+            rewrite_comptime_type_symbol_args_expr_scoped(expr, freeze, callables)?
+        }
         Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
         Statement::VariableDecl(decl, _) => {
             if let Some(init) = &mut decl.value {
-                rewrite_comptime_type_symbol_args_expr(init, freeze)?;
+                rewrite_comptime_type_symbol_args_expr_scoped(init, freeze, callables)?;
             }
         }
         Statement::Assignment(assign, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut assign.value, freeze)?;
+            rewrite_comptime_type_symbol_args_expr_scoped(&mut assign.value, freeze, callables)?;
         }
         Statement::For(for_loop, _) => {
             match &mut for_loop.init {
                 shape_ast::ast::ForInit::ForIn { iter, .. } => {
-                    rewrite_comptime_type_symbol_args_expr(iter, freeze)?;
+                    rewrite_comptime_type_symbol_args_expr_scoped(iter, freeze, callables)?;
                 }
                 shape_ast::ast::ForInit::ForC {
                     init,
                     condition,
                     update,
                 } => {
-                    rewrite_comptime_type_symbol_args(init, freeze)?;
-                    rewrite_comptime_type_symbol_args_expr(condition, freeze)?;
-                    rewrite_comptime_type_symbol_args_expr(update, freeze)?;
+                    rewrite_comptime_type_symbol_args_scoped(init, freeze, callables)?;
+                    rewrite_comptime_type_symbol_args_expr_scoped(condition, freeze, callables)?;
+                    rewrite_comptime_type_symbol_args_expr_scoped(update, freeze, callables)?;
                 }
             }
             for s in &mut for_loop.body {
-                rewrite_comptime_type_symbol_args(s, freeze)?;
+                rewrite_comptime_type_symbol_args_scoped(s, freeze, callables)?;
             }
         }
         Statement::While(while_loop, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, freeze)?;
+            rewrite_comptime_type_symbol_args_expr_scoped(
+                &mut while_loop.condition,
+                freeze,
+                callables,
+            )?;
             for s in &mut while_loop.body {
-                rewrite_comptime_type_symbol_args(s, freeze)?;
+                rewrite_comptime_type_symbol_args_scoped(s, freeze, callables)?;
             }
         }
         Statement::If(if_stmt, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, freeze)?;
+            rewrite_comptime_type_symbol_args_expr_scoped(
+                &mut if_stmt.condition,
+                freeze,
+                callables,
+            )?;
             for s in &mut if_stmt.then_body {
-                rewrite_comptime_type_symbol_args(s, freeze)?;
+                rewrite_comptime_type_symbol_args_scoped(s, freeze, callables)?;
             }
             if let Some(else_body) = &mut if_stmt.else_body {
                 for s in else_body {
-                    rewrite_comptime_type_symbol_args(s, freeze)?;
+                    rewrite_comptime_type_symbol_args_scoped(s, freeze, callables)?;
                 }
             }
         }
@@ -774,11 +912,11 @@ fn rewrite_comptime_type_symbol_args(
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }
         | Statement::ExtendItemsExpr { expression, .. } => {
-            rewrite_comptime_type_symbol_args_expr(expression, freeze)?;
+            rewrite_comptime_type_symbol_args_expr_scoped(expression, freeze, callables)?;
         }
         Statement::ReplaceBody { body, .. } => {
             for s in body {
-                rewrite_comptime_type_symbol_args(s, freeze)?;
+                rewrite_comptime_type_symbol_args_scoped(s, freeze, callables)?;
             }
         }
         // Directives with no embedded expression / already-parsed payloads.
@@ -793,6 +931,14 @@ fn rewrite_comptime_type_symbol_args(
 fn rewrite_comptime_type_symbol_args_expr(
     expr: &mut Expr,
     freeze: &super::comptime_builtins::FreezeOverlay,
+) -> Result<()> {
+    rewrite_comptime_type_symbol_args_expr_scoped(expr, freeze, &CallableScope::new())
+}
+
+fn rewrite_comptime_type_symbol_args_expr_scoped(
+    expr: &mut Expr,
+    freeze: &super::comptime_builtins::FreezeOverlay,
+    callables: &CallableScope,
 ) -> Result<()> {
     // ADR-009 B4 (Stage 2, Dec 54): the method-call surfaces
     // (`apply` / `refine` / `type_argument`) on comptime carriers rewrite to
@@ -835,6 +981,80 @@ fn rewrite_comptime_type_symbol_args_expr(
                 named_args: Vec::new(),
                 span,
             };
+        }
+    }
+
+    // ADR-009 B6 (Stage 2, Dec 63): the `FrozenCallable` accessor surface.
+    // `callable.param(I)` is signature-indexed POSITIONAL access — it desugars
+    // to indexing the descriptor's ordered `params` array (the working S1
+    // carrier), so the returned `ParamDescriptor` carries the position's
+    // type-identity / optionality / passing mode. A string selector is the
+    // named R1 rejection, fired HERE (comptime-prep) before any index forms —
+    // parameters are never string-keyed.
+    //
+    // The rewrite (and its R1 string / arity diagnostics) fire ONLY when the
+    // receiver is provably a `FrozenCallable` (`is_frozen_callable_receiver`):
+    // the desugaring lowers to plain `.params[I]` access that does not re-check
+    // the receiver, so a receiver-blind rewrite would silently capture a user
+    // `.param(...)` method on an unrelated receiver (wrong field / a misleading
+    // `PARAM_ARITY` diagnostic on a user `foo.param(a, b)`). A non-callable
+    // receiver is left as an ordinary `MethodCall` for normal dispatch.
+    if let Expr::MethodCall {
+        receiver,
+        method,
+        args,
+        span,
+        ..
+    } = expr
+    {
+        if method == "param" && is_frozen_callable_receiver(receiver.as_ref(), callables) {
+            let span = *span;
+            if args.len() != 1 {
+                return Err(ShapeError::SemanticError {
+                    message: PARAM_ARITY_DIAGNOSTIC.to_string(),
+                    location: None,
+                });
+            }
+            if matches!(
+                &args[0],
+                Expr::Literal(shape_ast::ast::Literal::String(_), _)
+            ) {
+                return Err(ShapeError::SemanticError {
+                    message: PARAM_STRING_SELECTOR_DIAGNOSTIC.to_string(),
+                    location: None,
+                });
+            }
+            let receiver = std::mem::replace(receiver.as_mut(), Expr::Unit(span));
+            let index = std::mem::take(args)
+                .into_iter()
+                .next()
+                .expect("arity checked to be exactly one");
+            *expr = Expr::IndexAccess {
+                object: Box::new(Expr::PropertyAccess {
+                    object: Box::new(receiver),
+                    property: "params".to_string(),
+                    optional: false,
+                    span,
+                }),
+                index: Box::new(index),
+                end_index: None,
+                span,
+            };
+        }
+    }
+
+    // `callable.parameters` (property) is the ordered per-position descriptor
+    // collection — the same `params` carrier under the ADR-named surface. Kept
+    // a distinct spelling so the surface reads as the ADR-009 §Public-surface
+    // `callable.parameters` while reusing the one carrier. Guarded on a
+    // `FrozenCallable` receiver (Dec 63) so a user struct with a `.parameters`
+    // field used in comptime is not silently renamed to `.params`.
+    if let Expr::PropertyAccess {
+        object, property, ..
+    } = expr
+    {
+        if property == "parameters" && is_frozen_callable_receiver(object.as_ref(), callables) {
+            *property = "params".to_string();
         }
     }
 
@@ -927,9 +1147,11 @@ fn rewrite_comptime_type_symbol_args_expr(
     }
 
     // Recurse into every child expression so nested reflection calls
-    // (`print(type_info(User).name)`) are rewritten too.
+    // (`print(type_info(User).name)`) are rewritten too. The callable scope
+    // flows unchanged into children EXCEPT match arms, whose per-arm bindings
+    // extend it (handled explicitly below).
     let recur = |child: &mut Expr| -> Result<()> {
-        rewrite_comptime_type_symbol_args_expr(child, freeze)
+        rewrite_comptime_type_symbol_args_expr_scoped(child, freeze, callables)
     };
     match expr {
         Expr::FunctionCall {
@@ -999,10 +1221,14 @@ fn rewrite_comptime_type_symbol_args_expr(
         Expr::Match(match_expr, _) => {
             recur(&mut match_expr.scrutinee)?;
             for arm in &mut match_expr.arms {
+                // A `FrozenType::Callable(c)` arm binds `c` to a
+                // `FrozenCallable` for the guard + body scope only (Dec 63).
+                let mut arm_scope = callables.clone();
+                collect_frozen_callable_bindings(&arm.pattern, &mut arm_scope);
                 if let Some(guard) = &mut arm.guard {
-                    recur(guard)?;
+                    rewrite_comptime_type_symbol_args_expr_scoped(guard, freeze, &arm_scope)?;
                 }
-                recur(&mut arm.body)?;
+                rewrite_comptime_type_symbol_args_expr_scoped(&mut arm.body, freeze, &arm_scope)?;
             }
         }
         Expr::Array(elems, _) => {
@@ -1027,7 +1253,7 @@ fn rewrite_comptime_type_symbol_args_expr(
             for item in &mut block.items {
                 match item {
                     shape_ast::ast::BlockItem::Statement(s) => {
-                        rewrite_comptime_type_symbol_args(s, freeze)?;
+                        rewrite_comptime_type_symbol_args_scoped(s, freeze, callables)?;
                     }
                     shape_ast::ast::BlockItem::Expression(e) => recur(e)?,
                     shape_ast::ast::BlockItem::VariableDecl(decl) => {
@@ -1047,6 +1273,28 @@ fn rewrite_comptime_type_symbol_args_expr(
         | Expr::AsyncScope(inner, _)
         | Expr::Reference { expr: inner, .. } => recur(inner)?,
         Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => recur(inner)?,
+        // Control-flow EXPRESSION forms (`for`/`while`/`if`/`loop` used as block
+        // items or tail values) embed a reflection call in natural comptime code
+        // — e.g. `for p in c.parameters { … }` inside a comptime match arm, or
+        // `if implements(T, Ord) { … }`. Recurse into their sub-expressions so
+        // the accessor/reflection rewrites reach them (statement forms are
+        // covered by `rewrite_comptime_type_symbol_args`).
+        Expr::For(for_expr, _) => {
+            recur(&mut for_expr.iterable)?;
+            recur(&mut for_expr.body)?;
+        }
+        Expr::While(while_expr, _) => {
+            recur(&mut while_expr.condition)?;
+            recur(&mut while_expr.body)?;
+        }
+        Expr::If(if_expr, _) => {
+            recur(&mut if_expr.condition)?;
+            recur(&mut if_expr.then_branch)?;
+            if let Some(else_branch) = &mut if_expr.else_branch {
+                recur(else_branch)?;
+            }
+        }
+        Expr::Loop(loop_expr, _) => recur(&mut loop_expr.body)?,
         Expr::Range { start, end, .. } => {
             if let Some(s) = start {
                 recur(s)?;
@@ -3012,6 +3260,222 @@ annotation reflect() {
         assert!(matches!(args[1], Expr::Literal(Literal::Int(0), _)));
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // ADR-009 B6 (Dec 63): the `.param(I)` / `.parameters` accessor rewrites
+    // are FrozenCallable-receiver-guarded — they fire on a
+    // `FrozenType::Callable(c)`-bound receiver and NEVER on an arbitrary user
+    // receiver (precise-surface discipline; no collateral capture).
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn overlay_for_rewrite_tests()
+    -> std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay> {
+        std::sync::Arc::new(crate::compiler::comptime_builtins::FreezeOverlay::new(
+            crate::compiler::comptime_builtins::semantic_freeze::SemanticFreeze::freeze(
+                &crate::compiler::BytecodeCompiler::new(),
+            )
+            .expect("freeze"),
+            "<module>",
+            &[],
+        ))
+    }
+
+    /// A `FrozenType::Callable(c)` match arm binds `c` as a `FrozenCallable`, so
+    /// `c.param(0)` → `c.params[0]` and `c.parameters` → `c.params` INSIDE the
+    /// arm. The guard admits the full enabled surface.
+    #[test]
+    fn frozen_callable_accessors_rewrite_inside_a_callable_match_arm() {
+        use shape_ast::ast::{PatternConstructorFields, TypePath};
+        let overlay = overlay_for_rewrite_tests();
+
+        let callable_pattern = shape_ast::ast::Pattern::Constructor {
+            enum_name: Some(TypePath::simple("FrozenType")),
+            variant: "Callable".to_string(),
+            fields: PatternConstructorFields::Tuple(vec![shape_ast::ast::Pattern::Identifier {
+                name: "c".to_string(),
+                span: Span::DUMMY,
+            }]),
+        };
+        // arm body: { c.param(0); c.parameters }  (a block of two exprs)
+        let param_call = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("c".to_string(), Span::DUMMY)),
+            method: "param".to_string(),
+            args: vec![Expr::Literal(Literal::Int(0), Span::DUMMY)],
+            named_args: Vec::new(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        let parameters_access = Expr::PropertyAccess {
+            object: Box::new(Expr::Identifier("c".to_string(), Span::DUMMY)),
+            property: "parameters".to_string(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        let body = Expr::Block(
+            shape_ast::ast::expr_helpers::BlockExpr {
+                items: vec![
+                    shape_ast::ast::BlockItem::Expression(param_call),
+                    shape_ast::ast::BlockItem::Expression(parameters_access),
+                ],
+            },
+            Span::DUMMY,
+        );
+        let mut match_expr = Expr::Match(
+            Box::new(shape_ast::ast::expr_helpers::MatchExpr {
+                scrutinee: Box::new(Expr::Identifier("x".to_string(), Span::DUMMY)),
+                arms: vec![shape_ast::ast::expr_helpers::MatchArm {
+                    pattern: callable_pattern,
+                    guard: None,
+                    body: Box::new(body),
+                    pattern_span: None,
+                }],
+            }),
+            Span::DUMMY,
+        );
+
+        super::rewrite_comptime_type_symbol_args_expr(&mut match_expr, overlay.as_ref())
+            .expect("rewrite ok");
+
+        let Expr::Match(m, _) = &match_expr else {
+            panic!("still a match");
+        };
+        let Expr::Block(block, _) = m.arms[0].body.as_ref() else {
+            panic!("arm body is a block");
+        };
+        // `c.param(0)` → `c.params[0]`
+        let shape_ast::ast::BlockItem::Expression(Expr::IndexAccess { object, .. }) =
+            &block.items[0]
+        else {
+            panic!(
+                "param(0) must desugar to index access: {:?}",
+                block.items[0]
+            );
+        };
+        assert!(
+            matches!(object.as_ref(), Expr::PropertyAccess { property, .. } if property == "params"),
+            "index base must be the `.params` carrier"
+        );
+        // `c.parameters` → `c.params`
+        let shape_ast::ast::BlockItem::Expression(Expr::PropertyAccess { property, .. }) =
+            &block.items[1]
+        else {
+            panic!("parameters must stay a property access");
+        };
+        assert_eq!(property, "params", "`.parameters` renames to `.params`");
+    }
+
+    /// Collateral guard: a `.param(...)` method call and a `.parameters` field
+    /// access on a receiver that is NOT a `FrozenCallable` are left untouched —
+    /// no rewrite, no `PARAM_ARITY` / string-selector diagnostic. A user struct
+    /// with a `.parameters` field or a `.param(a, b)` method used in comptime
+    /// keeps its own semantics.
+    #[test]
+    fn user_receiver_param_and_parameters_are_not_captured() {
+        let overlay = overlay_for_rewrite_tests();
+
+        // `foo.parameters` (foo not callable-bound) stays a `.parameters`
+        // property access — NOT renamed to `.params`.
+        let mut prop = Expr::PropertyAccess {
+            object: Box::new(Expr::Identifier("foo".to_string(), Span::DUMMY)),
+            property: "parameters".to_string(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        super::rewrite_comptime_type_symbol_args_expr(&mut prop, overlay.as_ref())
+            .expect("rewrite ok");
+        assert!(
+            matches!(&prop, Expr::PropertyAccess { property, .. } if property == "parameters"),
+            "user `.parameters` field must not be renamed: {prop:?}"
+        );
+
+        // `foo.param(0)` (foo not callable-bound) stays a method call — NOT
+        // desugared to `.params[0]`.
+        let mut one_arg = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("foo".to_string(), Span::DUMMY)),
+            method: "param".to_string(),
+            args: vec![Expr::Literal(Literal::Int(0), Span::DUMMY)],
+            named_args: Vec::new(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        super::rewrite_comptime_type_symbol_args_expr(&mut one_arg, overlay.as_ref())
+            .expect("rewrite ok");
+        assert!(
+            matches!(&one_arg, Expr::MethodCall { method, .. } if method == "param"),
+            "user `.param(i)` method must not be captured: {one_arg:?}"
+        );
+
+        // `foo.param(a, b)` (two args) must NOT fire the arity diagnostic — the
+        // pre-guard behavior mis-reported this as a `callable.param` arity error.
+        let mut two_arg = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("foo".to_string(), Span::DUMMY)),
+            method: "param".to_string(),
+            args: vec![
+                Expr::Identifier("a".to_string(), Span::DUMMY),
+                Expr::Identifier("b".to_string(), Span::DUMMY),
+            ],
+            named_args: Vec::new(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        let result = super::rewrite_comptime_type_symbol_args_expr(&mut two_arg, overlay.as_ref());
+        assert!(
+            result.is_ok(),
+            "a user 2-arg `.param(a, b)` must not raise PARAM_ARITY: {result:?}"
+        );
+        assert!(
+            matches!(&two_arg, Expr::MethodCall { method, args, .. } if method == "param" && args.len() == 2),
+            "user `.param(a, b)` must survive unchanged: {two_arg:?}"
+        );
+    }
+
+    /// A user enum whose variant is spelled `Callable` (a DIFFERENT enum head,
+    /// not `FrozenType`) does not open a callable scope — `.param` on its
+    /// binding is not captured.
+    #[test]
+    fn non_frozentype_callable_variant_does_not_open_a_callable_scope() {
+        use shape_ast::ast::{PatternConstructorFields, TypePath};
+        let overlay = overlay_for_rewrite_tests();
+
+        let pattern = shape_ast::ast::Pattern::Constructor {
+            enum_name: Some(TypePath::simple("MyEnum")),
+            variant: "Callable".to_string(),
+            fields: PatternConstructorFields::Tuple(vec![shape_ast::ast::Pattern::Identifier {
+                name: "c".to_string(),
+                span: Span::DUMMY,
+            }]),
+        };
+        let body = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("c".to_string(), Span::DUMMY)),
+            method: "param".to_string(),
+            args: vec![Expr::Literal(Literal::Int(0), Span::DUMMY)],
+            named_args: Vec::new(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        let mut match_expr = Expr::Match(
+            Box::new(shape_ast::ast::expr_helpers::MatchExpr {
+                scrutinee: Box::new(Expr::Identifier("x".to_string(), Span::DUMMY)),
+                arms: vec![shape_ast::ast::expr_helpers::MatchArm {
+                    pattern,
+                    guard: None,
+                    body: Box::new(body),
+                    pattern_span: None,
+                }],
+            }),
+            Span::DUMMY,
+        );
+        super::rewrite_comptime_type_symbol_args_expr(&mut match_expr, overlay.as_ref())
+            .expect("rewrite ok");
+        let Expr::Match(m, _) = &match_expr else {
+            panic!("still a match");
+        };
+        assert!(
+            matches!(m.arms[0].body.as_ref(), Expr::MethodCall { method, .. } if method == "param"),
+            "a non-FrozenType `Callable` variant must not open a callable scope: {:?}",
+            m.arms[0].body
+        );
+    }
+
     // Regression (2026-06-21): a comptime block evaluating to `false` (and
     // `build_config().debug` in a release build) was baked as `null` at the
     // print / f-string boundary. Root cause: the `NativeKind::Bool` arm in
@@ -4306,6 +4770,7 @@ match reflect(type_ref(int)) {
   }
   FrozenType::Never(n) => 4
   FrozenType::Erased(e) => 5
+  FrozenType::Callable(c) => 6
 }
 "#,
         )
@@ -4333,6 +4798,7 @@ match reflect(type_ref(bigint)) {
   }
   FrozenType::Never(n) => 4
   FrozenType::Erased(e) => 5
+  FrozenType::Callable(c) => 6
 }
 "#,
         )
@@ -4353,6 +4819,7 @@ match reflect(type_ref({spelling})) {{
   FrozenType::Primitive(p) => 1
   FrozenType::Never(n) => 4
   FrozenType::Erased(e) => 5
+  FrozenType::Callable(c) => 6
 }}
 "#
             ))
@@ -4417,6 +4884,7 @@ match reflect(type_ref(int)) {
   FrozenType::Primitive(p) => 1
   FrozenType::Never(n) => 2
   FrozenType::Erased(e) => 3
+  FrozenType::Callable(c) => 5
   FrozenType::Unknown(u) => 4
 }
 "#,

@@ -1165,6 +1165,39 @@ impl ParamReferenceMode {
             ParamReferenceMode::Exclusive => "&mut ",
         }
     }
+
+    /// ADR-009 B6 (Dec 63): project the single shared ADR mode axis
+    /// (`shape_runtime::comptime_reflection::PassingMode`, the one mode
+    /// vocabulary the FrozenCallable freeze descriptor and completion catalog
+    /// consume) onto the LSP's borrow-only reference-mode axis. `Move`
+    /// (by-value, no borrow in the annotation) carries no reference prefix, so
+    /// it projects to `None`; `SharedBorrow`/`ExclusiveBorrow` map 1:1 to
+    /// `Shared`/`Exclusive`. This is the reconciliation point required by the
+    /// ticket: the LSP does NOT define a parallel mode vocabulary — its
+    /// two-mode axis is a provable projection of the shared three-mode axis.
+    pub fn from_passing_mode(
+        mode: shape_runtime::comptime_reflection::PassingMode,
+    ) -> Option<Self> {
+        use shape_runtime::comptime_reflection::PassingMode;
+        match mode {
+            PassingMode::Move => None,
+            PassingMode::SharedBorrow => Some(Self::Shared),
+            PassingMode::ExclusiveBorrow => Some(Self::Exclusive),
+        }
+    }
+
+    /// Inverse of [`ParamReferenceMode::from_passing_mode`] on the borrow-only
+    /// axis: a shared reference is [`PassingMode::SharedBorrow`], an exclusive
+    /// reference is [`PassingMode::ExclusiveBorrow`]. Total on the LSP axis
+    /// (`Move` has no LSP representative — it is the projected-away by-value
+    /// mode).
+    pub fn to_passing_mode(self) -> shape_runtime::comptime_reflection::PassingMode {
+        use shape_runtime::comptime_reflection::PassingMode;
+        match self {
+            Self::Shared => PassingMode::SharedBorrow,
+            Self::Exclusive => PassingMode::ExclusiveBorrow,
+        }
+    }
 }
 
 /// Inferred type information for a function's parameters and return type.
@@ -3144,5 +3177,48 @@ mutate(s)
             sigs.get("greet").is_none(),
             "Fully annotated function should have no inferred signatures"
         );
+    }
+
+    /// ADR-009 B6 (Dec 63): the LSP `ParamReferenceMode` axis is a projection of
+    /// the single shared ADR mode axis
+    /// (`shape_runtime::comptime_reflection::PassingMode`), NOT a parallel
+    /// vocabulary. `Move` (by-value) has no reference prefix and projects to
+    /// `None`; the two borrow modes round-trip 1:1. Exhaustive against the
+    /// shared catalog so a new ADR mode forces this reconciliation to update.
+    #[test]
+    fn test_param_reference_mode_reconciles_with_adr_passing_mode_axis() {
+        use shape_runtime::comptime_reflection::PassingMode;
+
+        assert_eq!(
+            ParamReferenceMode::from_passing_mode(PassingMode::Move),
+            None,
+            "by-value Move has no reference prefix"
+        );
+        assert_eq!(
+            ParamReferenceMode::from_passing_mode(PassingMode::SharedBorrow),
+            Some(ParamReferenceMode::Shared)
+        );
+        assert_eq!(
+            ParamReferenceMode::from_passing_mode(PassingMode::ExclusiveBorrow),
+            Some(ParamReferenceMode::Exclusive)
+        );
+
+        assert_eq!(
+            ParamReferenceMode::Shared.to_passing_mode(),
+            PassingMode::SharedBorrow
+        );
+        assert_eq!(
+            ParamReferenceMode::Exclusive.to_passing_mode(),
+            PassingMode::ExclusiveBorrow
+        );
+
+        // Exhaustive over the shared catalog: every ADR mode is accounted for,
+        // and every borrow mode round-trips through the LSP axis.
+        for mode in PassingMode::ALL {
+            match ParamReferenceMode::from_passing_mode(mode) {
+                Some(lsp) => assert_eq!(lsp.to_passing_mode(), mode),
+                None => assert_eq!(mode, PassingMode::Move),
+            }
+        }
     }
 }

@@ -577,6 +577,93 @@ fn callable_descriptor_is_positional_and_return_significant() {
     assert_ne!(int_string_to_bool.identity, int_string_to_int.identity);
 }
 
+/// ADR-009 B6: the callable's PRESERVED structural descriptor (the widened
+/// composite memo input) records ordered per-position params with their
+/// passing mode and name, WITHOUT those facts leaking into the identity hash.
+/// Names are identity-insignificant; passing mode is derived from the borrow
+/// wrapper and is NOT part of the descriptor string.
+#[test]
+fn callable_structural_descriptor_records_modes_and_names_off_the_identity() {
+    // `PassingMode` is in scope via `use super::*`.
+    let overlay = module_overlay(|_| {});
+
+    let borrow = |mutable: bool, inner: &str| TypeAnnotation::Borrow {
+        mutable,
+        inner: Box::new(basic(inner)),
+    };
+    let named = |name: &str, annotation: TypeAnnotation| FunctionParam {
+        name: Some(name.to_string()),
+        optional: false,
+        type_annotation: annotation,
+    };
+    // fn(a: int, b: &string, c: &mut int) -> bool
+    let sig = TypeAnnotation::Function {
+        params: vec![
+            named("a", basic("int")),
+            named("b", borrow(false, "string")),
+            named("c", borrow(true, "int")),
+        ],
+        returns: Box::new(basic("bool")),
+    };
+    let canonical = canon(&overlay, &sig);
+    let descriptor = canonical
+        .callable
+        .as_ref()
+        .expect("callable canonicalization preserves a structural descriptor");
+    assert_eq!(descriptor.params.len(), 3);
+    assert_eq!(descriptor.params[0].mode, PassingMode::Move);
+    assert_eq!(descriptor.params[1].mode, PassingMode::SharedBorrow);
+    assert_eq!(descriptor.params[2].mode, PassingMode::ExclusiveBorrow);
+    assert_eq!(descriptor.params[0].name.as_deref(), Some("a"));
+    // The borrow param's VALUE-type identity is the referent (int / string),
+    // NOT the reference wrapper.
+    assert_eq!(descriptor.params[1].type_identity, overlay.identity_of("string").unwrap());
+    assert_eq!(descriptor.params[2].type_identity, overlay.identity_of("int").unwrap());
+    assert_eq!(descriptor.returns, overlay.identity_of("bool").unwrap());
+
+    // Renaming every parameter is identity-neutral (names insignificant) and
+    // the mode axis does not perturb the identity beyond the borrow wrapper the
+    // grammar already embeds.
+    let renamed = TypeAnnotation::Function {
+        params: vec![
+            named("x", basic("int")),
+            named("y", borrow(false, "string")),
+            named("z", borrow(true, "int")),
+        ],
+        returns: Box::new(basic("bool")),
+    };
+    assert_eq!(canon(&overlay, &renamed).identity, canonical.identity);
+}
+
+/// ADR-009 B6 R2 (Dec 63): a callable parameter modeled with the
+/// compiler-internal `Any` top type (bare or `Array<Any>`) is the named
+/// Any-erasure rejection; lowercase `any` (the enabled Erased leaf) is not.
+#[test]
+fn r2_callable_param_erased_to_any_is_the_named_rejection() {
+    // `CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC` is in scope via `use super::*`.
+    let overlay = module_overlay(|_| {});
+
+    // fn(Array<Any>) -> bool — the homogeneous top-typed param modeling.
+    let array_any = canonicalize_type_annotation(
+        &callable(vec![applied("Array", vec![basic("Any")])], basic("bool")),
+        &overlay,
+    )
+    .expect_err("a callable parameter typed Array<Any> must reject");
+    assert_eq!(array_any, CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC);
+
+    // Bare `Any` parameter — same rejection.
+    let bare_any = canonicalize_type_annotation(
+        &callable(vec![basic("Any")], basic("bool")),
+        &overlay,
+    )
+    .expect_err("a callable parameter typed Any must reject");
+    assert_eq!(bare_any, CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC);
+
+    // Lowercase `any` is the enabled Erased leaf — a callable param typed `any`
+    // canonicalizes (NOT the R2 rejection).
+    canon(&overlay, &callable(vec![basic("any")], basic("bool")));
+}
+
 #[test]
 fn reference_mutability_is_descriptor_significant() {
     let overlay = module_overlay(|_| {});
@@ -1444,10 +1531,8 @@ mod payload_query {
                 TypeAnnotation::Object(vec![record_field("x", false, basic("int"))]),
                 FrozenTypeCategory::Record,
             ),
-            (
-                callable(vec![basic("int")], basic("bool")),
-                FrozenTypeCategory::Callable,
-            ),
+            // ADR-009 B6: Callable is no longer pending — it has a positive
+            // payload test below (`site_interned_callable_answers_full_payload`).
             (
                 TypeAnnotation::Borrow {
                     mutable: false,
@@ -1576,6 +1661,283 @@ mod payload_query {
             freeze.payload_of(any),
             Ok(FrozenPayloadDescriptor::Erased { .. })
         ));
+    }
+
+    // ── ADR-009 B6: callable signature descriptor payload ────────────────
+
+    /// A `FunctionParam` with an explicit name/optionality/annotation.
+    fn param(name: Option<&str>, optional: bool, annotation: TypeAnnotation) -> FunctionParam {
+        FunctionParam {
+            name: name.map(str::to_string),
+            optional,
+            type_annotation: annotation,
+        }
+    }
+
+    fn function(params: Vec<FunctionParam>, returns: TypeAnnotation) -> TypeAnnotation {
+        TypeAnnotation::Function {
+            params,
+            returns: Box::new(returns),
+        }
+    }
+
+    /// B6 core: a site-interned callable answers a COMPLETE `FrozenCallable`
+    /// payload from the widened composite memo — ordered params with stable
+    /// type identities, optionality flags, and passing modes derived from the
+    /// borrow annotation, plus the return identity. Reconstructed WITHOUT
+    /// inverting the one-way SHA-256 identity (which drops names + modes).
+    #[test]
+    fn site_interned_callable_answers_full_payload() {
+        use super::payloads::{CallableDescriptor, ParamDescriptor};
+        use shape_runtime::comptime_reflection::PassingMode;
+
+        let overlay = module_overlay(|_| {});
+        // (count: int, label?: string, &mut int, &string) -> bool
+        let annotation = function(
+            vec![
+                param(Some("count"), false, basic("int")),
+                param(Some("label"), true, basic("string")),
+                param(
+                    None,
+                    false,
+                    TypeAnnotation::Borrow {
+                        mutable: true,
+                        inner: Box::new(basic("int")),
+                    },
+                ),
+                param(
+                    None,
+                    false,
+                    TypeAnnotation::Borrow {
+                        mutable: false,
+                        inner: Box::new(basic("string")),
+                    },
+                ),
+            ],
+            basic("bool"),
+        );
+        let identity = overlay
+            .canonicalize_type(&annotation)
+            .expect("callable canonicalizes");
+        assert_eq!(
+            overlay.category_of(identity),
+            Ok(FrozenTypeCategory::Callable)
+        );
+
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+        let bool_id = overlay.identity_of("bool").expect("bool identity");
+        let expected = CallableDescriptor {
+            params: vec![
+                ParamDescriptor {
+                    name: Some("count".to_string()),
+                    type_identity: int_id,
+                    optional: false,
+                    mode: PassingMode::Move,
+                },
+                ParamDescriptor {
+                    name: Some("label".to_string()),
+                    type_identity: string_id,
+                    optional: true,
+                    mode: PassingMode::Move,
+                },
+                ParamDescriptor {
+                    name: None,
+                    // Borrowed parameter: mode carries the borrow, type is the referent.
+                    type_identity: int_id,
+                    optional: false,
+                    mode: PassingMode::ExclusiveBorrow,
+                },
+                ParamDescriptor {
+                    name: None,
+                    type_identity: string_id,
+                    optional: false,
+                    mode: PassingMode::SharedBorrow,
+                },
+            ],
+            returns: bool_id,
+        };
+        assert_eq!(
+            overlay.payload_of(identity),
+            Ok(FrozenPayloadDescriptor::Callable(expected))
+        );
+    }
+
+    /// A module-level alias whose target is a callable type (`type Handler =
+    /// (int) -> bool`) interns a Callable identity into the BASE index; its
+    /// full signature descriptor is preserved in the same rebuild, so the base
+    /// `payload_of` answers a complete `FrozenCallable` — never a partial
+    /// descriptor (symmetric with the overlay memo).
+    #[test]
+    fn base_interned_callable_alias_answers_full_payload() {
+        let handler = callable(vec![basic("int")], basic("bool"));
+        let freeze = freeze_of(|compiler| {
+            compiler
+                .type_aliases
+                .insert("Handler".to_string(), format!("{handler:?}"));
+            compiler
+                .type_inference
+                .env
+                .define_type_alias("Handler", &handler, None);
+        });
+        let identity = freeze
+            .identity_of("Handler")
+            .expect("alias fixpoint interns the callable target");
+        assert_eq!(freeze.category_of(identity), Ok(FrozenTypeCategory::Callable));
+        let FrozenPayloadDescriptor::Callable(descriptor) =
+            freeze.payload_of(identity).expect("callable payload")
+        else {
+            panic!("expected a Callable payload");
+        };
+        assert_eq!(descriptor.params.len(), 1);
+        assert_eq!(
+            descriptor.params[0].type_identity,
+            freeze.identity_of("int").expect("int identity")
+        );
+        assert_eq!(
+            descriptor.returns,
+            freeze.identity_of("bool").expect("bool identity")
+        );
+    }
+
+    /// Parameter NAMES are identity-insignificant (grammar §Callable), yet the
+    /// preserved structure keeps them for hygienic `param(#name)` resolution.
+    #[test]
+    fn callable_identity_is_name_insignificant_but_structure_keeps_names() {
+        let overlay = module_overlay(|_| {});
+        let named = function(vec![param(Some("a"), false, basic("int"))], basic("bool"));
+        let anon = function(vec![param(None, false, basic("int"))], basic("bool"));
+
+        assert_eq!(
+            canon(&overlay, &named).identity,
+            canon(&overlay, &anon).identity,
+            "param names must not affect the canonical identity"
+        );
+
+        let identity = overlay.canonicalize_type(&named).expect("callable canonicalizes");
+        let FrozenPayloadDescriptor::Callable(descriptor) =
+            overlay.payload_of(identity).expect("callable payload")
+        else {
+            panic!("expected a Callable payload");
+        };
+        assert_eq!(descriptor.params[0].name.as_deref(), Some("a"));
+    }
+
+    /// Positional parameter identity is stable and order-significant: the
+    /// descriptor lists params in signature order and reordering re-hashes.
+    #[test]
+    fn callable_param_positions_are_stable_and_order_significant() {
+        let overlay = module_overlay(|_| {});
+        let annotation = callable(vec![basic("int"), basic("string")], basic("bool"));
+        let identity = overlay.canonicalize_type(&annotation).expect("canonicalizes");
+        let FrozenPayloadDescriptor::Callable(descriptor) =
+            overlay.payload_of(identity).expect("callable payload")
+        else {
+            panic!("expected a Callable payload");
+        };
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+        assert_eq!(descriptor.params.len(), 2);
+        assert_eq!(descriptor.params[0].type_identity, int_id);
+        assert_eq!(descriptor.params[1].type_identity, string_id);
+
+        let flipped = callable(vec![basic("string"), basic("int")], basic("bool"));
+        assert_ne!(
+            canon(&overlay, &annotation).identity,
+            canon(&overlay, &flipped).identity
+        );
+    }
+
+    /// R3 (Dec 52 — ordering): descriptor issuance for an UNRESOLVED signature
+    /// is rejected by the ONE freeze-boundary predicate
+    /// (`annotation_has_unresolved_inference_variable`) BEFORE any descriptor
+    /// is formed and interned — a hole at ANY depth (param, return, nested)
+    /// fires the named Dec-52 diagnostic, and nothing is memoized.
+    #[test]
+    fn callable_with_unresolved_inference_variable_rejects_before_issuance() {
+        let overlay = module_overlay(|_| {});
+        let holed_param = function(
+            vec![param(
+                None,
+                false,
+                tyvar_to_annotation(&TypeVar("P".to_string())),
+            )],
+            basic("bool"),
+        );
+        let holed_return = function(
+            vec![param(None, false, basic("int"))],
+            tyvar_to_annotation(&TypeVar("R".to_string())),
+        );
+        let holed_nested = callable(
+            vec![TypeAnnotation::Tuple(vec![
+                basic("int"),
+                tyvar_to_annotation(&TypeVar("N".to_string())),
+            ])],
+            basic("bool"),
+        );
+        for annotation in [holed_param, holed_return, holed_nested] {
+            let error = canonicalize_type_annotation(&annotation, &overlay)
+                .expect_err("unresolved signature must reject issuance");
+            assert!(
+                error.contains("unresolved inference variable"),
+                "Dec 52 freeze-boundary diagnostic missing: {error}"
+            );
+            // The rejection fires BEFORE any descriptor forms — no FrozenCallable
+            // is issued, and nothing is interned into the composite memo.
+            assert!(
+                overlay.canonicalize_type(&annotation).is_err(),
+                "an unresolved signature must never mint an identity"
+            );
+        }
+    }
+
+    /// The heap-value builder lowers a callable to a schema-correct nested
+    /// descriptor: `FrozenType{__variant: 6, __payload_0: FrozenCallable{params:
+    /// [ParamDescriptor…], returns_identity_high/low}}` — ordinal-pinned variant
+    /// id (6, never dense), typed nested objects, no rendered type-name strings.
+    #[test]
+    fn builder_produces_schema_correct_callable_descriptor() {
+        let overlay = module_overlay(|_| {});
+        let annotation = callable(vec![basic("int")], basic("bool"));
+        let identity = overlay.canonicalize_type(&annotation).expect("canonicalizes");
+
+        let frozen = payloads::build_frozen_type_heap_value(identity, &overlay)
+            .expect("callable payload builds");
+        let frozen_storage = storage_of(&frozen);
+        assert_eq!(schema_name_of(frozen_storage), COMPTIME_FROZEN_TYPE_SCHEMA);
+        let (variant, payload) = variant_and_payload(frozen_storage);
+        assert_eq!(
+            variant,
+            i64::from(FrozenTypeCategory::Callable.catalog_ordinal()),
+            "Callable is catalog ordinal 6, never dense"
+        );
+
+        let callable_storage = payload
+            .as_typed_object_storage()
+            .expect("payload must be a typed object");
+        assert_eq!(
+            schema_name_of(callable_storage),
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_CALLABLE_SCHEMA
+        );
+        // params (field 0) is a TypedArray; returns halves (fields 1,2) match bool.
+        let params = callable_storage
+            .clone_field_kinded(0)
+            .expect("params must be readable");
+        assert_eq!(
+            params.kind(),
+            NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)
+        );
+        let bool_id = overlay.identity_of("bool").expect("bool identity");
+        let returns_high = callable_storage
+            .clone_field_kinded(1)
+            .and_then(|slot| slot.as_i64())
+            .expect("returns_identity_high");
+        let returns_low = callable_storage
+            .clone_field_kinded(2)
+            .and_then(|slot| slot.as_i64())
+            .expect("returns_identity_low");
+        assert_eq!(returns_high, bool_id.high);
+        assert_eq!(returns_low, bool_id.low);
     }
 
     // ── heap-value builders ──────────────────────────────────────────────
