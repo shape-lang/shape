@@ -8,6 +8,36 @@ use crate::type_schema::builtin_schemas::{
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind};
 
+// ADR-009 B3 (Dec 51) — canonical existential-package rejection diagnostics.
+// These live in shape-runtime so BOTH the type-inference tier (this crate) and
+// the freeze/compile tier (`shape-vm` `comptime_builtins::existential`, which
+// re-exports them) speak ONE string per rejection — no divergent copies.
+
+/// Rejection-matrix row 6: `comptime for some<W...>` iterates a heterogeneous
+/// existential descriptor collection. An element type that is not an
+/// existential descriptor package is this named rejection.
+pub const NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC: &str =
+    "comptime for some can only iterate a heterogeneous existential descriptor \
+     collection: the element type is not an existential descriptor package \
+     (exists<W...> Descriptor<W...>)";
+
+/// Rejection-matrix row 2: a hidden witness opened by `comptime for some` may
+/// not escape its opening scope. Binding a witness-typed value to an
+/// enclosing-scope name (so it outlives the loop) is this named rejection —
+/// unless the value is explicitly repackaged as an existential.
+pub const WITNESS_ESCAPES_SCOPE_DIAGNOSTIC: &str =
+    "hidden witness cannot escape its `some` opening scope unless explicitly \
+     repackaged in an existential value: a witness-typed binding may not be \
+     assigned to an enclosing-scope variable";
+
+/// Rejection-matrix row 3: `comptime for some` is sugar over the same
+/// reflect()/payload_of surface (a rank-2 generic callback). Reaching for a
+/// second reflection/iterator protocol is refused on sight.
+pub const SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC: &str =
+    "comptime for some is iteration sugar over the single reflect()/payload \
+     surface (Dec 51); a second reflection or iterator protocol is not \
+     permitted";
+
 /// ADR-009 A1 S4 — single-source catalog macro.
 ///
 /// One variant list generates the `FrozenTypeCategory` enum, its exhaustive
@@ -71,6 +101,15 @@ macro_rules! frozen_type_category_catalog {
 
 frozen_type_category_catalog!(
     Primitive, Never, Parameter, Nominal, Tuple, Record, Callable, Reference, Union, Erased,
+    // ADR-009 B3 (Dec 51): existential descriptor packages
+    // (`exists<W...> Descriptor<W...>`). Appended so existing catalog ordinals
+    // stay ABI-stable (spec §3.3). Its `reflect()` payload is not enabled
+    // (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`) — reflecting it is the named
+    // R1 per-category rejection, and it is never returned by a bare
+    // `type_category`/`reflect` (an existential's witnesses are hidden — it
+    // only appears as a descriptor collection's element type, opened by
+    // `comptime for some<W...>`).
+    Existential,
 );
 
 /// Descriptor row for one `FrozenPrimitive` catalog member: the variant name
@@ -567,9 +606,10 @@ mod tests {
                 "Reference",
                 "Union",
                 "Erased",
+                "Existential",
             ]
         );
-        assert_eq!(names.iter().copied().collect::<HashSet<_>>().len(), 10);
+        assert_eq!(names.iter().copied().collect::<HashSet<_>>().len(), 11);
         assert!(!names.contains(&"Unknown"));
     }
 
@@ -909,7 +949,7 @@ mod tests {
                 .expect("enabled payload variant must be a catalog category");
             assert_eq!(position as u16, category.catalog_ordinal());
         }
-        assert_eq!(FrozenTypeCategory::ALL.len(), 10);
+        assert_eq!(FrozenTypeCategory::ALL.len(), 11);
     }
 
     /// The enabled-payload doc enumeration is derived from the same list

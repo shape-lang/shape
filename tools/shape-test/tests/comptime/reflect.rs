@@ -216,11 +216,12 @@ print(describe("s"))
     expect_vm_and_jit_output(source, "signed:arbitrary\nsigned:arbitrary");
 }
 
-/// The category layer stays exhaustive at 10 alongside reflect in the SAME
-/// program: `type_category` still matches all 10 `FrozenTypeCategory`
-/// variants while `reflect` matches the 3-variant payload sum.
+/// The category layer stays exhaustive at 11 alongside reflect in the SAME
+/// program: `type_category` still matches all 11 `FrozenTypeCategory`
+/// variants (ADR-009 B3 appended `Existential`) while `reflect` matches the
+/// 3-variant payload sum.
 #[test]
-fn type_category_stays_exhaustive_at_ten_alongside_reflect() {
+fn type_category_stays_exhaustive_at_eleven_alongside_reflect() {
     let source = r#"
 let category = comptime {
   match type_category(type_ref(int)) {
@@ -234,6 +235,7 @@ let category = comptime {
     FrozenTypeCategory::Reference => "reference"
     FrozenTypeCategory::Union => "union"
     FrozenTypeCategory::Erased => "erased"
+    FrozenTypeCategory::Existential => "existential"
   }
 }
 let payload = comptime {

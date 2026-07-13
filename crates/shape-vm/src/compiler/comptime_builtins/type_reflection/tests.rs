@@ -796,6 +796,41 @@ fn applied_generic_is_nominal_with_args_distinct_from_bare_head() {
     );
 }
 
+/// ADR-009 B3 (S2): the existential package descriptor is
+/// `exists:{arity}:{inner_hex}`, where the inner descriptor canonicalizes the
+/// witnesses POSITIONALLY (`witness:{index}`). This pins the B4/B7 ABI
+/// substrate: the identity is alpha-invariant, arity-significant, and distinct
+/// from the concrete instantiation of the same head.
+#[test]
+fn existential_package_descriptor_embeds_positional_witness_identities() {
+    let overlay = module_overlay(|compiler| {
+        add_struct(compiler, "Owner");
+        add_generic_struct(compiler, "Pair", &["A", "B"]);
+    });
+
+    let package = canon(
+        &overlay,
+        &TypeAnnotation::Existential {
+            witnesses: vec!["I".to_string(), "F".to_string()],
+            inner: Box::new(applied("Pair", vec![basic("I"), basic("F")])),
+        },
+    );
+    assert_eq!(package.category, FrozenTypeCategory::Existential);
+
+    let w0 = identity_hex(FrozenTypeIdentity::from_canonical_descriptor("witness:0"));
+    let w1 = identity_hex(FrozenTypeIdentity::from_canonical_descriptor("witness:1"));
+    let inner_descriptor = format!("applied:{}<{w0},{w1}>", leaf_hex(&overlay, "Pair"));
+    let inner_identity = FrozenTypeIdentity::from_canonical_descriptor(&inner_descriptor);
+    assert_eq!(
+        package.descriptor,
+        format!("exists:2:{}", identity_hex(inner_identity))
+    );
+
+    // The package is distinct from the concrete instantiation Pair<Owner,Owner>.
+    let concrete = canon(&overlay, &applied("Pair", vec![basic("Owner"), basic("Owner")]));
+    assert_ne!(package.identity, concrete.identity);
+}
+
 #[test]
 fn array_sugar_and_applied_array_share_identity() {
     let overlay = module_overlay(|_| {});

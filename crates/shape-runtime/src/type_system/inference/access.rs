@@ -490,6 +490,23 @@ impl TypeInferenceEngine {
                     .map(|arg| Self::substitute_type_params_in_annotation(arg, bindings))
                     .collect(),
             },
+            // ADR-009 B3 (S1): existential descriptor package type. The
+            // witnesses are locally bound, so outer type-param bindings must not
+            // substitute them — shadow them out before recursing into the inner
+            // descriptor.
+            TypeAnnotation::Existential { witnesses, inner } => {
+                let mut inner_bindings = bindings.clone();
+                for w in witnesses {
+                    inner_bindings.remove(w);
+                }
+                TypeAnnotation::Existential {
+                    witnesses: witnesses.clone(),
+                    inner: Box::new(Self::substitute_type_params_in_annotation(
+                        inner,
+                        &inner_bindings,
+                    )),
+                }
+            }
             TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null

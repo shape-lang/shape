@@ -695,6 +695,59 @@ fn canonicalize_resolved(
             }
             canonical_erased_bounds(names)
         }
+        // ADR-009 B3 (S2): existential descriptor package
+        // (`exists<W...> Descriptor<W...>`). The witnesses are canonicalized
+        // POSITIONALLY (`witness:{index}` — de-Bruijn), so the package
+        // identity is alpha-invariant (witness names don't matter) and
+        // site-independent; the arity prefix makes it distinct per witness
+        // count. Descriptor grammar: `exists:{arity}:{inner_hex}`. A witness
+        // slot spelled with the compiler-internal `Any` top type erases the
+        // witness — the named row-1 rejection, never a minted identity.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            if witnesses.is_empty() {
+                // The parser rejects `exists<>`; a fabricated empty AST would
+                // otherwise mint a witness-less "existential" — reject it
+                // rather than form a meaningless identity.
+                return Err(
+                    "existential descriptor package must bind at least one witness"
+                        .to_string(),
+                );
+            }
+            if super::existential::annotation_erases_witness_to_any(inner) {
+                return Err(super::existential::WITNESS_ERASED_TO_ANY_DIAGNOSTIC.to_string());
+            }
+            let witness_index: HashMap<&str, usize> = witnesses
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.as_str(), index))
+                .collect();
+            let outer_resolve = scope.resolve;
+            // Positional witness scope: a witness always shadows an outer name
+            // (it is a bound de-Bruijn slot inside this package).
+            let resolve = |name: &str| -> Option<(FrozenTypeIdentity, FrozenTypeCategory)> {
+                if let Some(&index) = witness_index.get(name) {
+                    return Some((
+                        FrozenTypeIdentity::from_canonical_descriptor(&format!("witness:{index}")),
+                        FrozenTypeCategory::Parameter,
+                    ));
+                }
+                (outer_resolve)(name)
+            };
+            let witness_scope = LeafScope {
+                resolve: &resolve,
+                is_trait: scope.is_trait,
+                applied_arity: scope.applied_arity,
+            };
+            let inner_canon = canonicalize_resolved(inner, &witness_scope)?;
+            Ok(composite(
+                format!(
+                    "exists:{}:{}",
+                    witnesses.len(),
+                    identity_hex(inner_canon.identity)
+                ),
+                FrozenTypeCategory::Existential,
+            ))
+        }
     }
 }
 

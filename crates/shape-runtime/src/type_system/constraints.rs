@@ -852,8 +852,149 @@ impl ConstraintSolver {
                 .iter()
                 .all(|t| self.has_trait_impl(t.as_str(), path.as_str()))),
 
+            // ADR-009 B3 (Dec 51): existential introduction (subsumption). A
+            // concrete descriptor value is accepted where an `exists<W...>
+            // Descriptor<W...>` package is expected — the witnesses are HIDDEN,
+            // so only the descriptor's non-witness structure must match; the
+            // witness positions are existentially quantified away. Introduction
+            // is directional (concrete → package), but element/annotation
+            // constraints arrive in either orientation, so both sides are
+            // handled. This is the ONLY relation that crosses the
+            // concrete/existential boundary; it introduces NO second reflection
+            // protocol (Dec 51 — `for some` is sugar over the same surface).
+            (TypeAnnotation::Existential { witnesses, inner }, concrete)
+            | (concrete, TypeAnnotation::Existential { witnesses, inner }) => {
+                self.existential_introduces(witnesses, inner, concrete)
+            }
+
             // Different types don't unify
             _ => Ok(false),
+        }
+    }
+
+    /// ADR-009 B3 (Dec 51) — existential introduction: does `concrete`
+    /// introduce into `exists<witnesses> inner`?
+    ///
+    /// * If `concrete` is itself an existential package, require alpha-equal
+    ///   packages (same witness arity + structurally-equal inner up to witness
+    ///   renaming). This keeps `exists<T> D<T>` self-compatible without erasing
+    ///   the witness arity.
+    /// * Otherwise the witnesses are hidden: the head nominal must match and
+    ///   every NON-witness argument position must unify. Witness positions
+    ///   accept anything (they are quantified away), and a fully-erased concrete
+    ///   (no type arguments, e.g. the B1 `reflect(...) : FrozenType` payload
+    ///   introduced into `exists<T> FrozenType<T>`) is accepted when every inner
+    ///   argument is a witness.
+    fn existential_introduces(
+        &self,
+        witnesses: &[String],
+        inner: &TypeAnnotation,
+        concrete: &TypeAnnotation,
+    ) -> TypeResult<bool> {
+        if let TypeAnnotation::Existential {
+            witnesses: w2,
+            inner: inner2,
+        } = concrete
+        {
+            // Alpha-equivalence: rename both witness sets to positional markers
+            // and compare the inner descriptors structurally. Two existential
+            // packages are the same type iff their inner descriptors are
+            // structurally identical up to witness renaming — an EXACT
+            // structural comparison (`annotations_equal`), not the widening
+            // `unify_annotations` (which has no plain Generic~Generic arm and
+            // would spuriously reject two identical `Descriptor<W>` inners).
+            return Ok(witnesses.len() == w2.len()
+                && crate::type_system::unification::annotations_equal(
+                    &Self::mark_witnesses_positionally(inner, witnesses),
+                    &Self::mark_witnesses_positionally(inner2, w2),
+                ));
+        }
+
+        let is_witness = |ann: &TypeAnnotation| -> bool {
+            ann.as_type_name_str()
+                .is_some_and(|n| witnesses.iter().any(|w| w == n))
+        };
+
+        let (inner_head, inner_args) = Self::head_and_args(inner);
+        let (concrete_head, concrete_args) = Self::head_and_args(concrete);
+        let (Some(inner_head), Some(concrete_head)) = (inner_head, concrete_head) else {
+            return Ok(false);
+        };
+        if inner_head != concrete_head {
+            return Ok(false);
+        }
+
+        // Fully-erased introduction: the concrete carries no type arguments and
+        // every inner argument is a hidden witness (the B1 reflect payload
+        // case). The head match alone certifies introduction.
+        if concrete_args.is_empty() && inner_args.iter().all(|a| is_witness(a)) {
+            return Ok(true);
+        }
+
+        // Precisely-typed introduction: matching arity, witness positions
+        // hidden, non-witness positions must unify.
+        if inner_args.len() != concrete_args.len() {
+            return Ok(false);
+        }
+        for (inner_arg, concrete_arg) in inner_args.iter().zip(concrete_args.iter()) {
+            if is_witness(inner_arg) {
+                continue;
+            }
+            if !self.unify_annotations(inner_arg, concrete_arg)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Head nominal name + type-argument slice of an annotation, for
+    /// existential introduction. A bare `Basic`/`Reference` has no arguments;
+    /// an applied `Generic` exposes its arguments.
+    fn head_and_args(ann: &TypeAnnotation) -> (Option<&str>, &[TypeAnnotation]) {
+        match ann {
+            TypeAnnotation::Generic { name, args } => (Some(name.as_str()), args.as_slice()),
+            TypeAnnotation::Basic(name) => (Some(name.as_str()), &[]),
+            TypeAnnotation::Reference(path) => (Some(path.as_str()), &[]),
+            _ => (None, &[]),
+        }
+    }
+
+    /// Rewrite each witness occurrence in `ann` to a positional marker
+    /// (`witness:{index}`) so two alpha-equivalent existential packages compare
+    /// structurally-equal regardless of witness spelling. Non-witness structure
+    /// is preserved verbatim.
+    fn mark_witnesses_positionally(ann: &TypeAnnotation, witnesses: &[String]) -> TypeAnnotation {
+        let index_of = |name: &str| witnesses.iter().position(|w| w == name);
+        if let Some(name) = ann.as_type_name_str() {
+            if let Some(idx) = index_of(name) {
+                // Only a bare (unapplied) witness name is a witness leaf; an
+                // applied `W<..>` is handled by the Generic arm below.
+                if matches!(
+                    ann,
+                    TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)
+                ) {
+                    return TypeAnnotation::Basic(format!("\u{1}witness:{idx}"));
+                }
+            }
+        }
+        match ann {
+            TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| Self::mark_witnesses_positionally(a, witnesses))
+                    .collect(),
+            },
+            TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(
+                Self::mark_witnesses_positionally(inner, witnesses),
+            )),
+            TypeAnnotation::Tuple(items) => TypeAnnotation::Tuple(
+                items
+                    .iter()
+                    .map(|a| Self::mark_witnesses_positionally(a, witnesses))
+                    .collect(),
+            ),
+            other => other.clone(),
         }
     }
 
@@ -1617,6 +1758,61 @@ mod tests {
 
     fn fresh_type(tvgen: &mut TypeVarGen) -> Type {
         tvgen.fresh_type()
+    }
+
+    /// ADR-009 B3 (Dec 51) — existential introduction (subsumption). A concrete
+    /// descriptor value is accepted where an `exists<W...> Descriptor<W...>`
+    /// package is expected, in BOTH constraint orientations:
+    ///  * fully-erased introduction (`FrozenType` → `exists<T> FrozenType<T>`,
+    ///    the B1 reflect-payload case where the witness is fully hidden);
+    ///  * precisely-typed introduction (`Pair<int, bool>` → `exists<F> Pair<int,
+    ///    F>`, non-witness `int` must match, witness `F` is hidden);
+    ///  * alpha-equivalent packages share one identity;
+    ///  * a non-witness mismatch or a head mismatch still rejects.
+    #[test]
+    fn existential_introduction_accepts_erased_and_precise_descriptors() {
+        use shape_ast::ast::TypeAnnotation;
+
+        let existential = |witnesses: &[&str], inner: TypeAnnotation| TypeAnnotation::Existential {
+            witnesses: witnesses.iter().map(|w| w.to_string()).collect(),
+            inner: Box::new(inner),
+        };
+        let generic = |name: &str, args: Vec<TypeAnnotation>| TypeAnnotation::Generic {
+            name: shape_ast::ast::TypePath::simple(name),
+            args,
+        };
+        let b = |n: &str| TypeAnnotation::Basic(n.to_string());
+        let solver = ConstraintSolver::new();
+        // `solve_constraint`'s concrete/concrete arm routes through
+        // `unify_annotations` — the relation carrying existential introduction.
+        let unifies = |x: &TypeAnnotation, y: &TypeAnnotation| solver.unify_annotations(x, y).unwrap();
+
+        // Fully-erased introduction, both orientations (the B1 reflect payload:
+        // `FrozenType` into `exists<T> FrozenType<T>`).
+        let pkg = existential(&["T"], generic("FrozenType", vec![b("T")]));
+        let erased = b("FrozenType");
+        assert!(unifies(&pkg, &erased));
+        assert!(unifies(&erased, &pkg));
+
+        // Head mismatch rejects.
+        assert!(!unifies(&pkg, &b("Other")));
+
+        // Precisely-typed introduction: non-witness position must match.
+        let pair_pkg = existential(&["F"], generic("Pair", vec![b("int"), b("F")]));
+        assert!(unifies(&pair_pkg, &generic("Pair", vec![b("int"), b("bool")])));
+        assert!(
+            !unifies(&pair_pkg, &generic("Pair", vec![b("string"), b("bool")])),
+            "a non-witness position mismatch must still reject"
+        );
+
+        // Alpha-equivalent packages are one type (witness spelling irrelevant).
+        let pkg_a = existential(&["A"], generic("FrozenType", vec![b("A")]));
+        let pkg_b = existential(&["B"], generic("FrozenType", vec![b("B")]));
+        assert!(unifies(&pkg_a, &pkg_b));
+
+        // Distinct witness arity is a distinct package.
+        let pkg_arity2 = existential(&["A", "B"], generic("Pair", vec![b("A"), b("B")]));
+        assert!(!unifies(&pkg_a, &pkg_arity2));
     }
 
     /// U1 ISOLATION GATE (STRUCTURAL-AUDIT §U1 regression test).

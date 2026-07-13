@@ -25,6 +25,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+pub(crate) mod existential;
 pub(crate) mod expansion_provenance;
 pub(crate) mod semantic_freeze;
 // ADR-009 (ticket B2, slice S3): opaque TraitRef/ImplRef carriers + the

@@ -281,6 +281,20 @@ pub fn substitute_type_annotation(
                 .collect(),
         },
 
+        // ADR-009 B3 (S1): existential descriptor package. Witnesses are
+        // locally bound, so shadow them out of the substitution before
+        // recursing into the inner descriptor.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            let mut inner_subs = subs.clone();
+            for w in witnesses {
+                inner_subs.remove(w);
+            }
+            TypeAnnotation::Existential {
+                witnesses: witnesses.clone(),
+                inner: Box::new(substitute_type_annotation(inner, &inner_subs)),
+            }
+        }
+
         // Leaves with no nested type annotations.
         TypeAnnotation::Void => TypeAnnotation::Void,
         TypeAnnotation::Never => TypeAnnotation::Never,
@@ -1334,6 +1348,7 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
 
         Expr::ComptimeFor(comp_for, span) => Expr::ComptimeFor(
             Box::new(ComptimeForExpr {
+                witnesses: comp_for.witnesses.clone(),
                 variable: comp_for.variable.clone(),
                 iterable: Box::new(substitute_const_in_expr(&comp_for.iterable, const_subs)),
                 body: comp_for
@@ -2213,6 +2228,7 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
 
         Expr::ComptimeFor(comp_for, span) => Expr::ComptimeFor(
             Box::new(ComptimeForExpr {
+                witnesses: comp_for.witnesses.clone(),
                 variable: comp_for.variable.clone(),
                 iterable: Box::new(substitute_expr(&comp_for.iterable, subs)),
                 body: comp_for

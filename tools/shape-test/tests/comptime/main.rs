@@ -1,5 +1,6 @@
 mod annotations;
 mod blocks;
+mod existential;
 mod flagship_wf3d;
 mod frozen_type;
 mod functions;

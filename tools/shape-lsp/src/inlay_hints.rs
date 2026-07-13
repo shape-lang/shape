@@ -668,6 +668,37 @@ impl<'a> HintContext<'a> {
             return;
         }
 
+        // ADR-009 B3 (S3): a `some`-bound iteration renders the OPENED witness /
+        // descriptor type at the loop head, via the shared freeze-query surface
+        // (`open_comptime_some_descriptor`) — the same `TypeAnnotation` carrier
+        // the compiler's canonicalizer consumes, never a hand-written row.
+        if !comptime_for.witnesses.is_empty() {
+            if let Some(opened) =
+                crate::type_inference::open_comptime_some_descriptor(comptime_for, self.program)
+            {
+                let position = offset_to_position(self.text, span.end);
+                if is_in_range(position, self.range) {
+                    self.hints.push(InlayHint {
+                        position,
+                        label: InlayHintLabel::String(opened.descriptor.clone()),
+                        kind: Some(InlayHintKind::TYPE),
+                        text_edits: None,
+                        tooltip: Some(tower_lsp_server::ls_types::InlayHintTooltip::String(
+                            format!(
+                                "`{}` opened from `{}` — fresh hidden witness `{}` per `comptime for some` iteration; cannot escape this scope.",
+                                opened.descriptor,
+                                opened.existential,
+                                opened.witnesses.join(", "),
+                            ),
+                        )),
+                        padding_left: Some(true),
+                        padding_right: Some(false),
+                        data: None,
+                    });
+                }
+            }
+        }
+
         // Try to resolve iteration count from iterable
         let hint_label =
             if let Expr::PropertyAccess { property, .. } = comptime_for.iterable.as_ref() {

@@ -814,18 +814,40 @@ impl super::BytecodeCompiler {
         }
         // User-struct annotation: `Array<B>` / `B[]` where B is a registered
         // struct type. Map to TypedArrayKind::TypedObject per §2.1 + §3.A row 1.
-        let inner_name = match annotation {
+        //
+        // ADR-009 B3 (Dec 51): an `Array<exists<W...> Descriptor<W...>>`
+        // existential-descriptor collection carries the SAME TypedObject carrier
+        // as its underlying nominal descriptor — the witnesses are a type-level
+        // opening, invisible to the runtime carrier. Unwrap the existential to
+        // the inner descriptor's head nominal (`exists<T> FrozenType<T>` →
+        // `FrozenType`) and resolve that. This is NOT a new carrier: the B1
+        // reflect payload is already a `TypedObject`-carried enum value.
+        fn carrier_nominal_name(ann: &TypeAnnotation) -> Option<&str> {
+            match ann {
+                TypeAnnotation::Basic(n) => Some(n.as_str()),
+                TypeAnnotation::Existential { inner, .. } => carrier_nominal_name(inner),
+                // Only unwrap a Generic head when it names the descriptor of an
+                // existential package (reached via the arm above); a bare
+                // top-level `Array<Foo<X>>` element still returns None here.
+                _ => None,
+            }
+        }
+        let element_ann = match annotation {
             TypeAnnotation::Generic { name, args }
                 if name.as_str() == "Array" && args.len() == 1 =>
             {
-                match &args[0] {
-                    TypeAnnotation::Basic(n) => Some(n.as_str()),
-                    _ => None,
-                }
+                Some(&args[0])
             }
-            TypeAnnotation::Array(inner) => match inner.as_ref() {
-                TypeAnnotation::Basic(n) => Some(n.as_str()),
-                _ => None,
+            TypeAnnotation::Array(inner) => Some(inner.as_ref()),
+            _ => None,
+        };
+        let inner_name = match element_ann {
+            Some(TypeAnnotation::Basic(n)) => Some(n.as_str()),
+            // Existential descriptor package: resolve the hidden descriptor's
+            // head nominal (Generic `FrozenType<T>` or bare `FrozenType`).
+            Some(TypeAnnotation::Existential { inner, .. }) => match inner.as_ref() {
+                TypeAnnotation::Generic { name, .. } => Some(name.as_str()),
+                other => carrier_nominal_name(other),
             },
             _ => None,
         }?;

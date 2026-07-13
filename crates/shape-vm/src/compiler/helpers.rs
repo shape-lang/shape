@@ -5722,6 +5722,15 @@ impl BytecodeCompiler {
             // typed-object element kind); intermediate Any here, the
             // trait registry resolves the concrete dispatch downstream.
             TypeAnnotation::Dyn(_) => FieldType::Any,
+            // ADR-009 B3 (S1): existential descriptor package types
+            // (`exists<W...> Descriptor<W...>`) are comptime-only descriptor
+            // packages — they never materialize as a runtime field-storage
+            // value at S1 (no way to construct a value of existential type
+            // yet). Intermediate Any at the schema tier, consistent with the
+            // other non-storable annotation forms above; the reflection
+            // representation is the freeze surface's job (S2/S3), not runtime
+            // slot storage.
+            TypeAnnotation::Existential { .. } => FieldType::Any,
         }
     }
 

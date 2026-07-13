@@ -188,6 +188,14 @@ impl Unifier {
                     .collect(),
             },
 
+            // ADR-009 B3 (S1): existential descriptor package type. Recurse into
+            // the inner descriptor (it may carry tyvar markers); witnesses pass
+            // through unchanged.
+            TypeAnnotation::Existential { witnesses, inner } => TypeAnnotation::Existential {
+                witnesses: witnesses.clone(),
+                inner: Box::new(self.apply_to_annotation(inner)),
+            },
+
             // No substitutions needed for these
             TypeAnnotation::Basic(_)
             | TypeAnnotation::Reference(_)
@@ -257,6 +265,9 @@ fn annotation_occurs(var: &TypeVar, ann: &TypeAnnotation) -> bool {
             types.iter().any(|t| annotation_occurs(var, t))
         }
         TypeAnnotation::Generic { args, .. } => args.iter().any(|a| annotation_occurs(var, a)),
+        // ADR-009 B3 (S1): existential descriptor package type — a tyvar marker
+        // can be buried in the inner descriptor.
+        TypeAnnotation::Existential { inner, .. } => annotation_occurs(var, inner),
         TypeAnnotation::Basic(_)
         | TypeAnnotation::Reference(_)
         | TypeAnnotation::Void

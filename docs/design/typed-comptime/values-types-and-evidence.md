@@ -216,6 +216,41 @@ Accepted: heterogeneous reflection collections use ordinary language-level
 existential packages. Lexical `some` bindings provide ergonomic typed access;
 they are not a compiler-only dynamic iterator.
 
+**CURRENT-partial / VM+JIT (ADR009-B3 S1).** The `exists<W...> Descriptor<W...>`
+package type is canonicalized through the FrozenTypeIdentity SHA-256 scheme
+(positional de-Bruijn `exists:{arity}:{inner}`, alpha-invariant), existential
+introduction accepts a concrete descriptor where the package is expected
+(witnesses hidden), and `comptime for some<W...> x in coll {}` opens fresh
+per-iteration hidden witnesses (freeze-overlay scoped, restored on exit) and
+binds the loop variable to the opened descriptor. `for some` is sugar over the
+same reflect()/payload freeze surface — it is the existing runtime for-loop
+rewrite, never a second reflection protocol. The rejection matrix is enforced
+with named diagnostics: witness-erased-to-`Any`, witness escape, non-existential
+iterable, and no-freeze-handle. Proven over the B1
+`Array<exists<T> FrozenType<T>>` reflect-payload substrate (the first concrete
+descriptor family). Engine scope, stated precisely: `comptime for some`
+iteration executes at compile time on the comptime VM interpreter — comptime
+code never tiers up to the JIT, so no engine iterates the collection at
+runtime. The VM/JIT dual-run in the evidence proves the *enclosing* program
+(the comptime block plus its downstream runtime use of the folded result)
+lowers and runs identically under both the interpreter and the JIT tier — i.e.
+the feature is JIT-tier-clean at the comptime→runtime boundary; it is NOT a
+claim that the JIT iterates the existential collection. Families beyond B1
+(`FieldDescriptor` / `record.fields`,
+variants, params) land with B5-B7. LSP hover and inlay over a `some`-bound
+witness binding render the opened descriptor (`FrozenType<T>`), the comptime
+stage, and the escape rule — driven by the SAME shared query surface the
+compiler's canonicalizer consumes (`open_comptime_some_descriptor`), not a
+hand-written metadata row — and hovering a `some`-clause witness name renders
+the opened hidden witness (ADR009-B3 S3). Evidence:
+`tools/shape-test/tests/comptime/existential.rs`,
+`tools/shape-test/tests/lsp/typed_comptime.rs` (S3 witness hover/inlay:
+`hover_on_some_bound_loop_var_shows_opened_descriptor_and_stage`,
+`hover_on_some_witness_name_shows_opened_hidden_witness`,
+`inlay_on_some_bound_iteration_shows_opened_descriptor`), and the unit tests in
+`crates/shape-runtime/src/type_system/constraints.rs` +
+`crates/shape-vm/src/compiler/comptime_builtins/existential.rs`.
+
 **TARGET - proposed positive example**
 
 ```shape

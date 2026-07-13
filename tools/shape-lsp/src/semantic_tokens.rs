@@ -388,6 +388,15 @@ impl<'a> TokenCollector<'a> {
                     out.push(trait_name.as_str());
                 }
             }
+            // ADR-009 B3 (S1): existential descriptor package. Surface the
+            // witness names and recurse into the inner descriptor so tokens
+            // cover the whole `exists<W...> Descriptor<W...>` spelling.
+            TypeAnnotation::Existential { witnesses, inner } => {
+                for witness in witnesses {
+                    out.push(witness.as_str());
+                }
+                Self::collect_type_annotation_identifiers(inner, out);
+            }
             TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null

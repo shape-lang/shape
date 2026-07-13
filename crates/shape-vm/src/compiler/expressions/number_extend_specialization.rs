@@ -89,6 +89,18 @@ pub(super) fn substitute_type_params_in_annotation(
             mutable: *mutable,
             inner: Box::new(substitute_type_params_in_annotation(inner, substitutions)),
         },
+        // ADR-009 B3 (S1): existential descriptor package. Witnesses are locally
+        // bound, so shadow them out of the substitution before recursing.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            let mut inner_subs = substitutions.clone();
+            for w in witnesses {
+                inner_subs.remove(w);
+            }
+            TypeAnnotation::Existential {
+                witnesses: witnesses.clone(),
+                inner: Box::new(substitute_type_params_in_annotation(inner, &inner_subs)),
+            }
+        }
         TypeAnnotation::Void
         | TypeAnnotation::Never
         | TypeAnnotation::Null

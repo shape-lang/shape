@@ -748,6 +748,14 @@ impl SemanticFreeze {
 pub(crate) struct FreezeOverlay {
     base: Arc<SemanticFreeze>,
     parameters: HashMap<String, FrozenTypeIdentity>,
+    /// ADR-009 B3 (S2): hidden witnesses opened by
+    /// [`FreezeOverlay::open_witnesses`] for one `comptime for some<W...>`
+    /// site (`parameter:{some_site}:{witness}` identities). A DISTINCT binder
+    /// layer from `parameters`: a declared type parameter defers to a
+    /// same-named base identity (interning-order parity), but a freshly-opened
+    /// hidden witness ALWAYS shadows the base — it is a new opaque type, so the
+    /// witness layer is consulted first in every query below.
+    witnesses: HashMap<String, FrozenTypeIdentity>,
     /// Site-interned composite identities (S2). Interior-mutable because the
     /// overlay is shared as `Arc<FreezeOverlay>` between the rewrite and the
     /// intrinsics; populated ONLY by [`FreezeOverlay::canonicalize_type`].
@@ -779,6 +787,7 @@ impl FreezeOverlay {
         Self {
             base,
             parameters,
+            witnesses: HashMap::new(),
             composites: Mutex::new(HashMap::new()),
         }
     }
@@ -812,9 +821,13 @@ impl FreezeOverlay {
         Ok(canonical.identity)
     }
 
-    /// Shared query API: base identities first (interning-order parity), then
-    /// this overlay's scoped parameters.
+    /// Shared query API: opened hidden witnesses shadow first (S2 — a witness
+    /// is a fresh opaque type), then base identities (interning-order parity),
+    /// then this overlay's scoped declared parameters.
     pub(crate) fn identity_of(&self, name: &str) -> Option<FrozenTypeIdentity> {
+        if let Some(&identity) = self.witnesses.get(name) {
+            return Some(identity);
+        }
         self.base
             .identity_of(name)
             .or_else(|| self.parameters.get(name).copied())
@@ -828,10 +841,11 @@ impl FreezeOverlay {
         &self,
         identity: FrozenTypeIdentity,
     ) -> std::result::Result<FrozenTypeCategory, String> {
-        if self
-            .parameters
-            .values()
-            .any(|&parameter| parameter == identity)
+        if self.witnesses.values().any(|&witness| witness == identity)
+            || self
+                .parameters
+                .values()
+                .any(|&parameter| parameter == identity)
         {
             return Ok(FrozenTypeCategory::Parameter);
         }
@@ -866,10 +880,11 @@ impl FreezeOverlay {
     ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
     {
         use super::type_reflection::payloads;
-        if self
-            .parameters
-            .values()
-            .any(|&parameter| parameter == identity)
+        if self.witnesses.values().any(|&witness| witness == identity)
+            || self
+                .parameters
+                .values()
+                .any(|&parameter| parameter == identity)
         {
             return Err(payloads::pending_payload_rejection(
                 FrozenTypeCategory::Parameter,
@@ -907,7 +922,14 @@ impl FreezeOverlay {
                 | FrozenTypeCategory::Record
                 | FrozenTypeCategory::Callable
                 | FrozenTypeCategory::Reference
-                | FrozenTypeCategory::Union) => Err(payloads::pending_payload_rejection(pending)),
+                | FrozenTypeCategory::Union
+                // ADR-009 B3 (S2): a site-interned existential descriptor
+                // package. Its iteration payload (the opened witness element
+                // descriptors) lands with slice S3 — until then it is the
+                // named R1 per-category rejection, never a partial descriptor.
+                | FrozenTypeCategory::Existential) => {
+                    Err(payloads::pending_payload_rejection(pending))
+                }
             };
         }
         self.base.payload_of(identity)
@@ -962,7 +984,39 @@ impl FreezeOverlay {
     /// (i.e. it resolves to [`FrozenTypeCategory::Parameter`] here and is
     /// not shadowed by a base identity).
     pub(crate) fn is_scoped_parameter(&self, name: &str) -> bool {
-        self.parameters.contains_key(name)
+        self.witnesses.contains_key(name) || self.parameters.contains_key(name)
+    }
+
+    /// ADR-009 B3 (slice S2): open an existential descriptor package's hidden
+    /// witnesses for ONE `comptime for some<W...>` iteration site. Fresh
+    /// `parameter:{some_site}:{witness}` identities are scoped over the SAME
+    /// shared base freeze — modeled on [`Self::new`]'s scoped-parameter
+    /// mechanism and the specialization type-param overlay
+    /// ([`BytecodeCompiler::comptime_freeze_overlay`]); this is an extension
+    /// of the ONE freeze query surface, never a parallel iterator or a second
+    /// reflection protocol.
+    ///
+    /// Two distinct sites never share a witness identity (the `some_site`
+    /// discriminates), so a hidden witness cannot escape its opening scope by
+    /// aliasing another site's. Unlike a declared type parameter
+    /// ([`Self::new`] defers to a same-named base identity), a hidden witness
+    /// ALWAYS shadows: it is a freshly-opened type, so a base type of the
+    /// same spelling never captures it. Any enclosing-scope generic
+    /// parameters already carried by this overlay are preserved.
+    pub(crate) fn open_witnesses(&self, some_site: &str, witnesses: &[String]) -> Self {
+        let mut opened = self.witnesses.clone();
+        for name in witnesses {
+            let identity = FrozenTypeIdentity::from_canonical_descriptor(&format!(
+                "parameter:{some_site}:{name}"
+            ));
+            opened.insert(name.clone(), identity);
+        }
+        Self {
+            base: Arc::clone(&self.base),
+            parameters: self.parameters.clone(),
+            witnesses: opened,
+            composites: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -999,6 +1053,11 @@ pub(super) fn annotation_has_unresolved_inference_variable(annotation: &TypeAnno
             .iter()
             .any(annotation_has_unresolved_inference_variable),
         TypeAnnotation::Borrow { inner, .. } => annotation_has_unresolved_inference_variable(inner),
+        // ADR-009 B3 (S1): existential descriptor package — an inference hole can
+        // hide inside the inner descriptor; witnesses are bound names, not tyvars.
+        TypeAnnotation::Existential { inner, .. } => {
+            annotation_has_unresolved_inference_variable(inner)
+        }
         TypeAnnotation::Reference(_)
         | TypeAnnotation::Void
         | TypeAnnotation::Never

@@ -1090,7 +1090,11 @@ impl BytecodeCompiler {
             TypeAnnotation::Union(types) | TypeAnnotation::Intersection(types) => {
                 types.iter().any(Self::annotation_is_heap_like)
             }
-            TypeAnnotation::Void
+            // ADR-009 B3 (S1): existential descriptor package types are
+            // comptime-only — no runtime value materializes at S1, so not
+            // heap-like for storage-class purposes.
+            TypeAnnotation::Existential { .. }
+            | TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null
             | TypeAnnotation::Undefined => false,

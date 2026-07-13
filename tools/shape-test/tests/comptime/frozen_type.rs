@@ -20,6 +20,7 @@ let label = comptime {
     FrozenTypeCategory::Reference => "reference"
     FrozenTypeCategory::Union => "union"
     FrozenTypeCategory::Erased => "erased"
+    FrozenTypeCategory::Existential => "existential"
   }
 }
 
@@ -118,6 +119,7 @@ fn describe<T>(value: T) -> string {
       FrozenTypeCategory::Reference => "reference"
       FrozenTypeCategory::Union => "union"
       FrozenTypeCategory::Erased => "erased"
+      FrozenTypeCategory::Existential => "existential"
     }
   }
   label
@@ -452,7 +454,7 @@ print(enum_label)
 // =========================================================================
 
 /// Positive per-form proof template: `type_ref({spelling})` consumed via the
-/// full 10-arm exhaustive `type_category` match, asserted on VM and JIT.
+/// full 11-arm exhaustive `type_category` match, asserted on VM and JIT.
 fn expect_type_ref_category(preamble: &str, spelling: &str, expected: &str) {
     let source = format!(
         r#"
@@ -469,6 +471,7 @@ let label = comptime {{
     FrozenTypeCategory::Reference => "reference"
     FrozenTypeCategory::Union => "union"
     FrozenTypeCategory::Erased => "erased"
+    FrozenTypeCategory::Existential => "existential"
   }}
 }}
 

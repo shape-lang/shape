@@ -13,10 +13,11 @@ use crate::type_inference::{
     FunctionTypeInfo, ParamReferenceMode, extract_struct_fields,
     infer_block_return_type_via_engine, infer_function_signatures, infer_program_types,
     infer_variable_type, infer_variable_type_for_display, infer_variable_visible_type_at_offset,
-    parse_object_shape_fields, resolve_struct_field_type, type_annotation_to_string,
-    unified_metadata,
+    open_comptime_some_descriptor, parse_object_shape_fields, resolve_struct_field_type,
+    type_annotation_to_string, unified_metadata,
 };
 use crate::util::{get_word_at_position, parser_source, position_to_offset};
+use shape_ast::ast::expr_helpers::ComptimeForExpr;
 use shape_ast::ast::{Expr, Item, JoinKind, Pattern, Program, Span, Statement, TypeName};
 use shape_ast::parser::parse_program;
 use shape_runtime::metadata::LanguageMetadata;
@@ -160,6 +161,14 @@ fn get_hover_for_word(
 
     // Check if hovering on a comptime builtin.
     if let Some(hover) = get_comptime_builtin_hover(word) {
+        return Some(hover);
+    }
+
+    // ADR-009 B3 (S3): hovering a `some`-bound witness binding — the loop
+    // variable or a `some`-clause witness name of a `comptime for some<W...>`.
+    // Checked before `get_type_param_hover` so a witness name wins over a
+    // coincidental bounded-type-parameter match.
+    if let Some(hover) = get_comptime_some_witness_hover(text, word, position) {
         return Some(hover);
     }
 
@@ -1669,6 +1678,97 @@ fn get_self_receiver_hover(text: &str, word: &str, position: Position) -> Option
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
             value: content,
+        }),
+        range: None,
+    })
+}
+
+/// ADR-009 B3 (S3): hover over a `some`-bound witness binding.
+///
+/// Two cases, both scoped to a `comptime for some<W...> x in coll` whose span
+/// contains the cursor:
+///   * the loop variable `x` → renders the OPENED descriptor type (the
+///     existential's inner descriptor with the hidden witness bound), the
+///     stage, and the escape rule;
+///   * a `some`-clause witness name `W` → renders it as an opened hidden
+///     witness, fresh per iteration and erased outside the loop.
+///
+/// The opened descriptor is computed by `open_comptime_some_descriptor` — the
+/// same shared `TypeAnnotation` surface the compiler's canonicalizer consumes,
+/// not a hand-written metadata row. `for some` introduces no second reflection
+/// protocol (Dec 51 sugar-only).
+fn get_comptime_some_witness_hover(text: &str, word: &str, position: Position) -> Option<Hover> {
+    let offset = position_to_offset(text, position)?;
+    let program = parse_with_fallback(text)?;
+
+    struct SomeFinder<'a> {
+        offset: usize,
+        word: &'a str,
+        /// `Some((is_witness_name, cloned ComptimeForExpr))` once located.
+        hit: Option<(bool, ComptimeForExpr)>,
+    }
+    impl Visitor for SomeFinder<'_> {
+        fn visit_expr(&mut self, expr: &Expr) -> bool {
+            if self.hit.is_some() {
+                return false;
+            }
+            if let Expr::ComptimeFor(cf, span) = expr {
+                if !cf.witnesses.is_empty() && span_contains_offset(*span, self.offset) {
+                    if cf.witnesses.iter().any(|w| w == self.word) {
+                        self.hit = Some((true, (**cf).clone()));
+                    } else if cf.variable == self.word {
+                        self.hit = Some((false, (**cf).clone()));
+                    }
+                }
+            }
+            true
+        }
+    }
+
+    let mut finder = SomeFinder {
+        offset,
+        word,
+        hit: None,
+    };
+    walk_program(&mut finder, &program);
+    let (is_witness, comptime_for) = finder.hit?;
+
+    let value = if is_witness {
+        format!(
+            "**Opened hidden witness**: `{word}`\n\n\
+             Bound fresh per iteration of `comptime for some<{ws}>`. Erased outside the loop — \
+             a hidden witness cannot escape its opening scope unless explicitly repackaged in an \
+             existential value.\n\n\
+             **Stage:** comptime (ADR-009 B3, Dec 51)",
+            word = word,
+            ws = comptime_for.witnesses.join(", "),
+        )
+    } else {
+        // Loop variable: render the opened descriptor via the shared surface.
+        let opened = open_comptime_some_descriptor(&comptime_for, &program)?;
+        let (plural, verb) = if opened.witnesses.len() > 1 {
+            ("es", "are")
+        } else {
+            ("", "is")
+        };
+        format!(
+            "**`some`-bound witness binding**: `{var}`\n\n\
+             **Type:** `{descriptor}`\n\n\
+             Opened from `{existential}` — the hidden witness{plural} `{ws}` {verb} fresh per \
+             iteration of `comptime for some` and cannot escape this scope unless repackaged in an \
+             existential value.\n\n\
+             **Stage:** comptime (ADR-009 B3, Dec 51)",
+            var = comptime_for.variable,
+            descriptor = opened.descriptor,
+            existential = opened.existential,
+            ws = opened.witnesses.join(", "),
+        )
+    };
+
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
         }),
         range: None,
     })

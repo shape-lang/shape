@@ -7,9 +7,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+use shape_ast::ast::expr_helpers::ComptimeForExpr;
 use shape_ast::ast::{
-    Expr, Item, Literal, ObjectEntry, ObjectTypeField, Pattern, Program, Statement, TraitMember,
-    TraitMemberSignature, TypeAnnotation, VariableDecl,
+    BlockExpr, BlockItem, Expr, Item, Literal, ObjectEntry, ObjectTypeField, Pattern, Program,
+    Statement, TraitMember, TraitMemberSignature, TypeAnnotation, TypePath, VariableDecl,
 };
 use shape_runtime::metadata::UnifiedMetadata;
 use shape_runtime::schema_cache::{
@@ -68,6 +69,205 @@ pub fn type_annotation_to_string(ta: &TypeAnnotation) -> Option<String> {
             let strs: Vec<String> = types.iter().filter_map(type_annotation_to_string).collect();
             merge_structural_intersection_shapes(&strs).or_else(|| Some(strs.join(" + ")))
         }
+        // ADR-009 B3 (S1): existential descriptor package type — render the
+        // witness list plus the inner descriptor for hover/inlay.
+        TypeAnnotation::Existential { witnesses, inner } => Some(format!(
+            "exists<{}> {}",
+            witnesses.join(", "),
+            type_annotation_to_string(inner).unwrap_or_else(|| "?".to_string())
+        )),
+    }
+}
+
+/// ADR-009 B3 (S3): the opened form of a `some`-bound witness binding.
+///
+/// A `comptime for some<W...> x in coll` opens each hidden witness `W` to a
+/// fresh scoped type per iteration and binds `x` to the existential package's
+/// inner descriptor with those witnesses filled in. This struct carries the
+/// rendered opened descriptor (e.g. `FrozenType<T>`), the source existential
+/// package (`exists<T> FrozenType<T>`), and the opened witness names — all
+/// derived from the SAME `TypeAnnotation` carrier the compiler's canonicalizer
+/// consumes (`type_annotation_to_string`), so hover / inlay never invent a
+/// parallel metadata row (ADR-009 §3.5; Dec 51 sugar-only).
+pub struct OpenedWitnessBinding {
+    /// The opened descriptor type, e.g. `FrozenType<T>`.
+    pub descriptor: String,
+    /// The source existential package, e.g. `exists<T> FrozenType<T>`.
+    pub existential: String,
+    /// The `some`-clause witness names opened per iteration.
+    pub witnesses: Vec<String>,
+}
+
+/// ADR-009 B3 (S3): resolve the opened descriptor of a `some`-bound loop
+/// variable for hover / inlay. Returns `None` for a legacy `comptime for`
+/// (no witnesses) or when the iterable's element type cannot be resolved to an
+/// existential descriptor package. This is the ONE shared LSP surface both
+/// hover and inlay consume — there is no second reflection/iterator protocol.
+pub fn open_comptime_some_descriptor(
+    comptime_for: &ComptimeForExpr,
+    program: &Program,
+) -> Option<OpenedWitnessBinding> {
+    if comptime_for.witnesses.is_empty() {
+        return None;
+    }
+    let element = resolve_iterable_element_annotation(&comptime_for.iterable, program)?;
+    let TypeAnnotation::Existential {
+        witnesses: exist_ws,
+        inner,
+    } = &element
+    else {
+        return None;
+    };
+    // Alpha-rename the existential's bound witnesses to the `some`-clause names
+    // (positional correspondence; identity pairs are skipped). Display-only —
+    // the descriptor STRUCTURE comes from the real `TypeAnnotation`.
+    let mut rename: HashMap<String, String> = HashMap::new();
+    for (from, to) in exist_ws.iter().zip(comptime_for.witnesses.iter()) {
+        if from != to {
+            rename.insert(from.clone(), to.clone());
+        }
+    }
+    let opened = alpha_rename_witnesses(inner, &rename);
+    Some(OpenedWitnessBinding {
+        descriptor: type_annotation_to_string(&opened)?,
+        existential: type_annotation_to_string(&element)?,
+        witnesses: comptime_for.witnesses.clone(),
+    })
+}
+
+/// Resolve the element `TypeAnnotation` of a `comptime for some` iterable. The
+/// iterable is an identifier bound to an annotated `Array<E>` collection; the
+/// element `E` is the existential descriptor package.
+fn resolve_iterable_element_annotation(
+    iterable: &Expr,
+    program: &Program,
+) -> Option<TypeAnnotation> {
+    let name = match iterable {
+        Expr::Identifier(name, _) => name.as_str(),
+        _ => return None,
+    };
+    let ann = find_binding_annotation(program, name)?;
+    element_annotation(&ann)
+}
+
+/// Extract the element annotation from an array collection annotation
+/// (`Array<E>` or `E[]`).
+fn element_annotation(ann: &TypeAnnotation) -> Option<TypeAnnotation> {
+    match ann {
+        TypeAnnotation::Array(inner) => Some((**inner).clone()),
+        TypeAnnotation::Generic { name, args } if name.as_str() == "Array" => args.first().cloned(),
+        _ => None,
+    }
+}
+
+/// Find the explicit `type_annotation` of a `let`/`var` binding by name,
+/// scanning both statement-level and block-level declarations.
+fn find_binding_annotation(program: &Program, target: &str) -> Option<TypeAnnotation> {
+    struct BindingFinder<'a> {
+        target: &'a str,
+        found: Option<TypeAnnotation>,
+    }
+    impl Visitor for BindingFinder<'_> {
+        fn visit_stmt(&mut self, stmt: &Statement) -> bool {
+            if self.found.is_some() {
+                return false;
+            }
+            if let Statement::VariableDecl(decl, _) = stmt {
+                if decl.pattern.as_identifier() == Some(self.target) {
+                    if let Some(ann) = &decl.type_annotation {
+                        self.found = Some(ann.clone());
+                    }
+                }
+            }
+            true
+        }
+        fn visit_block(&mut self, block: &BlockExpr) -> bool {
+            if self.found.is_some() {
+                return false;
+            }
+            for item in &block.items {
+                if let BlockItem::VariableDecl(decl) = item {
+                    if decl.pattern.as_identifier() == Some(self.target) {
+                        if let Some(ann) = &decl.type_annotation {
+                            self.found = Some(ann.clone());
+                        }
+                    }
+                }
+            }
+            true
+        }
+    }
+    let mut finder = BindingFinder {
+        target,
+        found: None,
+    };
+    walk_program(&mut finder, program);
+    finder.found
+}
+
+/// Recursively alpha-rename witness identifiers in a descriptor annotation.
+/// Display-only: used to relabel an existential's bound witnesses to the
+/// `some`-clause names. Shadowed inner-existential witnesses are preserved.
+fn alpha_rename_witnesses(
+    ann: &TypeAnnotation,
+    rename: &HashMap<String, String>,
+) -> TypeAnnotation {
+    if rename.is_empty() {
+        return ann.clone();
+    }
+    match ann {
+        TypeAnnotation::Basic(name) => match rename.get(name) {
+            Some(to) => TypeAnnotation::Basic(to.clone()),
+            None => ann.clone(),
+        },
+        TypeAnnotation::Reference(path) => match rename.get(path.as_str()) {
+            Some(to) => TypeAnnotation::Reference(TypePath::simple(to.clone())),
+            None => ann.clone(),
+        },
+        TypeAnnotation::Array(inner) => {
+            TypeAnnotation::Array(Box::new(alpha_rename_witnesses(inner, rename)))
+        }
+        TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|a| alpha_rename_witnesses(a, rename))
+                .collect(),
+        },
+        TypeAnnotation::Tuple(items) => TypeAnnotation::Tuple(
+            items
+                .iter()
+                .map(|a| alpha_rename_witnesses(a, rename))
+                .collect(),
+        ),
+        TypeAnnotation::Union(items) => TypeAnnotation::Union(
+            items
+                .iter()
+                .map(|a| alpha_rename_witnesses(a, rename))
+                .collect(),
+        ),
+        TypeAnnotation::Intersection(items) => TypeAnnotation::Intersection(
+            items
+                .iter()
+                .map(|a| alpha_rename_witnesses(a, rename))
+                .collect(),
+        ),
+        TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+            mutable: *mutable,
+            inner: Box::new(alpha_rename_witnesses(inner, rename)),
+        },
+        TypeAnnotation::Existential { witnesses, inner } => {
+            // A nested existential's own witnesses shadow the outer rename.
+            let mut inner_map = rename.clone();
+            for w in witnesses {
+                inner_map.remove(w);
+            }
+            TypeAnnotation::Existential {
+                witnesses: witnesses.clone(),
+                inner: Box::new(alpha_rename_witnesses(inner, &inner_map)),
+            }
+        }
+        other => other.clone(),
     }
 }
 

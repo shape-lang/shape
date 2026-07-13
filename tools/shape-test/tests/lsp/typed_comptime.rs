@@ -8,6 +8,19 @@ fn comptime_completion_offers_typed_reflection_builtins() {
         .expect_completion("type_category");
 }
 
+/// ADR-009 B3 (Dec 51): hover over a binding whose type is an existential
+/// descriptor package renders the exact `exists<W...> Descriptor<W...>`
+/// witness spelling — the shared freeze/render surface reaches the LSP, so a
+/// `some`-bound witness type is shown, not erased to `any`/`?`.
+#[test]
+fn hover_renders_existential_witness_package_type() {
+    // `pkg` is annotated with the existential package; hover renders the
+    // witness list + inner descriptor via the shared annotation renderer.
+    ShapeTest::new("fn describe(pkg: exists<T> FrozenType<T>) -> string {\n  return \"x\"\n}\n")
+        .at(pos(0, 13))
+        .expect_hover_contains("exists<T>");
+}
+
 #[test]
 fn runtime_completion_hides_typed_reflection_builtins() {
     ShapeTest::new("")
@@ -570,6 +583,7 @@ fn describe<T>(value: T) -> string {
       FrozenTypeCategory::Reference => "reference"
       FrozenTypeCategory::Union => "union"
       FrozenTypeCategory::Erased => "erased"
+      FrozenTypeCategory::Existential => "existential"
     }
   }
   label
@@ -580,4 +594,46 @@ print(describe(1))
     ShapeTest::new(source)
         .expect_no_semantic_diagnostic_contains("unknown semantic type identity")
         .expect_no_semantic_diagnostic_contains("cannot infer type argument");
+}
+
+// =====================================================================
+// ADR-009 B3 (S3): LSP hover + inlay over a `some`-bound witness binding.
+//
+// Hovering the loop variable of a `comptime for some<W...> x in coll`
+// renders the OPENED descriptor type (the existential's inner descriptor
+// with the hidden witness bound), the stage, and the escape rule.
+// Hovering a `some`-clause witness name renders it as an opened hidden
+// witness. The inlay hint over the iteration renders the same opened
+// descriptor. All three are driven by the shared LSP type-annotation
+// surface (`open_comptime_some_descriptor`) — the same `TypeAnnotation`
+// carrier the compiler's canonicalizer consumes, not a hand-written row.
+// The B1 substrate opens to `FrozenType<T>` (witness erased at the reflect
+// boundary; recovering a witness-typed projection is B5, not landed).
+// =====================================================================
+
+const SOME_BOUND_ITERATION: &str = "let out = comptime {\n  \
+let coll: Array<exists<T> FrozenType<T>> = []\n  \
+comptime for some<T> ft in coll {\n    \
+let x = ft\n  }\n  \"\"\n}\n";
+
+#[test]
+fn hover_on_some_bound_loop_var_shows_opened_descriptor_and_stage() {
+    ShapeTest::new(SOME_BOUND_ITERATION)
+        .at(pos(2, 23))
+        .expect_hover_contains("FrozenType<T>")
+        .expect_hover_contains("witness")
+        .expect_hover_contains("comptime");
+}
+
+#[test]
+fn hover_on_some_witness_name_shows_opened_hidden_witness() {
+    ShapeTest::new(SOME_BOUND_ITERATION)
+        .at(pos(2, 20))
+        .expect_hover_contains("hidden witness")
+        .expect_hover_contains("comptime");
+}
+
+#[test]
+fn inlay_on_some_bound_iteration_shows_opened_descriptor() {
+    ShapeTest::new(SOME_BOUND_ITERATION).expect_type_hint_label("FrozenType<T>");
 }

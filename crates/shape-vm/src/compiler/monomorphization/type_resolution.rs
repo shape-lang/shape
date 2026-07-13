@@ -1257,6 +1257,13 @@ fn annotation_mentions_outside_closure_position(
         TypeAnnotation::Union(items) | TypeAnnotation::Intersection(items) => items
             .iter()
             .any(|t| annotation_mentions_outside_closure_position(t, generic)),
+        // ADR-009 B3 (S1): existential descriptor package — the generic may be
+        // mentioned inside the inner descriptor (a witness would shadow it, but
+        // the witness list is a distinct name space checked upstream).
+        TypeAnnotation::Existential { witnesses, inner } => {
+            !witnesses.iter().any(|w| w == generic)
+                && annotation_mentions_outside_closure_position(inner, generic)
+        }
         TypeAnnotation::Void
         | TypeAnnotation::Never
         | TypeAnnotation::Null
@@ -1480,6 +1487,16 @@ fn annotation_mentions_any(annotation: &TypeAnnotation, generics: &[&str]) -> bo
             .any(|f| annotation_mentions_any(&f.type_annotation, generics)),
         TypeAnnotation::Union(items) | TypeAnnotation::Intersection(items) => {
             items.iter().any(|t| annotation_mentions_any(t, generics))
+        }
+        // ADR-009 B3 (S1): existential descriptor package — a generic can be
+        // named inside the inner descriptor unless a witness shadows it.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            let inner_generics: Vec<&str> = generics
+                .iter()
+                .copied()
+                .filter(|g| !witnesses.iter().any(|w| w == g))
+                .collect();
+            annotation_mentions_any(inner, &inner_generics)
         }
         TypeAnnotation::Void
         | TypeAnnotation::Never
@@ -1800,9 +1817,14 @@ fn unify_annotation_with_inference_type(
         TypeAnnotation::Borrow { inner, .. } => {
             unify_annotation_with_inference_type(inner, &actual, compiler, generics, bindings)
         }
+        // ADR-009 B3 (S1): existential descriptor package types are comptime-only
+        // and cannot appear as a real generic-fn parameter yet, so there is no
+        // binding to derive — treat as trivially unifiable (no conflict), matching
+        // the other non-structural forms.
         TypeAnnotation::Object(_)
         | TypeAnnotation::Union(_)
         | TypeAnnotation::Intersection(_)
+        | TypeAnnotation::Existential { .. }
         | TypeAnnotation::Void
         | TypeAnnotation::Never
         | TypeAnnotation::Null
@@ -1911,9 +1933,12 @@ fn unify_annotation_with_concrete(
         TypeAnnotation::Borrow { inner, .. } => {
             unify_annotation_with_concrete(inner, actual, generics, bindings)
         }
+        // ADR-009 B3 (S1): existential descriptor package types are comptime-only
+        // and contribute no monomorphization bindings — trivially unifiable.
         TypeAnnotation::Object(_)
         | TypeAnnotation::Union(_)
         | TypeAnnotation::Intersection(_)
+        | TypeAnnotation::Existential { .. }
         | TypeAnnotation::Dyn(_)
         | TypeAnnotation::Void
         | TypeAnnotation::Never
