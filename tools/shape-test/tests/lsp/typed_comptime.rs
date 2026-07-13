@@ -581,3 +581,131 @@ print(describe(1))
         .expect_no_semantic_diagnostic_contains("unknown semantic type identity")
         .expect_no_semantic_diagnostic_contains("cannot infer type argument");
 }
+
+// =====================================================================
+// ADR-009 D2 (slice 2, DoD #5-completion): a generated FREE FUNCTION the
+// declaration-discovery fixed point reserved is visible to LATER source
+// through completion — sourced from the SAME `generated_symbol_query()`
+// table the compiler consumes (no speculative second pass, no LSP
+// re-evaluator, no parallel discovery path).
+// =====================================================================
+
+#[test]
+fn completion_sees_generated_free_function_after_discovery() {
+    // The annotation emits `User_label()`; a bare-name call position on the
+    // trailing line must complete the generated declaration.
+    let source = r#"annotation schema_of() {
+    targets: [type]
+    comptime post(target, ctx) {
+        extend (f"fn {target.name}_label() -> string \{ {string_lit("User schema")} \}")
+    }
+}
+
+@schema_of()
+type User { id: int }
+
+User_
+"#;
+    let last_line = source.lines().count() as u32 - 1;
+    ShapeTest::new(source)
+        .at(pos(last_line, 5))
+        .expect_completion("User_label");
+}
+
+/// ADR-009 D2 DoD #4 (runtime-execution arm, paired with the completion arm
+/// above): the declaration-discovery fixed point reserves a generated FREE
+/// FUNCTION `User_answer()`; LATER source (`fn double_answer`) resolves it,
+/// and the top-level call must produce the SAME value under the VM
+/// interpreter and under the JIT. DoD #4 requires BOTH entry proofs; the
+/// completion-after-discovery arm sits directly above, so both arms live
+/// together under D2. The landed bounded-worklist discovery driver
+/// (functions_annotations.rs L1856-2261) already serves this — the generated
+/// declaration is applied exactly once per application identity + dependency
+/// hash before body checking, so no engine change is needed to make the two
+/// execution modes agree.
+#[test]
+fn generated_free_function_visible_to_later_source_runs_identically_in_vm_and_jit() {
+    let source = r#"annotation schema_of() {
+    targets: [type]
+    comptime post(target, ctx) {
+        extend (f"fn {target.name}_answer() -> int \{ 21 \}")
+    }
+}
+
+@schema_of()
+type User { id: int }
+
+fn double_answer() -> int { User_answer() * 2 }
+
+double_answer()
+"#;
+    ShapeTest::new(source).expect_number(42.0);
+    ShapeTest::new(source).with_jit().expect_number(42.0);
+}
+
+#[test]
+fn runtime_completion_hides_generated_methods_from_free_standing_position() {
+    // The annotation emits the METHOD `Point.answer`; a bare-name position
+    // must NOT complete it (methods are reachable only through a receiver).
+    let source = r#"annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+@gen()
+type Point { id: int }
+
+ans
+"#;
+    let last_line = source.lines().count() as u32 - 1;
+    ShapeTest::new(source)
+        .at(pos(last_line, 3))
+        .expect_no_completion("answer");
+}
+
+// =====================================================================
+// ADR-009 D2 (slice 3, DoD #5-virtual-view): a generated-symbol call site
+// resolves to a read-only `shape-expansion://` virtual view that renders
+// the checked generated declaration with a bidirectional source map — the
+// SAME shared fixed-point query that drives goto/references/rename (no
+// second expansion pass, no LSP re-evaluator). The view is inspection-only
+// and is never reparsed as compiler input.
+// =====================================================================
+
+/// Zero-based lines mirror `generated_navigation`'s fixture:
+/// 14  let a = p.answer()   <- generated-method call site (cursor here)
+const D2_VIRTUAL_VIEW_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+"#;
+
+#[test]
+fn generated_call_site_renders_read_only_virtual_view_with_source_map() {
+    ShapeTest::new(D2_VIRTUAL_VIEW_PROGRAM)
+        .at(pos(14, 11))
+        .expect_expansion_view_renders("Point.answer");
+}
+
+#[test]
+fn ordinary_call_site_offers_no_virtual_view() {
+    // A plain function call in a non-generating document has no virtual view.
+    ShapeTest::new("fn helper() -> int { 7 }\nlet h = helper()\n")
+        .at(pos(1, 10))
+        .expect_no_expansion_view();
+}

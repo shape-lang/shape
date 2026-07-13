@@ -7721,3 +7721,88 @@ did).
 generated symbols keep compiler-table navigation, ordinary symbols with
 colliding bare names keep their pre-D1 providers — before D2 builds the
 declaration-discovery fixed point on top of this gate.
+
+## 2026-07-13 — ADR009-D2 close-out: rejected compromises (declaration-discovery fixed point + shared expansion query + `shape-expansion://` virtual views)
+
+Ticket ADR009-D2 (shape-lang/shape#16, branch adr009/d2, slices 1-3 engine +
+slices 1-2 close) landed the declaration-discovery fixed point
+(`DeclarationDiscoveryFixedPoint`), the single shared
+`generated_symbol_query()` surface consumed by compiler and LSP, and the
+read-only `shape-expansion://` virtual views. Compromises considered and
+REJECTED during implementation, plus the named/bounded decisions taken:
+
+**1. A separate LSP re-evaluator / speculative second expansion pass.**
+The tempting shape was to let the LSP re-run expansion (or keep the pre-D1
+speculative pre-pass alive as a "tooling-only" evaluator) so completion,
+navigation, and virtual views could answer without threading through the
+compiler's converged state. Rejected: two evaluators drift, double-issue
+identities, and reintroduce exactly the parallel-carrier defect the D1
+close-out killed. Chosen: ONE fixed-point query
+(`BytecodeCompiler::generated_symbol_query() -> &GeneratedSymbolTable`,
+Decision 66 closing rule); the bounded monotone worklist runs once inside
+`compile_in_place`, and every LSP consumer
+(`tools/shape-lsp/src/generated_symbols.rs`, completion, definition,
+document_symbols, expansion_views) reads that same converged table. No LSP
+second pass, no speculative re-evaluation.
+
+**2. Reparsing the `shape-expansion://` render as compiler input.**
+A virtual document that renders generated IR back to text invites a
+round-trip: parse the render, re-check it, treat it as a source module.
+Rejected as a spec §3 boundary violation (it would make generated text
+authoritative and let a tooling render feed the type checker). Chosen: the
+render is inspection-only — `render_expansion_view` produces read-only text
+with a bidirectional source map (`virtual_to_source` / `source_to_virtual`),
+and the invariant is pinned by the sentinel test
+`the_module_never_reparses_its_own_render`. The virtual view is a projection
+of already-checked IR, never a parse source.
+
+**3. String / JSON / partial-descriptor identity for discovered decls.**
+Keying the discovery memo, header-immutability table, or trigger graph on
+rendered names, JSON blobs, or partially populated descriptors was rejected
+per spec §3.1 (no strings/JSON/Any/partial descriptors). Chosen: every
+identity is the A1 canonical-descriptor SHA-256 fingerprint
+(`ExpansionIdentity` with `arguments_hash` + `dependencies_hash`,
+`CanonicalHash`), so `claim()` run-once memoization, `record_header`
+immutability, and the trigger adjacency graph all compare canonical hashes,
+never text. A counter-allocated identity (the recurring `next_id` collision
+family) was likewise rejected — identity is structural.
+
+**4. Soft limits / "warn but continue" for oscillation and unbounded growth.**
+Treating a non-converging frontier or a runaway generation count as a
+warning that degrades to best-effort output was rejected — surface-and-stop
+(spec §3) requires an unprovable fixed point to be a compile error, never a
+runtime/tooling fallback. Chosen: oscillation (`observe_round_state`, a
+non-adjacent frontier recurrence), trigger cycles (`record_trigger`/`reaches`),
+and exceeding `MAX_DISCOVERY_ROUNDS` (256) / `MAX_DISCOVERY_EXPANSIONS`
+(65_536) are hard named diagnostics (`DISCOVERY_OSCILLATION`,
+`DISCOVERY_CYCLE`, `DISCOVERY_UNBOUNDED`), each carrying expansion provenance
+via `build_discovery_failure` and each with an asserting test.
+
+**5. A parallel discovery/query/view module beside the D1 provenance file.**
+Forking a new fixed-point module rather than extending
+`comptime_builtins/expansion_provenance.rs` in place, or standing up a second
+generated-symbol table for the worklist, was refused per CLAUDE.md Forbidden
+Patterns (no parallel producer/consumer carriers). Chosen: the fixed-point
+engine EXTENDS the D1 provenance file in place (same `GeneratedSymbolTable`,
+same `ExpansionIdentity`/`SymbolId`/`GeneratedOrigin`), and the discovery
+driver in `functions_annotations.rs` is the pre-existing single speculative
+pass rewritten as the bounded monotone worklist — not a second pass bolted
+on. The ordering invariant (fixed point BEFORE body checking, Decision 67)
+is preserved with the annotation method still invoked exactly once.
+
+**Docs finalization (this slice):** the design-index status rows in
+`docs/design/typed-comptime.md` flipped Decision 66/67 (the fixed point,
+shared query, and virtual views) from TARGET to CURRENT /
+compiler+LSP+VM+JIT with an evidence label and a Book status line pointing at
+the gate-runnable ShapeTests
+(`tools/shape-test/tests/lsp/typed_comptime.rs` VM+JIT +
+`tools/shape-lsp/src/expansion_views.rs` in-file suite). Decision 69 (name
+policies) stays TARGET. No language surface changed — discovery is
+compiler-internal over existing annotation/`extend` directives, and
+`shape-expansion://` is read-only tooling, not language input.
+
+**Cost saved:** compiler and LSP share one converged fixed-point query end to
+end (no drift, no double-issue), the virtual view can never become a parse
+source, and every non-convergence mode is a provenance-carrying compile error
+instead of a silent degrade — the fixed point is a clean foundation for the
+Decision 69 name-policy work that follows.

@@ -161,6 +161,58 @@ impl BytecodeCompiler {
         err
     }
 
+    /// ADR-009 D2 (Decision 67): route a declaration-discovery convergence
+    /// failure — cycle / oscillation / unbounded generation / header mutated
+    /// / reserved-identity-undefined — through the C0003 generated-declaration
+    /// diagnostic family. When the failure is attributable to a specific
+    /// expansion application (`site` is `Some`), the diagnostic carries the
+    /// application + generator locations as notes, exactly like the row-7
+    /// generated-declaration failure; a whole-graph convergence failure with
+    /// no single owning application surfaces the named diagnostic message
+    /// directly (still surface-and-stop, never a silent skip).
+    pub(crate) fn build_discovery_failure(
+        &self,
+        message: String,
+        site: Option<&ExpansionSite>,
+    ) -> ShapeError {
+        let Some(site) = site else {
+            return ShapeError::SemanticError {
+                message,
+                location: None,
+            };
+        };
+        let application_loc = self.comptime_lsds_location(site.application_span());
+        let generator_loc = self.comptime_lsds_location(site.generator_span());
+        let diag = shape_diagnostics::DiagnosticBuilder::new(
+            GENERATED_DECL_ERROR_ID,
+            shape_diagnostics::Severity::Error,
+            application_loc.clone(),
+            message,
+        )
+        .with_note(shape_diagnostics::DiagnosticNote::new(
+            "generated from this application site",
+            Some(application_loc.clone()),
+        ))
+        .with_note(shape_diagnostics::DiagnosticNote::new(
+            "generator defined here",
+            Some(generator_loc),
+        ))
+        .build();
+        let mut err = super::functions::diagnostic_to_shape_error(&diag);
+        if let ShapeError::SemanticError {
+            location: Some(loc),
+            ..
+        } = &mut err
+        {
+            let sl = self.span_to_source_location(site.application_span());
+            loc.source_line = sl.source_line;
+            if sl.length.is_some() {
+                loc.length = sl.length;
+            }
+        }
+        err
+    }
+
     /// ADR-009 D1 (S4): outer directive-processing wrap that PRESERVES a
     /// provenance-carrying generated-declaration failure. The row-7
     /// diagnostic built by [`Self::build_generated_decl_failure`] already

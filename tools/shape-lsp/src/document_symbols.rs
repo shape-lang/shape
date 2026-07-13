@@ -10,6 +10,29 @@ use tower_lsp_server::ls_types::{
     SymbolKind, Uri,
 };
 
+/// Resolve every generated declaration in the document to its read-only
+/// `shape-expansion://` virtual view (ADR-009 D2 slice 3). The outline /
+/// workspace consumer opens these read-only views to inspect checked
+/// generated IR; each view carries the bidirectional source map back to the
+/// real checked-declaration anchor. Sourced from the SAME shared
+/// fixed-point query as [`get_document_symbols`] — no second expansion pass.
+pub fn get_generated_expansion_views(
+    text: &str,
+    uri: &Uri,
+) -> Vec<crate::expansion_views::ExpansionView> {
+    let program = match parse_program(text) {
+        Ok(p) => p,
+        Err(_) => {
+            let partial = shape_ast::parse_program_resilient(text);
+            if partial.items.is_empty() {
+                return Vec::new();
+            }
+            partial.into_program()
+        }
+    };
+    crate::expansion_views::expansion_views_all(&program, text, uri)
+}
+
 /// Get document symbols for outline view
 pub fn get_document_symbols(text: &str) -> Option<DocumentSymbolResponse> {
     // Try full parse first, fall back to resilient parse for partial results
