@@ -418,9 +418,6 @@ impl EnvironmentAnalyzer {
             Statement::SetParamType { .. }
             | Statement::SetReturnType { .. }
             | Statement::SetReturnExpr { .. } => {}
-            Statement::SetParamTypeExpr { expression, .. } => {
-                self.analyze_expr(expression);
-            }
             Statement::SetParamValue { expression, .. } => {
                 self.analyze_expr(expression);
             }

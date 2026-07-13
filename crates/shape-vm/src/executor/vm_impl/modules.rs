@@ -541,10 +541,6 @@ fn project_typed_return(
 
     match tr {
         TypedReturn::Concrete(c) => project_concrete_return(registry, c),
-        TypedReturn::Future(id) => Ok(KindedSlot::new(
-            ValueSlot::from_raw(id),
-            NativeKind::Ptr(HeapKind::Future),
-        )),
 
         // ── Result / Option wrappers (ADR-006 §2.7.17 / Q18) ───────────
         TypedReturn::Ok(c) => {
@@ -645,7 +641,7 @@ impl VirtualMachine {
             task_id,
             crate::executor::task_scheduler::PendingAsyncTask {
                 completion: rx,
-                abort: Some(handle.abort_handle()),
+                abort: handle.abort_handle(),
             },
         );
         Ok(shape_value::KindedSlot::new(
@@ -708,9 +704,7 @@ impl VirtualMachine {
             Ok(body_result) => {
                 // Ready — remove the entry and project.
                 let _ = self.task_scheduler.take_pending_async(task_id);
-                Ok(Some(
-                    self.project_and_cache_pending_async(task_id, body_result)?,
-                ))
+                Ok(Some(self.project_and_cache_pending_async(task_id, body_result)?))
             }
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => {
@@ -858,7 +852,6 @@ impl VirtualMachine {
                 let vm_state_snap = self.capture_vm_state();
                 let granted_permissions = self.granted_permissions.clone();
                 let scope_constraints = self.scope_constraints.clone();
-                let function_hash_raw = self.function_hash_raw.clone();
 
                 // `ctx.schemas` sources the ambient thread-local registry
                 // (`current_registry()`) — a cheap `Arc` clone of the same
@@ -882,15 +875,14 @@ impl VirtualMachine {
                 // loop — just reached from the native-module boundary.
                 let vm_cell = std::cell::RefCell::new(self);
                 let body_result = {
-                    let invoke_cb =
-                        |callee: &shape_value::KindedSlot,
-                         cb_args: &[shape_value::KindedSlot]|
-                         -> Result<shape_value::KindedSlot, String> {
-                            vm_cell
-                                .borrow_mut()
-                                .call_value_immediate_nb(callee, cb_args, None)
-                                .map_err(|e| e.to_string())
-                        };
+                    let invoke_cb = |callee: &shape_value::KindedSlot,
+                                     cb_args: &[shape_value::KindedSlot]|
+                     -> Result<shape_value::KindedSlot, String> {
+                        vm_cell
+                            .borrow_mut()
+                            .call_value_immediate_nb(callee, cb_args, None)
+                            .map_err(|e| e.to_string())
+                    };
                     // Sender-side per-function distributed-transfer seam
                     // (distributed §4.1.1). The dispatcher reads `self.program`
                     // through the SAME `vm_cell` that backs `invoke_cb` — a
@@ -912,7 +904,7 @@ impl VirtualMachine {
                         schemas: &ambient_registry,
                         invoke_callable: Some(&invoke_cb),
                         raw_invoker: None,
-                        function_hashes: Some(function_hash_raw.as_slice()),
+                        function_hashes: None,
                         vm_state: Some(&vm_state_snap),
                         // WF-1D security wiring: thread the VM's installed
                         // permission envelope into the gated-dispatch context.
@@ -1116,15 +1108,13 @@ impl VirtualMachine {
             // clobbered (ADR-006 §2.7.8: no fabricated kind; a fresh typed
             // `Ptr(HeapKind::TypedObject)` module object per binding).
             let hidden_name = format!("__imported_module__::{}", module_name);
-            let short_name = module_name
-                .rsplit("::")
-                .next()
-                .unwrap_or(module_name.as_str());
+            let short_name = module_name.rsplit("::").next().unwrap_or(module_name.as_str());
             let mut target_binding_idxs: Vec<usize> = Vec::new();
             for (i, n) in self.program.module_binding_names.iter().enumerate() {
                 let is_canonical = n == &hidden_name || n == &module_name;
-                let is_short_uninit =
-                    n.as_str() == short_name && short_name != module_name.as_str() && {
+                let is_short_uninit = n.as_str() == short_name
+                    && short_name != module_name.as_str()
+                    && {
                         // Only claim the short alias if it is still the
                         // uninitialised sentinel — never overwrite a live
                         // value.

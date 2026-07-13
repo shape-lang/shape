@@ -29,43 +29,6 @@ fn type_annotation_from_concrete_type(ct: &ConcreteType) -> Option<shape_ast::as
     crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
 }
 
-fn content_type_info() -> VariableTypeInfo {
-    VariableTypeInfo::with_storage(
-        "content".to_string(),
-        crate::type_tracking::NativeKind::Ptr(shape_value::HeapKind::Content),
-    )
-}
-
-fn content_preserving_method(method: &str) -> bool {
-    matches!(
-        method,
-        "bold"
-            | "italic"
-            | "underline"
-            | "dim"
-            | "fg"
-            | "bg"
-            | "border"
-            | "max_rows"
-            | "maxRows"
-            | "add"
-            | "series"
-            | "title"
-            | "x_label"
-            | "xLabel"
-            | "y_label"
-            | "yLabel"
-            | "width"
-            | "height"
-            | "headers"
-            | "row"
-            | "language"
-            | "source"
-            | "pair"
-            | "build"
-    )
-}
-
 #[cfg(test)]
 mod w28_hof_reduce_static_proof_tests {
     use crate::test_utils::eval_typed_i64;
@@ -3214,27 +3177,13 @@ impl BytecodeCompiler {
             Some(Operand::Builtin(builtin)),
         ));
         self.last_expr_schema = None;
-        // SC1: `Color.rgb(...)` returns a `string` carrier. Content namespace
-        // constructors and the per-type content builders return the concrete
-        // `Ptr(HeapKind::Content)` carrier so array literals can prove
-        // `Array<content>` without falling back to Any.
+        // SC1: `Color.rgb(...)` returns a `string` carrier; the remaining
+        // namespace ctors produce Content / DateTime values whose type the
+        // downstream dispatch infers structurally (left as `None`).
         self.last_expr_type_info = if matches!(builtin, BuiltinFunction::ColorRgbCtor) {
             Some(crate::type_tracking::VariableTypeInfo::named(
                 "string".to_string(),
             ))
-        } else if matches!(
-            builtin,
-            BuiltinFunction::ContentChart
-                | BuiltinFunction::ContentTextCtor
-                | BuiltinFunction::ContentTableCtor
-                | BuiltinFunction::ContentCodeCtor
-                | BuiltinFunction::ContentKvCtor
-                | BuiltinFunction::ContentFragmentCtor
-                | BuiltinFunction::TableBuilderNew
-                | BuiltinFunction::CodeBuilderNew
-                | BuiltinFunction::KeyValueBuilderNew
-        ) {
-            Some(content_type_info())
         } else {
             None
         };
@@ -5570,12 +5519,6 @@ impl BytecodeCompiler {
         // After filter/head/tail/etc., the result is still Table<T>.
         if self.is_type_preserving_table_method(method) {
             self.last_expr_type_info = receiver_type_info.clone();
-        } else if receiver_type_info
-            .as_ref()
-            .is_some_and(Self::type_info_is_content)
-            && content_preserving_method(method)
-        {
-            self.last_expr_type_info = Some(content_type_info());
         } else {
             self.last_expr_type_info = None;
         }
@@ -5797,13 +5740,12 @@ impl BytecodeCompiler {
         // carrier (per-field kinds proven from the compiled args), and dispatch
         // to the internal `__call_raising` sibling with `R` instantiated from
         // `fn_ref`'s declared return type.
-        if canonical_module == "std::core::remote" && (method == "call" || method == "call_async") {
+        if canonical_module == "std::core::remote" && method == "call" {
             return self.compile_remote_call_elaboration(
                 binding_name,
                 namespace_name,
                 namespace_span,
                 args,
-                method == "call_async",
             );
         }
 
@@ -6236,21 +6178,14 @@ impl BytecodeCompiler {
         namespace_name: &str,
         namespace_span: Span,
         args: &[Expr],
-        async_result: bool,
     ) -> Result<()> {
         use shape_ast::ast::{FunctionParameter, TypeAnnotation};
-        let surface_name = if async_result {
-            "remote::call_async"
-        } else {
-            "remote::call"
-        };
 
         if args.len() < 2 {
             return Err(ShapeError::SemanticError {
-                message: format!(
-                    "{surface_name}(addr, fn, args…) requires at least a server address \
-                     and a function reference"
-                ),
+                message: "remote::call(addr, fn, args…) requires at least a server address \
+                          and a function reference"
+                    .to_string(),
                 location: Some(self.span_to_source_location(namespace_span)),
             });
         }
@@ -6265,10 +6200,9 @@ impl BytecodeCompiler {
             Expr::Identifier(name, _) => name.clone(),
             _ => {
                 return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "{surface_name}: the function reference must name a \
-                         statically-known function or closure binding"
-                    ),
+                    message: "remote::call: the function reference must name a \
+                              statically-known function or closure binding"
+                        .to_string(),
                     location: Some(self.span_to_source_location(fn_ref_expr.span())),
                 });
             }
@@ -6282,32 +6216,31 @@ impl BytecodeCompiler {
         // Named-function declaration first (R1); then a retained closure-literal
         // peek for a `let`-bound closure value (R2). Both yield the same
         // `(Vec<FunctionParameter>, Option<TypeAnnotation>)` signature shape.
-        let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) = if let Some(
-            func_def,
-        ) = self
-            .function_defs
-            .get(&resolved_name)
-            .or_else(|| self.function_defs.get(&fn_name))
-            .cloned()
-        {
-            (func_def.params, func_def.return_type)
-        } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
-            (peek.params, peek.return_type)
-        } else {
-            return Err(ShapeError::SemanticError {
-                message: format!(
-                    "{surface_name}: '{}' is not a statically-known function or closure binding",
-                    fn_name
-                ),
-                location: Some(self.span_to_source_location(fn_ref_expr.span())),
-            });
-        };
+        let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) =
+            if let Some(func_def) = self
+                .function_defs
+                .get(&resolved_name)
+                .or_else(|| self.function_defs.get(&fn_name))
+                .cloned()
+            {
+                (func_def.params, func_def.return_type)
+            } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
+                (peek.params, peek.return_type)
+            } else {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "remote::call: '{}' is not a statically-known function or closure binding",
+                        fn_name
+                    ),
+                    location: Some(self.span_to_source_location(fn_ref_expr.span())),
+                });
+            };
 
         // (2) Arity check.
         if call_args.len() != params.len() {
             return Err(ShapeError::SemanticError {
                 message: format!(
-                    "{surface_name}: '{}' expects {} argument(s), but {} were supplied",
+                    "remote::call: '{}' expects {} argument(s), but {} were supplied",
                     fn_name,
                     params.len(),
                     call_args.len()
@@ -6338,7 +6271,7 @@ impl BytecodeCompiler {
                 Some(arg_ct) => {
                     return Err(ShapeError::SemanticError {
                         message: format!(
-                            "{surface_name}: argument #{} to '{}' has type `{}`, but the \
+                            "remote::call: argument #{} to '{}' has type `{}`, but the \
                              declared parameter type is `{}`",
                             i + 1,
                             fn_name,
@@ -6351,7 +6284,7 @@ impl BytecodeCompiler {
                 None => {
                     return Err(ShapeError::SemanticError {
                         message: format!(
-                            "{surface_name}: cannot statically prove the type of argument #{} \
+                            "remote::call: cannot statically prove the type of argument #{} \
                              to '{}' (declared parameter type `{}`) — annotate the value",
                             i + 1,
                             fn_name,
@@ -6383,16 +6316,11 @@ impl BytecodeCompiler {
         // protocol / remote failure → `Err(RemoteError::…)`). The raising
         // sibling `__call_raising` is left for the `@remote` before-hook (Q26).
         let rewritten = vec![addr_expr, fn_ref_expr, pack_expr];
-        let internal_name = if async_result {
-            "__call_async_result"
-        } else {
-            "__call_result"
-        };
         self.compile_module_namespace_call_on_binding(
             binding_name,
             namespace_name,
             namespace_span,
-            internal_name,
+            "__call_result",
             &[],
             &rewritten,
         )?;
@@ -6401,12 +6329,9 @@ impl BytecodeCompiler {
         // of the raising sibling), so the documented
         // `match remote::call(…) { Ok(v) => …, Err(e) => … }` type-checks and
         // the runtime `Result` value it produces matches. `R` is `fn_ref`'s
-        // declared return type, except a remote callee returning `Future<T>` is
-        // receiver-materialized before serialization and therefore surfaces as
-        // payload `T`. An unannotated/unit return becomes `Void`.
+        // declared return type; an unannotated/unit return becomes `Void`.
         let r_ann = return_type
             .clone()
-            .map(Self::remote_result_payload_annotation)
             .unwrap_or(shape_ast::ast::TypeAnnotation::Void);
         let result_ann = shape_ast::ast::TypeAnnotation::Generic {
             name: shape_ast::ast::TypePath::simple("Result"),
@@ -6417,45 +6342,12 @@ impl BytecodeCompiler {
                 )),
             ],
         };
-        let final_ann = if async_result {
-            shape_ast::ast::TypeAnnotation::Generic {
-                name: shape_ast::ast::TypePath::simple("Future"),
-                args: vec![result_ann],
-            }
-        } else {
-            result_ann
-        };
-        self.last_expr_type_info = self.type_info_from_annotation(&final_ann);
+        self.last_expr_type_info = self.type_info_from_annotation(&result_ann);
         self.last_expr_schema = self
             .last_expr_type_info
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
         Ok(())
-    }
-
-    fn remote_result_payload_annotation(
-        ann: shape_ast::ast::TypeAnnotation,
-    ) -> shape_ast::ast::TypeAnnotation {
-        use shape_ast::ast::TypeAnnotation;
-        match ann {
-            TypeAnnotation::Generic { name, mut args }
-                if name.name() == "Future" && args.len() == 1 =>
-            {
-                args.remove(0)
-            }
-            TypeAnnotation::Basic(name) => {
-                let trimmed = name.trim();
-                if let Some(inner) = trimmed
-                    .strip_prefix("Future<")
-                    .and_then(|rest| rest.strip_suffix('>'))
-                {
-                    TypeAnnotation::Basic(inner.trim().to_string())
-                } else {
-                    TypeAnnotation::Basic(name)
-                }
-            }
-            other => other,
-        }
     }
 
     /// Resolve a `let`-bound closure value's retained [`ClosureBodyPeek`] by
@@ -6987,9 +6879,6 @@ impl BytecodeCompiler {
             Statement::Return(Some(expr), _)
             | Statement::Expression(expr, _)
             | Statement::SetParamValue {
-                expression: expr, ..
-            }
-            | Statement::SetParamTypeExpr {
                 expression: expr, ..
             }
             | Statement::SetReturnExpr {

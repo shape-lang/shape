@@ -1459,10 +1459,6 @@ impl<'a> Visitor for TokenCollector<'a> {
                 self.add_keyword_token("set", *span);
                 self.add_keyword_token_in_span("param", *span);
             }
-            Statement::SetParamTypeExpr { span, .. } => {
-                self.add_keyword_token("set", *span);
-                self.add_keyword_token_in_span("param", *span);
-            }
             Statement::SetParamValue { span, .. } => {
                 self.add_keyword_token("set", *span);
                 self.add_keyword_token_in_span("param", *span);
