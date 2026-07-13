@@ -8,6 +8,7 @@ mod diagnostics;
 mod editing;
 mod folding;
 mod foreign_lsp;
+mod generated_provenance;
 mod hover;
 mod inlay_storage_class;
 mod navigation;

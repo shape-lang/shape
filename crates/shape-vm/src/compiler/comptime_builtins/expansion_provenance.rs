@@ -276,7 +276,7 @@ impl ExpansionIdentity {
 /// CLAUDE.md §Mechanical enforcement): the only way to obtain a `SymbolId`
 /// is to register full provenance with the [`GeneratedSymbolTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SymbolId {
+pub struct SymbolId {
     high: i64,
     low: i64,
 }
@@ -301,7 +301,7 @@ impl SymbolId {
 /// node. Non-empty by construction: a path always starts at a declaration
 /// root segment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct GeneratedNodePath {
+pub struct GeneratedNodePath {
     segments: Vec<String>,
 }
 
@@ -320,11 +320,16 @@ impl GeneratedNodePath {
         Self { segments }
     }
 
-    // First production reader is the S4 query surface (diagnostics carry
-    // node paths); delete the allow there.
-    #[allow(dead_code)]
-    pub(crate) fn segments(&self) -> &[String] {
+    pub fn segments(&self) -> &[String] {
         &self.segments
+    }
+
+    /// Canonical `root/child/…` rendering for diagnostics (S4 row 7: the
+    /// generated-node note names the node path so a body error inside a
+    /// generated declaration is attributable without virtual documents,
+    /// which are ticket D2).
+    pub fn render(&self) -> String {
+        self.segments.join("/")
     }
 }
 
@@ -335,7 +340,7 @@ impl GeneratedNodePath {
 /// row-1 diagnostic. A genuine zero-offset span (start 0, end > 0) is a
 /// legitimate anchor; only the empty `{0, 0}` dummy is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SourceAnchor {
+pub struct SourceAnchor {
     file_id: u16,
     span: Span,
 }
@@ -348,12 +353,19 @@ impl SourceAnchor {
         Ok(Self { file_id, span })
     }
 
-    pub(crate) fn file_id(&self) -> u16 {
+    pub fn file_id(&self) -> u16 {
         self.file_id
     }
 
-    pub(crate) fn span(&self) -> Span {
+    pub fn span(&self) -> Span {
         self.span
+    }
+
+    /// Does this anchor's span contain byte `offset` in file `file_id`?
+    /// (Half-open `[start, end)` containment — the position-resolution
+    /// predicate of the S4 query surface.)
+    pub fn contains(&self, file_id: u16, offset: usize) -> bool {
+        self.file_id == file_id && self.span.start <= offset && offset < self.span.end
     }
 }
 
@@ -386,25 +398,35 @@ impl GeneratedOrigin {
 }
 
 /// One comptime expansion SITE: the six-component identity plus the raw
-/// application anchor (SourceMap file id + application span). Built once at
-/// each directive-producing site (`annotation_expansion_site` /
-/// `comptime_block_expansion_site` in `functions_annotations.rs`) and handed
-/// to the directive-consumption points; the anchor is validated into a
-/// [`SourceAnchor`] at the registration entry point, where a dummy span is
-/// the named row-1 compile error.
+/// application anchor (SourceMap file id + application span) and the raw
+/// generator-definition anchor (the annotation `comptime` handler's span;
+/// for a `comptime { }` block, the block IS its own generator, so both
+/// spans coincide). Built once at each directive-producing site
+/// (`annotation_expansion_site` / `comptime_block_expansion_site` in
+/// `functions_annotations.rs`) and handed to the directive-consumption
+/// points; the anchors are validated into [`SourceAnchor`]s at the
+/// registration entry point, where a dummy span is the named row-1 compile
+/// error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExpansionSite {
     identity: ExpansionIdentity,
     file_id: u16,
     application_span: Span,
+    generator_span: Span,
 }
 
 impl ExpansionSite {
-    pub(crate) fn new(identity: ExpansionIdentity, file_id: u16, application_span: Span) -> Self {
+    pub(crate) fn new(
+        identity: ExpansionIdentity,
+        file_id: u16,
+        application_span: Span,
+        generator_span: Span,
+    ) -> Self {
         Self {
             identity,
             file_id,
             application_span,
+            generator_span,
         }
     }
 
@@ -416,20 +438,58 @@ impl ExpansionSite {
         self.application_span
     }
 
+    pub(crate) fn generator_span(&self) -> Span {
+        self.generator_span
+    }
+
     /// Validate the application anchor into a real [`SourceAnchor`].
     /// Rejection row 1: a dummy application span cannot anchor a generated
     /// declaration — named compile error, surface-and-stop.
     pub(crate) fn source_anchor(&self) -> Result<SourceAnchor, String> {
         SourceAnchor::new(self.file_id, self.application_span)
     }
+
+    /// Validate the generator-definition anchor into a real
+    /// [`SourceAnchor`]. Same row-1 rule: a generated declaration whose
+    /// generator cannot be located in real source has incomplete
+    /// provenance — named compile error, surface-and-stop.
+    pub(crate) fn generator_anchor(&self) -> Result<SourceAnchor, String> {
+        SourceAnchor::new(self.file_id, self.generator_span)
+    }
 }
 
-/// One reserved generated declaration: its full origin plus the canonical
-/// content fingerprint of the emitted declaration (rejection row 3).
+/// One reserved generated declaration: its full origin, the canonical
+/// content fingerprint of the emitted declaration (rejection row 3), the
+/// declaration's function-table name, and the generator-definition anchor
+/// (the S4 query surface answers "generator defined here" from the table,
+/// never from a text scan).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GeneratedSymbolRecord {
     origin: GeneratedOrigin,
     content: CanonicalHash,
+    decl_name: String,
+    generator_anchor: SourceAnchor,
+}
+
+/// One generated symbol's full provenance, as answered by the S4 query
+/// surface (Decision 66: the LSP consumes compiler query results — never a
+/// text scan, never a second evaluation). All locations are real
+/// [`SourceAnchor`]s by construction.
+///
+/// `checked_decl` is where the CHECKED generated declaration anchors in
+/// real source. Until ticket D2's `shape-expansion://` virtual documents
+/// give checked declarations their own addressable text, the S3 anchoring
+/// rule places every generated decl at its application span, so
+/// `checked_decl` and `application` carry the same anchor — two roles, one
+/// location today; the field split is the Decision 68 query shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedSymbolProvenance<'a> {
+    pub symbol: SymbolId,
+    pub decl_name: &'a str,
+    pub node_path: &'a GeneratedNodePath,
+    pub checked_decl: SourceAnchor,
+    pub application: SourceAnchor,
+    pub generator: SourceAnchor,
 }
 
 /// Outcome of reserving a generated declaration.
@@ -452,9 +512,11 @@ pub(crate) enum SymbolReservation {
 /// are a derived view INTO this table, never an identity of their own.
 ///
 /// Lives on `BytecodeCompiler` (`compiler/mod.rs`), initialized empty per
-/// compilation unit beside the A3 specialization overlay.
+/// compilation unit beside the A3 specialization overlay. Exposed to
+/// tooling via `BytecodeCompiler::generated_symbol_query()` — the ONE
+/// query API of spec §4.1 (slice S5 wires LSP navigation onto it).
 #[derive(Debug)]
-pub(crate) struct GeneratedSymbolTable {
+pub struct GeneratedSymbolTable {
     records: HashMap<SymbolId, GeneratedSymbolRecord>,
     /// Derived name index: generated function-table name -> issued
     /// SymbolId. A lookup convenience only — identity lives in `records`.
@@ -487,6 +549,7 @@ impl GeneratedSymbolTable {
         decl_name: &str,
         origin: GeneratedOrigin,
         content: CanonicalHash,
+        generator_anchor: SourceAnchor,
     ) -> Result<SymbolReservation, String> {
         let id = SymbolId::derive(&origin.expansion, decl_name);
         if let Some(existing_id) = self.names.get(decl_name) {
@@ -510,17 +573,36 @@ impl GeneratedSymbolTable {
             }
             return Ok(SymbolReservation::Reissued(id));
         }
-        self.records
-            .insert(id, GeneratedSymbolRecord { origin, content });
+        self.records.insert(
+            id,
+            GeneratedSymbolRecord {
+                origin,
+                content,
+                decl_name: decl_name.to_string(),
+                generator_anchor,
+            },
+        );
         self.names.insert(decl_name.to_string(), id);
         Ok(SymbolReservation::Fresh(id))
     }
 
-    /// Provenance lookup. An unknown identity is a named error — never a
-    /// silent absent-value return (surface-and-stop).
-    // First production reader is the S4 query surface (unit tests consume
-    // it today); delete the allow there.
-    #[allow(dead_code)]
+    fn provenance_view<'a>(&self, id: SymbolId, record: &'a GeneratedSymbolRecord) -> GeneratedSymbolProvenance<'a> {
+        GeneratedSymbolProvenance {
+            symbol: id,
+            decl_name: &record.decl_name,
+            node_path: &record.origin.node_path,
+            checked_decl: record.origin.source_anchor,
+            application: record.origin.source_anchor,
+            generator: record.generator_anchor,
+        }
+    }
+
+    /// Full-`GeneratedOrigin` lookup for test assertions on the expansion
+    /// identity (the production query surface is [`Self::provenance_of`],
+    /// which answers the Decision-68 location shape). An unknown identity
+    /// is a named error — never a silent absent-value return
+    /// (surface-and-stop).
+    #[cfg(test)]
     pub(crate) fn origin_of(&self, id: SymbolId) -> Result<&GeneratedOrigin, String> {
         self.records
             .get(&id)
@@ -528,12 +610,62 @@ impl GeneratedSymbolTable {
             .ok_or_else(|| UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC.to_string())
     }
 
+    /// S4 query surface: resolve an issued [`SymbolId`] to its full
+    /// provenance — {symbol, checked-decl location, application location,
+    /// generator-definition location}. An unknown identity is a named
+    /// error — never a silent absent-value return (surface-and-stop).
+    pub fn provenance_of(&self, id: SymbolId) -> Result<GeneratedSymbolProvenance<'_>, String> {
+        self.records
+            .get(&id)
+            .map(|record| self.provenance_view(id, record))
+            .ok_or_else(|| UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC.to_string())
+    }
+
+    /// S4 query surface: resolve a generated declaration's function-table
+    /// name to its full provenance. An unknown name is a named error.
+    pub fn provenance_for_name(
+        &self,
+        decl_name: &str,
+    ) -> Result<GeneratedSymbolProvenance<'_>, String> {
+        self.provenance_of(self.symbol_for_name(decl_name)?)
+    }
+
+    /// S4 query surface: every generated symbol with its provenance, in
+    /// deterministic (declaration-name) order — the workspace-symbol
+    /// listing (Decision 68 LSP behavior: workspace symbols include
+    /// generated symbols via `SymbolId`, answered from this table only).
+    pub fn generated_symbols(&self) -> Vec<GeneratedSymbolProvenance<'_>> {
+        let mut all: Vec<GeneratedSymbolProvenance<'_>> = self
+            .records
+            .iter()
+            .map(|(id, record)| self.provenance_view(*id, record))
+            .collect();
+        all.sort_by(|a, b| a.decl_name.cmp(b.decl_name));
+        all
+    }
+
+    /// S4 query surface: the generated symbols whose CHECKED-DECLARATION
+    /// anchor contains byte `offset` of file `file_id` (position → symbol
+    /// resolution for navigation). This is a position FILTER over the
+    /// table, not an identity lookup: an empty result means "no generated
+    /// declaration anchors here" and is a legitimate answer, unlike the
+    /// named-error identity lookups above. Several generated declarations
+    /// may share one application anchor (every method of one `extend`
+    /// block), so the result is a list.
+    pub fn symbols_at(&self, file_id: u16, offset: usize) -> Vec<GeneratedSymbolProvenance<'_>> {
+        let mut hits: Vec<GeneratedSymbolProvenance<'_>> = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.origin.source_anchor.contains(file_id, offset))
+            .map(|(id, record)| self.provenance_view(*id, record))
+            .collect();
+        hits.sort_by(|a, b| a.decl_name.cmp(b.decl_name));
+        hits
+    }
+
     /// Derived name view: resolve a generated declaration's function-table
     /// name to its issued SymbolId. An unknown name is a named error.
-    // First production reader is the S4 query surface (unit tests consume
-    // it today); delete the allow there.
-    #[allow(dead_code)]
-    pub(crate) fn symbol_for_name(&self, decl_name: &str) -> Result<SymbolId, String> {
+    pub fn symbol_for_name(&self, decl_name: &str) -> Result<SymbolId, String> {
         self.names
             .get(decl_name)
             .copied()
@@ -548,11 +680,15 @@ impl GeneratedSymbolTable {
     }
 
     /// Number of reserved generated declarations.
-    // First production reader is the S4 query surface (unit tests consume
-    // it today); delete the allow there.
-    #[allow(dead_code)]
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.records.len()
+    }
+
+    /// Is the table empty? (Clippy pairing for [`Self::len`]; an empty
+    /// table is the legitimate "no comptime expansions in this unit"
+    /// state.)
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
     }
 }
 
@@ -598,6 +734,10 @@ mod tests {
         CanonicalHash::from_canonical_decl_encoding("extend:Point:method:sum:body-encoding")
     }
 
+    fn sample_generator_anchor() -> SourceAnchor {
+        SourceAnchor::new(0, Span::new(5, 30)).expect("real generator span must anchor")
+    }
+
     // (a) Hash determinism: two independent constructions from the same
     // canonical descriptors agree on identity, fingerprint, and issued
     // SymbolId (the pre-pass/pass-2 agreement precondition).
@@ -610,7 +750,12 @@ mod tests {
 
         let mut table = GeneratedSymbolTable::new();
         let reservation_a = table
-            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
             .expect("first reservation succeeds");
         let SymbolReservation::Fresh(id_a) = reservation_a else {
             panic!("first reservation must be Fresh, got {reservation_a:?}");
@@ -619,7 +764,12 @@ mod tests {
         // pre-pass then authoritative pass-2) is idempotent: same SymbolId,
         // reported as a re-issue, no conflict.
         let reservation_b = table
-            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
             .expect("idempotent re-reservation succeeds");
         let SymbolReservation::Reissued(id_b) = reservation_b else {
             panic!("second reservation must be Reissued, got {reservation_b:?}");
@@ -640,13 +790,19 @@ mod tests {
     fn conflicting_content_for_one_reserved_identity_is_the_named_row3_error() {
         let mut table = GeneratedSymbolTable::new();
         table
-            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
             .expect("first reservation succeeds");
         let err = table
             .reserve_generated_decl(
                 "Point.sum",
                 sample_origin(),
                 CanonicalHash::from_canonical_decl_encoding("a-different-body-encoding"),
+                sample_generator_anchor(),
             )
             .expect_err("conflicting output for one identity must be refused");
         assert!(
@@ -666,7 +822,12 @@ mod tests {
     fn one_name_under_two_identities_is_the_named_row2_error() {
         let mut table = GeneratedSymbolTable::new();
         table
-            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
             .expect("first reservation succeeds");
         let other_origin = GeneratedOrigin {
             expansion: ExpansionIdentity::new(
@@ -681,7 +842,12 @@ mod tests {
             source_anchor: SourceAnchor::new(0, Span::new(90, 110)).expect("real span must anchor"),
         };
         let err = table
-            .reserve_generated_decl("Point.sum", other_origin, sample_content())
+            .reserve_generated_decl(
+                "Point.sum",
+                other_origin,
+                sample_content(),
+                sample_generator_anchor(),
+            )
             .expect_err("one name under two identities must be refused");
         assert!(
             err.contains(GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC),
@@ -701,6 +867,129 @@ mod tests {
             .symbol_for_name("never_generated")
             .expect_err("unknown name must be a named error");
         assert!(err.contains(UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC));
+    }
+
+    // S4 query surface: a reserved generated symbol resolves (by name and
+    // by SymbolId) to its FULL provenance — {symbol, checked-decl location,
+    // application location, generator-definition location} — answered from
+    // the identity table alone. The checked-decl and application anchors
+    // coincide until D2 virtual documents (documented field split); the
+    // generator anchor is the handler-definition location.
+    #[test]
+    fn s4_query_surface_resolves_full_provenance_by_name_and_id() {
+        let mut table = GeneratedSymbolTable::new();
+        table
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
+            .expect("reservation succeeds");
+
+        let by_name = table
+            .provenance_for_name("Point.sum")
+            .expect("reserved name resolves to provenance");
+        assert_eq!(by_name.decl_name, "Point.sum");
+        assert_eq!(by_name.checked_decl, sample_origin().source_anchor);
+        assert_eq!(by_name.application, sample_origin().source_anchor);
+        assert_eq!(by_name.generator, sample_generator_anchor());
+        assert_eq!(
+            by_name.node_path.render(),
+            "extend:Point/method:sum",
+            "node path renders root/child"
+        );
+
+        let by_id = table
+            .provenance_of(by_name.symbol)
+            .expect("issued SymbolId resolves to provenance");
+        assert_eq!(by_id, by_name, "name view and id view agree");
+    }
+
+    // S4 query surface: unknown-SymbolId provenance lookups are the named
+    // error — never a silent absent-value return. (The id is issued by a
+    // DIFFERENT table; SymbolId's constructor stays private, so this is
+    // the only way to hold an id the queried table never issued.)
+    #[test]
+    fn s4_unknown_symbol_id_provenance_lookup_is_the_named_error() {
+        let mut issuing = GeneratedSymbolTable::new();
+        let SymbolReservation::Fresh(foreign_id) = issuing
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
+            .expect("reservation succeeds")
+        else {
+            panic!("first reservation must be Fresh");
+        };
+        let empty = GeneratedSymbolTable::new();
+        let err = empty
+            .provenance_of(foreign_id)
+            .expect_err("unknown SymbolId must be a named error");
+        assert!(err.contains(UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC));
+    }
+
+    // S4 query surface: the workspace-symbol listing enumerates every
+    // generated symbol with provenance in deterministic declaration-name
+    // order, and the position filter resolves a byte offset inside a
+    // checked-decl anchor to the declarations anchored there (a filter,
+    // not an identity lookup: empty result = nothing generated here).
+    #[test]
+    fn s4_query_surface_lists_and_position_filters_generated_symbols() {
+        let mut table = GeneratedSymbolTable::new();
+        table
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
+            .expect("reserve sum");
+        table
+            .reserve_generated_decl(
+                "Point.scale",
+                GeneratedOrigin {
+                    expansion: sample_identity(),
+                    node_path: GeneratedNodePath::decl_root("extend:Point").child("method:scale"),
+                    source_anchor: SourceAnchor::new(0, Span::new(42, 57))
+                        .expect("real span must anchor"),
+                },
+                CanonicalHash::from_canonical_decl_encoding("scale-body-encoding"),
+                sample_generator_anchor(),
+            )
+            .expect("reserve scale");
+
+        let listing = table.generated_symbols();
+        assert_eq!(
+            listing
+                .iter()
+                .map(|provenance| provenance.decl_name)
+                .collect::<Vec<_>>(),
+            vec!["Point.scale", "Point.sum"],
+            "workspace-symbol listing is deterministic by declaration name"
+        );
+
+        // Both decls share the application anchor (span 42..57 in file 0).
+        let at_application = table.symbols_at(0, 50);
+        assert_eq!(
+            at_application
+                .iter()
+                .map(|provenance| provenance.decl_name)
+                .collect::<Vec<_>>(),
+            vec!["Point.scale", "Point.sum"],
+            "position inside the shared checked-decl anchor resolves both methods"
+        );
+
+        assert!(
+            table.symbols_at(0, 200).is_empty(),
+            "an offset outside every anchor resolves to no generated symbols"
+        );
+        assert!(
+            table.symbols_at(9, 50).is_empty(),
+            "a different file id resolves to no generated symbols"
+        );
     }
 
     // (b) Sensitivity: changing ANY of the six ExpansionIdentity components
@@ -775,7 +1064,12 @@ mod tests {
     fn symbol_id_is_sensitive_to_decl_name_descriptor() {
         let mut table = GeneratedSymbolTable::new();
         let SymbolReservation::Fresh(sum) = table
-            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
             .expect("reserve sum")
         else {
             panic!("first reservation must be Fresh");
@@ -790,6 +1084,7 @@ mod tests {
                         .expect("real span must anchor"),
                 },
                 sample_content(),
+                sample_generator_anchor(),
             )
             .expect("reserve scale")
         else {

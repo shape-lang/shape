@@ -14,7 +14,8 @@ use std::collections::{HashMap, HashSet};
 use super::BytecodeCompiler;
 use super::comptime_builtins::expansion_provenance::{
     ApplicationId, CanonicalHash, ComptimeStage, ExpansionIdentity, ExpansionSite,
-    GeneratedNodePath, GeneratedOrigin, GeneratorRef, SymbolReservation, TargetIdentity,
+    GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable, GeneratorRef, SymbolReservation,
+    TargetIdentity,
 };
 
 /// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
@@ -371,10 +372,8 @@ impl BytecodeCompiler {
                     else {
                         continue;
                     };
-                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
-                        &param_name,
-                        &value,
-                    )?);
+                    param.default_value =
+                        Some(Self::scalar_default_expr_from_kinded_slot(&param_name, &value)?);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
                 _ => {}
@@ -979,12 +978,14 @@ impl BytecodeCompiler {
             func_def,
             &expansion_site,
         )
-        .map_err(|e| ShapeError::RuntimeError {
-            message: format!(
-                "Comptime handler '{}' directive processing failed: {}",
-                annotation.name, e
-            ),
-            location: Some(self.span_to_source_location(handler_span)),
+        .map_err(|e| {
+            // ADR-009 D1 (S4): provenance-carrying generated-decl failures
+            // pass through with their location notes intact.
+            self.preserve_or_wrap_directive_failure(
+                e,
+                &format!("Comptime handler '{}'", annotation.name),
+                handler_span,
+            )
         })
     }
 
@@ -1524,6 +1525,21 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-009 D1 (S4): the compiler-owned generated-symbol query surface —
+    /// the ONE query API of spec §4.1 for generated declarations. Tooling
+    /// (the LSP in slice S5, diagnostics here in S4) resolves generated
+    /// symbols to `{SymbolId, checked-decl location, application location,
+    /// generator-definition location}` and lists them for workspace-symbol
+    /// consumption THROUGH this handle, answered from the S2 identity table
+    /// only — never by text scan, never by a second expansion run
+    /// (Decision 66 closing rule).
+    ///
+    /// Query the compiler AFTER compilation (`compile_in_place`) so the
+    /// table holds every reserved expansion of the unit.
+    pub fn generated_symbol_query(&self) -> &GeneratedSymbolTable {
+        &self.generated_symbols
+    }
+
     /// ADR-009 D1 (S2): build the [`ExpansionSite`] for one comptime
     /// annotation-handler application. Called by BOTH phases of the existing
     /// extend/materialization path — the speculative pre-pass
@@ -1586,6 +1602,10 @@ impl BytecodeCompiler {
             ),
             self.current_file_id,
             annotation.span,
+            // Generator-definition anchor: the annotation's comptime
+            // handler span (S4 query surface + row-7 diagnostics answer
+            // "generator defined here" from this anchor).
+            handler.span,
         )
     }
 
@@ -1619,6 +1639,9 @@ impl BytecodeCompiler {
             ),
             self.current_file_id,
             span,
+            // The comptime block is its own generator AND its own
+            // application site: one span fills both anchor roles.
+            span,
         )
     }
 
@@ -1650,9 +1673,13 @@ impl BytecodeCompiler {
 
         // ADR-009 D1 (S2), rejection row 1: a generated declaration must
         // anchor at a real application span — refused HERE, before any
-        // registration or compilation (Dec 68 required rejection).
+        // registration or compilation (Dec 68 required rejection). The
+        // generator-definition anchor is held to the same rule (S4).
         let source_anchor = site
             .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let generator_anchor = site
+            .generator_anchor()
             .map_err(|message| self.expansion_rejection(message, site))?;
 
         // Row-3 content fingerprints are taken over the handler-emitted
@@ -1677,10 +1704,11 @@ impl BytecodeCompiler {
             // application span (content fingerprint above is over the raw
             // handler-emitted AST — see `anchor_generated_function_decl`).
             anchor_generated_function_decl(&mut func_def, site.application_span());
+            let node_path = GeneratedNodePath::decl_root(format!("extend:{extend_type_str}"))
+                .child(format!("method:{}", method.name));
             let origin = GeneratedOrigin {
                 expansion: site.identity().clone(),
-                node_path: GeneratedNodePath::decl_root(format!("extend:{extend_type_str}"))
-                    .child(format!("method:{}", method.name)),
+                node_path: node_path.clone(),
                 source_anchor,
             };
             // §4.9.1 + D1 identity-keyed dedup: if the whole-program
@@ -1691,12 +1719,19 @@ impl BytecodeCompiler {
             // a duplicate slot). The body is still compiled below, filling
             // the pre-registered slot, so the method is compiled exactly
             // once through the identical path.
-            match self
-                .generated_symbols
-                .reserve_generated_decl(&func_def.name, origin, content)
-            {
+            match self.generated_symbols.reserve_generated_decl(
+                &func_def.name,
+                origin,
+                content,
+                generator_anchor,
+            ) {
                 Ok(SymbolReservation::Fresh(_)) => {
-                    self.register_function(&func_def)?;
+                    // ADR-009 D1 (S4), rejection row 7: a diagnostic raised
+                    // on a generated declaration carries generated-node +
+                    // application + generator locations.
+                    self.register_function(&func_def).map_err(|e| {
+                        self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
+                    })?;
                 }
                 Ok(SymbolReservation::Reissued(_)) => {}
                 Err(message) => return Err(self.expansion_rejection(message, site)),
@@ -1707,7 +1742,15 @@ impl BytecodeCompiler {
             // JIT. Generated methods need the same path; the signature was
             // already registered above/pre-pass, so this only fills the body
             // and MIR for the existing function slot.
-            self.compile_function(&func_def)?;
+            //
+            // ADR-009 D1 (S4), rejection row 7: a body error inside the
+            // generated method surfaces with full expansion provenance —
+            // generated-node + application-site + generator-definition
+            // locations — never as a bare error pointing at handler-emitted
+            // offsets.
+            self.compile_function(&func_def).map_err(|e| {
+                self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
+            })?;
         }
         Ok(())
     }
@@ -1918,10 +1961,16 @@ impl BytecodeCompiler {
                             continue;
                         };
                         // ADR-009 D1 (S2), rejection row 1: generated decls
-                        // must anchor at the real application span.
+                        // must anchor at the real application span; the
+                        // generator-definition anchor is held to the same
+                        // rule (S4).
                         let source_anchor = expansion_site.source_anchor().map_err(|message| {
                             self.expansion_rejection(message, &expansion_site)
                         })?;
+                        let generator_anchor =
+                            expansion_site.generator_anchor().map_err(|message| {
+                                self.expansion_rejection(message, &expansion_site)
+                            })?;
                         for item in items {
                             match item {
                                 Item::Function(mut func_def, _span) => {
@@ -1933,18 +1982,18 @@ impl BytecodeCompiler {
                                         &mut func_def,
                                         expansion_site.application_span(),
                                     );
+                                    let node_path =
+                                        GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
                                     let origin = GeneratedOrigin {
                                         expansion: expansion_site.identity().clone(),
-                                        node_path: GeneratedNodePath::decl_root(format!(
-                                            "fn:{}",
-                                            func_def.name
-                                        )),
+                                        node_path: node_path.clone(),
                                         source_anchor,
                                     };
                                     match self.generated_symbols.reserve_generated_decl(
                                         &func_def.name,
                                         origin,
                                         content,
+                                        generator_anchor,
                                     ) {
                                         Ok(SymbolReservation::Fresh(_)) => {
                                             // Register the signature NOW so the
@@ -1957,7 +2006,19 @@ impl BytecodeCompiler {
                                             // path as before this pre-pass, so the
                                             // generated function's runtime/JIT
                                             // characteristics are unchanged.
-                                            self.register_function(&func_def)?;
+                                            //
+                                            // ADR-009 D1 (S4), row 7:
+                                            // registration failures on the
+                                            // generated decl carry full
+                                            // expansion provenance.
+                                            self.register_function(&func_def).map_err(|e| {
+                                                self.build_generated_decl_failure(
+                                                    &e,
+                                                    &func_def.name,
+                                                    &node_path,
+                                                    &expansion_site,
+                                                )
+                                            })?;
                                             generated.push(Item::Function(
                                                 func_def,
                                                 expansion_site.application_span(),
@@ -2007,21 +2068,33 @@ impl BytecodeCompiler {
                                             &mut func_def,
                                             expansion_site.application_span(),
                                         );
+                                        let node_path = GeneratedNodePath::decl_root(format!(
+                                            "extend:{extend_type_str}"
+                                        ))
+                                        .child(format!("method:{}", method.name));
                                         let origin = GeneratedOrigin {
                                             expansion: expansion_site.identity().clone(),
-                                            node_path: GeneratedNodePath::decl_root(format!(
-                                                "extend:{extend_type_str}"
-                                            ))
-                                            .child(format!("method:{}", method.name)),
+                                            node_path: node_path.clone(),
                                             source_anchor,
                                         };
                                         match self.generated_symbols.reserve_generated_decl(
                                             &func_def.name,
                                             origin,
                                             content,
+                                            generator_anchor,
                                         ) {
                                             Ok(SymbolReservation::Fresh(_)) => {
-                                                self.register_function(&func_def)?;
+                                                // ADR-009 D1 (S4), row 7:
+                                                // provenance on registration
+                                                // failures.
+                                                self.register_function(&func_def).map_err(|e| {
+                                                    self.build_generated_decl_failure(
+                                                        &e,
+                                                        &func_def.name,
+                                                        &node_path,
+                                                        &expansion_site,
+                                                    )
+                                                })?;
                                                 any_new = true;
                                             }
                                             Ok(SymbolReservation::Reissued(_)) => {}
@@ -2161,9 +2234,13 @@ impl BytecodeCompiler {
         }
 
         // ADR-009 D1 (S2), rejection row 1: generated decls must anchor at
-        // the real application span — refused before any registration.
+        // the real application span — refused before any registration. The
+        // generator-definition anchor is held to the same rule (S4).
         let source_anchor = site
             .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let generator_anchor = site
+            .generator_anchor()
             .map_err(|message| self.expansion_rejection(message, site))?;
 
         // comptime-excellence §4.5.1 + D1 identity-keyed dedup: if the
@@ -2181,17 +2258,24 @@ impl BytecodeCompiler {
             // the pre-pass hashed the same raw AST (see
             // `anchor_generated_function_decl`).
             anchor_generated_function_decl(func_def, site.application_span());
+            let node_path = GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
             let origin = GeneratedOrigin {
                 expansion: site.identity().clone(),
-                node_path: GeneratedNodePath::decl_root(format!("fn:{}", func_def.name)),
+                node_path: node_path.clone(),
                 source_anchor,
             };
-            match self
-                .generated_symbols
-                .reserve_generated_decl(&func_def.name, origin, content)
-            {
+            match self.generated_symbols.reserve_generated_decl(
+                &func_def.name,
+                origin,
+                content,
+                generator_anchor,
+            ) {
                 Ok(SymbolReservation::Fresh(_)) => {
-                    self.register_function(func_def)?;
+                    // ADR-009 D1 (S4), row 7: provenance on registration
+                    // failures.
+                    self.register_function(func_def).map_err(|e| {
+                        self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
+                    })?;
                 }
                 Ok(SymbolReservation::Reissued(_)) => {}
                 Err(message) => return Err(self.expansion_rejection(message, site)),
@@ -2206,7 +2290,15 @@ impl BytecodeCompiler {
             // whole-program deopt to the interpreter. A hand-written free function
             // goes through `compile_function`; routing the generated one through
             // the same path gives it native JIT codegen and VM == JIT.
-            self.compile_function(func_def)?;
+            //
+            // ADR-009 D1 (S4), rejection row 7: a body error inside the
+            // generated free function surfaces with full expansion
+            // provenance (generated-node + application + generator
+            // locations).
+            self.compile_function(func_def).map_err(|e| {
+                let node_path = GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
+                self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
+            })?;
         }
         for extend in extends {
             self.apply_comptime_extend(extend, target_name, site)?;
@@ -2464,17 +2556,15 @@ impl BytecodeCompiler {
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         target_name: &str,
         site: &ExpansionSite,
-    ) -> std::result::Result<bool, String> {
+    ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
-                    self.apply_comptime_extend(extend, target_name, site)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend(extend, target_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
-                    self.apply_comptime_extend_items(items, target_name, site)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend_items(items, target_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     removed = true;
@@ -2482,28 +2572,24 @@ impl BytecodeCompiler {
                 }
                 super::comptime_builtins::ComptimeDirective::SetParamType { .. }
                 | super::comptime_builtins::ComptimeDirective::SetParamValue { .. } => {
-                    return Err(
-                        "`set param` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`set param` directives are only valid when compiling function targets",
+                    ));
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {
-                    return Err(
-                        "`set return` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`set return` directives are only valid when compiling function targets",
+                    ));
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceBody { .. } => {
-                    return Err(
-                        "`replace body` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`replace body` directives are only valid when compiling function targets",
+                    ));
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
-                    return Err(
-                        "`replace module` directives are only valid when compiling module targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`replace module` directives are only valid when compiling module targets",
+                    ));
                 }
             }
         }
@@ -2516,17 +2602,15 @@ impl BytecodeCompiler {
         target_name: &str,
         func_def: &mut FunctionDef,
         site: &ExpansionSite,
-    ) -> std::result::Result<bool, String> {
+    ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
-                    self.apply_comptime_extend(extend, target_name, site)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend(extend, target_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
-                    self.apply_comptime_extend_items(items, target_name, site)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend_items(items, target_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     removed = true;
@@ -2541,17 +2625,17 @@ impl BytecodeCompiler {
                         .iter_mut()
                         .find(|p| p.simple_name() == Some(param_name.as_str()));
                     let Some(param) = maybe_param else {
-                        return Err(format!(
+                        return Err(Self::directive_error(format!(
                             "comptime directive referenced unknown parameter '{}'",
                             param_name
-                        ));
+                        )));
                     };
                     if let Some(existing) = &param.type_annotation {
                         if existing != &type_annotation {
-                            return Err(format!(
+                            return Err(Self::directive_error(format!(
                                 "cannot override explicit type of parameter '{}'",
                                 param_name
-                            ));
+                            )));
                         }
                     } else {
                         param.type_annotation = Some(type_annotation);
@@ -2566,21 +2650,22 @@ impl BytecodeCompiler {
                         .iter_mut()
                         .find(|p| p.simple_name() == Some(param_name.as_str()));
                     let Some(param) = maybe_param else {
-                        return Err(format!(
+                        return Err(Self::directive_error(format!(
                             "comptime directive referenced unknown parameter '{}'",
                             param_name
-                        ));
+                        )));
                     };
-                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
-                        &param_name,
-                        &value,
-                    )?);
+                    param.default_value = Some(
+                        Self::scalar_default_expr_from_kinded_slot(&param_name, &value)
+                            .map_err(Self::directive_error)?,
+                    );
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { type_annotation } => {
                     if let Some(existing) = &func_def.return_type {
                         if existing != &type_annotation {
-                            return Err("cannot override explicit function return type annotation"
-                                .to_string());
+                            return Err(Self::directive_error(
+                                "cannot override explicit function return type annotation",
+                            ));
                         }
                     } else {
                         func_def.return_type = Some(type_annotation);
@@ -2605,10 +2690,8 @@ impl BytecodeCompiler {
                         is_async: func_def.is_async,
                         is_comptime: func_def.is_comptime,
                     };
-                    self.register_function(&shadow_def)
-                        .map_err(|e| e.to_string())?;
-                    self.compile_function_body(&shadow_def)
-                        .map_err(|e| e.to_string())?;
+                    self.register_function(&shadow_def)?;
+                    self.compile_function_body(&shadow_def)?;
 
                     // Phase 3e: copy the original's inferred return type
                     // onto the shadow so call sites of `__original__` see
@@ -2644,10 +2727,9 @@ impl BytecodeCompiler {
                     func_def.body = body;
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
-                    return Err(
-                        "`replace module` directives are only valid when compiling module targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`replace module` directives are only valid when compiling module targets",
+                    ));
                 }
             }
         }
@@ -3932,6 +4014,9 @@ mod s2_expansion_provenance_tests {
             ),
             0,
             application_span,
+            // Generator-definition span: a distinct real span so S4 tests
+            // can tell the generator anchor apart from the application.
+            Span::new(2, 8),
         )
     }
 
@@ -4368,6 +4453,347 @@ let out = work(2)
             resolved_line(&compiler, return_span),
             handler_line,
             "wrapper Return statement must anchor at the handler body"
+        );
+    }
+}
+
+// ADR-009 ticket D1 (slice S4) — the shared compiler query surface for
+// generated symbols + provenance-carrying diagnostics.
+//
+// Decision 66 closing rule: tooling resolves generated declarations through
+// COMPILER QUERY RESULTS — {SymbolId, checked-decl location, application
+// location, generator-definition location} — answered from the S2 identity
+// table only, never by text scan and never by a second expansion run.
+// Rejection row 7: a diagnostic raised on a generated declaration carries
+// generated-node + application-site + generator-definition locations.
+#[cfg(test)]
+mod s4_query_surface_and_diagnostics_tests {
+    use super::BytecodeCompiler;
+    use crate::compiler::comptime_builtins::expansion_provenance::{
+        ApplicationId, CanonicalHash, ComptimeStage, ExpansionIdentity, ExpansionSite,
+        GeneratorRef, TargetIdentity,
+    };
+    use shape_ast::ast::Span;
+    use shape_ast::error::ShapeError;
+
+    fn parse(source: &str) -> shape_ast::ast::Program {
+        shape_ast::parse_program(source).expect("test program parses")
+    }
+
+    /// Compile `source` with source text installed so spans resolve to real
+    /// line/column locations (see the S3 test-mod helper: `compile_in_place`
+    /// moves `source_text` into debug info, so it is re-installed for the
+    /// test's own resolutions).
+    fn compiled_with_source(source: &str) -> BytecodeCompiler {
+        let program = parse(source);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        compiler
+            .compile_in_place(&program)
+            .expect("test program compiles");
+        compiler.set_source(source);
+        compiler
+    }
+
+    /// 1-indexed line of the first occurrence of `needle` in `source`.
+    fn line_of(source: &str, needle: &str) -> usize {
+        let offset = source.find(needle).expect("needle present in source");
+        source[..offset].chars().filter(|c| *c == '\n').count() + 1
+    }
+
+    fn resolved_line(compiler: &BytecodeCompiler, span: Span) -> usize {
+        compiler.span_to_source_location(span).line
+    }
+
+    const GENERATED_METHOD_FIXTURE: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+      method double() -> int { 84 }
+    }
+  }
+}
+
+@gen()
+type Point { id: int }
+"#;
+
+    /// The query surface resolves a generated declaration NAME to its full
+    /// provenance: SymbolId + checked-decl + application + generator
+    /// locations, each resolving to the right REAL source line — answered
+    /// from the identity table via `generated_symbol_query()` alone.
+    #[test]
+    fn query_surface_resolves_generated_method_provenance_to_real_lines() {
+        let source = GENERATED_METHOD_FIXTURE;
+        let compiler = compiled_with_source(source);
+        let application_line = line_of(source, "@gen()");
+        let generator_line = line_of(source, "comptime post(target, ctx)");
+
+        let provenance = compiler
+            .generated_symbol_query()
+            .provenance_for_name("Point.answer")
+            .expect("generated method resolves through the query surface");
+        assert_eq!(provenance.decl_name, "Point.answer");
+        assert_eq!(
+            provenance.node_path.render(),
+            "extend:Point/method:answer",
+            "node path identifies the generated node"
+        );
+        assert_eq!(
+            resolved_line(&compiler, provenance.checked_decl.span()),
+            application_line,
+            "checked-decl location resolves to the application line (S3 anchoring)"
+        );
+        assert_eq!(
+            resolved_line(&compiler, provenance.application.span()),
+            application_line,
+            "application location resolves to the @gen() line"
+        );
+        assert_eq!(
+            resolved_line(&compiler, provenance.generator.span()),
+            generator_line,
+            "generator-definition location resolves to the comptime handler line"
+        );
+
+        let by_id = compiler
+            .generated_symbol_query()
+            .provenance_of(provenance.symbol)
+            .expect("issued SymbolId resolves to the same provenance");
+        assert_eq!(by_id, provenance, "name view and SymbolId view agree");
+    }
+
+    /// The query surface lists every generated symbol (workspace-symbol
+    /// consumption) in deterministic order, and resolves a position inside
+    /// the checked-decl anchor to the generated declarations anchored there.
+    #[test]
+    fn query_surface_lists_and_position_resolves_generated_symbols() {
+        let source = GENERATED_METHOD_FIXTURE;
+        let compiler = compiled_with_source(source);
+        let query = compiler.generated_symbol_query();
+
+        let names: Vec<&str> = query
+            .generated_symbols()
+            .iter()
+            .map(|provenance| provenance.decl_name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Point.answer", "Point.double"],
+            "workspace-symbol listing enumerates every generated decl deterministically"
+        );
+
+        let anchor = query
+            .provenance_for_name("Point.answer")
+            .expect("generated method resolves")
+            .application;
+        let at_application = query.symbols_at(anchor.file_id(), anchor.span().start);
+        assert_eq!(
+            at_application
+                .iter()
+                .map(|provenance| provenance.decl_name)
+                .collect::<Vec<_>>(),
+            vec!["Point.answer", "Point.double"],
+            "a position on the application resolves every decl anchored there"
+        );
+
+        let type_offset = source.find("type Point").expect("fixture has the type");
+        assert!(
+            query.symbols_at(anchor.file_id(), type_offset).is_empty(),
+            "a position outside every generated anchor resolves to nothing"
+        );
+    }
+
+    /// Rejection row 7: an error raised INSIDE a generated method body
+    /// (here: the generated body calls an undefined function) surfaces as
+    /// the C0003 diagnostic carrying THREE location-bearing notes —
+    /// generated node, application site, generator definition — each
+    /// resolving to its real line.
+    #[test]
+    fn generated_body_failure_carries_three_provenance_note_locations() {
+        let source = "type UserRow { id: int }\n// application line\n// generator line\n";
+        let program = parse(source);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        compiler
+            .compile_in_place(&program)
+            .expect("target type compiles");
+        compiler.set_source(source);
+
+        let application_offset = source.find("// application line").expect("marker");
+        let generator_offset = source.find("// generator line").expect("marker");
+        let application_span = Span::new(application_offset, application_offset + 4);
+        let generator_span = Span::new(generator_offset, generator_offset + 4);
+        let application_line = line_of(source, "// application line");
+        let generator_line = line_of(source, "// generator line");
+
+        let no_args: [(&str, &str); 0] = [];
+        let site = ExpansionSite::new(
+            ExpansionIdentity::new(
+                GeneratorRef::from_canonical_descriptor("annotation:broken_gen:comptime-post"),
+                ApplicationId::from_canonical_descriptor("application:test:row7"),
+                TargetIdentity::from_canonical_descriptor("type:UserRow"),
+                ComptimeStage::AnnotationHandler,
+                CanonicalHash::from_canonical_argument_descriptors(&no_args),
+                CanonicalHash::from_canonical_dependency_descriptors(&[]),
+            ),
+            0,
+            application_span,
+            generator_span,
+        );
+
+        let extend_program =
+            parse("extend UserRow { method broken() -> int { missing_helper() } }");
+        let extend = extend_program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Extend(extend, _) => Some(extend.clone()),
+                _ => None,
+            })
+            .expect("program contains an extend item");
+
+        let err = compiler
+            .apply_comptime_extend(extend, "UserRow", &site)
+            .expect_err("a generated body calling an undefined function must fail");
+        let ShapeError::SemanticError {
+            message,
+            location: Some(location),
+        } = &err
+        else {
+            panic!("row-7 failure must be a located SemanticError, got {err:?}");
+        };
+        assert!(
+            message.contains("error in generated declaration `UserRow.broken`"),
+            "row-7 message must name the generated declaration: {message}"
+        );
+        assert_eq!(
+            location.line, application_line,
+            "row-7 primary location anchors at the application site"
+        );
+        assert_eq!(
+            location.notes.len(),
+            3,
+            "row-7 diagnostic carries exactly the three provenance notes: {:?}",
+            location.notes
+        );
+        let generated_note = &location.notes[0];
+        assert!(
+            generated_note
+                .message
+                .contains("generated node extend:UserRow/method:broken"),
+            "generated-node note must carry the node path: {}",
+            generated_note.message
+        );
+        assert_eq!(
+            generated_note
+                .location
+                .as_ref()
+                .expect("generated-node note has a location")
+                .line,
+            application_line,
+            "generated-node note resolves to the checked-decl (application) line"
+        );
+        let application_note = &location.notes[1];
+        assert!(
+            application_note
+                .message
+                .contains("generated from this application site"),
+            "application note missing: {}",
+            application_note.message
+        );
+        assert_eq!(
+            application_note
+                .location
+                .as_ref()
+                .expect("application note has a location")
+                .line,
+            application_line,
+        );
+        let generator_note = &location.notes[2];
+        assert!(
+            generator_note.message.contains("generator defined here"),
+            "generator note missing: {}",
+            generator_note.message
+        );
+        assert_eq!(
+            generator_note
+                .location
+                .as_ref()
+                .expect("generator note has a location")
+                .line,
+            generator_line,
+            "generator note resolves to the generator-definition line"
+        );
+    }
+
+    /// End-to-end row 7: the SAME provenance-carrying diagnostic surfaces
+    /// through the full two-phase pipeline when an annotation handler
+    /// generates a method whose body fails to compile. Runs under the
+    /// RecoverAll diagnostic modes (the LSP configuration) so the pipeline
+    /// reaches pass-2's generated-body compile after the analyzer has
+    /// already recorded its own view of the broken body; the row-7
+    /// diagnostic must be among the surfaced errors WITH its three
+    /// location-bearing notes intact (the outer directive-processing wrap
+    /// must not flatten them to a string).
+    #[test]
+    fn end_to_end_generated_body_failure_carries_provenance() {
+        let source = r#"
+annotation bad_gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method broken() -> int { missing_helper() }
+    }
+  }
+}
+
+@bad_gen()
+type Point { id: int }
+"#;
+        let program = parse(source);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_type_diagnostic_mode(crate::compiler::TypeDiagnosticMode::RecoverAll);
+        compiler.set_compile_diagnostic_mode(crate::compiler::CompileDiagnosticMode::RecoverAll);
+        compiler.set_source(source);
+        let err = compiler
+            .compile_in_place(&program)
+            .expect_err("generated body calling an undefined function must fail the compile");
+
+        fn flatten<'a>(e: &'a ShapeError, out: &mut Vec<&'a ShapeError>) {
+            if let ShapeError::MultiError(errors) = e {
+                for inner in errors {
+                    flatten(inner, out);
+                }
+            } else {
+                out.push(e);
+            }
+        }
+        let mut flat = Vec::new();
+        flatten(&err, &mut flat);
+        let provenance_error = flat
+            .iter()
+            .find_map(|e| match e {
+                ShapeError::SemanticError {
+                    message,
+                    location: Some(location),
+                } if message.contains("error in generated declaration `Point.broken`") => {
+                    Some(location)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "end-to-end failure must include the provenance-carrying \
+                     generated-decl diagnostic, got: {flat:?}"
+                )
+            });
+        assert_eq!(
+            provenance_error.notes.len(),
+            3,
+            "the three provenance notes must survive the full pipeline: {:?}",
+            provenance_error.notes
         );
     }
 }

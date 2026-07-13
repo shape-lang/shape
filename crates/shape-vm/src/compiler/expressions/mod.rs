@@ -675,12 +675,14 @@ impl BytecodeCompiler {
                         &target_name,
                         &expansion_site,
                     )
-                    .map_err(|e| ShapeError::RuntimeError {
-                        message: format!(
-                            "Comptime handler '{}' directive processing failed: {}",
-                            annotation.name, e
-                        ),
-                        location: Some(self.span_to_source_location(handler_span)),
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(
+                            e,
+                            &format!("Comptime handler '{}'", annotation.name),
+                            handler_span,
+                        )
                     })?;
 
                 if removed {
@@ -1922,9 +1924,10 @@ impl BytecodeCompiler {
                 let module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
                 let expansion_site = self.comptime_block_expansion_site(*span, &module_path);
                 self.process_comptime_directives(execution.directives, "", &expansion_site)
-                    .map_err(|e| shape_ast::error::ShapeError::RuntimeError {
-                        message: format!("Comptime block directive processing failed: {}", e),
-                        location: Some(self.span_to_source_location(*span)),
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(e, "Comptime block", *span)
                     })?;
                 if let Some(message) =
                     shape_runtime::comptime_reflection::runtime_lift_rejection(&execution.value)

@@ -273,6 +273,8 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                     DiagnosticSeverity::ERROR,
                     "shape",
                     Some(structured.code.as_str()),
+                    // This branch is only reached when no URI was supplied.
+                    None,
                 )]
             }
         }
@@ -283,6 +285,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::ERROR,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
         ShapeError::LexError { message, location } => {
@@ -292,6 +295,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::ERROR,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
         ShapeError::SemanticError { message, location } => {
@@ -301,6 +305,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::ERROR,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
         ShapeError::RuntimeError { message, location } => {
@@ -310,6 +315,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::WARNING,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
         ShapeError::TypeError(type_error) => {
@@ -320,6 +326,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::ERROR,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
         ShapeError::PatternError {
@@ -337,6 +344,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::ERROR,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
         ShapeError::DataError {
@@ -357,6 +365,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::WARNING,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
         ShapeError::ModuleError {
@@ -374,6 +383,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
                 DiagnosticSeverity::ERROR,
                 "shape",
                 error_code,
+                uri.as_ref(),
             )]
         }
 
@@ -392,6 +402,7 @@ pub fn error_to_diagnostic_with_uri(error: &ShapeError, uri: Option<Uri>) -> Vec
             DiagnosticSeverity::ERROR,
             "shape",
             error_code,
+            uri.as_ref(),
         )],
     }
 }
@@ -402,6 +413,7 @@ fn create_diagnostic(
     location: Option<&SourceLocation>,
     severity: DiagnosticSeverity,
     source: &str,
+    fallback_uri: Option<&Uri>,
 ) -> Diagnostic {
     let range = location_to_range(location);
 
@@ -425,7 +437,7 @@ fn create_diagnostic(
     // Build related information from notes and cross-file locations
     let related_information = if let Some(loc) = location {
         let mut related = if !loc.notes.is_empty() {
-            notes_to_related_info(&loc.notes, loc.file.as_deref())
+            notes_to_related_info(&loc.notes, loc.file.as_deref(), fallback_uri)
         } else {
             Vec::new()
         };
@@ -485,8 +497,9 @@ fn create_diagnostic_with_code(
     severity: DiagnosticSeverity,
     source: &str,
     error_code: Option<&str>,
+    fallback_uri: Option<&Uri>,
 ) -> Diagnostic {
-    let mut diag = create_diagnostic(message, location, severity, source);
+    let mut diag = create_diagnostic(message, location, severity, source, fallback_uri);
     if let Some(code) = error_code {
         diag.code = Some(NumberOrString::String(code.to_string()));
         // W2.3 / 1.17 — attach clickable book URL for the error code.
@@ -498,17 +511,25 @@ fn create_diagnostic_with_code(
 }
 
 /// Convert ErrorNotes to LSP DiagnosticRelatedInformation
+///
+/// A note whose location names a file resolves to that file's URI; a
+/// file-less note (in-memory / single-document compile, e.g. the ADR-009 D1
+/// generated-declaration provenance notes) falls back to the diagnostic's
+/// own document URI so the related location still navigates.
 fn notes_to_related_info(
     notes: &[ErrorNote],
     default_file: Option<&str>,
+    fallback_uri: Option<&Uri>,
 ) -> Vec<DiagnosticRelatedInformation> {
     notes
         .iter()
         .filter_map(|note| {
             // Try to create a valid URI for the location
             let location = note.location.as_ref()?;
-            let file = location.file.as_deref().or(default_file)?;
-            let uri = Uri::from_file_path(file)?;
+            let uri = match location.file.as_deref().or(default_file) {
+                Some(file) => Uri::from_file_path(file).or_else(|| fallback_uri.cloned())?,
+                None => fallback_uri.cloned()?,
+            };
 
             let line = if location.line > 0 {
                 location.line - 1
@@ -1963,6 +1984,68 @@ fn is_ident_byte(b: u8) -> bool {
 mod tests {
     use super::*;
     use crate::util::offset_to_line_col;
+
+    /// ADR-009 D1 (S4): location-bearing `ErrorNote`s on a semantic error
+    /// map to LSP `relatedInformation`. For an in-memory document whose
+    /// locations name no file, the document URI passed to
+    /// `error_to_diagnostic_with_uri` is the fallback — the note still
+    /// navigates instead of being silently dropped.
+    #[test]
+    fn semantic_error_notes_map_to_related_information_with_fallback_uri() {
+        let mut note_location = SourceLocation::new(4, 3);
+        note_location.file = None;
+        let mut location = SourceLocation::new(11, 1);
+        location.notes.push(ErrorNote {
+            message: "generator defined here".to_string(),
+            location: Some(note_location),
+        });
+        let error = ShapeError::SemanticError {
+            message: "error in generated declaration `Point.broken`".to_string(),
+            location: Some(location),
+        };
+
+        let uri = Uri::from_file_path("/mem.shape").expect("test uri");
+        let diagnostics = error_to_diagnostic_with_uri(&error, Some(uri.clone()));
+        assert_eq!(diagnostics.len(), 1);
+        let related = diagnostics[0]
+            .related_information
+            .as_ref()
+            .expect("location-bearing notes must map to relatedInformation");
+        let entry = related
+            .iter()
+            .find(|info| info.message.contains("generator defined here"))
+            .expect("the note becomes a related-information entry");
+        assert_eq!(
+            entry.location.uri, uri,
+            "file-less note falls back to the document URI"
+        );
+        assert_eq!(
+            entry.location.range.start.line, 3,
+            "1-based note line 4 maps to 0-based LSP line 3"
+        );
+    }
+
+    /// Without any URI (no note file, no document URI) the note cannot
+    /// become an LSP location — it is dropped from relatedInformation, and
+    /// nothing panics.
+    #[test]
+    fn semantic_error_notes_without_any_uri_are_dropped() {
+        let mut location = SourceLocation::new(11, 1);
+        location.notes.push(ErrorNote {
+            message: "generator defined here".to_string(),
+            location: Some(SourceLocation::new(4, 3)),
+        });
+        let error = ShapeError::SemanticError {
+            message: "boom".to_string(),
+            location: Some(location),
+        };
+        let diagnostics = error_to_diagnostic(&error);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0].related_information.is_none(),
+            "no URI can be fabricated for a file-less note without a document URI"
+        );
+    }
 
     #[test]
     fn test_extern_c_valid_no_false_diagnostic() {

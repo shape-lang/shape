@@ -248,7 +248,18 @@ impl ShapeTest {
             Ok(program) => program,
             Err(err) => return error_to_diagnostic(&err),
         };
-        shape_lsp::analysis::analyze_program_semantics(&program, &self.text, None, None, None)
+        // Carry the harness document URI so location-bearing error notes
+        // (e.g. ADR-009 D1 generated-declaration provenance) surface as
+        // `relatedInformation` exactly as they do for a real editor
+        // document.
+        shape_lsp::analysis::analyze_program_semantics_for_document(
+            &program,
+            &self.text,
+            None,
+            None,
+            None,
+            Some(&self.uri()),
+        )
     }
 
     // -- Runtime helpers ----------------------------------------------------
@@ -1184,6 +1195,58 @@ impl ShapeTest {
                 .map(|diag| diag.message.as_str())
                 .collect::<Vec<_>>()
         );
+        self
+    }
+
+    /// Assert one semantic diagnostic contains `message_fragment` AND
+    /// carries LSP `relatedInformation` entries matching every
+    /// `(note_fragment, zero_based_line)` pair — a related-locations
+    /// assertion, not rendered-string matching.
+    ///
+    /// ADR-009 D1 rejection row 7: a diagnostic raised on a generated
+    /// declaration must link the generated node, the application site, and
+    /// the generator definition as navigable related locations.
+    pub fn expect_semantic_diagnostic_related_locations(
+        self,
+        message_fragment: &str,
+        expected_related: &[(&str, u32)],
+    ) -> Self {
+        let diagnostics = self.collect_semantic_diagnostics();
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diag| diag.message.contains(message_fragment))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected a semantic diagnostic containing '{}', found: {:?}",
+                    message_fragment,
+                    diagnostics
+                        .iter()
+                        .map(|diag| diag.message.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let related = diagnostic
+            .related_information
+            .as_ref()
+            .unwrap_or_else(|| {
+                panic!(
+                    "Diagnostic '{}' carries no relatedInformation; expected {:?}",
+                    diagnostic.message, expected_related
+                )
+            });
+        for (note_fragment, line) in expected_related {
+            assert!(
+                related.iter().any(|info| info.message.contains(note_fragment)
+                    && info.location.range.start.line == *line),
+                "Expected related location containing '{}' at line {}, found: {:?}",
+                note_fragment,
+                line,
+                related
+                    .iter()
+                    .map(|info| (info.message.as_str(), info.location.range.start.line))
+                    .collect::<Vec<_>>()
+            );
+        }
         self
     }
 

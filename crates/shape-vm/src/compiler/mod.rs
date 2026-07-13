@@ -59,6 +59,14 @@ use shape_runtime::type_system::{
 // Sub-modules
 pub(crate) mod comptime;
 pub(crate) mod comptime_builtins;
+// ADR-009 D1 (S4): the generated-symbol query surface — the ONE query API
+// (spec §4.1) tooling uses to resolve generated declarations to identity +
+// provenance ({SymbolId, checked-decl, application, generator locations})
+// and to list them for workspace symbols. Consumed via
+// `BytecodeCompiler::generated_symbol_query()`.
+pub use comptime_builtins::expansion_provenance::{
+    GeneratedNodePath, GeneratedSymbolProvenance, GeneratedSymbolTable, SourceAnchor, SymbolId,
+};
 pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;

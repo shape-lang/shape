@@ -242,12 +242,13 @@ impl ShapeLanguageServer {
         match parse_program(parse_source.as_ref()) {
             Ok(program) => {
                 let module_cache = self.documents.get_module_cache();
-                let mut diagnostics = crate::analysis::analyze_program_semantics(
+                let mut diagnostics = crate::analysis::analyze_program_semantics_for_document(
                     &program,
                     &text,
                     uri.to_file_path().as_deref(),
                     Some(&module_cache),
                     self.project_root.get().map(|p| p.as_path()),
+                    Some(uri),
                 );
                 diagnostics.extend(crate::doc_diagnostics::validate_program_docs(
                     &program,
@@ -390,12 +391,13 @@ impl ShapeLanguageServer {
                     .await;
 
                 let module_cache = self.documents.get_module_cache();
-                let mut diagnostics = crate::analysis::analyze_program_semantics(
+                let mut diagnostics = crate::analysis::analyze_program_semantics_for_document(
                     &program,
                     &text,
                     uri.to_file_path().as_deref(),
                     Some(&module_cache),
                     self.project_root.get().map(|p| p.as_path()),
+                    Some(uri),
                 );
                 diagnostics.extend(crate::doc_diagnostics::validate_program_docs(
                     &program,
