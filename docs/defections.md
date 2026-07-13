@@ -7357,3 +7357,99 @@ persistent diagnostic-masking layer (4).
 **Bounded scope decision (pre-existing gap, not taken as part of this fix):** resolving a module's OWN nominal type by its BARE name from inside that module's comptime block (`type_ref(Point)` where the dep module defines `Point`) still yields "unknown semantic type identity": dependency structs freeze under their qualified names (`calc::numbers::Point`) while the body's identifier stays bare, and the deleted per-site builder on main read the same qualified tables — identical failure pre-branch. This is comptime name-resolution territory (B-ticket query-API extension), independent of barrier ordering; pinned in the test comment of `imported_module_comptime_reflection_consumes_a_populated_freeze`.
 
 **Cost saved:** imported-module comptime works again before the A1 merge instead of surfacing as a post-merge multi-file breakage the 12-gate set could not see (no gate exercised comptime inside an imported module).
+
+## 2026-07-13 — ADR009-B2 close-out: ruled stances + rejected compromises (TraitRef / ImplRef / find_impl typed implementation evidence)
+
+Ticket ADR009-B2 (shape-lang/shape#6, branch adr009/b2, slices S1-S6) landed
+`trait_ref` / `find_impl` typed implementation evidence over the A1 semantic
+freeze. Considered-but-rejected compromises and ruled stances, logged per
+slice mandate:
+
+**1. Spelling: positional `trait_ref(Serializable)` vs Dec 49's
+`trait_ref<Serializable>()` turbofish.** Dec 49 spells the turbofish form,
+but ticket A2 (checked type-expression syntax) is not in this base — the only
+landed type-symbol surface is the positional bare-identifier form
+(`type_ref(int)`). B2 lands `trait_ref(Trait)` positionally for consistency.
+REJECTED: partially implementing A2's turbofish inside B2 (an undeclared
+scope grab that would collide with A2's checked-syntax design), and a
+string-argument stopgap (`trait_ref("Serializable")` — rejection-matrix row
+R3 forbids exactly that). A2 upgrades the spelling for `type_ref` and
+`trait_ref` together; the design-index row records the pending deviation.
+
+**2. Blanket-impl satisfaction and legacy numeric widening are NOT frozen
+evidence (divergence from legacy `implements`; E5 reconciles).** The legacy
+boolean path answers `true` for blanket-impl satisfaction
+(`registry.type_implements_trait` recursion) and for the int→number widening
+heuristic. `find_impl` answers only from direct (default or named)
+`TraitImplEntry` facts frozen at the barrier; querying a pair whose only
+satisfaction route is a blanket impl or the widening rule is a NAMED
+surface-and-stop (`BLANKET_IMPL_NOT_EVIDENCE_DIAGNOSTIC`,
+`NUMERIC_WIDENING_NOT_EVIDENCE_DIAGNOSTIC`), never a silent `None` and never
+fabricated evidence. REJECTED: inheriting either rule into the evidence
+surface (bounds-unevaluated blanket "evidence" is partially-populated
+evidence — spec §3.1 forbids partial descriptors; the widening rule is
+legacy-`implements` vocabulary E5 deletes). Known conservatism, documented in
+S2: ANY blanket impl on the trait surfaces the stop for every non-direct
+pair (bounds are not evaluated); a future ticket may refine satisfaction
+into certified evidence with its own descriptor scheme. The user-visible
+divergence from `implements` is deliberate and disappears when E5 deletes
+the legacy path.
+
+**3. Post-freeze (comptime-generated/derived) impls: named ordering stop,
+never `find_impl -> None`.** Implementations registered after the barrier —
+annotation/extend paths, From/TryFrom-derived Into/TryInto, J-CT.2
+`comptime impl` blocks — are not barrier truth. Querying such a pair is the
+named `POST_BARRIER_IMPL_NOT_EVIDENCE_DIAGNOSTIC` (detection consults the
+site-time key set via freeze reverse name maps, diagnostic-only, never an
+evidence source). REJECTED: (a) silent `None` — masks a Dec 52 ordering
+violation as a missing impl (the exact "document it as out-of-scope" shade
+the plan forbids); (b) re-reading live `env.trait_impl_keys()` at the query
+site to "see" the late impl — the deleted A1 per-site-rebuild pattern; (c)
+re-freezing after generation phases — a second barrier breaks the
+one-freeze-per-unit invariant (spec §4.1).
+
+**4. R5 branch scoping: honestly minimal enforcement, no over-claimed escape
+analysis.** What is enforced and proven: (i) ImplRef/TraitRef are
+comptime-only — the stage-boundary lift rejection fires when evidence would
+enter runtime code (R6 family, `runtime_lift_rejection`); (ii) evidence is
+obtainable ONLY through `find_impl`'s `Some(proof)` arm — issuance is
+structural (only `find_impl` builds `ImplRef`; the schema-name-checked
+opaque decode + freeze re-validation block forgery, R7). NOT claimed: an
+intra-comptime escape analysis (evidence stored into a comptime local that
+outlives its match arm inside the same comptime block is not tracked).
+REJECTED: shipping a partial-but-silent arm-lifetime checker (partial
+enforcement masquerading as full branch scoping); the residual is explicit
+follow-up territory for the checked-consumption tickets (B3+), where
+evidence-consuming builders give the arm-scoping rule a real consumer.
+
+**5. Named-impls-only pairs: named stop, not `None`, not a fabricated
+default (S4 ruled stance).** A pair implemented ONLY via named impls has
+real evidence but no default selection; `find_impl`'s two-argument form
+answers with `FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC` instead of picking one
+(fabricated-default evidence) or lying (`None` while evidence exists). A
+future named-impl selector argument can lift the stop without changing the
+descriptor scheme (impl identities already carry
+`impl:{trait}:{type}:{impl_name}`).
+
+**6. Ambiguous unqualified-impl attribution: query-time stop (S2 residual).**
+Impl entries registered under unqualified trait names attribute exact →
+target-module-relative → unique-suffix; an entry matching more than one
+frozen trait def poisons its candidate pairs with
+`AMBIGUOUS_IMPL_EVIDENCE_DIAGNOSTIC` at query time. REJECTED: guessing an
+attribution (wrong-evidence risk) or dropping the entry silently
+(un-queryable evidence with no surfaced reason).
+
+**S6 fold-in (firewall safety):** the S2 stance diagnostics carried an
+"(ADR-009 B2 ruled stance)" suffix; the comptime diagnostics firewall
+(`helpers.rs::sanitize_comptime_internal`) wholesale-replaces any message
+containing "ADR-" — the named stops would have surfaced user-facing as the
+generic not-available sentence. De-jargonized in S6 (red-then-green), pinned
+by `semantic_freeze::tests::b2_user_facing_diagnostics_are_firewall_safe`
+over every mini-VM-path B2 diagnostic. `NO_FREEZE_HANDLE_DIAGNOSTIC` (A1,
+compile-error path, never firewall-routed) deliberately excluded — outside
+this ticket's territory.
+
+**Evidence:** rejection-row → test-name table + verification counts in the
+B2 addendum of `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`;
+design-index rows `TraitRef<Trait>` / `ImplRef<T, Trait>` flipped to CURRENT
+/ VM+JIT in `docs/design/typed-comptime.md`.

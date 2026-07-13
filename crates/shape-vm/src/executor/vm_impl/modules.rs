@@ -555,7 +555,17 @@ fn project_typed_return(
             let payload = project_concrete_return(registry, c)?;
             Ok(result_option_carrier::build_some(schemas, payload))
         }
-        TypedReturn::None => Ok(result_option_carrier::build_none(schemas)),
+        // Canonical Option representation (ffi-rebuild §4.4 stage 3, see
+        // `control_flow/foreign_marshal.rs::msgpack_to_kinded_slot` and
+        // `patterns/checking.rs`): `None` IS the null sentinel
+        // (`KindedSlot::none()`), `Some(v)` is the non-null `build_some`
+        // carrier. The pattern-matcher's `None` discriminator emits `IsNull`
+        // (null-coding), so a non-null `build_none` carrier here read as
+        // `Some` under `IsNull` and then faulted in `UnwrapOption` — user
+        // bytecode's `None` (`MirConstant::None`) already null-codes, this
+        // arm was the single divergent producer (ADR-009 B2 slice S4, found
+        // by the `find_impl` None-arm proof).
+        TypedReturn::None => Ok(shape_value::KindedSlot::none()),
 
         // ── Typed-object wrappers (TypedObjectStorage builder) ─────────
         TypedReturn::ObjectPairs(pairs) | TypedReturn::TypedObject(pairs) => {
@@ -1475,14 +1485,17 @@ mod stage_k1_tests {
         drop(payload);
     }
 
+    /// Canonical Option representation: a module function's `None` return
+    /// projects to the NULL SENTINEL, not a non-null `__Option` carrier —
+    /// the pattern-matcher's `None` discriminator null-codes (`IsNull`), so
+    /// a non-null carrier read as `Some` and faulted in `UnwrapOption`
+    /// (ADR-009 B2 slice S4; mirrors
+    /// `foreign_marshal.rs::msgpack_to_kinded_slot`'s §4.4 stage-3 rule).
     #[test]
-    fn none_wrapper_roundtrips() {
-        let (slot, schemas) = roundtrip_with_schemas(TypedReturn::None);
-        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
-        let view = result_option_carrier::read_option(&schemas, &slot)
-            .unwrap()
-            .unwrap();
-        assert!(!view.is_some());
+    fn none_wrapper_projects_to_the_null_sentinel() {
+        let (slot, _schemas) = roundtrip_with_schemas(TypedReturn::None);
+        assert_eq!(slot.kind(), shape_value::KindedSlot::none().kind());
+        assert_eq!(slot.raw(), shape_value::KindedSlot::none().raw());
     }
 
     #[test]

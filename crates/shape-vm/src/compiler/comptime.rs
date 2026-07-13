@@ -17,12 +17,47 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 const TYPE_REF_FORWARDER: &str = "\u{1}comptime:forward-type-ref";
+// ADR-009 B2 (slice S4): `trait_ref(TraitName)` lowers to this unspellable
+// forwarder carrying the FROZEN trait identity as int literals — the same
+// identity-literal transport as `type_ref`; a trait name string never
+// crosses into the mini-VM (Dec 49).
+const TRAIT_REF_FORWARDER: &str = "\u{1}comptime:forward-trait-ref";
 
-/// (name, arity, target_method, return_fields, named_return_type)
-const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option<&str>)] = &[
-    ("implements", 2, "implements", None, None),
-    ("warning", 1, "warning", None, None),
-    ("error", 1, "error", None, None),
+/// `find_impl`'s forwarder return annotation: `Option<ImplRef-carrier>`.
+/// Must stay byte-identical to
+/// `format!("Option<{COMPTIME_FROZEN_IMPL_REF_SCHEMA}>")` — pinned by
+/// `find_impl_forwarder_return_marker_matches_the_impl_ref_schema`.
+const FIND_IMPL_RETURN_MARKER: &str = "Option<\u{1}comptime:ImplRef>";
+
+/// (name, arity, target_method, return_fields, named_return_type,
+/// param_annotations)
+///
+/// `param_annotations` (slice S5): concrete parameter annotations for the
+/// generated forwarder fn. Forwarder params default to UNANNOTATED
+/// (inference vars), which routes mini-VM calls through the
+/// value-binding-call path (`infer_function_value_binding_call`) where any
+/// argument unifies — bypassing the named rejection matrix in
+/// `infer_comptime_builtin_call`. `find_impl` annotates its params with the
+/// reserved carrier schemas so the mini-VM analyzer routes the call through
+/// the comptime-builtin arm and the R3/R4/R8 named diagnostics fire at
+/// check time instead of decaying to generic intrinsic errors.
+const COMPTIME_BUILTIN_FORWARDERS: &[(
+    &str,
+    usize,
+    &str,
+    Option<&[&str]>,
+    Option<&str>,
+    Option<&[&str]>,
+)] = &[
+    // `implements` declares its real `bool` return (S5): the R4 rejection
+    // ("a boolean cannot authorize...") needs the legacy boolean's type to
+    // be CONCRETE at the `find_impl` argument position in the mini-VM —
+    // an unannotated fresh var would silently unify with the TraitRef
+    // carrier schema. Typing truth only; the legacy string-key semantics
+    // in `comptime_builtins.rs` are untouched (E5 deletes them).
+    ("implements", 2, "implements", None, Some("bool"), None),
+    ("warning", 1, "warning", None, None, None),
+    ("error", 1, "error", None, None, None),
     (
         "build_config",
         0,
@@ -40,6 +75,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
             "version",
         ]),
         None,
+        None,
     ),
     // W7 (2026-05-17) — `type_info(T)` comptime builtin per
     // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
@@ -55,6 +91,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
         "type_info",
         Some(&["kind", "name", "fields", "type_ref"]),
         None,
+        None,
     ),
     (
         TYPE_REF_FORWARDER,
@@ -62,6 +99,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
         super::comptime_builtins::TYPE_REF_INTRINSIC,
         None,
         Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
+        None,
     ),
     (
         "type_category",
@@ -69,13 +107,39 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
         super::comptime_builtins::TYPE_CATEGORY_INTRINSIC,
         None,
         Some("FrozenTypeCategory"),
+        None,
+    ),
+    // ADR-009 B2 (slice S4): trait identity + implementation evidence.
+    // The trait_ref forwarder is reached only through the site rewrite
+    // (identity-literal transport); find_impl is called by name and answers
+    // ONLY from frozen impl evidence (R9: unimplemented pair = None).
+    (
+        TRAIT_REF_FORWARDER,
+        2,
+        super::comptime_builtins::TRAIT_REF_INTRINSIC,
+        None,
+        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TRAIT_REF_SCHEMA),
+        None,
+    ),
+    (
+        "find_impl",
+        2,
+        super::comptime_builtins::FIND_IMPL_INTRINSIC,
+        None,
+        Some(FIND_IMPL_RETURN_MARKER),
+        // S5: concrete carrier-schema params — see `param_annotations` note
+        // in the table doc above.
+        Some(&[
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
+        ]),
     ),
     // First typed generation fragment surface. `item_fn(...)` returns a
     // typed fragment carrier accepted by `extend (expr)`.
-    ("item_fn", 3, "item_fn", None, None),
+    ("item_fn", 3, "item_fn", None, None, None),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
-    ("string_lit", 1, "string_lit", None, None),
+    ("string_lit", 1, "string_lit", None, None, None),
 ];
 
 /// Comptime execution result.
@@ -277,7 +341,7 @@ fn comptime_target_param_type() -> TypeAnnotation {
 fn comptime_builtin_forwarders() -> Vec<Item> {
     let mut items = vec![frozen_type_category_enum_item()];
     items.extend(COMPTIME_BUILTIN_FORWARDERS.iter().map(
-        |(name, arity, target_method, return_fields, named_return_type)| {
+        |(name, arity, target_method, return_fields, named_return_type, param_annotations)| {
             let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
                 .map(|i| shape_ast::ast::FunctionParameter {
                     pattern: shape_ast::ast::DestructurePattern::Identifier(
@@ -288,7 +352,9 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     is_reference: false,
                     is_mut_reference: false,
                     is_out: false,
-                    type_annotation: None,
+                    type_annotation: param_annotations
+                        .and_then(|annotations| annotations.get(i))
+                        .map(|annotation| TypeAnnotation::Basic((*annotation).to_string())),
                     default_value: None,
                 })
                 .collect();
@@ -309,8 +375,22 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
             // If the forwarder has known return fields, generate an Object
             // type annotation so the compiler can emit GetFieldTyped for
             // property access on the return value.
+            //
+            // ADR-009 B2 (slice S4): a named return type of the form
+            // `Option<inner>` (find_impl's `Option<ImplRef-carrier>`)
+            // becomes a real `Option` generic annotation so `match` with
+            // `Some(..)` / `None` patterns type-checks in the mini-VM.
             let return_type = named_return_type
-                .map(|name| TypeAnnotation::Basic((*name).to_string()))
+                .map(|name| {
+                    if let Some(inner) = name
+                        .strip_prefix("Option<")
+                        .and_then(|rest| rest.strip_suffix('>'))
+                    {
+                        TypeAnnotation::option(TypeAnnotation::Basic(inner.to_string()))
+                    } else {
+                        TypeAnnotation::Basic((*name).to_string())
+                    }
+                })
                 .or_else(|| {
                     return_fields.map(|fields| {
                         TypeAnnotation::Object(
@@ -510,11 +590,36 @@ fn rewrite_comptime_type_symbol_args_expr(
             }
         } else if name == "type_ref" {
             if let [Expr::Identifier(ident, span)] = args.as_slice() {
+                // Rejection R1 fall-through (B2 slice S5): when the bare
+                // identifier is not a frozen VALUE type but IS a frozen
+                // trait, transport the trait identity — still an identity
+                // literal, never a string — so the TypeRef carrier builder
+                // can answer the NAMED traits-are-not-value-types rejection.
+                // Genuinely-unknown names keep transporting INVALID and stay
+                // on A1 row 2's generic unknown-identity diagnostic.
                 let identity = freeze
                     .identity_of(ident)
+                    .or_else(|| freeze.trait_identity_of(ident))
                     .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
                 let span = *span;
                 *name = TYPE_REF_FORWARDER.to_string();
+                *args = vec![
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.low), span),
+                ];
+            }
+        } else if name == "trait_ref" {
+            // ADR-009 B2 (slice S4): the bare trait identifier lowers to the
+            // FROZEN trait identity (freeze input 4 — a DISTINCT identity
+            // kind from value types; `identity_of` never resolves a trait).
+            // A name with no frozen trait identity transports INVALID and the
+            // intrinsic answers with the named not-a-trait rejection.
+            if let [Expr::Identifier(ident, span)] = args.as_slice() {
+                let identity = freeze
+                    .trait_identity_of(ident)
+                    .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
+                let span = *span;
+                *name = TRAIT_REF_FORWARDER.to_string();
                 *args = vec![
                     Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
                     Expr::Literal(shape_ast::ast::Literal::Int(identity.low), span),
@@ -755,7 +860,16 @@ pub(crate) fn execute_comptime_with_context(
     // comptime mode; the outer-skip discipline doesn't apply within the
     // mini-VM).
     for trait_def in comptime_context_trait_defs {
-        items.push(Item::Trait(trait_def.clone(), Span::DUMMY));
+        let mut def = trait_def.clone();
+        // Same discipline as the impl-block clearing below (S5): inside the
+        // mini-VM everything IS comptime, so a `comptime trait` compiles as
+        // a plain trait. Without this a `comptime trait` + `comptime impl`
+        // pair failed the J-CT.1 alignment check in the mini (threaded
+        // trait kept is_comptime=true while the impl's flag was cleared).
+        // The OUTER env's trait def keeps its flag — J-CT.1 runtime-call
+        // rejection outside comptime blocks is unaffected.
+        def.is_comptime = false;
+        items.push(Item::Trait(def, Span::DUMMY));
     }
     for struct_def in comptime_context_struct_defs {
         items.push(Item::StructType(struct_def.clone(), Span::DUMMY));
@@ -789,8 +903,30 @@ pub(crate) fn execute_comptime_with_context(
 
     // ADR-009 §4.1 (S2): the reflection intrinsics consume the shared
     // freeze handle — the Arc moves into the builtins module's closures.
-    let comptime_builtins =
-        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys, freeze);
+    //
+    // S5: the site-time key set for the Dec 52 ordering diagnostic is the
+    // live key snapshot PLUS the J-CT.2 `comptime impl` pairs threaded into
+    // this mini-program (those register only in the mini-VM's env, so the
+    // outer live keys never see them). Diagnostic-only — the legacy
+    // `implements` set is passed through unchanged, and no evidence is ever
+    // produced from either set.
+    let mut site_time_impl_keys = trait_impl_keys.clone();
+    for impl_block in comptime_impl_blocks {
+        let trait_name = match &impl_block.trait_name {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        let type_name = match &impl_block.target_type {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        site_time_impl_keys.insert(format!("{trait_name}::{type_name}"));
+    }
+    let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
+        trait_impl_keys,
+        site_time_impl_keys,
+        freeze,
+    );
     compile_and_execute_comptime_program(
         &program,
         vec!["__comptime__".to_string()],
@@ -1366,8 +1502,15 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // runs. The old `TypeReflectionSnapshot::default()` empty-snapshot
     // defect and its S2 successor (the pre-pass reflection-rejection
     // module) are deleted.
-    let comptime_builtins =
-        super::comptime_builtins::create_comptime_builtins_module(trait_impl_keys, freeze);
+    // S5: annotation-handler runs thread no J-CT.2 comptime impl blocks, so
+    // the site-time key set for the Dec 52 ordering diagnostic is exactly
+    // the live key snapshot (diagnostic-only; never evidence).
+    let site_time_impl_keys = trait_impl_keys.clone();
+    let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
+        trait_impl_keys,
+        site_time_impl_keys,
+        freeze,
+    );
     compile_and_execute_comptime_program(
         &program,
         vec![
@@ -1941,6 +2084,85 @@ annotation reflect() {
         assert!(
             !rendered.contains("\"type_ref\""),
             "handler-body type_ref call must be rewritten to the identity forwarder: {rendered}"
+        );
+    }
+
+    /// ADR-009 B2 (slice S4, Dec 49): `trait_ref(Greetable)` lowers to the
+    /// unspellable trait-identity forwarder carrying EXACTLY the freeze's
+    /// canonical trait identity as INT LITERALS — identity-literal transport
+    /// into the compiled comptime artifact. No string transport: the trait
+    /// NAME must not survive the rewrite.
+    #[test]
+    fn trait_ref_rewrite_transports_the_frozen_trait_identity_literals() {
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler
+            .type_inference
+            .env
+            .define_trait(&shape_ast::ast::TraitDef {
+                name: "Greetable".to_string(),
+                doc_comment: None,
+                type_params: None,
+                super_traits: Vec::new(),
+                members: Vec::new(),
+                annotations: Vec::new(),
+                is_comptime: false,
+            });
+        let freeze =
+            crate::compiler::comptime_builtins::semantic_freeze::SemanticFreeze::freeze(&compiler)
+                .expect("resolved state freezes");
+        let overlay = std::sync::Arc::new(crate::compiler::comptime_builtins::FreezeOverlay::new(
+            freeze,
+            "<module>",
+            &[],
+        ));
+        let identity = overlay
+            .trait_identity_of("Greetable")
+            .expect("trait identity frozen at the barrier");
+
+        let mut statement = Statement::Return(
+            Some(Expr::FunctionCall {
+                name: "trait_ref".to_string(),
+                const_args: Vec::new(),
+                args: vec![Expr::Identifier("Greetable".to_string(), Span::DUMMY)],
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        );
+        super::rewrite_comptime_type_symbol_args(&mut statement, overlay.as_ref());
+
+        let Statement::Return(Some(Expr::FunctionCall { name, args, .. }), _) = &statement else {
+            panic!("rewrite must keep the return-call shape: {statement:?}");
+        };
+        assert_eq!(
+            name, "\u{1}comptime:forward-trait-ref",
+            "trait_ref must lower to the unspellable trait-identity forwarder"
+        );
+        assert_eq!(
+            args.as_slice(),
+            &[
+                Expr::Literal(Literal::Int(identity.high), Span::DUMMY),
+                Expr::Literal(Literal::Int(identity.low), Span::DUMMY),
+            ],
+            "the forwarder args must be the frozen trait identity as int literals"
+        );
+        let rendered = format!("{statement:?}");
+        assert!(
+            !rendered.contains("Greetable"),
+            "no string transport: the trait name must not survive the rewrite: {rendered}"
+        );
+    }
+
+    /// Drift pin: the find_impl forwarder's `Option<...>` return marker must
+    /// wrap exactly the reserved ImplRef carrier schema name.
+    #[test]
+    fn find_impl_forwarder_return_marker_matches_the_impl_ref_schema() {
+        assert_eq!(
+            super::FIND_IMPL_RETURN_MARKER,
+            format!(
+                "Option<{}>",
+                shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_IMPL_REF_SCHEMA
+            )
         );
     }
 

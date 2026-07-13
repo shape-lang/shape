@@ -2029,8 +2029,21 @@ impl BytecodeCompiler {
         // `later_declared_alias_and_enum_are_visible_to_earlier_comptime_blocks`):
         // aliases and enums become order-independent for comptime reflection,
         // matching functions and struct schemas.
-        for item in &program.items {
-            self.predeclare_item_semantic_freeze_inputs(item)?;
+        //
+        // ADR-009 (ticket B2, S1): the walk now also pre-registers
+        // barrier-time trait/impl truth into `type_inference.env`, in two
+        // sub-passes (all traits first, then impls — see
+        // `SemanticFreezePredeclarePass`). Without this, trait defs
+        // registered only in `register_item_functions` (post-barrier) and
+        // impls in pass-2 `Item::Impl` arms — S2's trait-identity /
+        // impl-evidence freeze inputs would freeze an empty table.
+        for pass in [
+            super::statements::SemanticFreezePredeclarePass::TypesAndTraits,
+            super::statements::SemanticFreezePredeclarePass::Impls,
+        ] {
+            for item in &program.items {
+                self.predeclare_item_semantic_freeze_inputs(item, pass)?;
+            }
         }
 
         // ADR-009 §4.1 (ticket A1, S1 barrier; moved ahead of the annotation
@@ -3104,43 +3117,59 @@ impl BytecodeCompiler {
         // This is the ONE unit barrier, not a per-module re-freeze:
         // `compile()` skips its install when the graph entry point already
         // ran it.
-        for &dep_id in graph.topo_order() {
-            let dep_node = graph.node(dep_id);
-            if !matches!(
-                dep_node.source_kind,
-                ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid
-            ) {
-                continue;
-            }
-            let Some(dep_ast) = dep_node.ast.clone() else {
-                continue;
-            };
-            let module_path = dep_node.canonical_path.clone();
-            self.module_scope_stack.push(module_path.clone());
-            let predeclare_result = (|| -> Result<()> {
-                for item in &dep_ast.items {
-                    if matches!(item, shape_ast::ast::Item::Import(..)) {
-                        continue;
-                    }
-                    // Only freeze-input-bearing items need qualification here
-                    // (the kinds the two predeclare walks act on); skipping
-                    // the rest avoids deep-cloning every imported fn body a
-                    // second time.
-                    if !Self::item_can_carry_semantic_freeze_inputs(item) {
-                        continue;
-                    }
-                    let qualified = self.qualify_module_item(item, &module_path)?;
-                    self.predeclare_item_struct_schemas(&qualified);
-                    self.predeclare_item_semantic_freeze_inputs(&qualified)?;
+        // ADR-009 (ticket B2, S1): the freeze-input predeclare runs as two
+        // sub-passes over the WHOLE unit (every graph module, then the
+        // root) — all type/trait definitions first, then all impls — so an
+        // impl anywhere in the unit registers with its trait def already
+        // present regardless of source or topo position (see
+        // `SemanticFreezePredeclarePass`). Struct schemas predeclare once,
+        // during the first sub-pass.
+        for pass in [
+            super::statements::SemanticFreezePredeclarePass::TypesAndTraits,
+            super::statements::SemanticFreezePredeclarePass::Impls,
+        ] {
+            for &dep_id in graph.topo_order() {
+                let dep_node = graph.node(dep_id);
+                if !matches!(
+                    dep_node.source_kind,
+                    ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid
+                ) {
+                    continue;
                 }
-                Ok(())
-            })();
-            self.module_scope_stack.pop();
-            predeclare_result?;
-        }
-        for item in &root_program.items {
-            self.predeclare_item_struct_schemas(item);
-            self.predeclare_item_semantic_freeze_inputs(item)?;
+                let Some(dep_ast) = dep_node.ast.clone() else {
+                    continue;
+                };
+                let module_path = dep_node.canonical_path.clone();
+                self.module_scope_stack.push(module_path.clone());
+                let predeclare_result = (|| -> Result<()> {
+                    for item in &dep_ast.items {
+                        if matches!(item, shape_ast::ast::Item::Import(..)) {
+                            continue;
+                        }
+                        // Only freeze-input-bearing items need qualification
+                        // here (the kinds the two predeclare walks act on);
+                        // skipping the rest avoids deep-cloning every
+                        // imported fn body a second time.
+                        if !Self::item_can_carry_semantic_freeze_inputs(item) {
+                            continue;
+                        }
+                        let qualified = self.qualify_module_item(item, &module_path)?;
+                        if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
+                            self.predeclare_item_struct_schemas(&qualified);
+                        }
+                        self.predeclare_item_semantic_freeze_inputs(&qualified, pass)?;
+                    }
+                    Ok(())
+                })();
+                self.module_scope_stack.pop();
+                predeclare_result?;
+            }
+            for item in &root_program.items {
+                if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
+                    self.predeclare_item_struct_schemas(item);
+                }
+                self.predeclare_item_semantic_freeze_inputs(item, pass)?;
+            }
         }
         self.install_semantic_freeze()?;
 

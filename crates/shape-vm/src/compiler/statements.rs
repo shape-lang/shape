@@ -21,6 +21,21 @@ struct NativeFieldLayoutSpec {
     align: u64,
 }
 
+/// ADR-009 (ticket B2, slice S1): sub-pass selector for
+/// `predeclare_item_semantic_freeze_inputs`. The freeze-input predeclare
+/// walk runs TWICE over the whole compilation unit — all type/trait
+/// definitions first, then all impls — because source order does not
+/// guarantee trait-before-impl and `register_trait_impl` validation needs
+/// the trait def present when the impl registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SemanticFreezePredeclarePass {
+    /// Sub-pass 1: type aliases, enum schemas, and trait definitions.
+    TypesAndTraits,
+    /// Sub-pass 2: trait impl registrations (requires sub-pass 1 complete
+    /// over the WHOLE unit — root and every graph dependency module).
+    Impls,
+}
+
 impl BytecodeCompiler {
     fn comptime_field_slot_from_literal(
         struct_name: &str,
@@ -1102,20 +1117,62 @@ impl BytecodeCompiler {
     /// exactly what Dec 52 forbids). Registration is idempotent with the
     /// pass-2 arms: alias insertion re-writes the same mapping, and
     /// `register_enum_scoped` content-interns to a stable schema id.
-    pub(super) fn predeclare_item_semantic_freeze_inputs(&mut self, item: &Item) -> Result<()> {
+    ///
+    /// ADR-009 (ticket B2, slice S1): the walk additionally pre-registers
+    /// barrier-time trait/impl truth into `type_inference.env` (the single
+    /// truth source S2's trait-identity / impl-evidence freeze inputs read).
+    /// It runs as TWO sub-passes over the whole unit — all trait definitions
+    /// first ([`SemanticFreezePredeclarePass::TypesAndTraits`]), then all
+    /// impls ([`SemanticFreezePredeclarePass::Impls`]) — because source
+    /// order does not guarantee trait-before-impl and `register_trait_impl`
+    /// validation needs the trait def present. Impl registration is
+    /// idempotent with the later pass-2 / analyzer registrations
+    /// (`registry.rs` `register_trait_impl_with_assoc_types_named`: an
+    /// exact-shape re-registration returns `Ok(())`; see the coherence check
+    /// around registry.rs:315-330).
+    ///
+    /// Ruled stance (B2 S1): barrier truth is FREEZE-TIME truth. Impls that
+    /// register only after the barrier — the comptime-generated families
+    /// (annotation/extend paths, e.g. the From/TryFrom-derived Into/TryInto
+    /// registrations below at `compile_from_impl`, and `comptime impl`
+    /// blocks deferred to the mini-VM per J-CT.2) — are NOT barrier truth
+    /// and therefore not impl evidence; slice S5 lands the named
+    /// surface-and-stop diagnostic for querying them (never a silent None).
+    pub(super) fn predeclare_item_semantic_freeze_inputs(
+        &mut self,
+        item: &Item,
+        pass: SemanticFreezePredeclarePass,
+    ) -> Result<()> {
         match item {
-            Item::TypeAlias(type_alias, _) => {
+            Item::TypeAlias(type_alias, _)
+                if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+            {
                 self.predeclare_type_alias_freeze_input(type_alias);
             }
-            Item::Enum(enum_def, _) => {
+            Item::Enum(enum_def, _) if pass == SemanticFreezePredeclarePass::TypesAndTraits => {
                 self.register_enum(enum_def)?;
             }
+            Item::Trait(trait_def, _) if pass == SemanticFreezePredeclarePass::TypesAndTraits => {
+                self.predeclare_trait_def_freeze_input(trait_def);
+            }
+            Item::Impl(impl_block, _) if pass == SemanticFreezePredeclarePass::Impls => {
+                self.predeclare_trait_impl_freeze_input(impl_block);
+            }
             Item::Export(export, _) => match &export.item {
-                ExportItem::TypeAlias(type_alias) => {
+                ExportItem::TypeAlias(type_alias)
+                    if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+                {
                     self.predeclare_type_alias_freeze_input(type_alias);
                 }
-                ExportItem::Enum(enum_def) => {
+                ExportItem::Enum(enum_def)
+                    if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+                {
                     self.register_enum(enum_def)?;
+                }
+                ExportItem::Trait(trait_def)
+                    if pass == SemanticFreezePredeclarePass::TypesAndTraits =>
+                {
+                    self.predeclare_trait_def_freeze_input(trait_def);
                 }
                 _ => {}
             },
@@ -1125,7 +1182,7 @@ impl BytecodeCompiler {
                 let result = (|| -> Result<()> {
                     for inner in &module_def.items {
                         if let Ok(qualified) = self.qualify_module_item(inner, &module_path) {
-                            self.predeclare_item_semantic_freeze_inputs(&qualified)?;
+                            self.predeclare_item_semantic_freeze_inputs(&qualified, pass)?;
                         }
                     }
                     Ok(())
@@ -1147,13 +1204,76 @@ impl BytecodeCompiler {
     /// inputs. Keep in lockstep with the two predeclare matches above.
     pub(super) fn item_can_carry_semantic_freeze_inputs(item: &Item) -> bool {
         match item {
-            Item::StructType(..) | Item::TypeAlias(..) | Item::Enum(..) | Item::Module(..) => true,
+            Item::StructType(..)
+            | Item::TypeAlias(..)
+            | Item::Enum(..)
+            | Item::Trait(..)
+            | Item::Impl(..)
+            | Item::Module(..) => true,
             Item::Export(export, _) => matches!(
                 &export.item,
-                ExportItem::Struct(_) | ExportItem::TypeAlias(_) | ExportItem::Enum(_)
+                ExportItem::Struct(_)
+                    | ExportItem::TypeAlias(_)
+                    | ExportItem::Enum(_)
+                    | ExportItem::Trait(_)
             ),
             _ => false,
         }
+    }
+
+    /// Trait half of the B2 S1 freeze-input predeclare: the same
+    /// registrations the pass-2 `register_item_functions` `Item::Trait` arm
+    /// performs (single derivation, registered earlier; all inserts are
+    /// idempotent re-writes of the same value).
+    fn predeclare_trait_def_freeze_input(&mut self, trait_def: &shape_ast::ast::TraitDef) {
+        self.known_traits.insert(trait_def.name.clone());
+        self.trait_defs
+            .insert(trait_def.name.clone(), trait_def.clone());
+        self.type_inference.env.define_trait(trait_def);
+    }
+
+    /// Impl half of the B2 S1 freeze-input predeclare: mirrors the
+    /// analyzer's registration (`inference/items.rs::register_impl`) — trait
+    /// and target names as written (`type_name_str` semantics), method names
+    /// from the block, associated-type bindings included — so the analyzer's
+    /// own later registration is an exact-shape idempotent `Ok(())`
+    /// (registry.rs:315-330). Runs in the `Impls` sub-pass, after ALL trait
+    /// defs of the unit predeclared, so registry validation (required
+    /// methods / associated types / coherence) sees the trait def; a
+    /// validation failure here registers nothing — the analyzer re-attempts
+    /// post-barrier and reports the named `TypeError`, keeping the
+    /// diagnostic surface unchanged.
+    ///
+    /// `comptime impl` blocks are skipped: they are deferred to the comptime
+    /// mini-VM (J-CT.2) and are not barrier truth (B2 S1 ruled stance).
+    fn predeclare_trait_impl_freeze_input(&mut self, impl_block: &shape_ast::ast::ImplBlock) {
+        if impl_block.is_comptime {
+            return;
+        }
+        let trait_name = match &impl_block.trait_name {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        let type_name = match &impl_block.target_type {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        let method_names: Vec<String> = impl_block.methods.iter().map(|m| m.name.clone()).collect();
+        let associated_types: std::collections::HashMap<String, TypeAnnotation> = impl_block
+            .associated_type_bindings
+            .iter()
+            .map(|b| (b.name.clone(), b.concrete_type.clone()))
+            .collect();
+        let _ = self
+            .type_inference
+            .env
+            .register_trait_impl_with_assoc_types_named(
+                &trait_name,
+                &type_name,
+                impl_block.impl_name.as_deref(),
+                method_names,
+                associated_types,
+            );
     }
 
     /// Alias half of `predeclare_item_semantic_freeze_inputs`: the same

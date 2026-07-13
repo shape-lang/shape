@@ -528,6 +528,30 @@ impl TypeRegistry {
         keys
     }
 
+    /// ADR-009 (ticket B2, slice S1): enumerate every registered trait
+    /// definition. This registry is the single truth source for trait/impl
+    /// facts — the semantic freeze (ticket B2 S2) reads barrier-time trait
+    /// truth through this accessor instead of re-deriving it from a parallel
+    /// table.
+    pub fn all_trait_defs(&self) -> impl Iterator<Item = &TraitDef> {
+        self.traits.values()
+    }
+
+    /// ADR-009 (ticket B2, slice S1): enumerate every registered trait
+    /// implementation entry — default AND named impls (`impl Trait for Type
+    /// as Name`). Single-truth-source companion to [`Self::all_trait_defs`].
+    pub fn all_trait_impl_entries(&self) -> impl Iterator<Item = &TraitImplEntry> {
+        self.trait_impls.values()
+    }
+
+    /// ADR-009 (ticket B2, slice S1): enumerate every registered blanket
+    /// implementation entry (`impl<T: Bound> Trait for T`). Exposed so
+    /// freeze-time consumers can take an explicit ruled stance on blanket
+    /// satisfaction instead of silently flattening it away.
+    pub fn all_blanket_impl_entries(&self) -> impl Iterator<Item = &BlanketImplEntry> {
+        self.blanket_impls.values().flatten()
+    }
+
     /// Register an enum definition for exhaustiveness checking
     pub fn register_enum(&mut self, enum_def: &EnumDef) {
         self.enum_defs
@@ -1246,5 +1270,58 @@ mod tests {
 
         // No supertraits, so direct impl is sufficient
         assert!(reg.type_implements_trait("MyType", "Simple"));
+    }
+
+    // ---------------------------------------------------------------
+    // ADR-009 B2 S1: enumeration accessors (single-truth-source reads
+    // for the semantic freeze — traits, impls incl. named, blankets)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn enumeration_accessors_expose_traits_default_and_named_impls_and_blankets() {
+        let mut reg = TypeRegistry::new();
+        reg.define_trait(&make_trait("Display", vec!["to_string"]));
+        reg.define_trait(&make_trait("Printable", vec!["print"]));
+
+        reg.register_trait_impl("Display", "User", vec!["to_string".into()])
+            .expect("default impl registers");
+        reg.register_trait_impl_named("Display", "User", "Fancy", vec!["to_string".into()])
+            .expect("named impl registers");
+        reg.register_blanket_impl(
+            "Printable",
+            vec!["Display".to_string()],
+            vec!["print".to_string()],
+        );
+
+        let trait_names: Vec<&str> = reg.all_trait_defs().map(|t| t.name.as_str()).collect();
+        assert!(trait_names.contains(&"Display"));
+        assert!(trait_names.contains(&"Printable"));
+
+        let impls: Vec<&TraitImplEntry> = reg.all_trait_impl_entries().collect();
+        assert!(
+            impls
+                .iter()
+                .any(|e| e.trait_name == "Display"
+                    && e.target_type == "User"
+                    && e.impl_name.is_none()),
+            "default impl must be enumerated"
+        );
+        assert!(
+            impls
+                .iter()
+                .any(|e| e.trait_name == "Display"
+                    && e.target_type == "User"
+                    && e.impl_name.as_deref() == Some("Fancy")),
+            "named impl must be enumerated distinctly"
+        );
+
+        let blankets: Vec<&BlanketImplEntry> = reg.all_blanket_impl_entries().collect();
+        assert!(
+            blankets
+                .iter()
+                .any(|b| b.trait_name == "Printable"
+                    && b.required_bounds == vec!["Display".to_string()]),
+            "blanket impl must be enumerated"
+        );
     }
 }

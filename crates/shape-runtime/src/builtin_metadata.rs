@@ -720,6 +720,11 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     // generated from that catalog's single variant list.
     crate::comptime_reflection::TYPE_REF_BUILTIN_ROW,
     crate::comptime_reflection::TYPE_CATEGORY_BUILTIN_ROW,
+    // ADR-009 B2 S3 — the `trait_ref`/`find_impl` trait-evidence rows are
+    // catalog-owned exactly like the `type_ref` pair above: spliced verbatim
+    // from the shared reflection catalog, never hand-written here.
+    crate::comptime_reflection::TRAIT_REF_BUILTIN_ROW,
+    crate::comptime_reflection::FIND_IMPL_BUILTIN_ROW,
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a valid Shape string literal (quotes + escapes) so it can be embedded
     // into generated source produced by the `extend (expr)` directive.
@@ -892,6 +897,38 @@ mod tests {
             **type_category,
             crate::comptime_reflection::TYPE_CATEGORY_BUILTIN_ROW
         );
+    }
+
+    /// ADR-009 (ticket B2, slice S3): the trait-evidence rows (`trait_ref` /
+    /// `find_impl`) are the shared-catalog descriptors — exactly once each,
+    /// byte-identical (a hand-written or duplicate row fails this test) —
+    /// and the comptime-only gate (the single source of truth for compiler
+    /// and LSP) covers both in lockstep.
+    #[test]
+    fn trait_evidence_rows_are_the_shared_catalog_descriptors() {
+        let rows: Vec<_> = collect_builtin_metadata()
+            .into_iter()
+            .filter(|meta| meta.name == "trait_ref" || meta.name == "find_impl")
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected exactly one trait_ref row and one find_impl row"
+        );
+
+        let trait_ref = rows.iter().find(|m| m.name == "trait_ref").unwrap();
+        let find_impl = rows.iter().find(|m| m.name == "find_impl").unwrap();
+        assert_eq!(
+            **trait_ref,
+            crate::comptime_reflection::TRAIT_REF_BUILTIN_ROW
+        );
+        assert_eq!(
+            **find_impl,
+            crate::comptime_reflection::FIND_IMPL_BUILTIN_ROW
+        );
+
+        assert!(is_comptime_builtin_function("trait_ref"));
+        assert!(is_comptime_builtin_function("find_impl"));
     }
 
     #[test]

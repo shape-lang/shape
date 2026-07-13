@@ -29,6 +29,36 @@ impl FrozenTypeIdentity {
         let low = i64::from_be_bytes(digest[8..16].try_into().expect("8-byte hash suffix"));
         Self { high, low }
     }
+
+    /// ADR-009 (ticket B2, slice S2; Dec 49 / Dec 50 rule 5): canonical TRAIT
+    /// identity — a DISTINCT identity kind from value-type identities, keyed
+    /// by the `trait:` descriptor prefix. Trait identities are NEVER interned
+    /// into `FrozenTypeIndex.frozen_type_ids` (so `type_ref(TraitName)` keeps
+    /// failing and `intern_identity`'s cross-category collision assertion
+    /// never sees them) and there is deliberately NO
+    /// `FrozenTypeCategory::Trait` variant.
+    pub(super) fn for_trait(canonical_trait_name: &str) -> Self {
+        Self::from_canonical_descriptor(&format!("trait:{canonical_trait_name}"))
+    }
+
+    /// ADR-009 (ticket B2, slice S2; Dec 49): canonical IMPL-evidence
+    /// identity — `impl:{trait}:{type}:{impl_name_or_default}`, so canonical
+    /// trait AND implementation identities enter the SHA-256 fingerprint
+    /// scheme and named impls (`impl Trait for Type as Name`) are distinct
+    /// evidence. `__default__` mirrors the registry's `DEFAULT_IMPL_NAME`
+    /// selector convention (`environment/registry.rs`).
+    pub(super) fn for_impl(
+        canonical_trait_name: &str,
+        target_type_name: &str,
+        impl_name: Option<&str>,
+    ) -> Self {
+        Self::from_canonical_descriptor(&format!(
+            "impl:{}:{}:{}",
+            canonical_trait_name,
+            target_type_name,
+            impl_name.unwrap_or("__default__")
+        ))
+    }
 }
 
 /// ADR-009 §4.1 (ticket A1, slice S2): the semantic freeze's INTERNAL type
@@ -226,6 +256,14 @@ pub(crate) fn build_frozen_type_ref_heap_value(
     identity: FrozenTypeIdentity,
     freeze: &FreezeOverlay,
 ) -> Result<HeapValue, String> {
+    // Rejection R1 (ADR-009 B2 slice S5, Dec 49): traits are not value
+    // types. A frozen TRAIT identity (freeze input 4 — a distinct identity
+    // kind, never interned into the type-identity map) reaching the TypeRef
+    // builder is the NAMED trait rejection, not the generic
+    // unknown-identity error a genuinely-unknown name keeps (A1 row 2).
+    if freeze.is_frozen_trait_identity(identity) {
+        return Err(super::trait_evidence::TRAIT_NOT_A_VALUE_TYPE_DIAGNOSTIC.to_string());
+    }
     freeze.category_of(identity)?;
     typed_slot_into_heap_value(typed_object_for_named_schema(
         COMPTIME_FROZEN_TYPE_REF_SCHEMA,
@@ -294,7 +332,11 @@ pub(crate) fn build_frozen_type_category_heap_value(
     ))
 }
 
-fn typed_slot_into_heap_value(slot: KindedSlot) -> Result<HeapValue, String> {
+// `pub(super)`-within-`comptime_builtins`: the S3 trait-evidence carriers
+// (`trait_evidence.rs`) reuse the SAME slot→heap-value ownership transfer as
+// the TypeRef/FrozenTypeCategory carriers — one construction path, no second
+// derivation.
+pub(super) fn typed_slot_into_heap_value(slot: KindedSlot) -> Result<HeapValue, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) || slot.raw() == 0 {
         return Err("typed reflection carrier was not a typed object".to_string());
     }

@@ -1005,6 +1005,66 @@ fn test_comptime_builtin_hover_type_category_uses_shared_catalog() {
     }
 }
 
+/// ADR-009 ticket B2 (S6): the `trait_ref` hover must be driven verbatim by
+/// the shared reflection-catalog row
+/// (`shape_runtime::comptime_reflection::TRAIT_REF_BUILTIN_ROW`) — the same
+/// descriptor the compiler gates on — proving the hover path consumes the
+/// shared query surface, never a hand-written parallel row.
+#[test]
+fn test_comptime_builtin_hover_trait_ref_uses_shared_catalog() {
+    use shape_runtime::comptime_reflection::TRAIT_REF_BUILTIN_ROW;
+    let hover = get_comptime_builtin_hover("trait_ref");
+    assert!(hover.is_some(), "Should get hover for trait_ref");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(
+                markup.value.contains(TRAIT_REF_BUILTIN_ROW.signature),
+                "trait_ref hover must embed the catalog row signature, got: {}",
+                markup.value
+            );
+            assert!(
+                markup.value.contains(TRAIT_REF_BUILTIN_ROW.description),
+                "trait_ref hover must embed the catalog row description, got: {}",
+                markup.value
+            );
+            assert!(markup.value.contains("a trait is not a value type"));
+            assert!(
+                markup
+                    .value
+                    .contains("Only available inside `comptime { }` blocks")
+            );
+        }
+    }
+}
+
+/// ADR-009 ticket B2 (S6): the `find_impl` hover must be driven verbatim by
+/// the shared reflection-catalog row
+/// (`shape_runtime::comptime_reflection::FIND_IMPL_BUILTIN_ROW`), carrying
+/// the load-bearing evidence phrases (Option-shaped evidence; unimplemented
+/// pair = None, never an error, never partial; boolean cannot authorize).
+#[test]
+fn test_comptime_builtin_hover_find_impl_uses_shared_catalog() {
+    use shape_runtime::comptime_reflection::FIND_IMPL_BUILTIN_ROW;
+    let hover = get_comptime_builtin_hover("find_impl");
+    assert!(hover.is_some(), "Should get hover for find_impl");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(
+                markup.value.contains(FIND_IMPL_BUILTIN_ROW.signature),
+                "find_impl hover must embed the catalog row signature, got: {}",
+                markup.value
+            );
+            assert!(
+                markup.value.contains(FIND_IMPL_BUILTIN_ROW.description),
+                "find_impl hover must embed the catalog row description, got: {}",
+                markup.value
+            );
+            assert!(markup.value.contains("Option<ImplRef<T, Tr>>"));
+            assert!(markup.value.contains("boolean cannot authorize"));
+        }
+    }
+}
+
 #[test]
 fn test_comptime_builtin_hover_build_config() {
     let hover = get_comptime_builtin_hover("build_config");
