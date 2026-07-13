@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use tower_lsp_server::ls_types::{
     CodeActionOrCommand, CompletionItem, Diagnostic, DocumentSymbol, DocumentSymbolResponse,
-    FormattingOptions, Hover, HoverContents, MarkupContent, Position, Range, SymbolKind, Uri,
+    FormattingOptions, GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent,
+    Position, Range, SymbolKind, Uri,
 };
 
 use shape_lsp::context::CompletionContext;
@@ -589,6 +590,151 @@ impl ShapeTest {
             "Expected at least {} references, got {}",
             min_count,
             refs.len()
+        );
+        self
+    }
+
+    /// Collect every `Location` of the goto-definition response at the
+    /// current position (Scalar / Array / Link variants flattened; empty
+    /// when no definition resolves).
+    fn definition_locations(&self) -> Vec<Location> {
+        let uri = self.uri();
+        match shape_lsp::definition::get_definition(
+            &self.text,
+            self.position,
+            &uri,
+            None,
+            None,
+            None,
+        ) {
+            None => Vec::new(),
+            Some(GotoDefinitionResponse::Scalar(location)) => vec![location],
+            Some(GotoDefinitionResponse::Array(locations)) => locations,
+            Some(GotoDefinitionResponse::Link(links)) => links
+                .into_iter()
+                .map(|link| Location {
+                    uri: link.target_uri,
+                    range: link.target_range,
+                })
+                .collect(),
+        }
+    }
+
+    /// Assert the goto-definition response at the current position includes
+    /// a location starting on every expected zero-based line.
+    ///
+    /// ADR-009 D1 (S5): go-to-definition on a generated-method call site
+    /// opens the checked generated declaration AND links the source
+    /// application + generator definition (Decision 68 LSP behavior 1).
+    pub fn expect_definition_includes_lines(self, expected_lines: &[u32]) -> Self {
+        let locations = self.definition_locations();
+        let lines: Vec<u32> = locations
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect();
+        for expected in expected_lines {
+            assert!(
+                lines.contains(expected),
+                "Expected a definition location starting on line {} at ({}, {}), got lines {:?}",
+                expected,
+                self.position.line,
+                self.position.character,
+                lines
+            );
+        }
+        self
+    }
+
+    /// Assert NO goto-definition location at the current position starts on
+    /// `line` (zero-based). Negative counterpart of
+    /// [`Self::expect_definition_includes_lines`] — proves decoy text
+    /// occurrences (comments, string literals) are not served as
+    /// definitions.
+    pub fn expect_definition_excludes_line(self, line: u32) -> Self {
+        let locations = self.definition_locations();
+        let lines: Vec<u32> = locations
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect();
+        assert!(
+            !lines.contains(&line),
+            "Did not expect a definition location on line {} at ({}, {}), got lines {:?}",
+            line,
+            self.position.line,
+            self.position.character,
+            lines
+        );
+        self
+    }
+
+    /// Zero-based start lines of every find-references result at the
+    /// current position (empty when references return nothing).
+    fn reference_lines(&self) -> Vec<u32> {
+        let uri = self.uri();
+        shape_lsp::definition::get_references(&self.text, self.position, &uri)
+            .unwrap_or_default()
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect()
+    }
+
+    /// Assert find-references at the current position includes a result
+    /// starting on every expected zero-based line.
+    ///
+    /// ADR-009 D1 (S5): references on a generated method include all call
+    /// sites AND the application site, resolved via the compiler-issued
+    /// SymbolId (Decision 68 LSP behavior 3).
+    pub fn expect_references_include_lines(self, expected_lines: &[u32]) -> Self {
+        let lines = self.reference_lines();
+        for expected in expected_lines {
+            assert!(
+                lines.contains(expected),
+                "Expected a reference on line {} at ({}, {}), got lines {:?}",
+                expected,
+                self.position.line,
+                self.position.character,
+                lines
+            );
+        }
+        self
+    }
+
+    /// Assert NO find-references result at the current position starts on
+    /// `line` (zero-based). ADR-009 D1 rejection row 6: a decoy text
+    /// occurrence of a generated symbol's name (comment, string literal)
+    /// must NOT be served as a reference — the text-scan path is not
+    /// answering for generated symbols.
+    pub fn expect_references_exclude_line(self, line: u32) -> Self {
+        let lines = self.reference_lines();
+        assert!(
+            !lines.contains(&line),
+            "Did not expect a reference on line {} at ({}, {}), got lines {:?}",
+            line,
+            self.position.line,
+            self.position.character,
+            lines
+        );
+        self
+    }
+
+    /// Assert the workspace-symbol listing for `query` includes a symbol
+    /// with exactly `name`.
+    ///
+    /// ADR-009 D1 (S5): workspace symbols include generated symbols via
+    /// SymbolId — including qualified generated names that never appear as
+    /// plain text in the document.
+    pub fn expect_workspace_symbol_named(self, query: &str, name: &str) -> Self {
+        let uri = self.uri();
+        let symbols = shape_lsp::document_symbols::get_workspace_symbols(&self.text, &uri, query);
+        assert!(
+            symbols.iter().any(|symbol| symbol.name == name),
+            "Expected workspace symbol named '{}' for query '{}', got: {:?}",
+            name,
+            query,
+            symbols
+                .iter()
+                .map(|symbol| symbol.name.clone())
+                .collect::<Vec<_>>()
         );
         self
     }
@@ -1225,19 +1371,18 @@ impl ShapeTest {
                         .collect::<Vec<_>>()
                 )
             });
-        let related = diagnostic
-            .related_information
-            .as_ref()
-            .unwrap_or_else(|| {
-                panic!(
-                    "Diagnostic '{}' carries no relatedInformation; expected {:?}",
-                    diagnostic.message, expected_related
-                )
-            });
+        let related = diagnostic.related_information.as_ref().unwrap_or_else(|| {
+            panic!(
+                "Diagnostic '{}' carries no relatedInformation; expected {:?}",
+                diagnostic.message, expected_related
+            )
+        });
         for (note_fragment, line) in expected_related {
             assert!(
-                related.iter().any(|info| info.message.contains(note_fragment)
-                    && info.location.range.start.line == *line),
+                related
+                    .iter()
+                    .any(|info| info.message.contains(note_fragment)
+                        && info.location.range.start.line == *line),
                 "Expected related location containing '{}' at line {}, found: {:?}",
                 note_fragment,
                 line,

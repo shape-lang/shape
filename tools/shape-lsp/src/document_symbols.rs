@@ -23,7 +23,13 @@ pub fn get_document_symbols(text: &str) -> Option<DocumentSymbolResponse> {
             partial.into_program()
         }
     };
-    let symbols = extract_document_symbols(&program, text);
+    let mut symbols = extract_document_symbols(&program, text);
+    // ADR-009 D1 (S5): the outline includes generated declarations,
+    // answered from the compiler's SymbolId/provenance query surface
+    // (Decision 68 LSP behavior 5) and anchored at their application site.
+    symbols.extend(crate::generated_symbols::generated_document_symbols(
+        &program, text,
+    ));
 
     if symbols.is_empty() {
         None
@@ -502,6 +508,14 @@ pub fn get_workspace_symbols(text: &str, uri: &Uri, query: &str) -> Vec<SymbolIn
             }
         }
     }
+
+    // ADR-009 D1 (S5): workspace symbols include generated declarations,
+    // listed from the compiler's SymbolId/provenance query surface — a
+    // qualified generated name (`Point.answer`) answers even though it
+    // never appears as plain text in the document.
+    symbols.extend(crate::generated_symbols::generated_workspace_symbols(
+        &program, text, uri, query,
+    ));
 
     symbols
 }

@@ -586,7 +586,11 @@ impl GeneratedSymbolTable {
         Ok(SymbolReservation::Fresh(id))
     }
 
-    fn provenance_view<'a>(&self, id: SymbolId, record: &'a GeneratedSymbolRecord) -> GeneratedSymbolProvenance<'a> {
+    fn provenance_view<'a>(
+        &self,
+        id: SymbolId,
+        record: &'a GeneratedSymbolRecord,
+    ) -> GeneratedSymbolProvenance<'a> {
         GeneratedSymbolProvenance {
             symbol: id,
             decl_name: &record.decl_name,
@@ -657,6 +661,31 @@ impl GeneratedSymbolTable {
             .records
             .iter()
             .filter(|(_, record)| record.origin.source_anchor.contains(file_id, offset))
+            .map(|(id, record)| self.provenance_view(*id, record))
+            .collect();
+        hits.sort_by(|a, b| a.decl_name.cmp(b.decl_name));
+        hits
+    }
+
+    /// S5 query surface: the generated symbols answering to `name` — the
+    /// full declaration name (`Point.answer`; generated free functions
+    /// answer to their bare name) or, for qualified method names, the
+    /// method segment after the receiver qualifier (`answer`). This is the
+    /// name FILTER navigation consults (Decision 68 LSP behaviors 1/3):
+    /// like [`Self::symbols_at`] it is a filter, not an identity lookup —
+    /// an empty result means "no generated symbol answers to this name"
+    /// and is a legitimate answer. Deterministic (declaration-name) order.
+    pub fn symbols_named(&self, name: &str) -> Vec<GeneratedSymbolProvenance<'_>> {
+        let mut hits: Vec<GeneratedSymbolProvenance<'_>> = self
+            .records
+            .iter()
+            .filter(|(_, record)| {
+                record.decl_name == name
+                    || record
+                        .decl_name
+                        .rsplit_once('.')
+                        .is_some_and(|(_, method)| method == name)
+            })
             .map(|(id, record)| self.provenance_view(*id, record))
             .collect();
         hits.sort_by(|a, b| a.decl_name.cmp(b.decl_name));
@@ -990,6 +1019,103 @@ mod tests {
             table.symbols_at(9, 50).is_empty(),
             "a different file id resolves to no generated symbols"
         );
+    }
+
+    // S5 query surface: the name FILTER navigation consults — a generated
+    // symbol answers to its full declaration name ("Point.sum") and, for
+    // qualified method names, to the method segment after the receiver
+    // qualifier ("sum"). Like `symbols_at`, this is a filter, not an
+    // identity lookup: an empty result means "no generated symbol answers
+    // to this name" and is legitimate. Results are deterministic by
+    // declaration name.
+    #[test]
+    fn s5_symbols_named_answers_qualified_and_simple_names() {
+        let mut table = GeneratedSymbolTable::new();
+        table
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                sample_content(),
+                sample_generator_anchor(),
+            )
+            .expect("reserve Point.sum");
+        table
+            .reserve_generated_decl(
+                "Vec2.sum",
+                GeneratedOrigin {
+                    expansion: ExpansionIdentity::new(
+                        sample_identity().generator,
+                        ApplicationId::from_canonical_descriptor(
+                            "application:app.main:Vec2:json_schema",
+                        ),
+                        TargetIdentity::from_canonical_descriptor("type:app.main:Vec2"),
+                        ComptimeStage::AnnotationHandler,
+                        sample_arguments_hash(),
+                        sample_dependencies_hash(),
+                    ),
+                    node_path: GeneratedNodePath::decl_root("extend:Vec2").child("method:sum"),
+                    source_anchor: SourceAnchor::new(0, Span::new(90, 110))
+                        .expect("real span must anchor"),
+                },
+                CanonicalHash::from_canonical_decl_encoding("vec2-sum-body-encoding"),
+                sample_generator_anchor(),
+            )
+            .expect("reserve Vec2.sum");
+        table
+            .reserve_generated_decl(
+                "free_schema_fn",
+                GeneratedOrigin {
+                    expansion: ExpansionIdentity::new(
+                        sample_identity().generator,
+                        ApplicationId::from_canonical_descriptor(
+                            "application:app.main:free:json_schema",
+                        ),
+                        TargetIdentity::from_canonical_descriptor("type:app.main:Point"),
+                        ComptimeStage::AnnotationHandler,
+                        sample_arguments_hash(),
+                        sample_dependencies_hash(),
+                    ),
+                    node_path: GeneratedNodePath::decl_root("fn:free_schema_fn"),
+                    source_anchor: SourceAnchor::new(0, Span::new(120, 140))
+                        .expect("real span must anchor"),
+                },
+                CanonicalHash::from_canonical_decl_encoding("free-fn-body-encoding"),
+                sample_generator_anchor(),
+            )
+            .expect("reserve free_schema_fn");
+
+        // Simple method-segment name answers every generated method with
+        // that segment, deterministically ordered.
+        assert_eq!(
+            table
+                .symbols_named("sum")
+                .iter()
+                .map(|provenance| provenance.decl_name)
+                .collect::<Vec<_>>(),
+            vec!["Point.sum", "Vec2.sum"],
+        );
+        // Full qualified declaration name answers exactly that symbol.
+        assert_eq!(
+            table
+                .symbols_named("Point.sum")
+                .iter()
+                .map(|provenance| provenance.decl_name)
+                .collect::<Vec<_>>(),
+            vec!["Point.sum"],
+        );
+        // Generated free functions answer to their declaration name.
+        assert_eq!(
+            table
+                .symbols_named("free_schema_fn")
+                .iter()
+                .map(|provenance| provenance.decl_name)
+                .collect::<Vec<_>>(),
+            vec!["free_schema_fn"],
+        );
+        // A name no generated symbol answers to: empty filter result.
+        assert!(table.symbols_named("never_generated").is_empty());
+        // The receiver qualifier alone is NOT a symbol name.
+        assert!(table.symbols_named("Point").is_empty());
     }
 
     // (b) Sensitivity: changing ANY of the six ExpansionIdentity components

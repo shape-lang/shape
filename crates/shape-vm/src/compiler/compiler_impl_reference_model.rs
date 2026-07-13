@@ -1979,7 +1979,12 @@ impl BytecodeCompiler {
     /// (Decision 66) and unit tests assert against. `compile` is the thin
     /// consuming wrapper above; the compiled program lands in
     /// `self.program`.
-    pub(crate) fn compile_in_place(&mut self, program: &Program) -> Result<()> {
+    ///
+    /// `pub` since D1 slice S5: the LSP compiles the document through this
+    /// entry and then answers generated-symbol navigation from
+    /// `generated_symbol_query()` — the ONE query API of spec §4.1, never a
+    /// second evaluator.
+    pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
         // First: desugar the program (converts FromQuery to method chains, etc.)
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);
