@@ -13,9 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::BytecodeCompiler;
 use super::comptime_builtins::expansion_provenance::{
-    ApplicationId, CanonicalHash, ComptimeStage, ExpansionIdentity, ExpansionSite,
-    GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable, GeneratorRef, SymbolReservation,
-    TargetIdentity,
+    ApplicationClaim, ApplicationId, CanonicalHash, ComptimeStage, DeclarationDiscoveryFixedPoint,
+    ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
+    GeneratorRef, SymbolReservation, TargetIdentity,
 };
 
 /// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
@@ -1853,227 +1853,205 @@ impl BytecodeCompiler {
 
         let mut generated: Vec<Item> = Vec::new();
 
-        for struct_def in &struct_defs {
-            for ann in &struct_def.annotations {
-                let Some(entry) = handler_map.get(ann.name.as_str()) else {
-                    continue;
-                };
-                for handler in &entry.handlers {
-                    let fields: Vec<(
-                        String,
-                        Option<TypeAnnotation>,
-                        Vec<shape_ast::ast::functions::Annotation>,
-                    )> = struct_def
-                        .fields
-                        .iter()
-                        .map(|f| {
-                            (
-                                f.name.clone(),
-                                Some(f.type_annotation.clone()),
-                                f.annotations.clone(),
-                            )
-                        })
-                        .collect();
+        // ADR-009 D2 (Decision 67): the monotonic declaration-discovery fixed
+        // point. The formerly single, unbounded speculative pass is now a
+        // bounded worklist that reaches a fixed point BEFORE the analyzer runs
+        // (this method is still invoked exactly once — the fixed point is the
+        // SINGLE discovery pass, no speculative second evaluation). Each round
+        // drains the worklist of struct definitions, runs every not-yet-run
+        // annotation application once (run-once memo keyed on the full
+        // `ExpansionIdentity` = ApplicationId + dependencies hash), records the
+        // generated headers immutably, and enqueues any newly generated
+        // annotated type for the next round (additions-only). The v1 directive
+        // surface emits only free functions and `extend` methods — never a new
+        // annotated type — so real programs converge in one round; the worklist
+        // machinery makes multi-level discovery total and its rejections named.
+        let mut discovery = DeclarationDiscoveryFixedPoint::new();
+        let mut worklist: Vec<shape_ast::ast::types::StructTypeDef> = struct_defs;
+        // Generated annotated type → the application whose expansion produced
+        // it (the output-triggers edge source for cycle detection).
+        let mut type_producer: HashMap<String, ExpansionIdentity> = HashMap::new();
 
-                    let target = super::comptime_target::ComptimeTarget::from_type(
-                        &struct_def.name,
-                        &fields,
-                    );
-                    // ADR-009 D1 (S2): the pre-pass builds the SAME expansion
-                    // site pass-2 will build for this application (same ann
-                    // node, same handler AST, same ComptimeTarget inputs), so
-                    // both phases reserve one identity per generated decl.
-                    let expansion_site = self.annotation_expansion_site(ann, handler, &target);
-                    let Ok(target_value) = target.to_nanboxed() else {
+        while !worklist.is_empty() {
+            // Round bound (DISCOVERY_UNBOUNDED on overflow).
+            discovery
+                .begin_round()
+                .map_err(|message| self.build_discovery_failure(message, None))?;
+            let round_defs = std::mem::take(&mut worklist);
+            // Frontier state for the monotone-convergence (oscillation) guard:
+            // the sorted set of type names discovered/pending this round.
+            let mut frontier: Vec<String> = round_defs.iter().map(|d| d.name.clone()).collect();
+            frontier.sort();
+            discovery
+                .observe_round_state(&frontier)
+                .map_err(|message| self.build_discovery_failure(message, None))?;
+            // Types generated this round, re-scanned next round (additions-only;
+            // discovered headers stay immutable through discovery).
+            let mut newly_generated_types: Vec<shape_ast::ast::types::StructTypeDef> = Vec::new();
+
+            for struct_def in &round_defs {
+                for ann in &struct_def.annotations {
+                    let Some(entry) = handler_map.get(ann.name.as_str()) else {
                         continue;
                     };
+                    for handler in &entry.handlers {
+                        let fields: Vec<(
+                            String,
+                            Option<TypeAnnotation>,
+                            Vec<shape_ast::ast::functions::Annotation>,
+                        )> = struct_def
+                            .fields
+                            .iter()
+                            .map(|f| {
+                                (
+                                    f.name.clone(),
+                                    Some(f.type_annotation.clone()),
+                                    f.annotations.clone(),
+                                )
+                            })
+                            .collect();
 
-                    // Reachable comptime helpers for this handler body. At
-                    // pre-pass time `function_defs` already holds every
-                    // dependency-module function (graph phase 1); root helpers
-                    // that are not yet registered simply fall back to pass-2.
-                    let mut helpers = self.collect_comptime_helpers();
-                    helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
-                    helpers.sort_by(|a, b| a.name.cmp(&b.name));
-                    helpers.dedup_by(|a, b| a.name == b.name);
-
-                    // §4.5.1: this pre-pass run is speculative (it only
-                    // materializes generated function signatures); pass-2
-                    // re-runs the same handler authoritatively. Suppress raw
-                    // handler output during the speculative run so a handler
-                    // that prints does not emit twice.
-                    // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
-                    // module doc): this speculative run fires AFTER the
-                    // semantic-freeze barrier and consumes the real
-                    // registration-complete freeze handle, so reflection-
-                    // using handlers materialize their generated functions
-                    // here (visible to every user body) instead of
-                    // deferring to pass 2. A site that cannot obtain the
-                    // handle is the row-3 named compile error; the handle
-                    // is acquired before the output-suppression toggle so
-                    // the error path cannot leak suppression state.
-                    let freeze = self.comptime_freeze_overlay()?;
-                    let prev_suppressed =
-                        super::comptime_builtins::set_comptime_output_suppressed(true);
-                    let execution_result =
-                        super::comptime::execute_comptime_with_annotation_handler(
-                            &handler.body,
-                            &handler.params,
-                            target_value,
-                            &ann.args,
-                            &entry.def_param_names,
-                            &[],
-                            &helpers,
-                            &extensions,
-                            known_type_symbols.clone(),
-                            &ctx_module_path,
-                            &ctx_file,
-                            trait_impls.clone(),
-                            freeze,
+                        let target = super::comptime_target::ComptimeTarget::from_type(
+                            &struct_def.name,
+                            &fields,
                         );
-                    super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
-                    let execution = match execution_result {
-                        Ok(execution) => execution,
-                        Err(e) => {
-                            // A genuine user `error()` call in the handler is a
-                            // deterministic compile error — surface it here with
-                            // a clean, spanned, LSDS-routed diagnostic anchored
-                            // at the annotation application site (§4.4). If we
-                            // swallowed it, the analyzer would instead reject the
-                            // never-generated function with a confusing
-                            // "Undefined function" and mask the real cause.
-                            //
-                            // Any other failure is treated as a pre-pass
-                            // limitation (e.g. a helper only registered later)
-                            // and deferred to pass-2, which re-runs the handler
-                            // authoritatively.
-                            if e.to_string().contains("[comptime error]") {
-                                let context =
-                                    format!("the @{} annotation on {}", ann.name, struct_def.name);
-                                return Err(self.build_comptime_failure(&e, ann.span, &context));
-                            }
-                            continue;
+                        // ADR-009 D1 (S2): the pre-pass builds the SAME expansion
+                        // site pass-2 will build for this application (same ann
+                        // node, same handler AST, same ComptimeTarget inputs), so
+                        // both phases reserve one identity per generated decl.
+                        let expansion_site = self.annotation_expansion_site(ann, handler, &target);
+                        // ADR-009 D2 (Decision 67): output-triggers edge for cycle
+                        // detection — if this struct was itself generated by an
+                        // earlier expansion, record the producing application →
+                        // this application edge (DISCOVERY_CYCLE on a closing edge).
+                        if let Some(producer) = type_producer.get(&struct_def.name) {
+                            discovery
+                                .record_trigger(producer, expansion_site.identity())
+                                .map_err(|message| {
+                                    self.build_discovery_failure(message, Some(&expansion_site))
+                                })?;
                         }
-                    };
-
-                    for directive in execution.directives {
-                        let super::comptime_builtins::ComptimeDirective::ExtendItems { items } =
-                            directive
-                        else {
+                        // ADR-009 D2 run-once memo: run each application exactly
+                        // once per (ApplicationId + dependencies hash). A re-claimed
+                        // identity (the struct re-enqueued in a later round)
+                        // short-circuits — this is memoization, NOT a silent
+                        // failure skip (DISCOVERY_UNBOUNDED on the expansion bound).
+                        match discovery.claim(expansion_site.identity()) {
+                            Ok(ApplicationClaim::Fresh) => {}
+                            Ok(ApplicationClaim::AlreadyApplied) => continue,
+                            Err(message) => {
+                                return Err(
+                                    self.build_discovery_failure(message, Some(&expansion_site))
+                                );
+                            }
+                        }
+                        let Ok(target_value) = target.to_nanboxed() else {
                             continue;
                         };
-                        // ADR-009 D1 (S2), rejection row 1: generated decls
-                        // must anchor at the real application span; the
-                        // generator-definition anchor is held to the same
-                        // rule (S4).
-                        let source_anchor = expansion_site.source_anchor().map_err(|message| {
-                            self.expansion_rejection(message, &expansion_site)
-                        })?;
-                        let generator_anchor =
-                            expansion_site.generator_anchor().map_err(|message| {
-                                self.expansion_rejection(message, &expansion_site)
-                            })?;
-                        for item in items {
-                            match item {
-                                Item::Function(mut func_def, _span) => {
-                                    let content = generated_free_fn_content(&func_def);
-                                    // ADR-009 D1 (S3): anchor AFTER the raw
-                                    // content fingerprint, so pass-2's raw
-                                    // hash of the same output agrees.
-                                    anchor_generated_function_decl(
-                                        &mut func_def,
-                                        expansion_site.application_span(),
+
+                        // Reachable comptime helpers for this handler body. At
+                        // pre-pass time `function_defs` already holds every
+                        // dependency-module function (graph phase 1); root helpers
+                        // that are not yet registered simply fall back to pass-2.
+                        let mut helpers = self.collect_comptime_helpers();
+                        helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
+                        helpers.sort_by(|a, b| a.name.cmp(&b.name));
+                        helpers.dedup_by(|a, b| a.name == b.name);
+
+                        // §4.5.1: this pre-pass run is speculative (it only
+                        // materializes generated function signatures); pass-2
+                        // re-runs the same handler authoritatively. Suppress raw
+                        // handler output during the speculative run so a handler
+                        // that prints does not emit twice.
+                        // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
+                        // module doc): this speculative run fires AFTER the
+                        // semantic-freeze barrier and consumes the real
+                        // registration-complete freeze handle, so reflection-
+                        // using handlers materialize their generated functions
+                        // here (visible to every user body) instead of
+                        // deferring to pass 2. A site that cannot obtain the
+                        // handle is the row-3 named compile error; the handle
+                        // is acquired before the output-suppression toggle so
+                        // the error path cannot leak suppression state.
+                        let freeze = self.comptime_freeze_overlay()?;
+                        let prev_suppressed =
+                            super::comptime_builtins::set_comptime_output_suppressed(true);
+                        let execution_result =
+                            super::comptime::execute_comptime_with_annotation_handler(
+                                &handler.body,
+                                &handler.params,
+                                target_value,
+                                &ann.args,
+                                &entry.def_param_names,
+                                &[],
+                                &helpers,
+                                &extensions,
+                                known_type_symbols.clone(),
+                                &ctx_module_path,
+                                &ctx_file,
+                                trait_impls.clone(),
+                                freeze,
+                            );
+                        super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
+                        let execution = match execution_result {
+                            Ok(execution) => execution,
+                            Err(e) => {
+                                // A genuine user `error()` call in the handler is a
+                                // deterministic compile error — surface it here with
+                                // a clean, spanned, LSDS-routed diagnostic anchored
+                                // at the annotation application site (§4.4). If we
+                                // swallowed it, the analyzer would instead reject the
+                                // never-generated function with a confusing
+                                // "Undefined function" and mask the real cause.
+                                //
+                                // Any other failure is treated as a pre-pass
+                                // limitation (e.g. a helper only registered later)
+                                // and deferred to pass-2, which re-runs the handler
+                                // authoritatively.
+                                if e.to_string().contains("[comptime error]") {
+                                    let context = format!(
+                                        "the @{} annotation on {}",
+                                        ann.name, struct_def.name
                                     );
-                                    let node_path =
-                                        GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
-                                    let origin = GeneratedOrigin {
-                                        expansion: expansion_site.identity().clone(),
-                                        node_path: node_path.clone(),
-                                        source_anchor,
-                                    };
-                                    match self.generated_symbols.reserve_generated_decl(
-                                        &func_def.name,
-                                        origin,
-                                        content,
-                                        generator_anchor,
-                                    ) {
-                                        Ok(SymbolReservation::Fresh(_)) => {
-                                            // Register the signature NOW so the
-                                            // analyzer, function-registration pass, and
-                                            // every user body (`fn main`) can resolve
-                                            // the call. The BODY is still compiled by
-                                            // pass-2's `apply_comptime_extend_items`
-                                            // (`compile_function`) when the
-                                            // annotated type compiles — the identical
-                                            // path as before this pre-pass, so the
-                                            // generated function's runtime/JIT
-                                            // characteristics are unchanged.
-                                            //
-                                            // ADR-009 D1 (S4), row 7:
-                                            // registration failures on the
-                                            // generated decl carry full
-                                            // expansion provenance.
-                                            self.register_function(&func_def).map_err(|e| {
-                                                self.build_generated_decl_failure(
-                                                    &e,
-                                                    &func_def.name,
-                                                    &node_path,
-                                                    &expansion_site,
-                                                )
-                                            })?;
-                                            generated.push(Item::Function(
-                                                func_def,
-                                                expansion_site.application_span(),
-                                            ));
-                                        }
-                                        Ok(SymbolReservation::Reissued(_)) => {}
-                                        Err(message) => {
-                                            return Err(
-                                                self.expansion_rejection(message, &expansion_site)
-                                            );
-                                        }
-                                    }
+                                    return Err(self.build_comptime_failure(&e, ann.span, &context));
                                 }
-                                Item::Extend(mut extend, _span) => {
-                                    // §4.9.1: a comptime-emitted type-extension
-                                    // method (`u.to_json()`) must be visible to
-                                    // the analyzer, method-dispatch resolution, and
-                                    // every user body BEFORE pass-2 — exactly like
-                                    // a generated free function. Reserve each
-                                    // method's identity and register its SIGNATURE
-                                    // now (keyed by its desugared `Type.method`
-                                    // name), and return the `extend` block so the
-                                    // analyzer learns the method on the type.
-                                    // Pass-2's `apply_comptime_extend` re-issues the
-                                    // same reservation and fills each pre-registered
-                                    // slot through the normal function driver, so
-                                    // generated methods get the same MIR/JIT surface
-                                    // as hand-written `extend` methods.
-                                    let extend_type_str = match &extend.type_name {
-                                        shape_ast::ast::TypeName::Simple(name) => name.clone(),
-                                        shape_ast::ast::TypeName::Generic { name, .. } => {
-                                            name.clone()
-                                        }
-                                    };
-                                    let mut any_new = false;
-                                    for method in &extend.methods {
-                                        let content = generated_extend_method_content(
-                                            &extend.type_name,
-                                            method,
-                                        );
-                                        let mut func_def =
-                                            self.desugar_extend_method(method, &extend.type_name)?;
-                                        // ADR-009 D1 (S3): anchor AFTER the
-                                        // raw content fingerprint (pass-2
-                                        // hashes the same raw AST).
+                                continue;
+                            }
+                        };
+
+                        for directive in execution.directives {
+                            let super::comptime_builtins::ComptimeDirective::ExtendItems { items } =
+                                directive
+                            else {
+                                continue;
+                            };
+                            // ADR-009 D1 (S2), rejection row 1: generated decls
+                            // must anchor at the real application span; the
+                            // generator-definition anchor is held to the same
+                            // rule (S4).
+                            let source_anchor =
+                                expansion_site.source_anchor().map_err(|message| {
+                                    self.expansion_rejection(message, &expansion_site)
+                                })?;
+                            let generator_anchor =
+                                expansion_site.generator_anchor().map_err(|message| {
+                                    self.expansion_rejection(message, &expansion_site)
+                                })?;
+                            for item in items {
+                                match item {
+                                    Item::Function(mut func_def, _span) => {
+                                        let content = generated_free_fn_content(&func_def);
+                                        // ADR-009 D1 (S3): anchor AFTER the raw
+                                        // content fingerprint, so pass-2's raw
+                                        // hash of the same output agrees.
                                         anchor_generated_function_decl(
                                             &mut func_def,
                                             expansion_site.application_span(),
                                         );
                                         let node_path = GeneratedNodePath::decl_root(format!(
-                                            "extend:{extend_type_str}"
-                                        ))
-                                        .child(format!("method:{}", method.name));
+                                            "fn:{}",
+                                            func_def.name
+                                        ));
                                         let origin = GeneratedOrigin {
                                             expansion: expansion_site.identity().clone(),
                                             node_path: node_path.clone(),
@@ -2086,9 +2064,21 @@ impl BytecodeCompiler {
                                             generator_anchor,
                                         ) {
                                             Ok(SymbolReservation::Fresh(_)) => {
+                                                // Register the signature NOW so the
+                                                // analyzer, function-registration pass, and
+                                                // every user body (`fn main`) can resolve
+                                                // the call. The BODY is still compiled by
+                                                // pass-2's `apply_comptime_extend_items`
+                                                // (`compile_function`) when the
+                                                // annotated type compiles — the identical
+                                                // path as before this pre-pass, so the
+                                                // generated function's runtime/JIT
+                                                // characteristics are unchanged.
+                                                //
                                                 // ADR-009 D1 (S4), row 7:
-                                                // provenance on registration
-                                                // failures.
+                                                // registration failures on the
+                                                // generated decl carry full
+                                                // expansion provenance.
                                                 self.register_function(&func_def).map_err(|e| {
                                                     self.build_generated_decl_failure(
                                                         &e,
@@ -2097,7 +2087,22 @@ impl BytecodeCompiler {
                                                         &expansion_site,
                                                     )
                                                 })?;
-                                                any_new = true;
+                                                // ADR-009 D2: the discovered header
+                                                // is immutable through the fixed
+                                                // point (DISCOVERY_HEADER_MUTATED on
+                                                // a differing re-derivation).
+                                                discovery
+                                                    .record_header(&func_def.name, content)
+                                                    .map_err(|message| {
+                                                        self.build_discovery_failure(
+                                                            message,
+                                                            Some(&expansion_site),
+                                                        )
+                                                    })?;
+                                                generated.push(Item::Function(
+                                                    func_def,
+                                                    expansion_site.application_span(),
+                                                ));
                                             }
                                             Ok(SymbolReservation::Reissued(_)) => {}
                                             Err(message) => {
@@ -2108,29 +2113,153 @@ impl BytecodeCompiler {
                                             }
                                         }
                                     }
-                                    if any_new {
-                                        // ADR-009 D1 (S3): the analysis copy
-                                        // anchors its decl-level spans at the
-                                        // application site too (method body
-                                        // spans stay handler-emitted — D2
-                                        // scope line, see
-                                        // `anchor_generated_function_decl`).
-                                        for method in &mut extend.methods {
-                                            method.span = expansion_site.application_span();
+                                    Item::Extend(mut extend, _span) => {
+                                        // §4.9.1: a comptime-emitted type-extension
+                                        // method (`u.to_json()`) must be visible to
+                                        // the analyzer, method-dispatch resolution, and
+                                        // every user body BEFORE pass-2 — exactly like
+                                        // a generated free function. Reserve each
+                                        // method's identity and register its SIGNATURE
+                                        // now (keyed by its desugared `Type.method`
+                                        // name), and return the `extend` block so the
+                                        // analyzer learns the method on the type.
+                                        // Pass-2's `apply_comptime_extend` re-issues the
+                                        // same reservation and fills each pre-registered
+                                        // slot through the normal function driver, so
+                                        // generated methods get the same MIR/JIT surface
+                                        // as hand-written `extend` methods.
+                                        let extend_type_str = match &extend.type_name {
+                                            shape_ast::ast::TypeName::Simple(name) => name.clone(),
+                                            shape_ast::ast::TypeName::Generic { name, .. } => {
+                                                name.clone()
+                                            }
+                                        };
+                                        let mut any_new = false;
+                                        for method in &extend.methods {
+                                            let content = generated_extend_method_content(
+                                                &extend.type_name,
+                                                method,
+                                            );
+                                            let mut func_def = self
+                                                .desugar_extend_method(method, &extend.type_name)?;
+                                            // ADR-009 D1 (S3): anchor AFTER the
+                                            // raw content fingerprint (pass-2
+                                            // hashes the same raw AST).
+                                            anchor_generated_function_decl(
+                                                &mut func_def,
+                                                expansion_site.application_span(),
+                                            );
+                                            let node_path = GeneratedNodePath::decl_root(format!(
+                                                "extend:{extend_type_str}"
+                                            ))
+                                            .child(format!("method:{}", method.name));
+                                            let origin = GeneratedOrigin {
+                                                expansion: expansion_site.identity().clone(),
+                                                node_path: node_path.clone(),
+                                                source_anchor,
+                                            };
+                                            match self.generated_symbols.reserve_generated_decl(
+                                                &func_def.name,
+                                                origin,
+                                                content,
+                                                generator_anchor,
+                                            ) {
+                                                Ok(SymbolReservation::Fresh(_)) => {
+                                                    // ADR-009 D1 (S4), row 7:
+                                                    // provenance on registration
+                                                    // failures.
+                                                    self.register_function(&func_def).map_err(
+                                                        |e| {
+                                                            self.build_generated_decl_failure(
+                                                                &e,
+                                                                &func_def.name,
+                                                                &node_path,
+                                                                &expansion_site,
+                                                            )
+                                                        },
+                                                    )?;
+                                                    // ADR-009 D2: header immutable
+                                                    // through the fixed point.
+                                                    discovery
+                                                        .record_header(&func_def.name, content)
+                                                        .map_err(|message| {
+                                                            self.build_discovery_failure(
+                                                                message,
+                                                                Some(&expansion_site),
+                                                            )
+                                                        })?;
+                                                    any_new = true;
+                                                }
+                                                Ok(SymbolReservation::Reissued(_)) => {}
+                                                Err(message) => {
+                                                    return Err(self.expansion_rejection(
+                                                        message,
+                                                        &expansion_site,
+                                                    ));
+                                                }
+                                            }
                                         }
-                                        generated.push(Item::Extend(
-                                            extend,
-                                            expansion_site.application_span(),
-                                        ));
+                                        if any_new {
+                                            // ADR-009 D1 (S3): the analysis copy
+                                            // anchors its decl-level spans at the
+                                            // application site too (method body
+                                            // spans stay handler-emitted — D2
+                                            // scope line, see
+                                            // `anchor_generated_function_decl`).
+                                            for method in &mut extend.methods {
+                                                method.span = expansion_site.application_span();
+                                            }
+                                            generated.push(Item::Extend(
+                                                extend,
+                                                expansion_site.application_span(),
+                                            ));
+                                        }
                                     }
+                                    Item::StructType(sd, _span) => {
+                                        // ADR-009 D2 additions-only re-scan: a
+                                        // generated ANNOTATED type is enqueued for
+                                        // the next discovery round so its own
+                                        // annotation applications are discovered
+                                        // (its header stays immutable once
+                                        // discovered). The producing application is
+                                        // recorded as the output-triggers edge
+                                        // source for cycle detection. The v1
+                                        // directive surface never emits a generated
+                                        // annotated type, so this arm is dormant on
+                                        // real programs — it makes multi-level
+                                        // discovery total.
+                                        if !sd.annotations.is_empty()
+                                            && known_type_symbols.insert(sd.name.clone())
+                                        {
+                                            type_producer.insert(
+                                                sd.name.clone(),
+                                                expansion_site.identity().clone(),
+                                            );
+                                            newly_generated_types.push(sd);
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                _ => {}
                             }
                         }
                     }
                 }
             }
+            // ADR-009 D2 additions-only: enqueue this round's newly generated
+            // annotated types for re-scan in the next discovery round.
+            for sd in newly_generated_types {
+                worklist.push(sd);
+            }
         }
+
+        // ADR-009 D2: the fixed point converged — the worklist is empty and
+        // every reserved generated identity was defined
+        // (RESERVED_IDENTITY_UNDEFINED otherwise). Declaration discovery is
+        // complete BEFORE the analyzer/inference/body-checking runs below
+        // (discovery-before-body ordering, Decision 67).
+        discovery
+            .converge()
+            .map_err(|message| self.build_discovery_failure(message, None))?;
 
         // The generated free functions are returned so the driver can add them
         // to the ANALYSIS program (the analyzer type-checks their call sites and

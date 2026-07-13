@@ -16,8 +16,8 @@
 use shape_ast::ast::{Expr, Item, Program, Span};
 use shape_runtime::visitor::{Visitor, walk_program};
 use tower_lsp_server::ls_types::{
-    DocumentSymbol, GotoDefinitionResponse, Location, Position, Range, SymbolInformation,
-    SymbolKind, Uri,
+    CompletionItem, CompletionItemKind, DocumentSymbol, GotoDefinitionResponse, Location, Position,
+    Range, SymbolInformation, SymbolKind, Uri,
 };
 
 use crate::util::offset_to_line_col;
@@ -676,6 +676,131 @@ pub(crate) fn generated_workspace_symbols(
         .collect()
 }
 
+/// Completion candidates for every generated FREE FUNCTION the
+/// declaration-discovery fixed point reserved (ADR-009 D2, Decision 68 LSP
+/// behavior: completion sees generated decls AFTER discovery). Sourced from
+/// the SAME `generated_symbol_query()` table the compiler consumes via
+/// [`compile_for_generated_symbol_queries`] — no second expansion pass, no
+/// LSP re-evaluator, no parallel discovery path. The
+/// [`program_may_generate_symbols`] prefilter keeps non-generating documents
+/// off the compile path.
+///
+/// Generated METHODS carry a qualified `Type.name` decl name and are only
+/// reachable through receiver-typed member completion (property access), so
+/// they are excluded here — a free-standing candidate list offers only the
+/// bare-name free functions that a call/expression position can actually
+/// resolve.
+pub(crate) fn generated_symbol_completions(program: &Program, text: &str) -> Vec<CompletionItem> {
+    if !program_may_generate_symbols(program) {
+        return Vec::new();
+    }
+    let compiler = compile_for_generated_symbol_queries(program, text);
+    compiler
+        .generated_symbol_query()
+        .generated_symbols()
+        .iter()
+        .filter(|provenance| generated_decl_kind(provenance.decl_name) == CallableKind::Function)
+        .map(|provenance| CompletionItem {
+            label: provenance.decl_name.to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("generated function".to_string()),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Owned render inputs for ONE generated symbol's read-only
+/// `shape-expansion://` virtual view (ADR-009 D2, slice 3), extracted from
+/// the SHARED `generated_symbol_query()` table — no second expansion pass,
+/// no LSP re-evaluator. Spans are real-source anchors; `checked_decl` is
+/// where the checked generated declaration anchors (the view renders it and
+/// maps positions back to this anchor).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedSymbolRenderInputs {
+    pub decl_name: String,
+    pub node_path: String,
+    pub kind: CallableKind,
+    pub checked_decl: Span,
+    pub application: Span,
+    pub generator: Span,
+}
+
+impl CallableKind {
+    /// Rendering label for the virtual view header.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            CallableKind::Method => "method",
+            CallableKind::Function => "function",
+        }
+    }
+}
+
+/// Resolve the generated symbol(s) at a call-site cursor to owned render
+/// inputs for the `shape-expansion://` virtual view — the SAME shared query
+/// (`generated_symbol_query()` via [`compile_for_generated_symbol_queries`])
+/// that drives goto/references/rename, kind-matched exactly like
+/// [`generated_definition`]. `None` = not a generated-symbol call site
+/// (including a call whose syntax cannot reach any generated declaration);
+/// the caller offers no virtual view and the ordinary providers serve.
+pub(crate) fn generated_render_inputs_at(
+    program: &Program,
+    text: &str,
+    word: &str,
+    offset: usize,
+) -> Option<Vec<GeneratedSymbolRenderInputs>> {
+    if !program_may_generate_symbols(program) {
+        return None;
+    }
+    let sites = call_site_name_spans(program, text, word);
+    let cursor_kind = call_site_kind_at(&sites, offset)?;
+    let compiler = compile_for_generated_symbol_queries(program, text);
+    let inputs: Vec<GeneratedSymbolRenderInputs> = compiler
+        .generated_symbol_query()
+        .symbols_named(word)
+        .into_iter()
+        .filter(|provenance| generated_decl_kind(provenance.decl_name) == cursor_kind)
+        .map(|provenance| GeneratedSymbolRenderInputs {
+            decl_name: provenance.decl_name.to_string(),
+            node_path: provenance.node_path.render(),
+            kind: generated_decl_kind(provenance.decl_name),
+            checked_decl: provenance.checked_decl.span(),
+            application: provenance.application.span(),
+            generator: provenance.generator.span(),
+        })
+        .collect();
+    if inputs.is_empty() {
+        return None;
+    }
+    Some(inputs)
+}
+
+/// Owned render inputs for EVERY generated declaration in the document,
+/// listed from the shared `generated_symbol_query()` table (workspace /
+/// outline consumption of the virtual views). Deterministic
+/// (declaration-name) order; empty when the document generates nothing.
+pub(crate) fn generated_render_inputs_all(
+    program: &Program,
+    text: &str,
+) -> Vec<GeneratedSymbolRenderInputs> {
+    if !program_may_generate_symbols(program) {
+        return Vec::new();
+    }
+    let compiler = compile_for_generated_symbol_queries(program, text);
+    compiler
+        .generated_symbol_query()
+        .generated_symbols()
+        .iter()
+        .map(|provenance| GeneratedSymbolRenderInputs {
+            decl_name: provenance.decl_name.to_string(),
+            node_path: provenance.node_path.render(),
+            kind: generated_decl_kind(provenance.decl_name),
+            checked_decl: provenance.checked_decl.span(),
+            application: provenance.application.span(),
+            generator: provenance.generator.span(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,6 +928,64 @@ let x = p.answer()
             GENERATOR_CONTROLLED_PROGRAM[generator_span.start..generator_span.end]
                 .contains("comptime post"),
             "the generator span covers the handler definition"
+        );
+    }
+
+    /// A generating document whose annotation emits a generated FREE
+    /// FUNCTION (`{Type}_label()`) — the flagship F1 shape.
+    const FREE_FN_GENERATING_PROGRAM: &str = r#"
+annotation schema_of() {
+    targets: [type]
+    comptime post(target, ctx) {
+        extend (f"fn {target.name}_label() -> string \{ {string_lit("User schema")} \}")
+    }
+}
+
+@schema_of()
+type User { id: int }
+
+User_label()
+"#;
+
+    #[test]
+    fn generated_free_function_is_a_completion_candidate_from_the_shared_query() {
+        let program = parse_program(FREE_FN_GENERATING_PROGRAM).expect("parses");
+        let items = generated_symbol_completions(&program, FREE_FN_GENERATING_PROGRAM);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"User_label"),
+            "the fixed-point-discovered generated free function must be a completion \
+             candidate, sourced from generated_symbol_query(); got {labels:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .all(|i| i.kind == Some(CompletionItemKind::FUNCTION)),
+            "generated free functions complete as functions"
+        );
+    }
+
+    #[test]
+    fn generated_method_is_not_a_free_standing_completion_candidate() {
+        // GENERATING_PROGRAM emits the METHOD `Point.answer` (qualified name).
+        // A method is reachable only through receiver-typed member completion,
+        // so the free-standing candidate list must not offer it.
+        let program = parse_program(GENERATING_PROGRAM).expect("parses");
+        let items = generated_symbol_completions(&program, GENERATING_PROGRAM);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !labels.contains(&"answer") && !labels.contains(&"Point.answer"),
+            "a generated method is not a free-standing completion candidate; got {labels:?}"
+        );
+    }
+
+    #[test]
+    fn non_generating_document_yields_no_generated_completions() {
+        let program = parse_program("fn f() -> int { 1 }\nlet x = f()\n").expect("parses");
+        let items = generated_symbol_completions(&program, "fn f() -> int { 1 }\nlet x = f()\n");
+        assert!(
+            items.is_empty(),
+            "a document that cannot generate pays no compile cost and offers nothing"
         );
     }
 

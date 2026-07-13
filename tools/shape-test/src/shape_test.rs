@@ -536,6 +536,61 @@ impl ShapeTest {
         self
     }
 
+    /// ADR-009 D2 (slice 3): assert the generated-symbol call site under the
+    /// cursor resolves to a read-only `shape-expansion://` virtual view whose
+    /// rendered content contains `expected`, AND that the view's source map
+    /// round-trips (`source → virtual → source` is the identity at the
+    /// checked-declaration anchor). The view is render-only — never reparsed.
+    pub fn expect_expansion_view_renders(self, expected: &str) -> Self {
+        let uri = self.uri();
+        let view = shape_lsp::definition::get_expansion_view(&self.text, self.position, &uri)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected a shape-expansion:// virtual view at ({}, {})",
+                    self.position.line, self.position.character
+                )
+            });
+        assert!(
+            view.uri.starts_with("shape-expansion://"),
+            "the view must carry a shape-expansion:// URI, got {}",
+            view.uri
+        );
+        assert!(
+            view.content.contains(expected),
+            "the virtual view must render {:?}; content was:\n{}",
+            expected,
+            view.content
+        );
+        // Bidirectional source map round-trips at the rendered decl line.
+        let anchor = view
+            .first_decl_anchor_start()
+            .expect("the view renders at least one checked declaration");
+        let forward = view
+            .source_to_virtual(anchor)
+            .expect("the checked-decl anchor maps into the virtual view");
+        let back = view
+            .virtual_to_source(forward)
+            .expect("the rendered decl line maps back to real source");
+        assert_eq!(
+            back, anchor,
+            "source→virtual→source must be the identity at the checked-decl anchor"
+        );
+        self
+    }
+
+    /// ADR-009 D2 (slice 3): assert NO `shape-expansion://` virtual view is
+    /// offered at the current position (an ordinary, non-generated site).
+    pub fn expect_no_expansion_view(self) -> Self {
+        let uri = self.uri();
+        assert!(
+            shape_lsp::definition::get_expansion_view(&self.text, self.position, &uri).is_none(),
+            "Did not expect a virtual view at ({}, {})",
+            self.position.line,
+            self.position.character
+        );
+        self
+    }
+
     /// Assert go-to-implementation at the current position returns at least
     /// `min_count` impl-method body `Location`s whose start line falls within
     /// `[start_line_min, start_line_max]` (inclusive). This is the

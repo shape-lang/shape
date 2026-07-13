@@ -11,12 +11,14 @@ use crate::code_actions::get_code_actions;
 use crate::code_lens::{get_code_lenses, resolve_code_lens};
 use crate::completion::get_completions_with_context;
 use crate::definition::{
-    get_declaration, get_definition, get_document_highlights, get_implementations,
-    get_references_cross_file, get_type_definition,
+    get_declaration, get_definition, get_document_highlights, get_expansion_view,
+    get_implementations, get_references_cross_file, get_type_definition,
 };
 use crate::diagnostics::error_to_diagnostic;
 use crate::document::DocumentManager;
-use crate::document_symbols::{get_document_symbols, get_workspace_symbols};
+use crate::document_symbols::{
+    get_document_symbols, get_generated_expansion_views, get_workspace_symbols,
+};
 use crate::folding::get_folding_ranges;
 use crate::formatting::{format_document, format_on_type, format_range};
 use crate::hover::get_hover;
@@ -2058,6 +2060,31 @@ impl LanguageServer for ShapeLanguageServer {
                 .await;
             return Err(tower_lsp_server::jsonrpc::Error::method_not_found());
         }
+
+        // ADR-009 D2 (slice 3): the expansion-view commands are the LSP surface
+        // through which an editor opens a read-only `shape-expansion://`
+        // virtual document. They resolve the checked generated declaration(s)
+        // from the SAME shared fixed-point query the compiler consumes and
+        // return the rendered view(s) as JSON — never a second expansion pass.
+        match params.command.as_str() {
+            EXPANSION_VIEW_COMMAND => {
+                let result = expansion_command_uri(&params.arguments).and_then(|uri| {
+                    let position = expansion_command_position(&params.arguments)?;
+                    let doc = self.documents.get(&uri)?;
+                    expansion_view_command_result(&doc.text(), &uri, position)
+                });
+                return Ok(result);
+            }
+            LIST_EXPANSION_VIEWS_COMMAND => {
+                let result = expansion_command_uri(&params.arguments).and_then(|uri| {
+                    let doc = self.documents.get(&uri)?;
+                    list_expansion_views_command_result(&doc.text(), &uri)
+                });
+                return Ok(result);
+            }
+            _ => {}
+        }
+
         self.client
             .log_message(
                 MessageType::INFO,
@@ -2205,7 +2232,64 @@ fn registered_commands() -> Vec<String> {
         "shape.debugTests".to_string(),
         "shape.showAnnotation".to_string(),
         "shape.showTraitMethod".to_string(),
+        // ADR-009 D2 (slice 3): open a read-only `shape-expansion://` virtual
+        // view of the checked generated declaration under the cursor
+        // (`shape.showExpansionView`) or enumerate every generated
+        // declaration's view in the document (`shape.listExpansionViews`).
+        // These are how an editor reaches the virtual-view surface — there is
+        // no standard `textDocument/*` request for a synthetic document, so
+        // the shared fixed-point query is consumed through `executeCommand`.
+        EXPANSION_VIEW_COMMAND.to_string(),
+        LIST_EXPANSION_VIEWS_COMMAND.to_string(),
     ]
+}
+
+/// `workspace/executeCommand` command ID for opening the read-only
+/// `shape-expansion://` virtual view of the generated declaration under a
+/// cursor. Arguments: `[uri: string, line: u32, character: u32]`.
+const EXPANSION_VIEW_COMMAND: &str = "shape.showExpansionView";
+
+/// `workspace/executeCommand` command ID for listing every generated
+/// declaration's read-only virtual view in a document. Arguments:
+/// `[uri: string]`.
+const LIST_EXPANSION_VIEWS_COMMAND: &str = "shape.listExpansionViews";
+
+/// ADR-009 D2 (slice 3): parse the leading `uri` argument shared by both
+/// expansion-view commands. Mirrors the `code_lens.rs` argument convention
+/// (`arguments[0]` = the document URI as a JSON string).
+fn expansion_command_uri(arguments: &[LSPAny]) -> Option<Uri> {
+    arguments.first()?.as_str()?.parse::<Uri>().ok()
+}
+
+/// ADR-009 D2 (slice 3): parse the `[_, line, character]` cursor position
+/// carried by `shape.showExpansionView` (positional JSON numbers, matching
+/// the `code_lens.rs` convention).
+fn expansion_command_position(arguments: &[LSPAny]) -> Option<Position> {
+    let line = u32::try_from(arguments.get(1)?.as_u64()?).ok()?;
+    let character = u32::try_from(arguments.get(2)?.as_u64()?).ok()?;
+    Some(Position { line, character })
+}
+
+/// ADR-009 D2 (slice 3): build the `shape.showExpansionView` result — the
+/// read-only virtual view of the generated-symbol call site under the cursor,
+/// serialized as JSON. Consumes the SAME shared fixed-point query as
+/// goto/references (via [`get_expansion_view`]); `None` when the cursor is not
+/// on a generated-symbol call site.
+fn expansion_view_command_result(text: &str, uri: &Uri, position: Position) -> Option<LSPAny> {
+    get_expansion_view(text, position, uri).map(|view| view.to_json())
+}
+
+/// ADR-009 D2 (slice 3): build the `shape.listExpansionViews` result — a JSON
+/// array of every generated declaration's read-only virtual view in the
+/// document (via [`get_generated_expansion_views`], the same shared query).
+/// `None` when the document generates nothing.
+fn list_expansion_views_command_result(text: &str, uri: &Uri) -> Option<LSPAny> {
+    let views = get_generated_expansion_views(text, uri);
+    if views.is_empty() {
+        None
+    } else {
+        Some(LSPAny::Array(views.iter().map(|v| v.to_json()).collect()))
+    }
 }
 
 /// W2.7 / 1.72 — collect text edits that rewrite `from OLD_MODULE_PATH`
@@ -3129,6 +3213,136 @@ print("hello")
                 cmd
             );
         }
+    }
+
+    // ADR-009 D2 (slice 3) — the `shape-expansion://` virtual-view surface
+    // must be reachable through the LSP `workspace/executeCommand` handler,
+    // not only via direct library calls. These tests pin the wiring:
+    // (1) the two expansion-view commands are declared so clients enable
+    //     them; (2) the command-result builders consume the shared
+    //     fixed-point query and render the checked generated declaration.
+
+    /// A generating document whose annotation emits a generated METHOD —
+    /// mirrors `expansion_views.rs::METHOD_PROGRAM` so the wiring test
+    /// exercises a real generated-symbol call site.
+    const EXPANSION_METHOD_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+"#;
+
+    #[test]
+    fn registered_commands_declares_expansion_view_commands_d2() {
+        let declared: std::collections::HashSet<String> =
+            registered_commands().into_iter().collect();
+        assert!(
+            declared.contains(EXPANSION_VIEW_COMMAND),
+            "executeCommand provider must declare {EXPANSION_VIEW_COMMAND}"
+        );
+        assert!(
+            declared.contains(LIST_EXPANSION_VIEWS_COMMAND),
+            "executeCommand provider must declare {LIST_EXPANSION_VIEWS_COMMAND}"
+        );
+    }
+
+    #[test]
+    fn expansion_view_command_result_renders_generated_call_site_d2() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let offset = EXPANSION_METHOD_PROGRAM
+            .find("p.answer()")
+            .expect("call site")
+            + 2;
+        let (line, character) =
+            crate::util::offset_to_line_col(EXPANSION_METHOD_PROGRAM, offset);
+        let result =
+            expansion_view_command_result(EXPANSION_METHOD_PROGRAM, &uri, Position { line, character })
+                .expect("a generated call site yields a virtual view payload");
+        let obj = result.as_object().expect("view payload is a JSON object");
+        let view_uri = obj.get("uri").and_then(|v| v.as_str()).unwrap_or_default();
+        assert!(
+            view_uri.starts_with(crate::expansion_views::EXPANSION_URI_SCHEME),
+            "payload carries a shape-expansion:// URI, got {view_uri}"
+        );
+        let content = obj
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            content.contains("Point.answer"),
+            "the checked generated declaration is rendered: {content}"
+        );
+        assert!(
+            content.contains("read-only"),
+            "the render is marked read-only: {content}"
+        );
+    }
+
+    #[test]
+    fn expansion_view_command_result_none_for_ordinary_call_site_d2() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let source = "fn f() -> int { 1 }\nlet x = f()\n";
+        let offset = source.find("= f()").expect("call site") + 2;
+        let (line, character) = crate::util::offset_to_line_col(source, offset);
+        assert!(
+            expansion_view_command_result(source, &uri, Position { line, character }).is_none(),
+            "an ordinary (non-generated) call site offers no virtual view"
+        );
+    }
+
+    #[test]
+    fn list_expansion_views_command_result_lists_generated_decls_d2() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let result = list_expansion_views_command_result(EXPANSION_METHOD_PROGRAM, &uri)
+            .expect("a generating document yields at least one view");
+        let arr = result.as_array().expect("list payload is a JSON array");
+        assert!(!arr.is_empty(), "expected at least one rendered view");
+        assert!(
+            arr.iter().any(|v| v
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(|c| c.contains("Point.answer"))
+                .unwrap_or(false)),
+            "the generated Point.answer declaration is among the listed views: {result}"
+        );
+    }
+
+    #[test]
+    fn list_expansion_views_command_result_none_for_non_generating_doc_d2() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let source = "fn f() -> int { 1 }\nlet x = f()\n";
+        assert!(
+            list_expansion_views_command_result(source, &uri).is_none(),
+            "a document that generates nothing yields no views"
+        );
+    }
+
+    #[test]
+    fn expansion_command_argument_parsing_d2() {
+        let args = vec![
+            serde_json::json!("file:///test.shape"),
+            serde_json::json!(3u32),
+            serde_json::json!(7u32),
+        ];
+        let uri = expansion_command_uri(&args).expect("uri parses from arg[0]");
+        assert_eq!(uri.as_str(), "file:///test.shape");
+        let pos = expansion_command_position(&args).expect("position parses from arg[1..3]");
+        assert_eq!(pos, Position { line: 3, character: 7 });
+
+        // Missing position args → None (list command shape, not show command).
+        assert!(expansion_command_position(&args[..1]).is_none());
+        // Missing uri → None.
+        assert!(expansion_command_uri(&[]).is_none());
     }
 
     // W2.7 / 1.72 — willRenameFiles edit collection rewrites `from X`

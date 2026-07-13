@@ -296,6 +296,13 @@ pub fn get_completions_with_context(
             completions.extend(comptime_builtin_function_completions());
             completions.extend(symbols_to_completions(&user_symbols));
             completions.extend(builtin_function_completions());
+            // ADR-009 D2: fixed-point-discovered generated free functions are
+            // visible to later source — offered from the SHARED expansion query.
+            if let Some(program) = parsed_program.as_ref() {
+                completions.extend(crate::generated_symbols::generated_symbol_completions(
+                    program, text,
+                ));
+            }
         }
         CompletionContext::EnumVariant { enum_name, prefix } => {
             let variants = enum_variant_completions(&enum_name, &prefix, parsed_program.as_ref());
@@ -407,6 +414,17 @@ pub fn get_completions_with_context(
 
             // 2. Standard completions
             completions.extend(all_completions(&user_symbols));
+
+            // 3. ADR-009 D2: generated free functions the declaration-discovery
+            // fixed point reserved become visible to later source. They are
+            // offered from the SAME `generated_symbol_query()` table the
+            // compiler consumes (via `compile_for_generated_symbol_queries`) —
+            // no speculative second pass, no parallel LSP discovery path.
+            if let Some(program) = parsed_program.as_ref() {
+                completions.extend(crate::generated_symbols::generated_symbol_completions(
+                    program, text,
+                ));
+            }
         }
     }
 

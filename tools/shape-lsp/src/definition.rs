@@ -66,6 +66,12 @@ pub fn get_definition(
         return Some(GotoDefinitionResponse::Scalar(location));
     }
 
+    // ADR-009 D2 (slice 3): `get_expansion_view` (below) resolves the same
+    // generated call site to its read-only `shape-expansion://` virtual view
+    // for editors that render checked generated IR; goto keeps returning the
+    // real-source anchors above (Decision 68 LSP behavior 1) so the two
+    // surfaces stay driven by the one shared fixed-point query.
+
     // If not found locally, check if it's an imported symbol
     if let Some(cache) = module_cache {
         if let Some(location) = find_imported_definition(&program, &word, uri, cache) {
@@ -81,6 +87,28 @@ pub fn get_definition(
     }
 
     None
+}
+
+/// Resolve a generated-symbol call site under the cursor to its read-only
+/// `shape-expansion://` virtual view (ADR-009 D2 slice 3). The view renders
+/// the checked generated declaration and carries a bidirectional source map
+/// (`ExpansionView::source_to_virtual` / `virtual_to_source`) so an editor
+/// can navigate between the real source and the rendered IR. Consumes the
+/// SAME shared fixed-point query that `get_definition` uses — no second
+/// expansion pass. `None` when the cursor is not on a generated-symbol call
+/// site.
+pub fn get_expansion_view(
+    text: &str,
+    position: Position,
+    uri: &Uri,
+) -> Option<crate::expansion_views::ExpansionView> {
+    let word = get_word_at_position(text, position)?;
+    let program = parse_program(text).ok().or_else(|| {
+        let partial = shape_ast::parser::resilient::parse_program_resilient(text);
+        (!partial.items.is_empty()).then(|| partial.into_program())
+    })?;
+    let offset = position_to_offset(text, position)?;
+    crate::expansion_views::expansion_view_at(&program, text, &word, offset, uri)
 }
 
 /// Find all references to a symbol at the given position.

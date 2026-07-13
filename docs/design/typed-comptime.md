@@ -394,7 +394,8 @@ that computed source-string generation is acceptable.
 source anchors, and identity-driven tooling (Decision 68, ticket ADR009-D1,
 2026-07-13).** Scope: the EXISTING extend/materialization path; the
 declaration-discovery fixed point (Decision 67) and `shape-expansion://`
-virtual views remain TARGET (ticket D2). Every declaration generated on that
+virtual views are now CURRENT via ticket ADR009-D2 (see the dedicated D2
+status entry below). Every declaration generated on that
 path is an ordinary compiler symbol: the compiler issues a content-derived
 `SymbolId` with full `ExpansionIdentity { generator, application, target,
 stage, arguments_hash, dependencies_hash }` + `GeneratedOrigin { expansion,
@@ -423,6 +424,49 @@ Book status: D1-enabled behaviors are gate-runnable in ShapeTest
 (`tools/shape-test/tests/lsp/{generated_navigation.rs,
 generated_provenance.rs, generated_rename.rs}` and
 `tests/annotations_comptime/generated_method_runtime.rs`, VM+JIT);
+book-chapter examples land in stage F1 per the program spec.
+
+**CURRENT / compiler+LSP+VM+JIT - declaration-discovery fixed point, shared
+expansion query, and `shape-expansion://` read-only virtual views
+(Decision 66/67, ticket ADR009-D2, 2026-07-13).** Declaration-producing
+comptime (v1: annotation handlers emitting free functions and `extend`
+methods) reaches a deterministic, monotone fixed point BEFORE ordinary body
+checking (Decision 67 ordering): `DeclarationDiscoveryFixedPoint`
+(`shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs`, extending
+the D1 provenance surface in place — never a fork) drives a bounded monotone
+worklist (`functions_annotations.rs` discovery driver) that applies each
+expansion exactly once per application identity + dependency hash (the
+`claim()` run-once memo keyed on `ApplicationId` + deps-hash), records each
+discovered header as immutable (`record_header` — re-derivation with a
+different definition is the named `DISCOVERY_HEADER_MUTATED` rejection), and
+requires every reserved generated identity to be defined exactly once at
+convergence (`converge` — a reserved-but-undefined identity is
+`RESERVED_IDENTITY_UNDEFINED`). Duplicates, cross-application conflicts,
+trigger cycles, frontier oscillation, and unbounded generation are all
+compile errors carrying expansion provenance via `build_discovery_failure`
+(the nine named diagnostics `GENERATED_NODE_WITHOUT_PROVENANCE` /
+`GENERATED_SYMBOL_DUPLICATE_IDENTITY` / `GENERATED_SYMBOL_CONFLICT` /
+`UNKNOWN_GENERATED_SYMBOL` / `DISCOVERY_CYCLE` / `DISCOVERY_OSCILLATION` /
+`DISCOVERY_UNBOUNDED` / `DISCOVERY_HEADER_MUTATED` /
+`RESERVED_IDENTITY_UNDEFINED`, each with an asserting test). Compiler and LSP
+consume the SAME fixed-point query surface
+(`BytecodeCompiler::generated_symbol_query() -> &GeneratedSymbolTable`,
+Decision 66 closing rule): there is no speculative second pass and no LSP
+re-evaluator — completion, navigation, references, rename, and virtual views
+all read the one converged table. `shape-expansion://` URIs
+(`tools/shape-lsp/src/expansion_views.rs`) render the checked generated IR
+read-only with a bidirectional source map (`virtual_to_source` /
+`source_to_virtual`); the render is inspection-only and is NEVER reparsed as
+compiler input (pinned by `the_module_never_reparses_its_own_render`).
+Identity everywhere is the A1 canonical-descriptor SHA-256 scheme (no strings,
+no JSON, no partial descriptors, no counters).
+Book status: D2-enabled behaviors are gate-runnable in ShapeTest —
+`tools/shape-test/tests/lsp/typed_comptime.rs`
+(`completion_sees_generated_free_function_after_discovery`,
+`generated_free_function_visible_to_later_source_runs_identically_in_vm_and_jit`
+VM+JIT, `generated_call_site_renders_read_only_virtual_view_with_source_map`)
+plus the `expansion_views.rs` in-file view/source-map suite and the
+`expansion_provenance.rs` rejection-matrix + deterministic-identity units;
 book-chapter examples land in stage F1 per the program spec.
 
 ### Implemented But Under-Proven
@@ -510,7 +554,11 @@ examples, rejection requirements, and implementation implications.
 - [Annotations And Hooks](typed-comptime/annotations-and-hooks.md): Decisions 61-65.
 - [Expansion And Tooling](typed-comptime/expansion-and-tooling.md): Decisions 66-69.
   Decision 68 is CURRENT on the existing extend/materialization path
-  (ADR009-D1, 2026-07-13); the fixed point + virtual views remain TARGET (D2).
+  (ADR009-D1, 2026-07-13); Decision 66/67 — the declaration-discovery fixed
+  point, the shared `generated_symbol_query()` surface, and `shape-expansion://`
+  read-only virtual views — are CURRENT / compiler+LSP+VM+JIT (ADR009-D2,
+  2026-07-13, evidence `tools/shape-test/tests/lsp/typed_comptime.rs` +
+  `expansion_views.rs`). Decision 69 (name policies) remains TARGET.
 - [Resources And Fragments](typed-comptime/resources-and-fragments.md): Decisions 70-73 and 95.
 - [Patterns And Control Flow](typed-comptime/patterns-and-control-flow.md): Decisions 74-76.
 - [Guards And Exhaustiveness](typed-comptime/guards-and-exhaustiveness.md): Decisions 77-79.
