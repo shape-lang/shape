@@ -86,6 +86,17 @@ impl BytecodeCompiler {
                         .iter()
                         .any(|arg| Self::annotation_contains_type_param(arg, type_params))
             }
+            // ADR-009 B3 (S1): existential descriptor package. Witnesses shadow
+            // outer type params, so check the inner descriptor against the set
+            // minus the bound witnesses.
+            TypeAnnotation::Existential { witnesses, inner } => {
+                let inner_params: HashSet<String> = type_params
+                    .iter()
+                    .filter(|p| !witnesses.contains(p))
+                    .cloned()
+                    .collect();
+                Self::annotation_contains_type_param(inner, &inner_params)
+            }
             TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null

@@ -730,6 +730,13 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     // from the shared reflection catalog, never hand-written here.
     crate::comptime_reflection::TRAIT_REF_BUILTIN_ROW,
     crate::comptime_reflection::FIND_IMPL_BUILTIN_ROW,
+    // ADR-009 B4 (Stage 2, Dec 54) — the uniform nominal-application
+    // free-function rows (`type_constructor` / `const_arg`) are catalog-owned
+    // exactly like the pairs above: spliced verbatim from the shared
+    // reflection catalog, never hand-written here. (`apply` / `refine` /
+    // `type_argument` are method forwarders, not free builtins.)
+    crate::comptime_reflection::TYPE_CONSTRUCTOR_BUILTIN_ROW,
+    crate::comptime_reflection::CONST_ARG_BUILTIN_ROW,
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a valid Shape string literal (quotes + escapes) so it can be embedded
     // into generated source produced by the `extend (expr)` directive.
@@ -988,6 +995,38 @@ mod tests {
 
         assert!(is_comptime_builtin_function("trait_ref"));
         assert!(is_comptime_builtin_function("find_impl"));
+    }
+
+    /// ADR-009 (ticket B4, Stage 2, Dec 54): the uniform-application rows
+    /// (`type_constructor` / `const_arg`) are the shared-catalog descriptors —
+    /// exactly once each, byte-identical (a hand-written or duplicate row
+    /// fails this test) — and the comptime-only gate (the single source of
+    /// truth for compiler and LSP) covers both in lockstep.
+    #[test]
+    fn uniform_application_rows_are_the_shared_catalog_descriptors() {
+        let rows: Vec<_> = collect_builtin_metadata()
+            .into_iter()
+            .filter(|meta| meta.name == "type_constructor" || meta.name == "const_arg")
+            .collect();
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected exactly one type_constructor row and one const_arg row"
+        );
+
+        let type_constructor = rows.iter().find(|m| m.name == "type_constructor").unwrap();
+        let const_arg = rows.iter().find(|m| m.name == "const_arg").unwrap();
+        assert_eq!(
+            **type_constructor,
+            crate::comptime_reflection::TYPE_CONSTRUCTOR_BUILTIN_ROW
+        );
+        assert_eq!(
+            **const_arg,
+            crate::comptime_reflection::CONST_ARG_BUILTIN_ROW
+        );
+
+        assert!(is_comptime_builtin_function("type_constructor"));
+        assert!(is_comptime_builtin_function("const_arg"));
     }
 
     #[test]

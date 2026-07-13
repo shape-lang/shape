@@ -53,6 +53,59 @@ pub(crate) const GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC: &str = "conflicting gener
 pub(crate) const UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC: &str = "unknown generated-symbol identity: no expansion provenance was \
      registered for the requested SymbolId (ADR-009 Decision 68)";
 
+// ─────────────────────────────────────────────────────────────────────────
+// ADR-009 ticket D2 (Decision 67) — declaration-discovery fixed point.
+//
+// The monotonic declaration-discovery fixed point ([`DeclarationDiscoveryFixedPoint`])
+// drives the existing run-once/dedup chokepoint ([`GeneratedSymbolTable::
+// reserve_generated_decl`]) to a deterministic, monotone convergence BEFORE
+// ordinary body checking. The five named diagnostics below are the D2
+// rejection matrix; each is routed through the C0003 generated-declaration
+// diagnostic family (`comptime_diagnostics.rs`) carrying expansion provenance.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Rejection-matrix D2 row (cycle): application A's generated declaration
+/// re-triggers an application whose generated declaration re-triggers A — a
+/// non-terminating output-triggers chain. A cycle in the discovery graph is
+/// a compile error carrying the cyclic expansions' provenance chain
+/// (Decision 67: cycles are compile errors).
+pub(crate) const DISCOVERY_CYCLE_DIAGNOSTIC: &str = "declaration-discovery cycle: a generated declaration re-triggers an \
+     expansion that (transitively) re-triggers it, so discovery never \
+     reaches a fixed point (ADR-009 Decision 67)";
+
+/// Rejection-matrix D2 row (oscillation): the discovered-header state
+/// returns to an earlier non-terminal state instead of growing monotonically
+/// to convergence (a header appears, then a later round's state flip-flops
+/// back). Non-monotone discovery is a compile error (Decision 67:
+/// discovery is monotone and converges).
+pub(crate) const DISCOVERY_OSCILLATION_DIAGNOSTIC: &str = "declaration-discovery did not converge monotonically: the discovered \
+     declaration set returned to an earlier state instead of growing to a \
+     fixed point (ADR-009 Decision 67)";
+
+/// Rejection-matrix D2 row (unbounded): the expansion count or the discovery
+/// round depth exceeded the deterministic bound. Unbounded generation is a
+/// compile error carrying the generator provenance (Decision 67:
+/// unbounded generation is rejected).
+pub(crate) const DISCOVERY_UNBOUNDED_DIAGNOSTIC: &str = "declaration-discovery exceeded the deterministic expansion bound: a \
+     generator produced declarations without reaching a fixed point \
+     (ADR-009 Decision 67)";
+
+/// Rejection-matrix D2 row (header mutated): a declaration header discovered
+/// in an earlier round is re-derived with DIFFERENT content later in the
+/// same fixed point — a discovered header must be immutable through
+/// discovery (Decision 67: discovered headers are immutable).
+pub(crate) const DISCOVERY_HEADER_MUTATED_DIAGNOSTIC: &str = "declaration-discovery header mutated: a generated declaration that was \
+     already discovered was re-derived with different content, violating \
+     header immutability through the fixed point (ADR-009 Decision 67)";
+
+/// Rejection-matrix D2 row (reserved-but-undefined): a generated-declaration
+/// identity was reserved during discovery but never defined by the time the
+/// fixed point converged. Every reserved identity must be defined exactly
+/// once (Decision 67).
+pub(crate) const RESERVED_IDENTITY_UNDEFINED_DIAGNOSTIC: &str = "reserved generated identity never defined: discovery reserved a \
+     declaration header that was not defined before the fixed point \
+     converged (ADR-009 Decision 67)";
+
 // Domain-separation tags: each hash kind digests a distinct domain prefix so
 // canonically-equal descriptor lists in different roles can never collide.
 const ARGUMENTS_HASH_DOMAIN: &str = "adr009:d1:arguments";
@@ -721,6 +774,259 @@ impl GeneratedSymbolTable {
     }
 }
 
+/// Deterministic discovery bounds (ADR-009 Decision 67: unbounded generation
+/// is a compile error). The bounds are generous relative to any realistic
+/// program — they exist to make non-convergence a terminating compile error
+/// rather than a hang. Exceeding EITHER bound is the named
+/// [`DISCOVERY_UNBOUNDED_DIAGNOSTIC`].
+const MAX_DISCOVERY_ROUNDS: u32 = 256;
+const MAX_DISCOVERY_EXPANSIONS: u32 = 65_536;
+
+/// Outcome of claiming one expansion application against the run-once memo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplicationClaim {
+    /// First time this application identity is seen this compilation unit:
+    /// the driver must execute the handler and record its generated headers.
+    Fresh,
+    /// The run-once memo already holds this identity (same ApplicationId +
+    /// dependencies hash): the handler ran once already — skip re-execution.
+    /// This is the memoized short-circuit, NOT a silent failure skip.
+    AlreadyApplied,
+}
+
+/// ADR-009 ticket D2 (Decision 67): the monotonic declaration-discovery
+/// fixed point. It is the deterministic driver state threaded through the
+/// existing speculative pre-pass
+/// (`functions_annotations.rs::materialize_computed_comptime_extends`),
+/// converting it from a single unbounded speculative pass into a bounded
+/// worklist that reaches a fixed point BEFORE ordinary body checking.
+///
+/// The fixed point is the SINGLE discovery pass — there is no speculative
+/// second evaluation; the compiler and the LSP consume the SAME reserved
+/// [`GeneratedSymbolTable`] this fixed point drives (Decision 66). This type
+/// owns only the convergence accounting; the identity/dedup chokepoint stays
+/// [`GeneratedSymbolTable::reserve_generated_decl`].
+///
+/// Invariants enforced (each a named D2 diagnostic):
+/// - run-once per application identity ([`ApplicationClaim`]);
+/// - discovered headers immutable through discovery
+///   ([`DISCOVERY_HEADER_MUTATED_DIAGNOSTIC`]);
+/// - monotone convergence, no oscillation
+///   ([`DISCOVERY_OSCILLATION_DIAGNOSTIC`]);
+/// - no output-triggers cycles ([`DISCOVERY_CYCLE_DIAGNOSTIC`]);
+/// - bounded rounds/expansions ([`DISCOVERY_UNBOUNDED_DIAGNOSTIC`]);
+/// - every reserved identity defined at convergence
+///   ([`RESERVED_IDENTITY_UNDEFINED_DIAGNOSTIC`]).
+#[derive(Debug)]
+pub(crate) struct DeclarationDiscoveryFixedPoint {
+    /// Rounds begun so far (each worklist drain is one round).
+    rounds: u32,
+    /// Applications claimed so far (the expansion-count bound axis).
+    expansions: u32,
+    /// Run-once memo: application-identity fingerprints already claimed.
+    claimed: std::collections::HashSet<CanonicalHash>,
+    /// Discovered-header immutability ledger: declaration name → the content
+    /// fingerprint it was first discovered with. Monotone: names are only
+    /// added; re-derivation with different content is the mutation error.
+    header_content: HashMap<String, CanonicalHash>,
+    /// Reserved-vs-defined accounting. `reserved` names must all appear in
+    /// `defined` at [`Self::converge`].
+    reserved: std::collections::BTreeSet<String>,
+    defined: std::collections::BTreeSet<String>,
+    /// Output-triggers adjacency (application fingerprint → applications its
+    /// generated declarations trigger). Used for cycle detection.
+    triggers: HashMap<CanonicalHash, Vec<CanonicalHash>>,
+    /// State fingerprints observed at each round boundary, oldest first. A
+    /// non-adjacent repeat is oscillation; an adjacent repeat is convergence.
+    round_states: Vec<CanonicalHash>,
+}
+
+impl DeclarationDiscoveryFixedPoint {
+    const STATE_DOMAIN: &'static str = "adr009:d2:discovery-state";
+
+    /// One fixed point per compilation unit, threaded through the pre-pass.
+    pub(crate) fn new() -> Self {
+        Self {
+            rounds: 0,
+            expansions: 0,
+            claimed: std::collections::HashSet::new(),
+            header_content: HashMap::new(),
+            reserved: std::collections::BTreeSet::new(),
+            defined: std::collections::BTreeSet::new(),
+            triggers: HashMap::new(),
+            round_states: Vec::new(),
+        }
+    }
+
+    /// Begin one discovery round (one worklist drain). Bounds the round depth
+    /// ([`DISCOVERY_UNBOUNDED_DIAGNOSTIC`]).
+    pub(crate) fn begin_round(&mut self) -> Result<(), String> {
+        self.rounds += 1;
+        if self.rounds > MAX_DISCOVERY_ROUNDS {
+            return Err(format!(
+                "{DISCOVERY_UNBOUNDED_DIAGNOSTIC}: exceeded {MAX_DISCOVERY_ROUNDS} discovery rounds"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Claim one expansion application against the run-once memo. Bounds the
+    /// expansion count ([`DISCOVERY_UNBOUNDED_DIAGNOSTIC`]); a fingerprint
+    /// already claimed returns [`ApplicationClaim::AlreadyApplied`] so the
+    /// driver skips re-execution (run-once per ApplicationId + deps hash).
+    pub(crate) fn claim(
+        &mut self,
+        identity: &ExpansionIdentity,
+    ) -> Result<ApplicationClaim, String> {
+        let fingerprint = identity.fingerprint();
+        if self.claimed.contains(&fingerprint) {
+            return Ok(ApplicationClaim::AlreadyApplied);
+        }
+        self.expansions += 1;
+        if self.expansions > MAX_DISCOVERY_EXPANSIONS {
+            return Err(format!(
+                "{DISCOVERY_UNBOUNDED_DIAGNOSTIC}: exceeded {MAX_DISCOVERY_EXPANSIONS} expansions"
+            ));
+        }
+        self.claimed.insert(fingerprint);
+        Ok(ApplicationClaim::Fresh)
+    }
+
+    /// Reserve a generated declaration header without (yet) defining it — the
+    /// predeclare-then-define shape. A reserved-but-never-defined header is the
+    /// [`RESERVED_IDENTITY_UNDEFINED_DIAGNOSTIC`] at convergence. The v1
+    /// pre-pass reserves-and-defines atomically via [`Self::record_header`], so
+    /// this split accessor drives the reserved-vs-defined convergence tests.
+    #[cfg(test)]
+    pub(crate) fn reserve_header(&mut self, decl_name: &str) {
+        self.reserved.insert(decl_name.to_string());
+    }
+
+    /// Record a discovered header with its content fingerprint: reserves AND
+    /// defines it, and enforces immutability. Re-recording the same name with
+    /// a DIFFERENT content fingerprint is [`DISCOVERY_HEADER_MUTATED_DIAGNOSTIC`];
+    /// re-recording with the SAME content is idempotent (the run-once memo
+    /// normally prevents re-derivation, but a re-issued reservation is benign).
+    pub(crate) fn record_header(
+        &mut self,
+        decl_name: &str,
+        content: CanonicalHash,
+    ) -> Result<(), String> {
+        if let Some(existing) = self.header_content.get(decl_name) {
+            if *existing != content {
+                return Err(format!(
+                    "{DISCOVERY_HEADER_MUTATED_DIAGNOSTIC}: `{decl_name}` was discovered with one \
+                     definition and re-derived with a different one"
+                ));
+            }
+        }
+        self.header_content.insert(decl_name.to_string(), content);
+        self.reserved.insert(decl_name.to_string());
+        self.defined.insert(decl_name.to_string());
+        Ok(())
+    }
+
+    /// Mark a previously reserved header as defined (pairs with
+    /// [`Self::reserve_header`] for the predeclare-then-define shape;
+    /// convergence-test accessor).
+    #[cfg(test)]
+    pub(crate) fn define_header(
+        &mut self,
+        decl_name: &str,
+        content: CanonicalHash,
+    ) -> Result<(), String> {
+        self.record_header(decl_name, content)
+    }
+
+    /// Record an output-triggers edge: application `from`'s generated
+    /// declaration re-triggered application `to`. Adding an edge that closes
+    /// a cycle in the discovery graph is [`DISCOVERY_CYCLE_DIAGNOSTIC`].
+    pub(crate) fn record_trigger(
+        &mut self,
+        from: &ExpansionIdentity,
+        to: &ExpansionIdentity,
+    ) -> Result<(), String> {
+        let from_fp = from.fingerprint();
+        let to_fp = to.fingerprint();
+        // A self-edge is a trivial cycle.
+        if from_fp == to_fp || self.reaches(to_fp, from_fp) {
+            return Err(format!(
+                "{DISCOVERY_CYCLE_DIAGNOSTIC}: `{}` → `{}` closes a cycle",
+                from.application.canonical_descriptor(),
+                to.application.canonical_descriptor(),
+            ));
+        }
+        self.triggers.entry(from_fp).or_default().push(to_fp);
+        Ok(())
+    }
+
+    /// Is `target` reachable from `start` along trigger edges?
+    fn reaches(&self, start: CanonicalHash, target: CanonicalHash) -> bool {
+        let mut stack = vec![start];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(node) = stack.pop() {
+            if node == target {
+                return true;
+            }
+            if !seen.insert(node) {
+                continue;
+            }
+            if let Some(next) = self.triggers.get(&node) {
+                stack.extend(next.iter().copied());
+            }
+        }
+        false
+    }
+
+    /// Observe the discovery STATE at a round boundary. `frontier` is the
+    /// driver's canonical descriptor of the round's frontier (the sorted
+    /// pending-worklist type identities plus the discovered-header names): a
+    /// correct monotone run drives the frontier toward emptiness and never
+    /// revisits a prior configuration. A state that repeats a NON-adjacent
+    /// earlier state means discovery returned to a prior configuration
+    /// instead of converging — [`DISCOVERY_OSCILLATION_DIAGNOSTIC`]. An
+    /// adjacent repeat (unchanged from the previous round) is the benign
+    /// convergence signal, not an error.
+    pub(crate) fn observe_round_state(&mut self, frontier: &[String]) -> Result<(), String> {
+        let state = self.frontier_fingerprint(frontier);
+        if let Some(last) = self.round_states.last() {
+            if *last == state {
+                // Unchanged since the previous round: converged, not an error.
+                self.round_states.push(state);
+                return Ok(());
+            }
+        }
+        if self.round_states.contains(&state) {
+            return Err(format!(
+                "{DISCOVERY_OSCILLATION_DIAGNOSTIC}: the discovery frontier recurred after \
+                 changing, so discovery is not monotone"
+            ));
+        }
+        self.round_states.push(state);
+        Ok(())
+    }
+
+    /// Fingerprint over the sorted round-frontier descriptor — stable,
+    /// insensitive to the order the driver lists the frontier in.
+    fn frontier_fingerprint(&self, frontier: &[String]) -> CanonicalHash {
+        let mut parts: Vec<&str> = frontier.iter().map(String::as_str).collect();
+        parts.sort_unstable();
+        CanonicalHash::over_framed(Self::STATE_DOMAIN, parts)
+    }
+
+    /// The fixed point is reached: every reserved identity must be defined
+    /// ([`RESERVED_IDENTITY_UNDEFINED_DIAGNOSTIC`]).
+    pub(crate) fn converge(&self) -> Result<(), String> {
+        let undefined: Vec<&String> = self.reserved.difference(&self.defined).collect();
+        if let Some(first) = undefined.first() {
+            return Err(format!(
+                "{RESERVED_IDENTITY_UNDEFINED_DIAGNOSTIC}: `{first}` was reserved but never defined"
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1276,6 +1582,215 @@ mod tests {
         assert_eq!(anchored.span(), Span::new(0, 12));
     }
 
+    // ── ADR-009 D2 declaration-discovery fixed-point ledger tests ──
+
+    fn identity_named(application: &str, deps: &[&str]) -> ExpansionIdentity {
+        ExpansionIdentity::new(
+            GeneratorRef::from_canonical_descriptor("annotation:derive@app.main"),
+            ApplicationId::from_canonical_descriptor(application),
+            TargetIdentity::from_canonical_descriptor("type:app.main:Point"),
+            ComptimeStage::AnnotationHandler,
+            sample_arguments_hash(),
+            CanonicalHash::from_canonical_dependency_descriptors(deps),
+        )
+    }
+
+    // Convergence: a monotone run claims each application once, records its
+    // headers, and converges cleanly. A second claim of the same identity is
+    // memoized (AlreadyApplied) — the run-once guarantee.
+    #[test]
+    fn discovery_reaches_monotone_fixed_point_running_each_application_once() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        let a = identity_named(
+            "application:app.main:Point:derive",
+            &["type:app.main:Point"],
+        );
+
+        fp.begin_round().expect("round 1 within bound");
+        assert_eq!(
+            fp.claim(&a).expect("first claim ok"),
+            ApplicationClaim::Fresh,
+            "first sighting of an application identity is Fresh"
+        );
+        fp.record_header("Point.derived", sample_content())
+            .expect("record header");
+        // Re-claiming the SAME identity (e.g. the struct re-enqueued) is the
+        // run-once short-circuit, not a re-execution.
+        assert_eq!(
+            fp.claim(&a).expect("second claim ok"),
+            ApplicationClaim::AlreadyApplied,
+            "the run-once memo short-circuits a re-claim"
+        );
+
+        // A second round observing an empty frontier converges.
+        fp.observe_round_state(&["Point.derived".to_string()])
+            .expect("round-1 frontier state");
+        fp.begin_round().expect("round 2 within bound");
+        fp.observe_round_state(&[])
+            .expect("empty frontier converges");
+        fp.converge().expect("every reserved header defined");
+    }
+
+    // Run-once is keyed on the FULL application identity: two applications
+    // that differ ONLY in the dependencies hash are distinct (both Fresh),
+    // while the identical identity is memoized.
+    #[test]
+    fn discovery_run_once_is_keyed_on_application_id_plus_dependencies_hash() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        let deps_a = identity_named("application:app.main:Point:derive", &["type:app.main:A"]);
+        let deps_b = identity_named("application:app.main:Point:derive", &["type:app.main:B"]);
+        fp.begin_round().expect("round");
+        assert_eq!(fp.claim(&deps_a).expect("claim a"), ApplicationClaim::Fresh);
+        assert_eq!(
+            fp.claim(&deps_b).expect("claim b"),
+            ApplicationClaim::Fresh,
+            "a different dependencies hash is a different application identity"
+        );
+        assert_eq!(
+            fp.claim(&deps_a).expect("re-claim a"),
+            ApplicationClaim::AlreadyApplied,
+        );
+    }
+
+    // Immutability: a discovered header re-derived with different content is
+    // the named DISCOVERY_HEADER_MUTATED error; re-recording identical content
+    // is idempotent.
+    #[test]
+    fn discovery_header_is_immutable_through_the_fixed_point() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        fp.record_header("Point.derived", sample_content())
+            .expect("first record");
+        fp.record_header("Point.derived", sample_content())
+            .expect("identical re-record is idempotent");
+        let err = fp
+            .record_header(
+                "Point.derived",
+                CanonicalHash::from_canonical_decl_encoding("a-different-body"),
+            )
+            .expect_err("re-derivation with different content must be refused");
+        assert!(
+            err.contains(DISCOVERY_HEADER_MUTATED_DIAGNOSTIC),
+            "header-mutation diagnostic missing: {err}"
+        );
+    }
+
+    // Cycle: A's output triggers B, B's output triggers A → named
+    // DISCOVERY_CYCLE carrying the application provenance.
+    #[test]
+    fn discovery_cycle_is_the_named_error() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        let a = identity_named("application:app.main:A:derive", &["type:app.main:A"]);
+        let b = identity_named("application:app.main:B:derive", &["type:app.main:B"]);
+        fp.record_trigger(&a, &b).expect("A→B is acyclic");
+        let err = fp
+            .record_trigger(&b, &a)
+            .expect_err("B→A closes a cycle and must be refused");
+        assert!(
+            err.contains(DISCOVERY_CYCLE_DIAGNOSTIC),
+            "cycle diagnostic missing: {err}"
+        );
+        assert!(
+            err.contains("application:app.main:B:derive"),
+            "cycle error must carry the closing application's provenance: {err}"
+        );
+    }
+
+    // A self-trigger is a trivial cycle.
+    #[test]
+    fn discovery_self_trigger_is_a_cycle() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        let a = identity_named("application:app.main:A:derive", &["type:app.main:A"]);
+        let err = fp
+            .record_trigger(&a, &a)
+            .expect_err("self-trigger is a trivial cycle");
+        assert!(err.contains(DISCOVERY_CYCLE_DIAGNOSTIC));
+    }
+
+    // Oscillation: the discovery frontier returns to an earlier non-adjacent
+    // state (A → B → A) → named DISCOVERY_OSCILLATION.
+    #[test]
+    fn discovery_oscillation_is_the_named_error() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        fp.observe_round_state(&["A".to_string()]).expect("state A");
+        fp.observe_round_state(&["B".to_string()]).expect("state B");
+        let err = fp
+            .observe_round_state(&["A".to_string()])
+            .expect_err("returning to state A is oscillation");
+        assert!(
+            err.contains(DISCOVERY_OSCILLATION_DIAGNOSTIC),
+            "oscillation diagnostic missing: {err}"
+        );
+    }
+
+    // An unchanged frontier across adjacent rounds is convergence, not
+    // oscillation.
+    #[test]
+    fn discovery_adjacent_repeat_is_convergence_not_oscillation() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        fp.observe_round_state(&["A".to_string()]).expect("state A");
+        fp.observe_round_state(&["A".to_string()])
+            .expect("an unchanged frontier is the convergence signal");
+    }
+
+    // Unbounded: exceeding the deterministic round bound → DISCOVERY_UNBOUNDED.
+    #[test]
+    fn discovery_unbounded_rounds_is_the_named_error() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        let mut err = None;
+        for _ in 0..(MAX_DISCOVERY_ROUNDS + 8) {
+            if let Err(e) = fp.begin_round() {
+                err = Some(e);
+                break;
+            }
+        }
+        let err = err.expect("the round bound must eventually trip");
+        assert!(
+            err.contains(DISCOVERY_UNBOUNDED_DIAGNOSTIC),
+            "unbounded diagnostic missing: {err}"
+        );
+    }
+
+    // Unbounded: exceeding the deterministic expansion bound → DISCOVERY_UNBOUNDED.
+    #[test]
+    fn discovery_unbounded_expansions_is_the_named_error() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        let mut err = None;
+        for i in 0..(MAX_DISCOVERY_EXPANSIONS + 8) {
+            let id = identity_named(
+                &format!("application:app.main:gen{i}:derive"),
+                &[Box::leak(format!("type:app.main:D{i}").into_boxed_str())],
+            );
+            if let Err(e) = fp.claim(&id) {
+                err = Some(e);
+                break;
+            }
+        }
+        let err = err.expect("the expansion bound must eventually trip");
+        assert!(
+            err.contains(DISCOVERY_UNBOUNDED_DIAGNOSTIC),
+            "unbounded diagnostic missing: {err}"
+        );
+    }
+
+    // Reserved-but-undefined: a header reserved during discovery but never
+    // defined is the named RESERVED_IDENTITY_UNDEFINED at convergence.
+    #[test]
+    fn discovery_reserved_but_undefined_identity_is_the_named_error() {
+        let mut fp = DeclarationDiscoveryFixedPoint::new();
+        fp.reserve_header("Point.pending");
+        let err = fp
+            .converge()
+            .expect_err("a reserved-but-undefined header must fail convergence");
+        assert!(
+            err.contains(RESERVED_IDENTITY_UNDEFINED_DIAGNOSTIC),
+            "reserved-undefined diagnostic missing: {err}"
+        );
+        // Defining it clears the failure.
+        fp.define_header("Point.pending", sample_content())
+            .expect("define");
+        fp.converge().expect("now every reserved header is defined");
+    }
+
     // ---- S6 close-out: repo-wide grep sentinels (rows 9/10), the
     // ---- `executor/tests/no_dynamic.rs` pattern. Documentation trees
     // ---- (docs/, CLAUDE.md) intentionally discuss these by name and are
@@ -1322,14 +1837,29 @@ mod tests {
         }
     }
 
-    // Rejection row 9 (D2 scope guard): the declaration-discovery fixed
-    // point, `shape-expansion` virtual-document URIs, and a memoized
-    // expansion query graph are ticket D2. The URI scheme may be NAMED on
-    // comment lines (scope notes) but must not appear in code; the
-    // fixed-point / query-graph vocabulary must not appear as identifiers
-    // in the comptime-compiler or LSP surfaces at all.
+    // Rejection row 9 (D2) — RELAXED + REPLACED (ADR-009 ticket D2).
+    //
+    // D1 reserved the declaration-discovery fixed-point / query-graph
+    // vocabulary FOR ticket D2 by asserting its ABSENCE. D2 slice 1
+    // IMPLEMENTS that surface, so the absence asserts are relaxed and
+    // REPLACED (never deleted-and-forgotten) with POSITIVE assertions that
+    //   (a) the fixed-point surface EXISTS in this module, and
+    //   (b) the discovery driver is SINGLE-PASS — invoked exactly once at
+    //       the compiler entry point, with no speculative second evaluation
+    //       (Decision 66: the compiler and LSP consume the SAME reserved
+    //       table this one pass drives).
+    // The `shape-expansion://` virtual-document URI is IMPLEMENTED by D2
+    // slice 3 (`tools/shape-lsp/src/expansion_views.rs`). D1 reserved the
+    // vocabulary by asserting its ABSENCE; slice 1 unblocked it and slice 3
+    // introduces it — so the absence assert is RELAXED + REPLACED (never
+    // deleted-and-forgotten) with a POSITIVE assertion that the read-only
+    // URI scheme now exists in CODE (a non-comment line), not just in scope
+    // notes.
     #[test]
-    fn row9_d2_scope_vocabulary_has_not_entered_the_source_tree() {
+    fn row9_d2_declaration_discovery_surface_is_present_and_single_pass() {
+        // (a-guard, slice 3) the virtual-document URI scheme is now
+        // IMPLEMENTED — it must appear in a non-comment CODE line of the LSP
+        // virtual-views surface.
         let uri_needle = ["shape-expa", "nsion://"].concat();
         let mut code_hits = Vec::new();
         for (path, src) in source_rs_contents() {
@@ -1340,39 +1870,39 @@ mod tests {
             }
         }
         assert!(
-            code_hits.is_empty(),
-            "the D2 virtual-document URI scheme appears in CODE (ticket D2 \
-             scope violation): {code_hits:#?}"
+            !code_hits.is_empty(),
+            "the D2 read-only virtual-document URI scheme must be implemented \
+             in CODE (D2 slice 3, `expansion_views.rs`) — no non-comment code \
+             line carries the `shape-expansion://` scheme"
         );
 
+        // (a) POSITIVE: the declaration-discovery fixed-point surface exists
+        // in this module — the vocabulary D1 reserved is now implemented.
+        let this = include_str!("expansion_provenance.rs");
+        let surface_needle = ["Declaration", "DiscoveryFixedPoint"].concat();
+        assert!(
+            this.contains(&surface_needle),
+            "the D2 declaration-discovery fixed-point surface must exist \
+             (relaxed row-9 replacement)"
+        );
+
+        // (b) SINGLE-PASS: the discovery driver is invoked exactly ONCE at
+        // the compiler entry point — no speculative second pass.
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest
             .parent()
             .and_then(std::path::Path::parent)
             .expect("repo root");
-        let mut scoped = Vec::new();
-        collect_rs(&repo_root.join("crates/shape-vm/src/compiler"), &mut scoped);
-        collect_rs(&repo_root.join("tools/shape-lsp/src"), &mut scoped);
-        let identifier_needles = [
-            ["fixed", "_point"].concat(),
-            ["Fixed", "Point"].concat(),
-            ["query", "_graph"].concat(),
-            ["Query", "Graph"].concat(),
-            ["expansion", "_query"].concat(),
-            ["Expansion", "Query"].concat(),
-        ];
-        let mut identifier_hits = Vec::new();
-        for (path, src) in scoped {
-            for needle in &identifier_needles {
-                if src.contains(needle) {
-                    identifier_hits.push(format!("{}: {needle}", path.display()));
-                }
-            }
-        }
-        assert!(
-            identifier_hits.is_empty(),
-            "D2 fixed-point / query-graph vocabulary entered the comptime \
-             compiler or LSP surface: {identifier_hits:#?}"
+        let driver_src = std::fs::read_to_string(
+            repo_root.join("crates/shape-vm/src/compiler/compiler_impl_reference_model.rs"),
+        )
+        .expect("driver source resolves");
+        let invocation = "materialize_computed_comptime_extends(&program)";
+        let call_sites = driver_src.matches(invocation).count();
+        assert_eq!(
+            call_sites, 1,
+            "the declaration-discovery driver must be invoked exactly once \
+             (single-pass, no speculative second evaluation), found {call_sites}"
         );
     }
 

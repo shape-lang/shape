@@ -215,6 +215,15 @@ pub struct JoinExpr {
 /// substituted for the concrete field descriptor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComptimeForExpr {
+    /// Witness bindings from a `some<W...>` clause (ADR-009 B3, Dec 51).
+    ///
+    /// Empty for the legacy `comptime for x in ...` form. When non-empty, the
+    /// loop iterates an existential descriptor collection, opening one fresh
+    /// hidden witness per name per iteration. The parser guarantees a `some<>`
+    /// clause with no witnesses is rejected, so a `some` clause always yields a
+    /// non-empty list.
+    #[serde(default)]
+    pub witnesses: Vec<String>,
     /// Loop variable name (e.g., "field")
     pub variable: String,
     /// The iterable expression (e.g., `target.fields`)

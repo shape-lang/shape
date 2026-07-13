@@ -77,6 +77,14 @@ impl TypeInferenceEngine {
                 inner: Box::new(Self::substitute_trait_self_annotation(inner, self_ann)),
             },
             TypeAnnotation::Dyn(traits) => TypeAnnotation::Dyn(traits.clone()),
+            // ADR-009 B3 (S1): existential descriptor package type. `Self` can
+            // legitimately appear inside the inner descriptor; recurse into it.
+            // Witnesses are locally-bound names, never `Self`, so they pass
+            // through unchanged.
+            TypeAnnotation::Existential { witnesses, inner } => TypeAnnotation::Existential {
+                witnesses: witnesses.clone(),
+                inner: Box::new(Self::substitute_trait_self_annotation(inner, self_ann)),
+            },
             TypeAnnotation::Basic(_)
             | TypeAnnotation::Reference(_)
             | TypeAnnotation::Void
@@ -3078,11 +3086,39 @@ impl TypeInferenceEngine {
             //
             // J-CT.1: ComptimeFor is itself a comptime context — calls to
             // `comptime impl` methods inside its body must type-check.
+            //
+            // ADR-009 B3 (Dec 51): a `some<W...>` clause opens an existential
+            // descriptor package per iteration. The iterable's element type
+            // MUST be an `exists<W...> Descriptor<W...>` package (else the named
+            // NON_EXISTENTIAL_ITERABLE rejection); each witness is opened as a
+            // FRESH opaque type scoped to the loop body only, and the loop
+            // variable binds to the opened descriptor. Restoring the scope on
+            // exit is what stops a hidden witness from escaping — it is the
+            // inference half of the "witness cannot escape its opening scope"
+            // invariant. Sugar over the same reflect()/payload surface: NO
+            // second protocol is introduced.
             Expr::ComptimeFor(cf, _) => {
                 self.enter_comptime();
+                self.env.push_scope();
+                let opened_witnesses = if cf.witnesses.is_empty() {
+                    false
+                } else {
+                    match self.open_comptime_for_witnesses(cf) {
+                        Ok(()) => true,
+                        Err(err) => {
+                            self.env.pop_scope();
+                            self.exit_comptime();
+                            return Err(err);
+                        }
+                    }
+                };
                 for stmt in &cf.body {
                     let _ = self.infer_statement(stmt);
                 }
+                if opened_witnesses {
+                    self.comptime_witness_frames.pop();
+                }
+                self.env.pop_scope();
                 self.exit_comptime();
                 Ok(Type::Concrete(TypeAnnotation::Void))
             }
@@ -3116,6 +3152,106 @@ impl TypeInferenceEngine {
                 }
             }
         }
+    }
+
+    /// ADR-009 B3 (Dec 51) — open the hidden witnesses of a
+    /// `comptime for some<W...> x in coll` loop for the body scope.
+    ///
+    /// The iterable's element type MUST be an `exists<W...> Descriptor<W...>`
+    /// package. Each package witness is opened to a FRESH type variable (a
+    /// hidden, per-iteration opaque type); the loop variable binds to the
+    /// descriptor with those fresh witnesses substituted in, so the body sees a
+    /// typed — but witness-opaque — descriptor. The caller has already pushed a
+    /// body scope; this records a [`ComptimeWitnessFrame`] so escapes of the
+    /// opened witnesses are rejected, and the caller pops the scope + frame on
+    /// exit (scope restoration = the "witness cannot escape" invariant).
+    ///
+    /// A non-existential element type is the named NON_EXISTENTIAL_ITERABLE
+    /// rejection (rejection-matrix row 6) — never a silent bind-to-anything.
+    pub(crate) fn open_comptime_for_witnesses(
+        &mut self,
+        cf: &shape_ast::ast::expr_helpers::ComptimeForExpr,
+    ) -> TypeResult<()> {
+        let iter_type = self.infer_expr(&cf.iterable)?;
+        let iter_type = self.solver.unifier().apply_substitutions(&iter_type);
+        let element_type = self.infer_iterator_element_type(&iter_type)?;
+        let element_type = self.solver.unifier().apply_substitutions(&element_type);
+
+        let (pkg_witnesses, inner) = match element_type.to_annotation() {
+            Some(TypeAnnotation::Existential { witnesses, inner }) => (witnesses, *inner),
+            _ => {
+                return Err(TypeError::ConstraintViolation(
+                    crate::comptime_reflection::NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC.to_string(),
+                ));
+            }
+        };
+
+        // Open each package witness to a fresh opaque type-var. Bind by the
+        // package's witness names (the inner descriptor is spelled in those).
+        let mut subst: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
+        let mut witness_vars = Vec::with_capacity(pkg_witnesses.len());
+        for name in &pkg_witnesses {
+            let var = self.type_var_gen.fresh_var();
+            witness_vars.push(var.clone());
+            subst.insert(name.clone(), Type::Variable(var));
+        }
+
+        let loop_var_type = Self::open_witness_annotation_to_type(&inner, &subst);
+        self.env
+            .define(&cf.variable, TypeScheme::mono(loop_var_type));
+
+        self.comptime_witness_frames.push(super::ComptimeWitnessFrame {
+            witness_vars,
+            body_scope_depth: self.env.scope_depth(),
+        });
+        Ok(())
+    }
+
+    /// Convert a descriptor annotation to a `Type`, replacing each witness name
+    /// with its freshly-opened type variable (ADR-009 B3). Non-witness
+    /// structure is preserved. The result carries the fresh witness vars so a
+    /// value derived from the descriptor still "mentions" its hidden witness —
+    /// which is what the escape check keys on.
+    fn open_witness_annotation_to_type(
+        ann: &TypeAnnotation,
+        subst: &std::collections::HashMap<String, Type>,
+    ) -> Type {
+        if let Some(name) = ann.as_type_name_str() {
+            if matches!(
+                ann,
+                TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)
+            ) {
+                if let Some(ty) = subst.get(name) {
+                    return ty.clone();
+                }
+            }
+        }
+        match ann {
+            TypeAnnotation::Generic { name, args } => Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Basic(name.to_string()))),
+                args: args
+                    .iter()
+                    .map(|a| Self::open_witness_annotation_to_type(a, subst))
+                    .collect(),
+            },
+            other => Type::Concrete(other.clone()),
+        }
+    }
+
+    /// ADR-009 B3 (Dec 51) — does `ty` mention any witness opened by a live
+    /// `some` frame? Used by the escape check.
+    pub(crate) fn type_mentions_active_witness(&self, ty: &Type) -> bool {
+        if self.comptime_witness_frames.is_empty() {
+            return false;
+        }
+        let resolved = self.solver.unifier().apply_substitutions(ty);
+        let mut vars = std::collections::HashSet::new();
+        self.collect_type_vars(&resolved, &mut vars);
+        vars.iter().any(|var| {
+            self.comptime_witness_frames
+                .iter()
+                .any(|frame| frame.witness_vars.contains(var))
+        })
     }
 
     /// Element type that an array-literal entry contributes for homogeneity

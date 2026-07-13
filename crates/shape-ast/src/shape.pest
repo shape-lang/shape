@@ -149,7 +149,14 @@ comptime_block = { &comptime_kw ~ "comptime" ~ block_expr }
 // Comptime for expression: comptime for field in target.fields { ... }
 // Unrolled at compile time. Each iteration generates code with the loop variable
 // bound to the concrete field descriptor.
-comptime_for_expr = { &comptime_kw ~ "comptime" ~ &for_kw ~ "for" ~ ident ~ &in_kw ~ "in" ~ postfix_expr ~ "{" ~ statement* ~ "}" }
+// `comptime for [some<W,...>] ident in postfix_expr { ... }` (ADR-009 B3).
+// The optional `some<W,...>` witness clause introduces fresh hidden witnesses
+// bound per iteration over an existential descriptor collection. The witness
+// list may parse empty (`some<>`) so the AST layer can emit a named
+// parse-time rejection rather than a bare grammar backtrack.
+comptime_for_expr = { &comptime_kw ~ "comptime" ~ &for_kw ~ "for" ~ comptime_for_some_clause? ~ ident ~ &in_kw ~ "in" ~ postfix_expr ~ "{" ~ statement* ~ "}" }
+comptime_for_some_clause = { "some" ~ "<" ~ (comptime_witness ~ ("," ~ comptime_witness)*)? ~ ">" }
+comptime_witness = { ident }
 
 // Annotated expression: @annotation expr
 // Wraps any expression with a compile-time annotation.
@@ -862,7 +869,8 @@ primary_type = {
 }
 
 non_array_type = {
-    reference_type
+    exists_type
+    | reference_type
     | tuple_type
     | object_type
     | function_type
@@ -886,6 +894,15 @@ unit_type = { "(" ~ ")" }
 
 // Trait object type: dyn Trait1 + Trait2
 dyn_type = { "dyn" ~ qualified_ident ~ ("+" ~ qualified_ident)* }
+
+// Existential descriptor package type (ADR-009 B3, Dec 51):
+//   exists<W...> Descriptor<W...>
+// The hidden witnesses W... are bound when the package is opened via
+// `comptime for some<W...>`. The witness list may parse empty (`exists<>`)
+// so the AST layer can emit a named parse-time rejection. The inner type is
+// a `primary_type` (typically a generic descriptor applied to the witnesses).
+exists_type = { "exists" ~ "<" ~ (exists_witness ~ ("," ~ exists_witness)*)? ~ ">" ~ primary_type }
+exists_witness = { ident }
 
 basic_type = {
     "number"

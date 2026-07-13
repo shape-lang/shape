@@ -432,11 +432,18 @@ fn angle_brackets_outside_type_ref_stay_comparisons() {
 
 #[test]
 fn const_generic_application_is_a_named_rejection() {
+    // ADR-009 B4 (Stage 2, Dec 54): the INLINE `type_ref(Head<..., N, ...>)`
+    // bare-const form stays a named rejection (no TypeAnnotation const carrier).
+    // The message now redirects to the CHECKED const-argument builder path.
     let err = parse_program_helper("let x = type_ref(Page<User, 32>);")
         .expect_err("const-generic type application must be rejected");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("const-generic type applications are not yet supported in type_ref"),
+        msg.contains("const-generic type applications are not supported in type_ref"),
         "expected the named const-generic rejection, got: {msg}"
+    );
+    assert!(
+        msg.contains("const_arg"),
+        "the rejection redirects to the checked const_arg builder path, got: {msg}"
     );
 }

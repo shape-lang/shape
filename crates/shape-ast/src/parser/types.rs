@@ -138,6 +138,7 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
             Ok(TypeAnnotation::Dyn(trait_names))
         }
         Rule::unit_type => Ok(TypeAnnotation::Basic("()".to_string())),
+        Rule::exists_type => parse_exists_type(pair),
         Rule::generic_type => parse_generic_type(pair),
         Rule::type_param => {
             let param = parse_type_param(pair)?;
@@ -159,6 +160,41 @@ pub fn parse_basic_type(name: &str) -> Result<TypeAnnotation> {
         "undefined" => TypeAnnotation::Undefined,
         other if other.contains("::") => TypeAnnotation::Reference(other.into()),
         other => TypeAnnotation::Basic(other.to_string()),
+    })
+}
+
+/// Parse an existential descriptor package type (ADR-009 B3, Dec 51):
+/// `exists<W...> Descriptor<W...>`.
+///
+/// The grammar allows an empty witness list (`exists<>`) so this parser can
+/// emit a named parse-time rejection rather than a bare grammar backtrack. A
+/// successfully-parsed `Existential` therefore always carries at least one
+/// witness.
+pub fn parse_exists_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
+    let pair_loc = pair_location(&pair);
+    let mut witnesses = Vec::new();
+    let mut inner = None;
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::exists_witness => witnesses.push(child.as_str().to_string()),
+            _ => inner = Some(parse_type_annotation(child)?),
+        }
+    }
+    if witnesses.is_empty() {
+        return Err(ShapeError::ParseError {
+            message: "existential type requires at least one witness: `exists<W...> Descriptor<W...>`"
+                .to_string(),
+            location: Some(pair_loc),
+        });
+    }
+    let inner = inner.ok_or_else(|| ShapeError::ParseError {
+        message: "existential type requires an inner descriptor type after `exists<W...>`"
+            .to_string(),
+        location: Some(pair_loc),
+    })?;
+    Ok(TypeAnnotation::Existential {
+        witnesses,
+        inner: Box::new(inner),
     })
 }
 

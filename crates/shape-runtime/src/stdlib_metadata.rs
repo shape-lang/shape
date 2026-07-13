@@ -418,6 +418,10 @@ impl StdlibMetadata {
             TypeAnnotation::Null => "null".to_string(),
             TypeAnnotation::Undefined => "undefined".to_string(),
             TypeAnnotation::Dyn(bounds) => format!("dyn {}", bounds.join(" + ")),
+            // ADR-009 B3 (S1): existential descriptor package type.
+            TypeAnnotation::Existential { witnesses, inner } => {
+                format!("exists<{}> {}", witnesses.join(", "), Self::format_type_annotation(inner))
+            }
         }
     }
 }

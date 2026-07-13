@@ -8,6 +8,19 @@ fn comptime_completion_offers_typed_reflection_builtins() {
         .expect_completion("type_category");
 }
 
+/// ADR-009 B3 (Dec 51): hover over a binding whose type is an existential
+/// descriptor package renders the exact `exists<W...> Descriptor<W...>`
+/// witness spelling — the shared freeze/render surface reaches the LSP, so a
+/// `some`-bound witness type is shown, not erased to `any`/`?`.
+#[test]
+fn hover_renders_existential_witness_package_type() {
+    // `pkg` is annotated with the existential package; hover renders the
+    // witness list + inner descriptor via the shared annotation renderer.
+    ShapeTest::new("fn describe(pkg: exists<T> FrozenType<T>) -> string {\n  return \"x\"\n}\n")
+        .at(pos(0, 13))
+        .expect_hover_contains("exists<T>");
+}
+
 #[test]
 fn runtime_completion_hides_typed_reflection_builtins() {
     ShapeTest::new("")
@@ -570,6 +583,7 @@ fn describe<T>(value: T) -> string {
       FrozenTypeCategory::Reference => "reference"
       FrozenTypeCategory::Union => "union"
       FrozenTypeCategory::Erased => "erased"
+      FrozenTypeCategory::Existential => "existential"
     }
   }
   label
@@ -580,4 +594,239 @@ print(describe(1))
     ShapeTest::new(source)
         .expect_no_semantic_diagnostic_contains("unknown semantic type identity")
         .expect_no_semantic_diagnostic_contains("cannot infer type argument");
+}
+
+// =====================================================================
+// ADR-009 B3 (S3): LSP hover + inlay over a `some`-bound witness binding.
+//
+// Hovering the loop variable of a `comptime for some<W...> x in coll`
+// renders the OPENED descriptor type (the existential's inner descriptor
+// with the hidden witness bound), the stage, and the escape rule.
+// Hovering a `some`-clause witness name renders it as an opened hidden
+// witness. The inlay hint over the iteration renders the same opened
+// descriptor. All three are driven by the shared LSP type-annotation
+// surface (`open_comptime_some_descriptor`) — the same `TypeAnnotation`
+// carrier the compiler's canonicalizer consumes, not a hand-written row.
+// The B1 substrate opens to `FrozenType<T>` (witness erased at the reflect
+// boundary; recovering a witness-typed projection is B5, not landed).
+// =====================================================================
+
+const SOME_BOUND_ITERATION: &str = "let out = comptime {\n  \
+let coll: Array<exists<T> FrozenType<T>> = []\n  \
+comptime for some<T> ft in coll {\n    \
+let x = ft\n  }\n  \"\"\n}\n";
+
+#[test]
+fn hover_on_some_bound_loop_var_shows_opened_descriptor_and_stage() {
+    ShapeTest::new(SOME_BOUND_ITERATION)
+        .at(pos(2, 23))
+        .expect_hover_contains("FrozenType<T>")
+        .expect_hover_contains("witness")
+        .expect_hover_contains("comptime");
+}
+
+#[test]
+fn hover_on_some_witness_name_shows_opened_hidden_witness() {
+    ShapeTest::new(SOME_BOUND_ITERATION)
+        .at(pos(2, 20))
+        .expect_hover_contains("hidden witness")
+        .expect_hover_contains("comptime");
+}
+
+#[test]
+fn inlay_on_some_bound_iteration_shows_opened_descriptor() {
+    ShapeTest::new(SOME_BOUND_ITERATION).expect_type_hint_label("FrozenType<T>");
+}
+
+// =====================================================================
+// ADR-009 ticket B4 (Stage 2, Dec 54): LSP surface for the uniform
+// nominal-application free-function builtins `type_constructor` /
+// `const_arg`. Both behaviors are driven by the shared-catalog rows
+// (`comptime_reflection.rs::{TYPE_CONSTRUCTOR_BUILTIN_ROW,
+// CONST_ARG_BUILTIN_ROW}` spliced verbatim into
+// `builtin_metadata::CORE_BUILTINS`) — a hand-written parallel LSP row is
+// a defect; a red test here is fixed by enriching the shared rows.
+// `apply` / `refine` / `type_argument` are METHOD forwarders, not free
+// builtins, so the smallest complete free-function surface is these two
+// rows (matching the A2/B1/B2 precedent).
+// =====================================================================
+
+#[test]
+fn comptime_completion_offers_uniform_application_builtins() {
+    ShapeTest::new("comptime {\n    \n}\n")
+        .at(pos(1, 4))
+        .expect_completion("type_constructor")
+        .expect_completion("const_arg");
+}
+
+#[test]
+fn runtime_completion_hides_uniform_application_builtins() {
+    ShapeTest::new("")
+        .at(pos(0, 0))
+        .expect_no_completion("type_constructor")
+        .expect_no_completion("const_arg");
+}
+
+#[test]
+fn type_constructor_hover_explains_constructor_capability() {
+    ShapeTest::new(
+        "let c = comptime { type_constructor(Option) }\n",
+    )
+    .at(pos(0, 22))
+    .expect_hover_contains("type_constructor(C) -> TypeConstructorRef<C>")
+    .expect_hover_contains("nominal type head")
+    .expect_hover_contains("Only valid inside comptime blocks");
+}
+
+#[test]
+fn const_arg_hover_explains_const_application() {
+    ShapeTest::new(
+        "let a = comptime { const_arg(5) }\n",
+    )
+    .at(pos(0, 22))
+    .expect_hover_contains("const_arg(N) -> ConstArg")
+    .expect_hover_contains("checked const argument")
+    .expect_hover_contains("const-generic");
+}
+
+#[test]
+fn type_constructor_offers_signature_help() {
+    ShapeTest::new("let c = comptime { type_constructor( ) }\n")
+        .at(pos(0, 36))
+        .expect_signature_help();
+}
+
+#[test]
+fn const_arg_offers_signature_help() {
+    ShapeTest::new("let a = comptime { const_arg( ) }\n")
+        .at(pos(0, 29))
+        .expect_signature_help();
+}
+
+// =====================================================================
+// ADR-009 D2 (slice 2, DoD #5-completion): a generated FREE FUNCTION the
+// declaration-discovery fixed point reserved is visible to LATER source
+// through completion — sourced from the SAME `generated_symbol_query()`
+// table the compiler consumes (no speculative second pass, no LSP
+// re-evaluator, no parallel discovery path).
+// =====================================================================
+
+#[test]
+fn completion_sees_generated_free_function_after_discovery() {
+    // The annotation emits `User_label()`; a bare-name call position on the
+    // trailing line must complete the generated declaration.
+    let source = r#"annotation schema_of() {
+    targets: [type]
+    comptime post(target, ctx) {
+        extend (f"fn {target.name}_label() -> string \{ {string_lit("User schema")} \}")
+    }
+}
+
+@schema_of()
+type User { id: int }
+
+User_
+"#;
+    let last_line = source.lines().count() as u32 - 1;
+    ShapeTest::new(source)
+        .at(pos(last_line, 5))
+        .expect_completion("User_label");
+}
+
+/// ADR-009 D2 DoD #4 (runtime-execution arm, paired with the completion arm
+/// above): the declaration-discovery fixed point reserves a generated FREE
+/// FUNCTION `User_answer()`; LATER source (`fn double_answer`) resolves it,
+/// and the top-level call must produce the SAME value under the VM
+/// interpreter and under the JIT. DoD #4 requires BOTH entry proofs; the
+/// completion-after-discovery arm sits directly above, so both arms live
+/// together under D2. The landed bounded-worklist discovery driver
+/// (functions_annotations.rs L1856-2261) already serves this — the generated
+/// declaration is applied exactly once per application identity + dependency
+/// hash before body checking, so no engine change is needed to make the two
+/// execution modes agree.
+#[test]
+fn generated_free_function_visible_to_later_source_runs_identically_in_vm_and_jit() {
+    let source = r#"annotation schema_of() {
+    targets: [type]
+    comptime post(target, ctx) {
+        extend (f"fn {target.name}_answer() -> int \{ 21 \}")
+    }
+}
+
+@schema_of()
+type User { id: int }
+
+fn double_answer() -> int { User_answer() * 2 }
+
+double_answer()
+"#;
+    ShapeTest::new(source).expect_number(42.0);
+    ShapeTest::new(source).with_jit().expect_number(42.0);
+}
+
+#[test]
+fn runtime_completion_hides_generated_methods_from_free_standing_position() {
+    // The annotation emits the METHOD `Point.answer`; a bare-name position
+    // must NOT complete it (methods are reachable only through a receiver).
+    let source = r#"annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+@gen()
+type Point { id: int }
+
+ans
+"#;
+    let last_line = source.lines().count() as u32 - 1;
+    ShapeTest::new(source)
+        .at(pos(last_line, 3))
+        .expect_no_completion("answer");
+}
+
+// =====================================================================
+// ADR-009 D2 (slice 3, DoD #5-virtual-view): a generated-symbol call site
+// resolves to a read-only `shape-expansion://` virtual view that renders
+// the checked generated declaration with a bidirectional source map — the
+// SAME shared fixed-point query that drives goto/references/rename (no
+// second expansion pass, no LSP re-evaluator). The view is inspection-only
+// and is never reparsed as compiler input.
+// =====================================================================
+
+/// Zero-based lines mirror `generated_navigation`'s fixture:
+/// 14  let a = p.answer()   <- generated-method call site (cursor here)
+const D2_VIRTUAL_VIEW_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+"#;
+
+#[test]
+fn generated_call_site_renders_read_only_virtual_view_with_source_map() {
+    ShapeTest::new(D2_VIRTUAL_VIEW_PROGRAM)
+        .at(pos(14, 11))
+        .expect_expansion_view_renders("Point.answer");
+}
+
+#[test]
+fn ordinary_call_site_offers_no_virtual_view() {
+    // A plain function call in a non-generating document has no virtual view.
+    ShapeTest::new("fn helper() -> int { 7 }\nlet h = helper()\n")
+        .at(pos(1, 10))
+        .expect_no_expansion_view();
 }

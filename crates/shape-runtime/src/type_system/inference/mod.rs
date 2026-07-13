@@ -179,6 +179,17 @@ impl InferenceFacts {
     }
 }
 
+/// ADR-009 B3 (Dec 51) — one active `comptime for some<W...>` witness opening.
+/// See [`TypeInferenceEngine::comptime_witness_frames`].
+pub(crate) struct ComptimeWitnessFrame {
+    /// The fresh witness type-vars opened for this loop (hidden per iteration).
+    pub(crate) witness_vars: Vec<TypeVar>,
+    /// Env scope depth of the loop body. A binding declared at a shallower
+    /// depth is an ENCLOSING binding; assigning a witness-typed value into it
+    /// is an escape.
+    pub(crate) body_scope_depth: usize,
+}
+
 pub struct TypeInferenceEngine {
     /// Type environment tracking variable types
     pub env: TypeEnvironment,
@@ -339,6 +350,14 @@ pub struct TypeInferenceEngine {
     /// binds it to `int` — the literal's NATURAL type — so the binding stays
     /// concrete (no `Option<T>` un-pinnable error) and no value is widened.
     pub(crate) deferred_constructor_literal_payload_vars: std::collections::HashSet<TypeVar>,
+    /// ADR-009 B3 (Dec 51) — active `comptime for some<W...>` witness openings,
+    /// innermost last (loops may nest). Each frame records the fresh witness
+    /// type-vars opened for that iteration plus the env scope depth at which the
+    /// loop body lives. A value whose type mentions one of these witness vars
+    /// must NOT be assigned to a binding declared SHALLOWER than the loop body
+    /// (`WITNESS_ESCAPES_SCOPE_DIAGNOSTIC`): that is the inference half of "a
+    /// hidden witness cannot escape its opening scope".
+    pub(crate) comptime_witness_frames: Vec<ComptimeWitnessFrame>,
     /// Deferred return unions for callables where one branch returned an unresolved type variable
     /// and another returned a concrete type (e.g. `return c` and `return "hi"`).
     /// We preserve precision by materializing these unions only after call-site widening.
@@ -497,6 +516,7 @@ impl TypeInferenceEngine {
             escaping_closure_numeric_param_vars: std::collections::HashSet::new(),
             escaping_closure_arg_sites: Vec::new(),
             deferred_constructor_literal_payload_vars: std::collections::HashSet::new(),
+            comptime_witness_frames: Vec::new(),
             pending_return_unions: HashMap::new(),
             return_var_aliases: HashMap::new(),
             return_scopes: Vec::new(),
@@ -1811,6 +1831,8 @@ impl TypeInferenceEngine {
             TypeAnnotation::Null => "None".to_string(),
             TypeAnnotation::Undefined => "undefined".to_string(),
             TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.join(" + ")),
+            // ADR-009 B3 (S1): existential descriptor package type.
+            TypeAnnotation::Existential { .. } => "existential".to_string(),
         }
     }
 
@@ -4269,6 +4291,13 @@ impl TypeInferenceEngine {
                     .iter()
                     .map(|a| Self::apply_substitutions_to_annotation(a, substitutions))
                     .collect(),
+            },
+            // ADR-009 B3 (S1): existential descriptor package type. Substitutions
+            // are tyvar-keyed, so recurse into the inner descriptor and keep the
+            // witness list intact.
+            TypeAnnotation::Existential { witnesses, inner } => TypeAnnotation::Existential {
+                witnesses: witnesses.clone(),
+                inner: Box::new(Self::apply_substitutions_to_annotation(inner, substitutions)),
             },
             TypeAnnotation::Basic(_)
             | TypeAnnotation::Reference(_)

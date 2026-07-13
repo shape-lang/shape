@@ -29,6 +29,23 @@ const TRAIT_REF_FORWARDER: &str = "\u{1}comptime:forward-trait-ref";
 /// `find_impl_forwarder_return_marker_matches_the_impl_ref_schema`.
 const FIND_IMPL_RETURN_MARKER: &str = "Option<\u{1}comptime:ImplRef>";
 
+// ADR-009 B4 (Stage 2, Dec 54): uniform nominal-application forwarders.
+// `type_constructor(C)` lowers (like `type_ref`) to this unspellable forwarder
+// carrying the FROZEN head identity as int literals — a name string never
+// crosses into the mini-VM (R1 strings-cannot-construct). `apply` / `refine` /
+// `type_argument` are METHOD-call surfaces: the site rewrite transforms the
+// `receiver.method(args)` node into a call to these forwarders with the
+// receiver as the first argument.
+const TYPE_CONSTRUCTOR_FORWARDER: &str = "\u{1}comptime:forward-type-constructor";
+const APPLY_FORWARDER: &str = "\u{1}comptime:forward-apply";
+const REFINE_FORWARDER: &str = "\u{1}comptime:forward-refine";
+const TYPE_ARGUMENT_FORWARDER: &str = "\u{1}comptime:forward-type-argument";
+
+/// `refine`'s forwarder return annotation: `Option<AppliedType-carrier>`. Must
+/// stay byte-identical to `format!("Option<{COMPTIME_APPLIED_TYPE_SCHEMA}>")` —
+/// pinned by `refine_forwarder_return_marker_matches_the_applied_type_schema`.
+const REFINE_RETURN_MARKER: &str = "Option<\u{1}comptime:AppliedType>";
+
 /// (name, arity, target_method, return_fields, named_return_type,
 /// param_annotations)
 ///
@@ -144,6 +161,54 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         super::comptime_builtins::REFLECT_INTRINSIC,
         None,
         Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
+        None,
+    ),
+    // ADR-009 B4 (Stage 2, Dec 54): uniform nominal application.
+    // `type_constructor(C)` lowers to identity halves (like `type_ref`) →
+    // TypeConstructorRef. `const_arg(N)` is a checked const argument. `apply` /
+    // `refine` / `type_argument` are reached through the method-call site
+    // rewrite (receiver prepended); their args are checked carriers, so their
+    // named rejections fire in the intrinsic.
+    (
+        TYPE_CONSTRUCTOR_FORWARDER,
+        2,
+        super::comptime_builtins::TYPE_CONSTRUCTOR_INTRINSIC,
+        None,
+        Some(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
+        ),
+        None,
+    ),
+    (
+        "const_arg",
+        1,
+        super::comptime_builtins::CONST_ARG_INTRINSIC,
+        None,
+        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
+        None,
+    ),
+    (
+        APPLY_FORWARDER,
+        2,
+        super::comptime_builtins::APPLY_INTRINSIC,
+        None,
+        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_APPLIED_TYPE_SCHEMA),
+        None,
+    ),
+    (
+        REFINE_FORWARDER,
+        2,
+        super::comptime_builtins::REFINE_INTRINSIC,
+        None,
+        Some(REFINE_RETURN_MARKER),
+        None,
+    ),
+    (
+        TYPE_ARGUMENT_FORWARDER,
+        2,
+        super::comptime_builtins::TYPE_ARGUMENT_INTRINSIC,
+        None,
+        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
         None,
     ),
     // First typed generation fragment surface. `item_fn(...)` returns a
@@ -729,6 +794,50 @@ fn rewrite_comptime_type_symbol_args_expr(
     expr: &mut Expr,
     freeze: &super::comptime_builtins::FreezeOverlay,
 ) -> Result<()> {
+    // ADR-009 B4 (Stage 2, Dec 54): the method-call surfaces
+    // (`apply` / `refine` / `type_argument`) on comptime carriers rewrite to
+    // their forwarders with the receiver prepended — BEFORE the child
+    // recursion below lowers nested `type_ref` / `const_arg` /
+    // `type_constructor` arguments. `apply` transports its variadic arguments
+    // as a checked array literal (each element is a checked carrier — never an
+    // untyped argument array, R4); `refine` / `type_argument` take the single
+    // method argument alongside the receiver.
+    if let Expr::MethodCall {
+        receiver,
+        method,
+        args,
+        span,
+        ..
+    } = expr
+    {
+        let forwarder = match method.as_str() {
+            "apply" => Some(APPLY_FORWARDER),
+            "refine" => Some(REFINE_FORWARDER),
+            "type_argument" => Some(TYPE_ARGUMENT_FORWARDER),
+            _ => None,
+        };
+        if let Some(forwarder) = forwarder {
+            let span = *span;
+            let receiver = std::mem::replace(receiver.as_mut(), Expr::Unit(span));
+            let call_args = std::mem::take(args);
+            let new_args = if forwarder == APPLY_FORWARDER {
+                vec![receiver, Expr::Array(call_args, span)]
+            } else {
+                let mut v = Vec::with_capacity(call_args.len() + 1);
+                v.push(receiver);
+                v.extend(call_args);
+                v
+            };
+            *expr = Expr::FunctionCall {
+                name: forwarder.to_string(),
+                const_args: Vec::new(),
+                args: new_args,
+                named_args: Vec::new(),
+                span,
+            };
+        }
+    }
+
     // Rewrite this call's own bare-identifier args if it is a reflection call.
     if let Expr::FunctionCall { name, args, .. } = expr {
         if name == "type_info" || name == "implements" {
@@ -791,6 +900,24 @@ fn rewrite_comptime_type_symbol_args_expr(
                     .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
                 let span = *span;
                 *name = TRAIT_REF_FORWARDER.to_string();
+                *args = vec![
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
+                    Expr::Literal(shape_ast::ast::Literal::Int(identity.low), span),
+                ];
+            }
+        } else if name == "type_constructor" {
+            // ADR-009 B4 (Stage 2, Dec 54): `type_constructor(C)` lowers the
+            // bare nominal head to its FROZEN identity halves (the `type_ref`
+            // transport). A name with no frozen VALUE-type identity transports
+            // INVALID and the intrinsic answers with the named unknown-
+            // constructor rejection (R6); a name string never crosses into the
+            // mini-VM (R1 strings-cannot-construct).
+            if let [Expr::Identifier(ident, span)] = args.as_slice() {
+                let identity = freeze
+                    .identity_of(ident)
+                    .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
+                let span = *span;
+                *name = TYPE_CONSTRUCTOR_FORWARDER.to_string();
                 *args = vec![
                     Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
                     Expr::Literal(shape_ast::ast::Literal::Int(identity.low), span),
@@ -2763,6 +2890,126 @@ annotation reflect() {
                 shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_IMPL_REF_SCHEMA
             )
         );
+    }
+
+    /// ADR-009 B4 drift pin: the refine forwarder's `Option<...>` return marker
+    /// must wrap exactly the reserved AppliedType carrier schema name.
+    #[test]
+    fn refine_forwarder_return_marker_matches_the_applied_type_schema() {
+        assert_eq!(
+            super::REFINE_RETURN_MARKER,
+            format!(
+                "Option<{}>",
+                shape_runtime::type_schema::builtin_schemas::COMPTIME_APPLIED_TYPE_SCHEMA
+            )
+        );
+    }
+
+    /// ADR-009 B4: `type_constructor(Head)` lowers the bare nominal head to its
+    /// FROZEN identity halves (the `type_ref` transport) — the head NAME never
+    /// survives into the compiled comptime artifact (R1 strings-cannot-
+    /// construct).
+    #[test]
+    fn type_constructor_rewrite_transports_the_frozen_head_identity_literals() {
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        // Register a nominal struct exactly as `predeclare_struct_schema` does
+        // (the `struct_types` row the freeze reads).
+        compiler
+            .struct_types
+            .insert("Widget".to_string(), (Vec::new(), Span::DUMMY));
+        let freeze =
+            crate::compiler::comptime_builtins::semantic_freeze::SemanticFreeze::freeze(&compiler)
+                .expect("resolved state freezes");
+        let overlay = std::sync::Arc::new(crate::compiler::comptime_builtins::FreezeOverlay::new(
+            freeze,
+            "<module>",
+            &[],
+        ));
+        let identity = overlay.identity_of("Widget").expect("Widget frozen at barrier");
+
+        let mut statement = Statement::Return(
+            Some(Expr::FunctionCall {
+                name: "type_constructor".to_string(),
+                const_args: Vec::new(),
+                args: vec![Expr::Identifier("Widget".to_string(), Span::DUMMY)],
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        );
+        let _ = super::rewrite_comptime_type_symbol_args(&mut statement, overlay.as_ref());
+
+        let Statement::Return(Some(Expr::FunctionCall { name, args, .. }), _) = &statement else {
+            panic!("rewrite must keep the return-call shape: {statement:?}");
+        };
+        assert_eq!(name, super::TYPE_CONSTRUCTOR_FORWARDER);
+        assert_eq!(
+            args.as_slice(),
+            &[
+                Expr::Literal(Literal::Int(identity.high), Span::DUMMY),
+                Expr::Literal(Literal::Int(identity.low), Span::DUMMY),
+            ]
+        );
+        assert!(
+            !format!("{statement:?}").contains("Widget"),
+            "no string transport: the head name must not survive the rewrite"
+        );
+    }
+
+    /// ADR-009 B4: the method-call surfaces (`apply` / `refine` /
+    /// `type_argument`) rewrite to their forwarders with the receiver
+    /// prepended; `apply` transports its variadic args as a checked array.
+    #[test]
+    fn method_call_surfaces_rewrite_to_forwarders_with_receiver_prepended() {
+        let overlay = std::sync::Arc::new(crate::compiler::comptime_builtins::FreezeOverlay::new(
+            crate::compiler::comptime_builtins::semantic_freeze::SemanticFreeze::freeze(
+                &crate::compiler::BytecodeCompiler::new(),
+            )
+            .expect("freeze"),
+            "<module>",
+            &[],
+        ));
+
+        // `c.apply(a, b)` → APPLY_FORWARDER(c, [a, b]).
+        let mut apply = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("c".to_string(), Span::DUMMY)),
+            method: "apply".to_string(),
+            args: vec![
+                Expr::Identifier("a".to_string(), Span::DUMMY),
+                Expr::Identifier("b".to_string(), Span::DUMMY),
+            ],
+            named_args: Vec::new(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        super::rewrite_comptime_type_symbol_args_expr(&mut apply, overlay.as_ref())
+            .expect("rewrite ok");
+        let Expr::FunctionCall { name, args, .. } = &apply else {
+            panic!("apply must become a function call: {apply:?}");
+        };
+        assert_eq!(name, super::APPLY_FORWARDER);
+        assert_eq!(args.len(), 2, "receiver + one checked array");
+        assert!(matches!(args[0], Expr::Identifier(ref n, _) if n == "c"));
+        assert!(matches!(args[1], Expr::Array(ref els, _) if els.len() == 2));
+
+        // `applied.type_argument(0)` → TYPE_ARGUMENT_FORWARDER(applied, 0).
+        let mut ta = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier("applied".to_string(), Span::DUMMY)),
+            method: "type_argument".to_string(),
+            args: vec![Expr::Literal(Literal::Int(0), Span::DUMMY)],
+            named_args: Vec::new(),
+            optional: false,
+            span: Span::DUMMY,
+        };
+        super::rewrite_comptime_type_symbol_args_expr(&mut ta, overlay.as_ref())
+            .expect("rewrite ok");
+        let Expr::FunctionCall { name, args, .. } = &ta else {
+            panic!("type_argument must become a function call: {ta:?}");
+        };
+        assert_eq!(name, super::TYPE_ARGUMENT_FORWARDER);
+        assert_eq!(args.len(), 2, "receiver + index");
+        assert!(matches!(args[0], Expr::Identifier(ref n, _) if n == "applied"));
+        assert!(matches!(args[1], Expr::Literal(Literal::Int(0), _)));
     }
 
     // Regression (2026-06-21): a comptime block evaluating to `false` (and

@@ -438,8 +438,15 @@ fn parse_type_ref_call(pair: Pair<Rule>) -> Result<Expr> {
                 }
             }
             Rule::type_ref_const_generic_reject => {
+                // ADR-009 B4 (Stage 2, Dec 54): a bare const literal inside a
+                // `type_ref(...)` type application stays a named rejection (no
+                // TypeAnnotation const carrier exists — spec §3.7). The CHECKED
+                // path is the const-argument builder: `const_arg(N)` applied
+                // through `type_constructor(Head).apply(...)`.
                 return Err(ShapeError::ParseError {
-                    message: "const-generic type applications are not yet supported in type_ref"
+                    message: "const-generic type applications are not supported in type_ref; \
+                              build one with const_arg(N) applied through \
+                              type_constructor(Head).apply(...)"
                         .to_string(),
                     location: Some(pair_location(&inner)),
                 });
@@ -1007,8 +1014,31 @@ fn parse_comptime_for_expr(pair: Pair<Rule>) -> Result<Expr> {
     let pair_loc = pair_location(&pair);
     let mut inner = pair.into_inner();
 
+    // Optional `some<W...>` witness clause (ADR-009 B3). Present only for the
+    // existential-iteration form; the legacy form leaves witnesses empty.
+    let mut witnesses = Vec::new();
+    let mut next = inner.next();
+    if let Some(some_pair) = next.as_ref() {
+        if some_pair.as_rule() == Rule::comptime_for_some_clause {
+            for w in some_pair.clone().into_inner() {
+                if w.as_rule() == Rule::comptime_witness {
+                    witnesses.push(w.as_str().to_string());
+                }
+            }
+            if witnesses.is_empty() {
+                return Err(ShapeError::ParseError {
+                    message: "`comptime for some<...>` requires at least one witness: \
+                              `comptime for some<W...> x in coll { ... }`"
+                        .to_string(),
+                    location: Some(pair_loc),
+                });
+            }
+            next = inner.next();
+        }
+    }
+
     // Parse loop variable name
-    let var_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+    let var_pair = next.ok_or_else(|| ShapeError::ParseError {
         message: "expected loop variable in comptime for".to_string(),
         location: Some(pair_loc.clone()),
     })?;
@@ -1031,6 +1061,7 @@ fn parse_comptime_for_expr(pair: Pair<Rule>) -> Result<Expr> {
 
     Ok(Expr::ComptimeFor(
         Box::new(ComptimeForExpr {
+            witnesses,
             variable,
             iterable: Box::new(iterable),
             body,

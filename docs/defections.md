@@ -7721,3 +7721,382 @@ did).
 generated symbols keep compiler-table navigation, ordinary symbols with
 colliding bare names keep their pre-D1 providers — before D2 builds the
 declaration-discovery fixed point on top of this gate.
+
+## 2026-07-13 — ADR009-B3 S2: existential descriptor package freeze model (two witness scopings; new source-visible category)
+
+**Considered (a):** collapsing the two witness scopings into one. An
+`exists<W...> Descriptor<W...>` package needs a scoping for its own type
+IDENTITY and a scoping for each `comptime for some<W...>` OPENING. The tempting
+"one witness map" would either make the package identity site-dependent (a
+`some`-site name leaks into the type identity, forking alpha-equivalent
+existentials into distinct identities) or make opened witnesses share one
+identity across iterations (a hidden witness escapes its opening scope by
+aliasing). **Kept two, deliberately:** the package identity canonicalizes
+witnesses POSITIONALLY (`witness:{index}`, de-Bruijn) so it is alpha-invariant
+and site-independent; `FreezeOverlay::open_witnesses` mints FRESH
+`parameter:{some_site}:{witness}` identities per opening. This is the standard
+type-theory distinction between a bound existential's canonical form and its
+skolemized instance — not a parallel implementation of one concept (both flow
+through the ONE `FreezeOverlay` query surface; no second reflection protocol,
+no parallel iterator). Not a Forbidden-Patterns duality: there is no
+producer/consumer carrier-shape boundary, no conversion hop — just two
+descriptor-string conventions on the single canonicalizer.
+
+**Considered (b):** representing the existential WITHOUT a new source-visible
+`FrozenTypeCategory` variant (to dodge the Dec 50 warning that a new category
+"exposes consumers that neither handle nor explicitly reject it"). Rejected:
+`CanonicalType.category` / `FreezeOverlay::category_of` return a
+`FrozenTypeCategory`, and misclassifying an existential as `Nominal`/`Record`
+would be a lie the strict model forbids; a stringly "`exists:`-prefix" side
+check would be a parallel discriminator. **Kept:** appended
+`FrozenTypeCategory::Existential` (append keeps every existing catalog ordinal
+ABI-stable per spec §3.3). Its `reflect()` payload is NOT enabled — reflecting
+it is the named R1 `pending_payload_rejection`, the EXPLICIT rejection the
+Dec 50 warning demands; the iteration payload lands with slice S3. The
+exhaustive `match FrozenTypeCategory` consumers (18 baseline tests) were
+updated to carry the new arm — that forcing function is exactly the designed
+consequence of a sanctioned catalog extension, not a regression.
+
+**Rejection matrix rows owned by S2:** row 1 `WITNESS_ERASED_TO_ANY_DIAGNOSTIC`
+(compiler-internal `Any` in a witness slot — distinct from the enabled
+lowercase-`any` Erased leaf), row 4 reuses B1 `pending_payload_rejection` (no
+partial/stringly descriptor; Record-family field descriptors stay a named R1
+rejection until S3), row 5 reuses `NO_FREEZE_HANDLE_DIAGNOSTIC` (freeze before
+any some-body), row 6 `NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC`. Rows 2 (witness
+escapes scope) and 3 (second-protocol surface-and-stop) are S3 territory.
+
+**Cost saved:** the iteration substrate for every heterogeneous descriptor
+family (fields, params, variants, tuple elements, union members, captures) now
+has one alpha-invariant package identity + one fresh-per-site opening
+mechanism, both on the single freeze query surface — before S3 builds the real
+`for some` unroll on top.
+
+## 2026-07-13 — ADR009-B3 S1: witness-typed iteration core (introduction + inference binding + VM/JIT proof)
+
+**Considered (a):** a bespoke collection-producing builtin (e.g.
+`reflect_all([...])` returning a ready-made heterogeneous descriptor iterator).
+Rejected on sight — it would be a SECOND reflection/iterator protocol (Dec 51
+"sugar only", CLAUDE.md renames-to-refuse). **Kept:** the heterogeneous
+collection is built with ORDINARY language-level existential introduction — a
+plain `[reflect(type_ref(int)), reflect(type_ref(bool))]` array annotated
+`Array<exists<T> FrozenType<T>>`; `comptime for some` is the existing
+`comptime_mode` runtime-for-loop rewrite over that array. No new opcode, no new
+builtin, no new iterator surface.
+
+**Considered (b):** making `reflect()` return a generic `FrozenType<T>` to force
+`[reflect(int), reflect(bool)]` heterogeneous. Rejected: B1 landed `reflect`
+typing bare `FrozenType` (the witness is erased at the reflect boundary), and
+re-typing it ripples through the whole B1 suite. **Kept:** existential
+introduction accepts the FULLY-ERASED concrete descriptor (`FrozenType` head
+matches `exists<T> FrozenType<T>` inner head; the witness is genuinely hidden).
+This is the correct existential semantics — an existential HIDES its witness, so
+introducing from a value whose witness was erased is sound, not a hack. Opening
+at a `some` site mints a fresh opaque witness with no recoverable connection to
+the original type — exactly what "hidden" means. (Recovering a witness-typed
+projection like `field.type_ref: TypeRef<F>` is B5 `FieldDescriptor`, not
+landed; the B1 loop body matches the opened descriptor's payload only.)
+
+**Considered (c):** enforcing the escape (row 2) and non-existential (row 6)
+rejections purely in the inference tier. Rejected as the SOLE tier: a
+`comptime { }` block executes via the mini-VM, whose statement inference is
+error-tolerant (`let _ = infer_statement(stmt)`), so a direct `Err` return from
+the `ComptimeFor` inference arm is swallowed inside a comptime block (only
+constraint-solve failures surface globally). **Kept both tiers, single-sourced
+diagnostics:** the inference-tier checks (witness-typed loop binding + escape
+via `comptime_witness_frames` + non-existential via `require_existential`) are
+correct and surface in non-swallowed contexts; the VM-compile-tier gate in
+`compile_comptime_for` (`check_comptime_for_some_rejections`) is their reliable
+surfacing counterpart inside comptime blocks. Both reference the SAME
+`shape_runtime::comptime_reflection` diagnostic constants (re-exported into
+`shape-vm` `comptime_builtins::existential`) — one string per rejection, no
+divergent copies. This is defense-in-depth on one diagnostic surface, not a
+parallel discriminator.
+
+**Considered (d):** testing existential introduction through `probe_equal`.
+Rejected: `probe_equal` is structural EXACT equality (`annotations_equal`), and
+introduction is a directional SUBSUMPTION living in `unify_annotations` (the
+`solve_constraint` concrete/concrete path). The unit test calls
+`unify_annotations` directly — the actual relation under test. (Alpha-equivalence
+of two existential packages IS exact structural equality after positional
+witness renaming, so that sub-case correctly uses `annotations_equal`.)
+
+## 2026-07-13 — ADR009-B3 S2b: hard rejection matrix completion (per-row test surface honesty)
+
+**Considered (a):** forcing a compile-failing ShapeTest for EVERY rejection-matrix
+row (1–6), including row 1 (witness erased to compiler-internal `Any`), row 3
+(second reflection protocol), and row 5 (no freeze handle at the some-site).
+Rejected as dishonest for rows 1/3/5: those three are FREEZE-MODEL / ARCHITECTURAL
+invariants with no well-typed user syntax that reaches them, so a ShapeTest would
+either not fire the intended guard or fire a DIFFERENT diagnostic.
+  * Row 1: capital `Any` is a compiler-internal top type, not a first-class user
+    type ("No `any` type", CLAUDE.md). Empirically confirmed
+    (`Array<exists<T> FrozenType<Any>>` in a let annotation) that the annotation
+    does NOT route through `annotation_erases_witness_to_any` — it compiled and
+    returned `Null`, because the some-gate infers the iterable ELEMENT type from
+    the VALUE (a B1 reflect payload, which never carries `Any`), not from the
+    declared annotation. There is no user value whose inferred witness slot is
+    `Any`. The guard's authentic surface is the freeze-model unit test
+    `existential::tests::witness_slot_erased_to_any_is_rejected`, which drives the
+    REAL `type_reflection.rs` canonicalizer through the REAL freeze overlay.
+  * Row 3: `for some` is sugar over the ONE reflect()/payload freeze surface;
+    there is NO user syntax requesting a second protocol (surface-and-stop). Its
+    surface is the named-const refusal unit test.
+  * Row 5: the per-compilation-unit freeze is always installed before user
+    comptime executes, so a real some-site always holds the handle. Its surface
+    is the no-installed-freeze unit test.
+**Kept:** rows 2 (escape), 4 (not-yet-enabled family surfacing inside a `some`
+collection), and 6 (non-existential iterable) get compile/run-failing ShapeTests
+through the real pipeline; rows 1/3/5 keep their freeze-model/architectural unit
+tests as the authentic surface, documented at the head of
+`tools/shape-test/tests/comptime/existential.rs`. NOT logged as a shortcut: wiring
+a user-reachable `Any` path would require inventing user syntax for the
+compiler-internal top type — refused, not deferred.
+
+## 2026-07-13 — ADR009-B3 S3: LSP witness hover/inlay + documentation status ledger (shared query surface, no hand-written row)
+
+**Considered (a):** giving the LSP its own hand-written witness-type metadata
+row (a per-`some`-form table mapping loop-variable names to display strings),
+so hover/inlay would not need to resolve the iterable's existential annotation.
+Rejected as a SECOND surface: a hand-authored LSP row is a parallel
+discriminator that drifts from the compiler's opened type the moment the
+canonicalizer changes — exactly the divergence the single-query-surface
+discipline (ADR-009 §3.5) forbids. **Kept:** hover and inlay both call the ONE
+shared `open_comptime_some_descriptor` helper, which opens the existential by
+consuming the SAME `TypeAnnotation` carrier (`type_annotation_to_string`) the
+compiler's canonicalizer consumes. There is no LSP-only reflection/iterator
+protocol — `for some` stays sugar over the single reflect()/payload surface
+(Dec 51 sugar-only), and the LSP reads the same annotation shape the freeze
+model canonicalizes.
+
+**Considered (b):** rendering a synthesized placeholder (`exists<?>`, `dyn`, or
+a fabricated witness spelling) when the iterable's element type cannot be
+resolved to an existential descriptor package. Rejected: a fabricated hover
+type is a partial/stringly descriptor — the same no-partial-descriptor
+invariant the freeze model enforces (spec §3.1), now at the hover layer. **Kept:**
+`open_comptime_some_descriptor` returns `None` when the element type is not a
+resolvable existential, and hover/inlay simply produce nothing rather than a
+misleading opened type. A hover that cannot prove the opened descriptor shows
+no descriptor.
+
+**Considered (c):** widening the display to fabricate a witness-typed
+projection (`field.type_ref: TypeRef<F>`) even on the B1-only substrate, to
+match the Dec 51 TARGET example. Rejected: the B1 `reflect` boundary erases the
+witness (`FrozenType`, not `FrozenType<T>`), so no witness-typed projection is
+recoverable until B5 `FieldDescriptor` / `record.fields` lands. **Kept:** hover
+renders the honest opened descriptor for the landed substrate — `FrozenType<T>`
+with the opened witness `T` — and the witness-name hover states the witness is
+hidden and erased outside the loop. The richer `FieldDescriptor<Owner, I, F>`
+hover is B5 territory, not fabricated here.
+
+**Honest caveat — book status line (unchanged from S1):** the gate-runnable
+`exists` / `for some` book status line lives in `../shape-web/book` (a SEPARATE
+git repo, outside this ticket's single writable worktree per AGENTS.md build
+lane). The in-repo status ledger IS updated: the design-index `exists` row
+(`docs/design/typed-comptime.md`) and Decision 51
+(`docs/design/typed-comptime/values-types-and-evidence.md`) both carry the S3
+LSP evidence label, and the enabled surface is a `comptime for some<T> ft in
+coll { … }` over an `Array<exists<T> FrozenType<T>>` reflect-payload collection
+(evidence in `tools/shape-test/tests/comptime/existential.rs`; engine scope per
+the B3 fix-round-1 entry below). The `shape-web` book edit is deferred to a
+shape-web-repo change, not silently dropped.
+
+## 2026-07-13 — ADR009-B3 fix round 1: freeze-surface wiring + JIT engine-scope honesty
+
+Two confirmed review findings on the S1–S3 landing, both fixed here.
+
+**Finding 1 — the landed freeze surface was dead relative to production.**
+`FreezeOverlay::open_witnesses`, `existential::require_existential_element`, and
+the site-skolemizing Existential canonicalize arm were invoked ONLY from their
+own unit tests. The production compile-tier gate
+(`check_comptime_for_some_rejections`, `expressions/misc.rs`) used a separate
+ad-hoc AST path — `infer_expr_type().to_annotation()` + a bare
+`matches!(TypeAnnotation::Existential { .. })` shape test — and performed NO
+witness skolemization at all. That is the "parallel surface instead of
+extending the landed freeze query surface" pattern the ticket's binding hints
+forbid ("EXTEND these surfaces, never add parallel ones"; the freeze query API
+is "the only site handle"), corroborated by dead-code warnings on
+`require_existential_element` / `open_witnesses`. **Fix:** the gate now routes
+Row 6 through `require_existential_element(overlay, element)` — the landed
+freeze surface, which canonicalizes the element through the ONE
+`FreezeOverlay::canonicalize_type` → canonicalizer Existential arm and requires
+the `Existential` category with the SAME single-sourced
+`NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC` — and then skolemizes the package's hidden
+witnesses at the some-site via `overlay.open_witnesses(some_site, &witnesses)`,
+minting fresh `parameter:{some_site}:{witness}` identities. This supersedes the
+"Considered (c)" note in the S1 entry above: the compile-tier gate is no longer
+an ad-hoc `matches!` shape test but the landed freeze query surface itself; the
+dead-code warnings are gone. The executable unroll stays the plain
+`comptime_mode` runtime-for-loop (Dec 51 sugar-only) — the opening is the
+type-level introduction, not a second protocol or a parallel iterator.
+**NOT a shortcut:** the witnesses are opened over the SHARED base freeze
+(`Arc` clone), never a rebuilt index; the some-site id discriminates sites so no
+witness escapes by aliasing another site's identity.
+
+**Finding 2 — "VM AND JIT entry proofs" overclaimed JIT coverage of the
+iteration.** `comptime for some` iteration executes at compile time on the
+comptime VM interpreter; comptime code never tiers up to the JIT, so no engine
+iterates the existential collection at runtime — by the time the program runs,
+the comptime block's result is an already-folded constant. The prior
+`expect_vm_and_jit_output` helper's `.with_jit()` arm only re-ran a
+`print(out)` over that folded constant, so the JIT tier never touched the
+substrate; the test name `..._on_both_engines`, the module doc "proved
+end-to-end on BOTH engines", and the design-index / Decision-51 "Proven
+end-to-end on VM and JIT" all overclaimed. **Fix (honesty, not fabrication):**
+the iteration proof is the VM comptime evaluation plus the freeze-model unit
+tests that drive the real canonicalizer/overlay; the interpreter/JIT dual-run is
+kept but renamed (`expect_output_under_interpreter_and_jit`) and re-documented as
+what it genuinely proves — the *enclosing* program (comptime block + downstream
+runtime use of the folded result) lowers and runs identically under both the
+interpreter and the JIT tier, i.e. the feature is JIT-tier-clean at the
+comptime→runtime boundary, NOT that the JIT iterates the collection. The
+headline test dropped its `_on_both_engines` suffix, and the module doc,
+design-index row (`docs/design/typed-comptime.md`) and Decision 51
+(`values-types-and-evidence.md`) now state the engine scope precisely.
+**Considered and rejected:** manufacturing a "genuine JIT iteration" by moving
+the loop out of comptime — refused, it would change the feature (comptime-only
+sugar per Dec 51) to fake a proof; the honest position is that a comptime
+feature's JIT proof is a comptime→runtime boundary proof.
+
+## 2026-07-13 — ADR009-B4 S2: uniform nominal-application carriers + orchestration (considered-but-rejected compromises)
+
+Slice S2 wires the S1 model (`TypeConstructorRef` / `AppliedType` descriptors,
+`canonical_apply`/`canonical_refine`/`type_argument`) into comptime execution:
+two reserved carrier schemas (`\u{1}comptime:TypeConstructorRef`,
+`\u{1}comptime:AppliedType`), the `ParamKind` vocabulary enum, five SOH
+intrinsics (`type_constructor` / `const_arg` / `apply` / `refine` /
+`type_argument`), the site-rewrite (`type_constructor(Head)` identity-literal
+lowering + the `apply`/`refine`/`type_argument` method-call surface), and the
+parser reject-message redirect. Lift walls registered in the SAME commit as the
+schemas (B1 discipline). Identity-equality against the A2 applied spelling
+(`identity(apply(constructor(Option), [int])) == identity(type_ref(Option<int>))`
+both directions) is proven at the carrier layer.
+
+**Considered and rejected:**
+
+(a) **A second param-kind table on the `TypeConstructorRef` carrier.** The plan
+sketch stored the ordered parameter kinds as a `ParamKind` array field on the
+constructor carrier. Rejected: `.apply(...)` re-reads the declared kinds through
+the ONE freeze projection (`FreezeOverlay::param_kinds_of`, S1's
+`generic_param_kinds`), so a snapshotted array would be exactly the "second
+arity/param-kind table" CLAUDE.md forbids — a drift attractor. The carrier
+stores head identity halves only; the freeze stays the single authority. The
+`ParamKind` enum is still registered (schema + lift-reject arm +
+`reflection_enum_variant_names`) as the classification vocabulary and the LSP
+completion surface.
+
+(b) **A third reserved schema for `const_arg`.** Rejected in favor of reusing
+the opaque `TypeRef` carrier as a pure identity transport for the const value's
+`const:int:{value}` identity. `.apply(...)` classifies each argument's kind by
+consulting the freeze (`category_of` succeeds ⇒ a frozen TYPE ⇒ `Type` arg;
+fails ⇒ a `const_arg` identity ⇒ `Const` arg), then checks the classified kind
+against the position's DECLARED kind. This is sound because an unknown/forged
+type identity never reaches `.apply` as a built carrier — `type_ref(Unknown)`
+already rejects at the TypeRef builder — so the only non-frozen-type identities
+that arrive are `const_arg` products. No JSON/Any/partial descriptor; identity
+halves only.
+
+(c) **`applied.type_argument<I>()` turbofish.** The `<I>` const-generic method
+syntax is not in the `MethodCall` AST (no `const_args` field), and adding one is
+a ~8-file exhaustive-match AST change out of this slice's scope. S2 ships the
+checked-int form `applied.type_argument(I)` — `I` is still a checked const index
+(named out-of-range rejection), just carried as a positional argument.
+
+(d) **Growing a `TypeAnnotation` const carrier for inline
+`type_ref(Head<..., N, ...>)`.** Rejected (unchanged from A2 S3): the inline
+bare-const form stays a named parse-time rejection; B4's checked const path is
+the `const_arg(N)` builder applied through `type_constructor(Head).apply(...)`.
+The primary.rs reject MESSAGE now redirects to that builder.
+
+(e) **Gating the `apply`/`refine`/`type_argument` method-call rewrite on
+receiver-type analysis.** The rewrite matches those three method names
+syntactically inside comptime code (the `type_ref`/`trait_ref` name-match
+precedent). A user method of the same name inside a comptime block would be
+rewritten and then rejected by the intrinsic's schema-name check (a named "expected
+a compiler-issued …" error), never silently mis-dispatched. Receiver-type
+resolution in the rewrite would be a second evaluator (Dec 66 territory); the
+schema-name-checked decode is the sound backstop.
+
+## 2026-07-13 — ADR009-D2 close-out: rejected compromises (declaration-discovery fixed point + shared expansion query + `shape-expansion://` virtual views)
+
+Ticket ADR009-D2 (shape-lang/shape#16, branch adr009/d2, slices 1-3 engine +
+slices 1-2 close) landed the declaration-discovery fixed point
+(`DeclarationDiscoveryFixedPoint`), the single shared
+`generated_symbol_query()` surface consumed by compiler and LSP, and the
+read-only `shape-expansion://` virtual views. Compromises considered and
+REJECTED during implementation, plus the named/bounded decisions taken:
+
+**1. A separate LSP re-evaluator / speculative second expansion pass.**
+The tempting shape was to let the LSP re-run expansion (or keep the pre-D1
+speculative pre-pass alive as a "tooling-only" evaluator) so completion,
+navigation, and virtual views could answer without threading through the
+compiler's converged state. Rejected: two evaluators drift, double-issue
+identities, and reintroduce exactly the parallel-carrier defect the D1
+close-out killed. Chosen: ONE fixed-point query
+(`BytecodeCompiler::generated_symbol_query() -> &GeneratedSymbolTable`,
+Decision 66 closing rule); the bounded monotone worklist runs once inside
+`compile_in_place`, and every LSP consumer
+(`tools/shape-lsp/src/generated_symbols.rs`, completion, definition,
+document_symbols, expansion_views) reads that same converged table. No LSP
+second pass, no speculative re-evaluation.
+
+**2. Reparsing the `shape-expansion://` render as compiler input.**
+A virtual document that renders generated IR back to text invites a
+round-trip: parse the render, re-check it, treat it as a source module.
+Rejected as a spec §3 boundary violation (it would make generated text
+authoritative and let a tooling render feed the type checker). Chosen: the
+render is inspection-only — `render_expansion_view` produces read-only text
+with a bidirectional source map (`virtual_to_source` / `source_to_virtual`),
+and the invariant is pinned by the sentinel test
+`the_module_never_reparses_its_own_render`. The virtual view is a projection
+of already-checked IR, never a parse source.
+
+**3. String / JSON / partial-descriptor identity for discovered decls.**
+Keying the discovery memo, header-immutability table, or trigger graph on
+rendered names, JSON blobs, or partially populated descriptors was rejected
+per spec §3.1 (no strings/JSON/Any/partial descriptors). Chosen: every
+identity is the A1 canonical-descriptor SHA-256 fingerprint
+(`ExpansionIdentity` with `arguments_hash` + `dependencies_hash`,
+`CanonicalHash`), so `claim()` run-once memoization, `record_header`
+immutability, and the trigger adjacency graph all compare canonical hashes,
+never text. A counter-allocated identity (the recurring `next_id` collision
+family) was likewise rejected — identity is structural.
+
+**4. Soft limits / "warn but continue" for oscillation and unbounded growth.**
+Treating a non-converging frontier or a runaway generation count as a
+warning that degrades to best-effort output was rejected — surface-and-stop
+(spec §3) requires an unprovable fixed point to be a compile error, never a
+runtime/tooling fallback. Chosen: oscillation (`observe_round_state`, a
+non-adjacent frontier recurrence), trigger cycles (`record_trigger`/`reaches`),
+and exceeding `MAX_DISCOVERY_ROUNDS` (256) / `MAX_DISCOVERY_EXPANSIONS`
+(65_536) are hard named diagnostics (`DISCOVERY_OSCILLATION`,
+`DISCOVERY_CYCLE`, `DISCOVERY_UNBOUNDED`), each carrying expansion provenance
+via `build_discovery_failure` and each with an asserting test.
+
+**5. A parallel discovery/query/view module beside the D1 provenance file.**
+Forking a new fixed-point module rather than extending
+`comptime_builtins/expansion_provenance.rs` in place, or standing up a second
+generated-symbol table for the worklist, was refused per CLAUDE.md Forbidden
+Patterns (no parallel producer/consumer carriers). Chosen: the fixed-point
+engine EXTENDS the D1 provenance file in place (same `GeneratedSymbolTable`,
+same `ExpansionIdentity`/`SymbolId`/`GeneratedOrigin`), and the discovery
+driver in `functions_annotations.rs` is the pre-existing single speculative
+pass rewritten as the bounded monotone worklist — not a second pass bolted
+on. The ordering invariant (fixed point BEFORE body checking, Decision 67)
+is preserved with the annotation method still invoked exactly once.
+
+**Docs finalization (this slice):** the design-index status rows in
+`docs/design/typed-comptime.md` flipped Decision 66/67 (the fixed point,
+shared query, and virtual views) from TARGET to CURRENT /
+compiler+LSP+VM+JIT with an evidence label and a Book status line pointing at
+the gate-runnable ShapeTests
+(`tools/shape-test/tests/lsp/typed_comptime.rs` VM+JIT +
+`tools/shape-lsp/src/expansion_views.rs` in-file suite). Decision 69 (name
+policies) stays TARGET. No language surface changed — discovery is
+compiler-internal over existing annotation/`extend` directives, and
+`shape-expansion://` is read-only tooling, not language input.
+
+**Cost saved:** compiler and LSP share one converged fixed-point query end to
+end (no drift, no double-issue), the virtual view can never become a parse
+source, and every non-convergence mode is a provenance-carrying compile error
+instead of a silent degrade — the fixed point is a clean foundation for the
+Decision 69 name-policy work that follows.

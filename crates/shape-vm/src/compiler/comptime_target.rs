@@ -574,6 +574,10 @@ pub(crate) fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
         TypeAnnotation::Null => "null".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
         TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.join(" + ")),
+        // ADR-009 B3 (S1): existential descriptor package type.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            format!("exists<{}> {}", witnesses.join(", "), type_annotation_to_string(inner))
+        }
     }
 }
 

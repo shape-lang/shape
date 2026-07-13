@@ -490,6 +490,23 @@ impl TypeInferenceEngine {
                     .map(|arg| Self::substitute_type_params_in_annotation(arg, bindings))
                     .collect(),
             },
+            // ADR-009 B3 (S1): existential descriptor package type. The
+            // witnesses are locally bound, so outer type-param bindings must not
+            // substitute them — shadow them out before recursing into the inner
+            // descriptor.
+            TypeAnnotation::Existential { witnesses, inner } => {
+                let mut inner_bindings = bindings.clone();
+                for w in witnesses {
+                    inner_bindings.remove(w);
+                }
+                TypeAnnotation::Existential {
+                    witnesses: witnesses.clone(),
+                    inner: Box::new(Self::substitute_type_params_in_annotation(
+                        inner,
+                        &inner_bindings,
+                    )),
+                }
+            }
             TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null
@@ -1031,6 +1048,23 @@ impl TypeInferenceEngine {
                     crate::type_schema::builtin_schemas::COMPTIME_FROZEN_IMPL_REF_SCHEMA
                         .to_string(),
                 )))
+            }
+            // ADR-009 B4 (Dec 54): `const_arg(N)` types as the opaque TypeRef
+            // carrier so `apply` accepts checked const arguments at the type
+            // level; kind discrimination (type-slot vs const-slot) happens in
+            // the intrinsic (`canonical_apply`), which owns the NAMED
+            // wrong-kind rejection. The argument is an ordinary closed
+            // comptime int (the initial const-argument domain).
+            "const_arg" => {
+                self.check_comptime_builtin_args(
+                    arg_types,
+                    &[BuiltinTypes::integer()],
+                    call_span,
+                )?;
+                Type::Concrete(TypeAnnotation::Basic(
+                    crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                        .to_string(),
+                ))
             }
             _ => {
                 return Err(TypeError::ConstraintViolation(format!(

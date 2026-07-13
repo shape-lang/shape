@@ -1455,6 +1455,22 @@ impl TypeEnvironment {
         self.scopes.push(HashMap::new());
     }
 
+    /// Number of live scopes (1 = module scope). ADR-009 B3: used to compare
+    /// the declaring depth of an assignment target against a `some`-loop body
+    /// depth for witness-escape detection.
+    pub fn scope_depth(&self) -> usize {
+        self.scopes.len()
+    }
+
+    /// Depth (1-based, innermost wins) of the scope that declares `name`, or
+    /// `None` if unbound. ADR-009 B3 witness-escape check.
+    pub fn declaring_scope_depth(&self, name: &str) -> Option<usize> {
+        self.scopes
+            .iter()
+            .rposition(|scope| scope.contains_key(name))
+            .map(|idx| idx + 1)
+    }
+
     /// Pop the current scope
     pub fn pop_scope(&mut self) {
         if self.scopes.len() > 1 {

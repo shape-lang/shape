@@ -7,6 +7,7 @@ use shape_ast::error::{Result, ShapeError};
 use std::collections::HashSet;
 
 use super::super::BytecodeCompiler;
+use crate::compiler::comptime_builtins::semantic_freeze::FreezeOverlay;
 use shape_ast::ast::expr_helpers::ComptimeForExpr;
 use shape_ast::ast::statements::Statement as AstStatement;
 use shape_ast::ast::{JoinExpr, JoinKind};
@@ -818,6 +819,169 @@ impl BytecodeCompiler {
 
     /// Compile a comptime for expression by evaluating the iterable at compile time
     /// and unrolling the body once per element.
+    /// ADR-009 B3 (Dec 51) — the compile-tier rejection gate for a
+    /// `comptime for some<W...>` site. Runs BEFORE the body unrolls, and is the
+    /// tier that reliably surfaces (comptime-block statement inference is
+    /// error-tolerant, so the inference-tier witness checks are dormant inside a
+    /// comptime block — this gate is their surfacing counterpart, sharing the
+    /// SAME single-sourced diagnostic strings).
+    ///
+    /// * Row 6 (non-existential iterable): the iterable's element type must be
+    ///   an `exists<W...> Descriptor<W...>` package. A determinably
+    ///   non-existential element (a scalar / plain nominal) is the named
+    ///   NON_EXISTENTIAL rejection.
+    /// * Row 2 (witness escape): the opened descriptor (the loop variable) may
+    ///   not be assigned to an enclosing-scope binding — that would let a hidden
+    ///   witness outlive its `some` opening. In the B1-only substrate the loop
+    ///   variable is the ONLY witness-typed value, so "loop var stored into an
+    ///   outer binding" is the complete, honest escape signal.
+    fn check_comptime_for_some_rejections(
+        &mut self,
+        cf: &ComptimeForExpr,
+        span: shape_ast::ast::Span,
+        overlay: &FreezeOverlay,
+    ) -> Result<()> {
+        use crate::compiler::comptime_builtins::existential::require_existential_element;
+        use crate::compiler::comptime_builtins::existential::WITNESS_ESCAPES_SCOPE_DIAGNOSTIC;
+        use shape_ast::ast::TypeAnnotation;
+
+        // Row 6: the iterable's element type must be an existential descriptor
+        // package. The check runs through the ONE landed freeze query surface
+        // (`require_existential_element` -> `FreezeOverlay::canonicalize_type`
+        // -> the canonicalizer's Existential arm), NOT a bespoke
+        // `matches!(Existential)` shape test, so the some-site gate and the
+        // freeze-model unit tests speak the SAME canonicalizer and the SAME
+        // single-sourced named diagnostic — no parallel classification surface.
+        let element_ann = self
+            .infer_expr_type(&cf.iterable)
+            .ok()
+            .and_then(|ty| ty.to_annotation())
+            .and_then(|ann| match ann {
+                TypeAnnotation::Array(inner) => Some(*inner),
+                TypeAnnotation::Generic { name, mut args }
+                    if name.as_str() == "Array" && args.len() == 1 =>
+                {
+                    Some(args.remove(0))
+                }
+                _ => None,
+            });
+        if let Some(element_ann) = element_ann {
+            // Canonicalize + require Existential through the freeze surface.
+            // The returned package identity is the frozen semantic identity of
+            // `exists<W...> Descriptor<W...>` interned in the overlay's memo.
+            let _package =
+                require_existential_element(overlay, &element_ann).map_err(|message| {
+                    ShapeError::SemanticError {
+                        message,
+                        location: Some(self.span_to_source_location(span)),
+                    }
+                })?;
+
+            // Skolemize the package's hidden witnesses at THIS `some` site:
+            // fresh `parameter:{some_site}:{witness}` identities scoped over the
+            // shared base freeze (`FreezeOverlay::open_witnesses`). Two distinct
+            // sites never share a witness identity and a witness opened here can
+            // never be conflated with an outer type — that opacity is the
+            // type-theoretic footing the row-2 escape check rests on. In the
+            // B1-only substrate the loop var is the only witness-typed value, so
+            // the executable unroll stays the plain runtime for-loop below; the
+            // opening is the type-level introduction the reviewer-required
+            // freeze surface performs, not a second protocol.
+            let some_site = format!("some@{}:{}", span.start, span.end);
+            let opened = overlay.open_witnesses(&some_site, &cf.witnesses);
+            if let Some(missing) = cf
+                .witnesses
+                .iter()
+                .find(|witness| !opened.is_scoped_parameter(witness))
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "internal invariant: witness `{missing}` was not skolemized at the \
+                         some-site opening"
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        }
+
+        // Row 2: the loop variable must not be stored into an enclosing binding.
+        let mut declared = std::collections::HashSet::new();
+        collect_declared_names(&cf.body, &mut declared);
+        if self.comptime_for_body_escapes_loop_var(&cf.body, &cf.variable, &declared) {
+            return Err(ShapeError::SemanticError {
+                message: WITNESS_ESCAPES_SCOPE_DIAGNOSTIC.to_string(),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+        Ok(())
+    }
+
+    /// True when some assignment in `body` stores the loop variable
+    /// (`Expr::Identifier(loop_var)`) into a name that is NOT declared within
+    /// the loop body (i.e. an enclosing binding) — the escape signal.
+    fn comptime_for_body_escapes_loop_var(
+        &self,
+        body: &[AstStatement],
+        loop_var: &str,
+        declared_in_body: &std::collections::HashSet<String>,
+    ) -> bool {
+        fn rhs_is_loop_var(expr: &Expr, loop_var: &str) -> bool {
+            matches!(expr, Expr::Identifier(name, _) if name == loop_var)
+        }
+        for stmt in body {
+            match stmt {
+                AstStatement::Assignment(assign, _) => {
+                    if let Some(target) = assign.pattern.as_identifier() {
+                        if target != loop_var
+                            && !declared_in_body.contains(target)
+                            && rhs_is_loop_var(&assign.value, loop_var)
+                        {
+                            return true;
+                        }
+                    }
+                }
+                AstStatement::If(if_stmt, _) => {
+                    if self.comptime_for_body_escapes_loop_var(
+                        &if_stmt.then_body,
+                        loop_var,
+                        declared_in_body,
+                    ) {
+                        return true;
+                    }
+                    if let Some(else_body) = &if_stmt.else_body {
+                        if self.comptime_for_body_escapes_loop_var(
+                            else_body,
+                            loop_var,
+                            declared_in_body,
+                        ) {
+                            return true;
+                        }
+                    }
+                }
+                AstStatement::For(for_stmt, _) => {
+                    if self.comptime_for_body_escapes_loop_var(
+                        &for_stmt.body,
+                        loop_var,
+                        declared_in_body,
+                    ) {
+                        return true;
+                    }
+                }
+                AstStatement::While(while_stmt, _) => {
+                    if self.comptime_for_body_escapes_loop_var(
+                        &while_stmt.body,
+                        loop_var,
+                        declared_in_body,
+                    ) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub(super) fn compile_comptime_for(
         &mut self,
         cf: &ComptimeForExpr,
@@ -827,6 +991,24 @@ impl BytecodeCompiler {
         // execute comptime-for directly as a runtime for-expression so lexical
         // bindings like `target` are visible.
         if self.comptime_mode {
+            // ADR-009 B3 (Dec 51, rejection-matrix rows 3 & 5): a
+            // `comptime for some<W...>` site is iteration sugar over the ONE
+            // reflect()/payload freeze surface — no second protocol. Before the
+            // body unrolls, the site must hold the per-compilation-unit freeze
+            // handle (`comptime_freeze_overlay` is the NO_FREEZE_HANDLE gate);
+            // this upholds the freeze-before-user-comptime ordering. The witness
+            // clause is a TYPE-level opening (bound during inference); the
+            // executable unroll is the same runtime for-loop as the plain form,
+            // so no parallel iteration path is emitted.
+            if !cf.witnesses.is_empty() {
+                let freeze = self.comptime_freeze_overlay().map_err(|e| {
+                    ShapeError::SemanticError {
+                        message: e.to_string(),
+                        location: Some(self.span_to_source_location(span)),
+                    }
+                })?;
+                self.check_comptime_for_some_rejections(cf, span, &freeze)?;
+            }
             let mut items = Vec::with_capacity(cf.body.len());
             for (idx, stmt) in cf.body.iter().enumerate() {
                 let is_last = idx + 1 == cf.body.len();
@@ -887,3 +1069,77 @@ impl BytecodeCompiler {
 // deleted carrier; restoring the coverage lands together with the
 // phase-2c carrier shape (ADR-006 §2.4) and the test harness sweep on
 // `crate::test_utils::eval`.
+
+/// ADR-009 B3 (Dec 51) — rejection-matrix row 2 escape-analysis walker unit
+/// tests. `comptime_for_body_escapes_loop_var` is the compile-tier signal a
+/// `comptime for some<W...>` site uses to reject a hidden witness (the loop
+/// variable, the only witness-typed value in the B1-only substrate) being
+/// stored into an enclosing binding. These drive the AST walker directly (the
+/// end-to-end proof is in tools/shape-test/tests/comptime/existential.rs).
+#[cfg(test)]
+mod escape_analysis_tests {
+    use super::*;
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::{Assignment, DestructurePattern, Span};
+
+    fn ident(name: &str) -> Expr {
+        Expr::Identifier(name.to_string(), Span::DUMMY)
+    }
+
+    fn assign(target: &str, value: Expr) -> AstStatement {
+        AstStatement::Assignment(
+            Assignment {
+                pattern: DestructurePattern::Identifier(target.to_string(), Span::DUMMY),
+                value,
+            },
+            Span::DUMMY,
+        )
+    }
+
+    fn declared(names: &[&str]) -> std::collections::HashSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// Storing the loop variable into a binding declared OUTSIDE the loop body
+    /// (an enclosing binding) is the escape signal — the witness would outlive
+    /// its `some` opening.
+    #[test]
+    fn loop_var_stored_into_enclosing_binding_escapes() {
+        let compiler = BytecodeCompiler::new();
+        let body = vec![assign("escaped", ident("ft"))];
+        assert!(compiler.comptime_for_body_escapes_loop_var(&body, "ft", &declared(&[])));
+    }
+
+    /// Storing the loop variable into a binding declared WITHIN the loop body
+    /// does not escape — the witness stays inside its opening scope.
+    #[test]
+    fn loop_var_stored_into_body_local_does_not_escape() {
+        let compiler = BytecodeCompiler::new();
+        let body = vec![assign("local", ident("ft"))];
+        assert!(!compiler.comptime_for_body_escapes_loop_var(&body, "ft", &declared(&["local"])));
+    }
+
+    /// A value that is NOT the loop variable flowing to an enclosing binding is
+    /// not an escape — the check keys on the witness-typed loop variable, never
+    /// on arbitrary outward assignment (guards a false positive).
+    #[test]
+    fn non_loop_var_flowing_outward_does_not_escape() {
+        let compiler = BytecodeCompiler::new();
+        let body = vec![assign("acc", ident("label"))];
+        assert!(!compiler.comptime_for_body_escapes_loop_var(&body, "ft", &declared(&[])));
+    }
+
+    /// The walker descends into nested control flow: an escape buried in an
+    /// `if` branch is still caught.
+    #[test]
+    fn escape_nested_in_if_branch_is_caught() {
+        let compiler = BytecodeCompiler::new();
+        let if_stmt = shape_ast::ast::IfStatement {
+            condition: Expr::Literal(shape_ast::ast::Literal::Bool(true), Span::DUMMY),
+            then_body: vec![assign("escaped", ident("ft"))],
+            else_body: None,
+        };
+        let body = vec![AstStatement::If(if_stmt, Span::DUMMY)];
+        assert!(compiler.comptime_for_body_escapes_loop_var(&body, "ft", &declared(&[])));
+    }
+}

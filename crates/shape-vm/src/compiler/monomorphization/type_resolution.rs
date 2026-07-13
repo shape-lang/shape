@@ -1257,6 +1257,13 @@ fn annotation_mentions_outside_closure_position(
         TypeAnnotation::Union(items) | TypeAnnotation::Intersection(items) => items
             .iter()
             .any(|t| annotation_mentions_outside_closure_position(t, generic)),
+        // ADR-009 B3 (S1): existential descriptor package — the generic may be
+        // mentioned inside the inner descriptor (a witness would shadow it, but
+        // the witness list is a distinct name space checked upstream).
+        TypeAnnotation::Existential { witnesses, inner } => {
+            !witnesses.iter().any(|w| w == generic)
+                && annotation_mentions_outside_closure_position(inner, generic)
+        }
         TypeAnnotation::Void
         | TypeAnnotation::Never
         | TypeAnnotation::Null
@@ -1424,14 +1431,27 @@ fn named_user_type_concrete(
     if compiler.struct_types.contains_key(name) || monomorphized_struct_base.is_some() {
         return Some(ConcreteType::named_struct(name, struct_layout));
     }
-    if compiler
-        .type_tracker
-        .schema_registry()
-        .get(name)
-        .map(|schema| schema.get_enum_info().is_some())
-        .unwrap_or(false)
-    {
-        return Some(ConcreteType::named_enum(name, enum_layout));
+    if let Some(schema) = compiler.type_tracker.schema_registry().get(name) {
+        if schema.get_enum_info().is_some() {
+            return Some(ConcreteType::named_enum(name, enum_layout));
+        }
+        // ADR-009 B4 (Stage 2, Dec 54): symmetric struct arm. A field-bearing,
+        // non-enum schema present in the registry but NOT in `struct_types` is a
+        // reserved/injected TypedObject schema (the comptime reflection carriers
+        // `TypeRef` / `TypeConstructorRef` / `AppliedType` are the driving case).
+        // They are `TypedObjectStorage`-backed at runtime — the same
+        // `Ptr(HeapKind::TypedObject)` carrier as a user struct — so resolving
+        // their name to a named struct lets the uniform-application site rewrite's
+        // synthesized carrier array (`.apply(a, b)` → an array of these carriers,
+        // read back by `apply_to_constructor` as `TypedArray<*const
+        // TypedObjectStorage>`) prove its element kind through the ONE typed-array
+        // kind table (`should_use_typed_array(Struct) → TypedObject`) instead of
+        // surface-and-stopping. User structs are unaffected (they already resolve
+        // via `struct_types` above); the only NEW resolutions are registry-only
+        // schemas. Per ADR-006 §2.7.5 the element kind is a producer-side proof.
+        if !schema.fields.is_empty() {
+            return Some(ConcreteType::named_struct(name, struct_layout));
+        }
     }
     None
 }
@@ -1480,6 +1500,16 @@ fn annotation_mentions_any(annotation: &TypeAnnotation, generics: &[&str]) -> bo
             .any(|f| annotation_mentions_any(&f.type_annotation, generics)),
         TypeAnnotation::Union(items) | TypeAnnotation::Intersection(items) => {
             items.iter().any(|t| annotation_mentions_any(t, generics))
+        }
+        // ADR-009 B3 (S1): existential descriptor package — a generic can be
+        // named inside the inner descriptor unless a witness shadows it.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            let inner_generics: Vec<&str> = generics
+                .iter()
+                .copied()
+                .filter(|g| !witnesses.iter().any(|w| w == g))
+                .collect();
+            annotation_mentions_any(inner, &inner_generics)
         }
         TypeAnnotation::Void
         | TypeAnnotation::Never
@@ -1800,9 +1830,14 @@ fn unify_annotation_with_inference_type(
         TypeAnnotation::Borrow { inner, .. } => {
             unify_annotation_with_inference_type(inner, &actual, compiler, generics, bindings)
         }
+        // ADR-009 B3 (S1): existential descriptor package types are comptime-only
+        // and cannot appear as a real generic-fn parameter yet, so there is no
+        // binding to derive — treat as trivially unifiable (no conflict), matching
+        // the other non-structural forms.
         TypeAnnotation::Object(_)
         | TypeAnnotation::Union(_)
         | TypeAnnotation::Intersection(_)
+        | TypeAnnotation::Existential { .. }
         | TypeAnnotation::Void
         | TypeAnnotation::Never
         | TypeAnnotation::Null
@@ -1911,9 +1946,12 @@ fn unify_annotation_with_concrete(
         TypeAnnotation::Borrow { inner, .. } => {
             unify_annotation_with_concrete(inner, actual, generics, bindings)
         }
+        // ADR-009 B3 (S1): existential descriptor package types are comptime-only
+        // and contribute no monomorphization bindings — trivially unifiable.
         TypeAnnotation::Object(_)
         | TypeAnnotation::Union(_)
         | TypeAnnotation::Intersection(_)
+        | TypeAnnotation::Existential { .. }
         | TypeAnnotation::Dyn(_)
         | TypeAnnotation::Void
         | TypeAnnotation::Never

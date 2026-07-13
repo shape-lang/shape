@@ -276,13 +276,17 @@ Decisions 50/94: transparent aliases normalize away through applied forms
 `Record`, trait intersections to `Erased` bound sets. Unresolved names at
 any depth and inference holes are named freeze rejections at compile time,
 before user comptime executes (Decision 52); applied arity is enforced from
-freeze facts; const-generic applications are a named parse-time rejection
-until B4/Dec-54 lands the const carrier. LSP completion inside the
+freeze facts; const-generic applications inside `type_ref(...)` stay a named
+parse-time rejection, and B4/Dec-54 has landed the const carrier — the checked
+const path is `const_arg(N)` applied through `type_constructor(Head).apply(...)`
+(the parse-time rejection message now redirects there). LSP completion inside the
 `type_ref(` type position routes to the type-annotation provider
 (primitives, user types, in-scope generic parameters — never value
 bindings); hover/signature stay generated from the shared catalog row. The
 surface spelling remains `type_ref(T)` (not the Dec-48 turbofish
-`type_ref<T>()`) — the constructor-identity reclassification is ticket B4.
+`type_ref<T>()`); the constructor-identity reclassification landed as ticket B4
+(the B4 CURRENT block below reclassifies frozen nominal heads through
+`type_constructor(Head)`, reusing these A2 applied-type identities unchanged).
 Evidence: `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`
 (A2 addendum); e2e in `tools/shape-test/tests/comptime/frozen_type.rs`
 (per-form VM+JIT matrix + rejection matrix) and
@@ -321,6 +325,39 @@ Book status: B2-enabled behaviors are gate-runnable in ShapeTest
 `tests/lsp/typed_comptime.rs`, VM+JIT); the gate-runnable book example lands
 with F1 or earlier per spec §3.7.
 
+**CURRENT / VM+JIT - uniform nominal application (ticket B4, 2026-07-13).**
+`type_constructor(C)` yields a compiler-issued `TypeConstructorRef` — an opaque
+constructor descriptor (`constructor:<head_hex>`) distinct from a bare nominal
+leaf, minted ONLY for a head the freeze classifies `Nominal` (R5 non-nominal and
+R6 unfrozen-head are named rejections from the one freeze query, not name-string
+checks). `const_arg(N)` builds a checked const argument (`const:int:{value}`
+identity). `type_constructor(Head).apply(...)` transports variadic CHECKED
+`type_ref`/`const_arg` carriers (R4 untyped-argument-array is structurally
+impossible — the site-rewrite only lowers checked carriers), checks arity and
+type-vs-const kind against the head's parameter kinds read from the SINGLE
+`param_kinds_of` projection in `semantic_freeze.rs` (never a second table), then
+reproduces the A2 `applied:<head_hex><arg_hex,...>` descriptor byte-for-byte.
+The identity equality is asserted both directions:
+`identity(type_constructor(Option).apply(type_ref(int))) ==
+identity(type_ref(Option<int>))`. `nominal.refine(constructor)` returns
+`Some(applied)` iff the nominal is a genuine application of that constructor and
+round-trips through `applied.type_argument(I)` (which reflects the I-th argument
+back to its `TypeRef`, with a named out-of-range rejection), `None` otherwise.
+One model spans zero-arg nominals, builtins (`Option`/`Result`/`Array`/
+collections), user generics, and const-generic applications — no per-type
+reflection variant. A generic ENUM head whose parameter kinds are unrecoverable
+from the freeze is a named surface-and-stop, never a guessed kind. Rejection
+matrix (each a named diagnostic, VM+JIT + LSP twins): R6 unfrozen head, R5
+non-nominal head, wrong arity, wrong kind (`const_arg` into a Type slot), enum-
+head arity-unrecoverable, `type_argument` out of range, forged/mismatched
+carrier (schema-name forgery wall), and TypeConstructorRef/AppliedType/ParamKind
+lift-into-runtime. Evidence:
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md` (B4 addendum).
+Book status: B4-enabled behaviors are gate-runnable green on VM and JIT in
+ShapeTest (`tools/shape-test/tests/comptime/typed_constructor.rs`) and LSP
+(`tools/shape-test/tests/lsp/typed_comptime.rs`); book-chapter examples land in
+stage F1 per the program spec.
+
 **CURRENT / compiler - generated implicit capture rejection**
 
 Annotation-generated functions are marked before body compilation. A closure
@@ -357,7 +394,8 @@ that computed source-string generation is acceptable.
 source anchors, and identity-driven tooling (Decision 68, ticket ADR009-D1,
 2026-07-13).** Scope: the EXISTING extend/materialization path; the
 declaration-discovery fixed point (Decision 67) and `shape-expansion://`
-virtual views remain TARGET (ticket D2). Every declaration generated on that
+virtual views are now CURRENT via ticket ADR009-D2 (see the dedicated D2
+status entry below). Every declaration generated on that
 path is an ordinary compiler symbol: the compiler issues a content-derived
 `SymbolId` with full `ExpansionIdentity { generator, application, target,
 stage, arguments_hash, dependencies_hash }` + `GeneratedOrigin { expansion,
@@ -386,6 +424,49 @@ Book status: D1-enabled behaviors are gate-runnable in ShapeTest
 (`tools/shape-test/tests/lsp/{generated_navigation.rs,
 generated_provenance.rs, generated_rename.rs}` and
 `tests/annotations_comptime/generated_method_runtime.rs`, VM+JIT);
+book-chapter examples land in stage F1 per the program spec.
+
+**CURRENT / compiler+LSP+VM+JIT - declaration-discovery fixed point, shared
+expansion query, and `shape-expansion://` read-only virtual views
+(Decision 66/67, ticket ADR009-D2, 2026-07-13).** Declaration-producing
+comptime (v1: annotation handlers emitting free functions and `extend`
+methods) reaches a deterministic, monotone fixed point BEFORE ordinary body
+checking (Decision 67 ordering): `DeclarationDiscoveryFixedPoint`
+(`shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs`, extending
+the D1 provenance surface in place — never a fork) drives a bounded monotone
+worklist (`functions_annotations.rs` discovery driver) that applies each
+expansion exactly once per application identity + dependency hash (the
+`claim()` run-once memo keyed on `ApplicationId` + deps-hash), records each
+discovered header as immutable (`record_header` — re-derivation with a
+different definition is the named `DISCOVERY_HEADER_MUTATED` rejection), and
+requires every reserved generated identity to be defined exactly once at
+convergence (`converge` — a reserved-but-undefined identity is
+`RESERVED_IDENTITY_UNDEFINED`). Duplicates, cross-application conflicts,
+trigger cycles, frontier oscillation, and unbounded generation are all
+compile errors carrying expansion provenance via `build_discovery_failure`
+(the nine named diagnostics `GENERATED_NODE_WITHOUT_PROVENANCE` /
+`GENERATED_SYMBOL_DUPLICATE_IDENTITY` / `GENERATED_SYMBOL_CONFLICT` /
+`UNKNOWN_GENERATED_SYMBOL` / `DISCOVERY_CYCLE` / `DISCOVERY_OSCILLATION` /
+`DISCOVERY_UNBOUNDED` / `DISCOVERY_HEADER_MUTATED` /
+`RESERVED_IDENTITY_UNDEFINED`, each with an asserting test). Compiler and LSP
+consume the SAME fixed-point query surface
+(`BytecodeCompiler::generated_symbol_query() -> &GeneratedSymbolTable`,
+Decision 66 closing rule): there is no speculative second pass and no LSP
+re-evaluator — completion, navigation, references, rename, and virtual views
+all read the one converged table. `shape-expansion://` URIs
+(`tools/shape-lsp/src/expansion_views.rs`) render the checked generated IR
+read-only with a bidirectional source map (`virtual_to_source` /
+`source_to_virtual`); the render is inspection-only and is NEVER reparsed as
+compiler input (pinned by `the_module_never_reparses_its_own_render`).
+Identity everywhere is the A1 canonical-descriptor SHA-256 scheme (no strings,
+no JSON, no partial descriptors, no counters).
+Book status: D2-enabled behaviors are gate-runnable in ShapeTest —
+`tools/shape-test/tests/lsp/typed_comptime.rs`
+(`completion_sees_generated_free_function_after_discovery`,
+`generated_free_function_visible_to_later_source_runs_identically_in_vm_and_jit`
+VM+JIT, `generated_call_site_renders_read_only_virtual_view_with_source_map`)
+plus the `expansion_views.rs` in-file view/source-map suite and the
+`expansion_provenance.rs` rejection-matrix + deterministic-identity units;
 book-chapter examples land in stage F1 per the program spec.
 
 ### Implemented But Under-Proven
@@ -427,11 +508,11 @@ examples, rejection requirements, and implementation implications.
 | `TypeRef<T>` | comptime | Canonical type identity | accepted; CURRENT / VM+JIT — A1 canonical semantic freeze: one per-unit freeze barrier, shared query API, annotation-handler handle threading (wave46 A1 addendum); A2 checked type-expression surface CURRENT / VM+JIT — tuples `[T, U]`, records `{field: T}`, callables `(T) -> R`, references `&T`/`&mut T`, unions `T \| U`, erased `any`/`dyn Trait`, applied generics `Option<int>` incl. alias normalization through applied forms (wave46 A2 addendum) |
 | `TraitRef<Trait>` | comptime | Canonical trait identity | accepted; CURRENT / VM+JIT — B2 distinct frozen trait identity (`trait:{name}` SHA-256 descriptors, never interned as type identities; positional `trait_ref(Trait)` surface, turbofish pending A2) (wave46 B2 addendum) |
 | `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted; CURRENT / VM+JIT — B2 `find_impl(type_ref, trait_ref) -> Option<ImplRef<T, Tr>>` over barrier-frozen evidence, Some-arm consumption + None arm proven VM+JIT; branch scoping = stage-boundary lift rejection + Some-arm-only issuance (wave46 B2 addendum) |
-| `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |
+| `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted; CURRENT-partial / VM+JIT via B3 — `exists<W...> Descriptor<W...>` package type (positional de-Bruijn `exists:{arity}:{inner}` SHA-256 identity), existential introduction/subsumption in the unifier, and `comptime for some<W...> x in coll {}` iteration sugar over the single reflect()/payload surface (no second protocol): fresh per-iteration hidden witnesses scoped by the freeze overlay, witness-typed loop binding, escape + non-existential + no-freeze + erased-to-Any rejections. Proven over the B1 `Array<exists<T> FrozenType<T>>` reflect-payload substrate (evidence: `tools/shape-test/tests/comptime/existential.rs`, `tests/lsp/typed_comptime.rs`, unit `constraints.rs`/`comptime_builtins/existential.rs` — ADR009-B3 S1). Engine scope: the `comptime for some` iteration runs at compile time on the comptime VM interpreter (comptime never tiers up to the JIT); the VM/JIT dual-run proves the enclosing program lowers and runs identically under both tiers (JIT-tier-clean at the comptime→runtime boundary), NOT that the JIT iterates the collection. LSP hover/inlay over a `some`-bound witness binding renders the opened descriptor (`FrozenType<T>`) + stage + escape rule via the shared `open_comptime_some_descriptor` surface, and hovering a `some`-clause witness name renders the opened hidden witness (evidence: `tests/lsp/typed_comptime.rs::{hover_on_some_bound_loop_var_shows_opened_descriptor_and_stage, hover_on_some_witness_name_shows_opened_hidden_witness, inlay_on_some_bound_iteration_shows_opened_descriptor}` — ADR009-B3 S3). Descriptor families beyond B1 (fields/params/variants) TARGET pending B5-B7 |
 | `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, and Erased payloads at catalog-pinned ordinals 0/1/9; the 7 remaining categories reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 addendum); remaining payloads TARGET (B2/B4-B7) |
 | `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
-| `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted |
-| `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted |
+| `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted; CURRENT / VM+JIT — B4 `type_constructor(C)` yields a compiler-issued constructor descriptor (`constructor:<head_hex>`, distinct from a bare nominal leaf), minted only for a frozen nominal head; R5 non-nominal / R6 unfrozen-head named rejections; parameter kinds projected from the single `param_kinds_of` freeze source, never a second table (wave46 B4 addendum) |
+| `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted; CURRENT / VM+JIT — B4 `.apply(...)` checks arity + type-vs-const kind then reproduces the A2 `applied:` descriptor byte-for-byte, so `identity(type_constructor(Option).apply(type_ref(int))) == identity(type_ref(Option<int>))` both directions; `const_arg(N)`, `nominal.refine(constructor)` round-trip, `applied.type_argument(I)` (wave46 B4 addendum) |
 | `NamePolicy<Domain, Namespace>` | comptime generation | Deterministic external identifier to hygienic symbol mapping | accepted |
 | `NominalShape<T>` | comptime | Exhaustive struct/enum/newtype/opaque semantic shape | accepted |
 | `StructDescriptor<T>` | comptime | Applied nominal struct representation | accepted |
@@ -473,7 +554,11 @@ examples, rejection requirements, and implementation implications.
 - [Annotations And Hooks](typed-comptime/annotations-and-hooks.md): Decisions 61-65.
 - [Expansion And Tooling](typed-comptime/expansion-and-tooling.md): Decisions 66-69.
   Decision 68 is CURRENT on the existing extend/materialization path
-  (ADR009-D1, 2026-07-13); the fixed point + virtual views remain TARGET (D2).
+  (ADR009-D1, 2026-07-13); Decision 66/67 — the declaration-discovery fixed
+  point, the shared `generated_symbol_query()` surface, and `shape-expansion://`
+  read-only virtual views — are CURRENT / compiler+LSP+VM+JIT (ADR009-D2,
+  2026-07-13, evidence `tools/shape-test/tests/lsp/typed_comptime.rs` +
+  `expansion_views.rs`). Decision 69 (name policies) remains TARGET.
 - [Resources And Fragments](typed-comptime/resources-and-fragments.md): Decisions 70-73 and 95.
 - [Patterns And Control Flow](typed-comptime/patterns-and-control-flow.md): Decisions 74-76.
 - [Guards And Exhaustiveness](typed-comptime/guards-and-exhaustiveness.md): Decisions 77-79.

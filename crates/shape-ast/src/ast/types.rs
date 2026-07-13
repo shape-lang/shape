@@ -52,6 +52,18 @@ pub enum TypeAnnotation {
     /// Trait object type: dyn Trait1 + Trait2
     /// Represents a type-erased value that implements the given traits
     Dyn(Vec<TypePath>),
+    /// Existential descriptor package type (ADR-009 B3, Dec 51):
+    /// `exists<W...> Descriptor<W...>`.
+    ///
+    /// The hidden witnesses `W...` are opened (bound to concrete types) only
+    /// inside a `comptime for some<W...>` iteration. They cannot erase to `Any`
+    /// and cannot escape their opening scope unless explicitly repackaged.
+    /// `witnesses` is guaranteed non-empty by the parser (`exists<>` is a
+    /// parse-time rejection).
+    Existential {
+        witnesses: Vec<String>,
+        inner: Box<TypeAnnotation>,
+    },
 }
 
 impl TypeAnnotation {
@@ -177,6 +189,9 @@ impl TypeAnnotation {
                     })
                     .collect();
                 format!("{{{}}}", fields_str.join(", "))
+            }
+            TypeAnnotation::Existential { witnesses, inner } => {
+                format!("exists<{}> {}", witnesses.join(", "), inner.to_type_string())
             }
             _ => "any".to_string(),
         }

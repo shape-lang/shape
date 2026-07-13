@@ -259,6 +259,10 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
         TypeAnnotation::Null => "None".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
         TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.join(" + ")),
+        // ADR-009 B3 (S1): existential descriptor package type.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            format!("exists<{}> {}", witnesses.join(", "), format_type_annotation(inner))
+        }
     }
 }
 

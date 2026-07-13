@@ -20,6 +20,7 @@ let label = comptime {
     FrozenTypeCategory::Reference => "reference"
     FrozenTypeCategory::Union => "union"
     FrozenTypeCategory::Erased => "erased"
+    FrozenTypeCategory::Existential => "existential"
   }
 }
 
@@ -118,6 +119,7 @@ fn describe<T>(value: T) -> string {
       FrozenTypeCategory::Reference => "reference"
       FrozenTypeCategory::Union => "union"
       FrozenTypeCategory::Erased => "erased"
+      FrozenTypeCategory::Existential => "existential"
     }
   }
   label
@@ -452,7 +454,7 @@ print(enum_label)
 // =========================================================================
 
 /// Positive per-form proof template: `type_ref({spelling})` consumed via the
-/// full 10-arm exhaustive `type_category` match, asserted on VM and JIT.
+/// full 11-arm exhaustive `type_category` match, asserted on VM and JIT.
 fn expect_type_ref_category(preamble: &str, spelling: &str, expected: &str) {
     let source = format!(
         r#"
@@ -469,6 +471,7 @@ let label = comptime {{
     FrozenTypeCategory::Reference => "reference"
     FrozenTypeCategory::Union => "union"
     FrozenTypeCategory::Erased => "erased"
+    FrozenTypeCategory::Existential => "existential"
   }}
 }}
 
@@ -685,13 +688,15 @@ fn applied_generic_arity_mismatch_is_a_named_rejection() {
         .expect_run_err_contains("expects 0 type argument(s), but 1 were provided");
 }
 
-/// S5 R6 (per the S3 prove-or-reject decision): const-generic type
-/// applications are a named parse-time rejection — no descriptor bytes are
-/// minted for a carrier the language cannot yet prove.
+/// S5 R6 (per the S3 prove-or-reject decision): a const-generic literal inside
+/// `type_ref(...)` is a named parse-time rejection (R9) — no descriptor bytes
+/// are minted for the untyped const application. ADR-009 B4 (Stage 2, Dec 54)
+/// relaxed this message to point at the supported spelling: build one with
+/// `const_arg(N)` applied through `type_constructor(Head).apply(...)`.
 #[test]
 fn const_generic_application_is_a_named_rejection() {
     ShapeTest::new("let reflected = comptime { type_ref(Array<3>) }")
-        .expect_run_err_contains("const-generic type applications are not yet supported in type_ref");
+        .expect_run_err_contains("const-generic type applications are not supported in type_ref");
 }
 
 /// S5 R8 (Dec 50/94 rule 3): a trait intersection in type position erases to

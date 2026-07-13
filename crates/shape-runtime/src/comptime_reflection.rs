@@ -1,12 +1,42 @@
 use crate::builtin_metadata::{BuiltinMetadata, BuiltinParam};
 use crate::type_schema::builtin_schemas::{
-    COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_IMPL_REF_SCHEMA,
+    COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_IMPL_REF_SCHEMA,
     COMPTIME_FROZEN_NEVER_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
-    COMPTIME_FROZEN_TRAIT_REF_SCHEMA, COMPTIME_FROZEN_TYPE_REF_SCHEMA,
-    COMPTIME_FROZEN_TYPE_SCHEMA,
+    COMPTIME_FROZEN_TRAIT_REF_SCHEMA, COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_REF_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA,
 };
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind};
+
+// ADR-009 B3 (Dec 51) — canonical existential-package rejection diagnostics.
+// These live in shape-runtime so BOTH the type-inference tier (this crate) and
+// the freeze/compile tier (`shape-vm` `comptime_builtins::existential`, which
+// re-exports them) speak ONE string per rejection — no divergent copies.
+
+/// Rejection-matrix row 6: `comptime for some<W...>` iterates a heterogeneous
+/// existential descriptor collection. An element type that is not an
+/// existential descriptor package is this named rejection.
+pub const NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC: &str =
+    "comptime for some can only iterate a heterogeneous existential descriptor \
+     collection: the element type is not an existential descriptor package \
+     (exists<W...> Descriptor<W...>)";
+
+/// Rejection-matrix row 2: a hidden witness opened by `comptime for some` may
+/// not escape its opening scope. Binding a witness-typed value to an
+/// enclosing-scope name (so it outlives the loop) is this named rejection —
+/// unless the value is explicitly repackaged as an existential.
+pub const WITNESS_ESCAPES_SCOPE_DIAGNOSTIC: &str =
+    "hidden witness cannot escape its `some` opening scope unless explicitly \
+     repackaged in an existential value: a witness-typed binding may not be \
+     assigned to an enclosing-scope variable";
+
+/// Rejection-matrix row 3: `comptime for some` is sugar over the same
+/// reflect()/payload_of surface (a rank-2 generic callback). Reaching for a
+/// second reflection/iterator protocol is refused on sight.
+pub const SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC: &str =
+    "comptime for some is iteration sugar over the single reflect()/payload \
+     surface (Dec 51); a second reflection or iterator protocol is not \
+     permitted";
 
 /// ADR-009 A1 S4 — single-source catalog macro.
 ///
@@ -71,6 +101,15 @@ macro_rules! frozen_type_category_catalog {
 
 frozen_type_category_catalog!(
     Primitive, Never, Parameter, Nominal, Tuple, Record, Callable, Reference, Union, Erased,
+    // ADR-009 B3 (Dec 51): existential descriptor packages
+    // (`exists<W...> Descriptor<W...>`). Appended so existing catalog ordinals
+    // stay ABI-stable (spec §3.3). Its `reflect()` payload is not enabled
+    // (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`) — reflecting it is the named
+    // R1 per-category rejection, and it is never returned by a bare
+    // `type_category`/`reflect` (an existential's witnesses are hidden — it
+    // only appears as a descriptor collection's element type, opened by
+    // `comptime for some<W...>`).
+    Existential,
 );
 
 /// Descriptor row for one `FrozenPrimitive` catalog member: the variant name
@@ -154,6 +193,47 @@ impl FloatWidth {
 /// Schema/type name for the [`FloatWidth`] width-domain enum carrier
 /// (ADR-009 B1 S2). Same discipline as [`INTEGER_WIDTH_SCHEMA_NAME`].
 pub const FLOAT_WIDTH_SCHEMA_NAME: &str = "FloatWidth";
+
+/// ADR-009 B4 (Stage 2, Dec 54) — the ordered generic-parameter kind of one
+/// declared position on a nominal type constructor.
+///
+/// This is the sealed catalog the freeze's per-constructor param-kind vector
+/// is built from and the kind `.apply(...)` checks each supplied argument
+/// against (a type argument against a [`ParamKind::Type`] position, a
+/// `const_arg` against a [`ParamKind::Const`] position). A shared runtime
+/// catalog sibling of [`FrozenTypeCategory`] / [`IntegerWidth`] /
+/// [`FloatWidth`] — one variant list, no second hand-written kind enum
+/// anywhere; the exact-two cardinality is the entire type-vs-const model
+/// (Dec 54, "type/const parameter kinds").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParamKind {
+    /// A type-level parameter (`<T>`, `<T: Bound>`) — the position accepts a
+    /// checked `TypeRef` argument.
+    Type,
+    /// A value-level const generic parameter (`<const N: int>`) — the
+    /// position accepts a checked `const_arg` argument.
+    Const,
+}
+
+impl ParamKind {
+    /// Exhaustive catalog (exactly two members — the whole type-vs-const
+    /// model). Exhaustive so a new kind forces every consumer to update.
+    pub const ALL: [Self; 2] = [Self::Type, Self::Const];
+
+    /// Catalog variant name (drives the `ParamKind` descriptor-schema
+    /// registration and LSP completion, following the [`IntegerWidth`]
+    /// precedent).
+    pub const fn variant_name(self) -> &'static str {
+        match self {
+            Self::Type => "Type",
+            Self::Const => "Const",
+        }
+    }
+}
+
+/// Schema/type name for the [`ParamKind`] generic-parameter-kind enum carrier
+/// (ADR-009 B4). Same discipline as [`INTEGER_WIDTH_SCHEMA_NAME`].
+pub const PARAM_KIND_SCHEMA_NAME: &str = "ParamKind";
 
 /// ADR-009 B1 S1 — single-source catalog macro for the sealed
 /// `FrozenPrimitive` sub-algebra (Dec 50/94), sibling of
@@ -377,6 +457,12 @@ pub fn reflection_enum_variant_names(enum_name: &str) -> Option<Vec<&'static str
                 .collect(),
         );
     }
+    // ADR-009 B4 (Stage 2, Dec 54): the `ParamKind` type-vs-const vocabulary,
+    // generated from the same shared catalog the freeze's kind vector and
+    // `.apply(...)` consume (`ParamKind::ALL`) — no second variant list.
+    if enum_name == PARAM_KIND_SCHEMA_NAME {
+        return Some(ParamKind::ALL.into_iter().map(ParamKind::variant_name).collect());
+    }
     None
 }
 
@@ -485,6 +571,51 @@ pub const FIND_IMPL_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
     ),
 };
 
+/// LSP-visible builtin row for `type_constructor`, owned by the shared
+/// reflection catalog (ADR-009 ticket B4, Stage 2, Dec 54). One uniform
+/// nominal-application model: a `TypeConstructorRef` built from a frozen
+/// NOMINAL head, applied through `.apply(...)` with arity and type-vs-const
+/// kind checking, producing an applied `TypeRef` whose identity equals the
+/// A2 `type_ref(Head<Args>)` spelling. Spliced verbatim into
+/// `builtin_metadata::CORE_BUILTINS`; it must not be duplicated as a
+/// hand-written row.
+pub const TYPE_CONSTRUCTOR_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
+    name: "type_constructor",
+    signature: "type_constructor(C) -> TypeConstructorRef<C>",
+    description: "Create an opaque compiler-issued TypeConstructorRef from a frozen nominal type head (Option, Result, Array, HashMap, or a user generic). Apply checked type and const arguments with .apply(...) — arity and type-vs-const kind are checked before an applied TypeRef is produced, so the resulting identity equals the type_ref(Head<Args>) spelling. A non-nominal head or an unfrozen name is a named compile-time rejection, never a name-string check. Only valid inside comptime blocks.",
+    category: "Comptime",
+    parameters: &[BuiltinParam {
+        name: "C",
+        param_type: "type constructor",
+        optional: false,
+        description: "A frozen nominal type head (builtin or user generic)",
+    }],
+    return_type: "TypeConstructorRef<C>",
+    example: Some("comptime { type_constructor(Option).apply(type_ref(int)) }"),
+};
+
+/// LSP-visible builtin row for `const_arg`, owned by the shared reflection
+/// catalog (ADR-009 ticket B4, Stage 2, Dec 54). A `const_arg(N)` is a
+/// CHECKED const argument for a const-generic type application, supplied
+/// through `type_constructor(Head).apply(...)`; supplying it where a type
+/// parameter is expected is a named kind rejection. Spliced verbatim into
+/// `builtin_metadata::CORE_BUILTINS`; it must not be duplicated as a
+/// hand-written row.
+pub const CONST_ARG_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
+    name: "const_arg",
+    signature: "const_arg(N) -> ConstArg",
+    description: "Create a checked const argument for a const-generic type application, supplied through type_constructor(Head).apply(...). A const argument fills a const-parameter slot; supplying it where a type parameter is expected is a named kind rejection at .apply(...). Only valid inside comptime blocks.",
+    category: "Comptime",
+    parameters: &[BuiltinParam {
+        name: "N",
+        param_type: "int",
+        optional: false,
+        description: "A compile-time integer value for a const-parameter slot",
+    }],
+    return_type: "ConstArg",
+    example: Some("comptime { type_constructor(Matrix).apply(const_arg(3), const_arg(3)) }"),
+};
+
 /// Return a diagnostic when a compile-stage capability is about to be baked
 /// into ordinary runtime code. Scalar comptime results remain liftable; typed
 /// reflection capabilities must be consumed before the stage boundary.
@@ -536,9 +667,21 @@ pub fn runtime_lift_rejection(value: &KindedSlot) -> Option<&'static str> {
         COMPTIME_FROZEN_TRAIT_REF_SCHEMA => {
             Some("TraitRef is a comptime-only compiler capability and cannot enter runtime code")
         }
-        COMPTIME_FROZEN_IMPL_REF_SCHEMA => Some(
-            "ImplRef is comptime-only implementation evidence and cannot enter runtime code",
+        COMPTIME_FROZEN_IMPL_REF_SCHEMA => {
+            Some("ImplRef is comptime-only implementation evidence and cannot enter runtime code")
+        }
+        // ADR-009 B4 (Stage 2, Dec 54): the uniform-application carriers and
+        // the `ParamKind` vocabulary are comptime-only compiler capabilities;
+        // arms registered in the SAME commit as their schemas (B1 discipline).
+        COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA => Some(
+            "TypeConstructorRef is a comptime-only compiler capability and cannot enter runtime code",
         ),
+        COMPTIME_APPLIED_TYPE_SCHEMA => {
+            Some("AppliedType is comptime-only reflection data and cannot enter runtime code")
+        }
+        PARAM_KIND_SCHEMA_NAME => {
+            Some("ParamKind is comptime-only reflection data and cannot enter runtime code")
+        }
         _ => None,
     }
 }
@@ -567,9 +710,10 @@ mod tests {
                 "Reference",
                 "Union",
                 "Erased",
+                "Existential",
             ]
         );
-        assert_eq!(names.iter().copied().collect::<HashSet<_>>().len(), 10);
+        assert_eq!(names.iter().copied().collect::<HashSet<_>>().len(), 11);
         assert!(!names.contains(&"Unknown"));
     }
 
@@ -698,6 +842,58 @@ mod tests {
         );
     }
 
+    /// ADR-009 (ticket B4, Stage 2, Dec 54): the `type_constructor` row is
+    /// catalog-owned with the load-bearing hover phrases — the constructor
+    /// is built from a frozen NOMINAL head, `.apply(...)` checks arity and
+    /// type-vs-const kind, and the result identity equals the A2
+    /// `type_ref(Head<Args>)` spelling.
+    #[test]
+    fn type_constructor_row_is_catalog_owned_with_typed_signature() {
+        assert_eq!(TYPE_CONSTRUCTOR_BUILTIN_ROW.name, "type_constructor");
+        assert_eq!(
+            TYPE_CONSTRUCTOR_BUILTIN_ROW.signature,
+            "type_constructor(C) -> TypeConstructorRef<C>"
+        );
+        assert_eq!(
+            TYPE_CONSTRUCTOR_BUILTIN_ROW.return_type,
+            "TypeConstructorRef<C>"
+        );
+        assert_eq!(TYPE_CONSTRUCTOR_BUILTIN_ROW.category, "Comptime");
+        assert!(
+            TYPE_CONSTRUCTOR_BUILTIN_ROW
+                .description
+                .contains("nominal type head")
+        );
+        assert!(
+            TYPE_CONSTRUCTOR_BUILTIN_ROW
+                .description
+                .contains("Only valid inside comptime blocks")
+        );
+    }
+
+    /// ADR-009 (ticket B4, Stage 2, Dec 54): the `const_arg` row is
+    /// catalog-owned; it builds a CHECKED const argument for a
+    /// const-generic application — supplying it into a type-parameter slot
+    /// is a named kind rejection at `.apply(...)`.
+    #[test]
+    fn const_arg_row_is_catalog_owned_with_typed_signature() {
+        assert_eq!(CONST_ARG_BUILTIN_ROW.name, "const_arg");
+        assert_eq!(CONST_ARG_BUILTIN_ROW.signature, "const_arg(N) -> ConstArg");
+        assert_eq!(CONST_ARG_BUILTIN_ROW.return_type, "ConstArg");
+        assert_eq!(CONST_ARG_BUILTIN_ROW.category, "Comptime");
+        assert!(
+            CONST_ARG_BUILTIN_ROW
+                .description
+                .contains("checked const argument")
+        );
+        assert!(CONST_ARG_BUILTIN_ROW.description.contains("const-generic"));
+        assert!(
+            CONST_ARG_BUILTIN_ROW
+                .description
+                .contains("Only valid inside comptime blocks")
+        );
+    }
+
     /// ADR-009 (ticket B2, slice S3) rejection R6, A1 row-5 mirror: the
     /// reserved TraitRef/ImplRef carriers cannot lift past the stage
     /// boundary into runtime code — named diagnostics, keyed by the
@@ -721,7 +917,10 @@ mod tests {
             rejection.contains("TraitRef is a comptime-only compiler capability"),
             "{rejection}"
         );
-        assert!(rejection.contains("cannot enter runtime code"), "{rejection}");
+        assert!(
+            rejection.contains("cannot enter runtime code"),
+            "{rejection}"
+        );
 
         let impl_ref = typed_object_for_named_schema(
             COMPTIME_FROZEN_IMPL_REF_SCHEMA,
@@ -739,10 +938,78 @@ mod tests {
             rejection.contains("ImplRef is comptime-only implementation evidence"),
             "{rejection}"
         );
-        assert!(rejection.contains("cannot enter runtime code"), "{rejection}");
+        assert!(
+            rejection.contains("cannot enter runtime code"),
+            "{rejection}"
+        );
 
         // Scalar comptime results remain liftable.
         assert_eq!(runtime_lift_rejection(&KindedSlot::from_int(7)), None);
+    }
+
+    /// ADR-009 B4 (Stage 2, Dec 54) rejection R6/lift wall: the uniform-
+    /// application carriers and the `ParamKind` vocabulary cannot lift past the
+    /// stage boundary — named diagnostics keyed by the reserved schema names,
+    /// registered in the SAME commit as the schemas.
+    #[test]
+    fn runtime_lift_rejection_names_uniform_application_carriers_as_comptime_only() {
+        use crate::type_schema::typed_object_for_named_schema;
+
+        let constructor = typed_object_for_named_schema(
+            COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
+            &[
+                ("identity_high", KindedSlot::from_int(11)),
+                ("identity_low", KindedSlot::from_int(22)),
+            ],
+        );
+        let rejection =
+            runtime_lift_rejection(&constructor).expect("TypeConstructorRef must not lift");
+        assert!(
+            rejection.contains("TypeConstructorRef is a comptime-only compiler capability"),
+            "{rejection}"
+        );
+
+        let applied = typed_object_for_named_schema(
+            COMPTIME_APPLIED_TYPE_SCHEMA,
+            &[
+                ("identity_high", KindedSlot::from_int(1)),
+                ("identity_low", KindedSlot::from_int(2)),
+                ("head_identity_high", KindedSlot::from_int(3)),
+                ("head_identity_low", KindedSlot::from_int(4)),
+                ("arg_identities", KindedSlot::none()),
+            ],
+        );
+        let rejection = runtime_lift_rejection(&applied).expect("AppliedType must not lift");
+        assert!(
+            rejection.contains("AppliedType is comptime-only reflection data"),
+            "{rejection}"
+        );
+
+        let param_kind = typed_object_for_named_schema(
+            PARAM_KIND_SCHEMA_NAME,
+            &[("__variant", KindedSlot::from_int(0))],
+        );
+        let rejection = runtime_lift_rejection(&param_kind).expect("ParamKind must not lift");
+        assert!(
+            rejection.contains("ParamKind is comptime-only reflection data"),
+            "{rejection}"
+        );
+    }
+
+    /// The `ParamKind` catalog is the exact-two type-vs-const model (Dec 54)
+    /// and completes through the shared `reflection_enum_variant_names` surface
+    /// with no second variant list.
+    #[test]
+    fn param_kind_catalog_is_exactly_type_and_const() {
+        assert_eq!(
+            ParamKind::ALL.map(ParamKind::variant_name),
+            ["Type", "Const"]
+        );
+        assert_eq!(PARAM_KIND_SCHEMA_NAME, "ParamKind");
+        assert_eq!(
+            reflection_enum_variant_names(PARAM_KIND_SCHEMA_NAME),
+            Some(vec!["Type", "Const"])
+        );
     }
 
     /// The `type_ref` row is catalog-owned and keeps the load-bearing hover
@@ -909,7 +1176,7 @@ mod tests {
                 .expect("enabled payload variant must be a catalog category");
             assert_eq!(position as u16, category.catalog_ordinal());
         }
-        assert_eq!(FrozenTypeCategory::ALL.len(), 10);
+        assert_eq!(FrozenTypeCategory::ALL.len(), 11);
     }
 
     /// The enabled-payload doc enumeration is derived from the same list
@@ -1256,8 +1523,8 @@ mod tests {
             INTEGER_WIDTH_SCHEMA_NAME,
             FLOAT_WIDTH_SCHEMA_NAME,
         ] {
-            let names = reflection_enum_variant_names(catalog_name)
-                .expect("catalog names must resolve");
+            let names =
+                reflection_enum_variant_names(catalog_name).expect("catalog names must resolve");
             assert!(!names.is_empty());
             assert!(!names.contains(&"Unknown"), "{catalog_name}");
             assert!(!names.contains(&"Any"), "{catalog_name}");

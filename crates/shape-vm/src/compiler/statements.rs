@@ -4730,6 +4730,24 @@ impl BytecodeCompiler {
                     .map(|trait_path| qualify_name(trait_path.as_str()).into())
                     .collect(),
             ),
+            // ADR-009 B3 (S1): existential descriptor package. The witnesses are
+            // locally-bound type names, so extend the shadow set with them before
+            // qualifying the inner descriptor — a witness must never be qualified
+            // as a module symbol.
+            TypeAnnotation::Existential { witnesses, inner } => {
+                let mut inner_type_params = type_params.clone();
+                for w in witnesses {
+                    inner_type_params.insert(w.clone());
+                }
+                TypeAnnotation::Existential {
+                    witnesses: witnesses.clone(),
+                    inner: Box::new(Self::qualify_module_type_annotation(
+                        inner,
+                        module_path,
+                        &inner_type_params,
+                    )),
+                }
+            }
             TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null

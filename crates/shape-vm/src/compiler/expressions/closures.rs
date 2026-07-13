@@ -687,6 +687,9 @@ fn annotation_contains_unknown(ann: &TypeAnnotation) -> bool {
         }
         TypeAnnotation::Generic { args, .. } => args.iter().any(annotation_contains_unknown),
         TypeAnnotation::Borrow { inner, .. } => annotation_contains_unknown(inner),
+        // ADR-009 B3 (S1): existential descriptor package — check the inner
+        // descriptor for `unknown` holes.
+        TypeAnnotation::Existential { inner, .. } => annotation_contains_unknown(inner),
         TypeAnnotation::Reference(_)
         | TypeAnnotation::Dyn(_)
         | TypeAnnotation::Void

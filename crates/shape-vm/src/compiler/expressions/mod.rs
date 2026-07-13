@@ -567,6 +567,9 @@ impl BytecodeCompiler {
                 name.as_str() == "unknown" || args.iter().any(Self::annotation_contains_unknown)
             }
             TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.as_str() == "unknown"),
+            // ADR-009 B3 (S1): existential descriptor package — check the inner
+            // descriptor for `unknown` holes.
+            TypeAnnotation::Existential { inner, .. } => Self::annotation_contains_unknown(inner),
             TypeAnnotation::Void
             | TypeAnnotation::Never
             | TypeAnnotation::Null

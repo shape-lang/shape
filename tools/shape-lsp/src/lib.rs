@@ -22,6 +22,7 @@ pub mod doc_render;
 pub mod doc_symbols;
 pub mod document;
 pub mod document_symbols;
+pub mod expansion_views;
 pub mod folding;
 pub mod foreign_lsp;
 pub mod formatting;

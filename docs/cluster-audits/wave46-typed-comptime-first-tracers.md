@@ -124,9 +124,11 @@ growth pressure on the pre-existing oversized `comptime_builtins.rs`.
    decision. See the B1 addendum below.
 3. Native type-expression syntax that can form `TypeRef` for tuples, records,
    callables, references, unions, erased domains, and applied generic types.
-   CLOSED (2026-07-13, ADR009-A2, ticket #4) — see the A2 addendum below;
-   const-generic applications remain a named parse-time rejection until
-   B4/Dec-54 lands the const carrier.
+   CLOSED (2026-07-13, ADR009-A2, ticket #4) — see the A2 addendum below.
+   Const-generic applications inside `type_ref(...)` stay a named parse-time
+   rejection; the checked const carrier landed with ADR009-B4/Dec-54 as
+   `const_arg(N)` applied through `type_constructor(Head).apply(...)` (see the
+   B4 addendum below).
 4. Complete semantic normalization for applied nominals, object intersections,
    and trait intersections on every call path. The declared-generic-parameter
    half of this gap is CLOSED (2026-07-12, ADR009-A3): the generic-call
@@ -639,3 +641,109 @@ of the harness CaptureAdapter — reproduced byte-for-byte with a hand-written
 control; the VM+JIT behavior-unchanged proofs in
 `annotations_comptime/generated_method_runtime.rs` therefore assert result
 values where affected.
+
+## ADR009-B4 Addendum (2026-07-13, ticket #8, branch adr009/b4)
+
+Ticket B4 (spec Stage 2, Dec 54, slices S1-S3) adds uniform nominal application
+on top of the A2 checked type-expression surface. Nothing here re-derives arity
+or parameter kinds from a parallel table; `param_kinds_of` in `semantic_freeze.rs`
+is the SINGLE projection, and `canonical_apply` reproduces A2's
+`canonical_applied` descriptor byte-for-byte rather than minting a second
+identity spelling.
+
+- **Compiler model (S1)**
+  (`shape-vm/src/compiler/comptime_builtins/type_reflection.rs`):
+  `ConstructorDescriptor { head_identity, "constructor:<head_hex>", identity }`
+  is comptime-only and distinct from a bare nominal leaf; `AppliedArg::{Type,
+  Const}` carries argument identities uniformly (hex-embedded, no per-kind
+  descriptor fork); `RefinedApplication` records head + ordered arg identities.
+  `canonical_constructor` rejects R6 unknown-head and R5 non-Nominal heads
+  through the ONE freeze query (`overlay.identity_of` / `category_of`);
+  `canonical_const_arg` mints `const:int:{value}`; `canonical_apply` checks
+  arity + type-vs-const kind via `overlay.param_kinds_of` (arity = vec length),
+  empty args collapsing to the A2 bare-nominal `type_ref(Head)` identity and
+  non-empty args reproducing `applied:<head_hex><arg_hex,...>`;
+  `canonical_refine` returns `None` for bare/non-applied descriptors (round-trips
+  only genuine applications); `type_argument` names its out-of-range rejection.
+  A generic enum head whose param kinds are unrecoverable hits
+  `ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC` (surface-and-stop, never a
+  guessed kind).
+- **Identity equality both directions (S1).** Unit e2es assert
+  `identity(apply(constructor(Option),[int])) == identity(type_ref(Option<int>))`
+  and back (`type_reflection/tests.rs`: apply==A2, refine round-trip, refine
+  None, constructor identity distinct, non-nominal/unknown/arity/kind rejects,
+  enum-head surface-and-stop; carrier round-trips: forgery reject, apply-over-
+  carriers==A2, refine mismatch, const-generic apply).
+- **Runtime carriers + intrinsics (S2).** Reserved unspellable schemas
+  `"\u{1}comptime:TypeConstructorRef"` (2 int identity fields) and
+  `"\u{1}comptime:AppliedType"` (5 fields incl. an `arg_identities`
+  `array<i64>`) plus the `ParamKind` enum schema
+  (`type_schema/builtin_schemas.rs`); `reserved_storage` is the schema-name-
+  checked forgery wall (TraitRef/ImplRef precedent). Five intrinsics
+  (`type_constructor` / `const_arg` / `apply` / `refine` / `type_argument`)
+  register against the SAME per-compilation-unit freeze handle. The comptime
+  site-rewrite lowers `type_constructor(C)` / `const_arg(N)` like `type_ref`
+  (identity literals, no surviving name string) and rewrites `apply` / `refine`
+  / `type_argument` to method forwarders with the receiver prepended; `apply`
+  transports variadic CHECKED carriers (R4 untyped-array structurally
+  impossible).
+- **Wiring bug found + fixed by the S1 e2e (in place, no parallel path).** The
+  `.apply(...)` variadic lowering synthesizes an array of the reserved comptime
+  carriers, and array element-kind inference could not prove the element type of
+  an array of a field-bearing REGISTRY-ONLY schema (C0001 "cannot infer the
+  element type"). Root cause: `named_user_type_concrete`
+  (`compiler/monomorphization/type_resolution.rs`) resolved registry ENUMs but
+  had no symmetric STRUCT arm. Fix adds the symmetric arm — a field-bearing
+  non-enum registry schema resolves to a named struct, so the ONE typed-array
+  kind table (`should_use_typed_array`) proves the element kind as `TypedObject`
+  (the `TypedArray<*const TypedObjectStorage>` carrier `apply_to_constructor`
+  reads back). User structs are unaffected (they already resolve via
+  `struct_types`); no second param-kind table, no dynamic fallback, no coercion
+  opcode.
+- **LSP rows are catalog-generated (S2).** `TYPE_CONSTRUCTOR_BUILTIN_ROW` /
+  `CONST_ARG_BUILTIN_ROW` (category "Comptime") live in the shared runtime
+  catalog (`comptime_reflection.rs`) and are spliced verbatim into
+  `CORE_BUILTINS` (`builtin_metadata.rs`); completion / hover / signature help
+  flow through the shared `unified_metadata()` path — no bespoke B4 LSP wiring.
+  `apply` / `refine` / `type_argument` stay method forwarders, so the free-
+  function surface is exactly the two rows (A2/B1/B2 precedent).
+
+### B4 rejection matrix (all named-diagnostic-asserted, green 2026-07-13)
+
+Public e2e rows live in `tools/shape-test/tests/comptime/typed_constructor.rs`,
+LSP rows in `tools/shape-test/tests/lsp/typed_comptime.rs`, unit pins in
+`type_reflection/tests.rs` and `semantic_freeze.rs`:
+
+| Row | Forbidden form | Asserting tests (e2e) |
+|---|---|---|
+| R6 | constructor over an unfrozen head | `typed_constructor.rs::type_constructor_over_an_unfrozen_head_is_the_named_r6_rejection` |
+| R5 | constructor over a non-nominal head | `type_constructor_over_a_non_nominal_head_is_the_named_r5_rejection` |
+| — | apply wrong arity | `apply_with_wrong_arity_is_the_named_arity_rejection` |
+| — | apply wrong kind (`const_arg` into a Type slot) | `apply_const_arg_into_a_type_slot_is_the_named_kind_rejection` |
+| — | enum-head arity/kinds unrecoverable | `ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC` surface-and-stop (`semantic_freeze.rs`; unit `type_reflection/tests.rs`) — never a guessed kind |
+| — | `type_argument` index out of range | `type_argument_out_of_range_is_the_named_rejection` |
+| forgery | hand-forged / mismatched carrier | `reserved_storage` schema-name wall (unit carrier round-trips) |
+| lift | TypeConstructorRef / AppliedType escaping to runtime | `type_constructor_ref_cannot_escape_to_runtime_code`, `applied_type_cannot_escape_to_runtime_code`; `ParamKind` lift arm in `comptime_reflection.rs::runtime_lift_rejection` |
+
+### B4 positive proofs (VM AND JIT, green 2026-07-13)
+
+`tools/shape-test/tests/comptime/typed_constructor.rs` runs each positive on
+BOTH engines via `expect_vm_and_jit_output` (VM + `.with_jit()`):
+`apply_option_then_type_argument_reflects_the_applied_primitive`,
+`apply_result_then_first_type_argument_reflects_int`,
+`apply_result_then_second_type_argument_reflects_string`,
+`refine_against_own_constructor_round_trips_the_type_argument`,
+`refine_against_a_different_constructor_is_none`. LSP:
+completion / hover / signature-help over `type_constructor` and `const_arg`
+through the shared catalog (`typed_comptime.rs`, B4 module).
+
+### B4 verification (2026-07-13)
+
+Strictly additive vs the wave-2 final base (`main@5697ff3b`); no deletions, no
+rebaselines other than one stale B1 const-generic-rejection message synced to
+the landed R9 relax. Gate list: shape-vm `compiler::comptime_builtins::
+type_reflection` + `::semantic_freeze`, shape-runtime `comptime_reflection` +
+`type_schema::builtin_schemas`, shape-ast `type_ref_syntax`, ShapeTest
+`comptime` (incl. the 12-test `typed_constructor.rs` matrix) + LSP
+`typed_comptime` (B4 rows), `cargo check -p shape-vm -p shape-runtime -p
+shape-ast --all-targets` and `-p shape-test --tests`, `check-no-dynamic.sh`.

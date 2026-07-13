@@ -72,6 +72,12 @@ pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
         TypeAnnotation::Null => "None".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
         TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.join(" + ")),
+        // ADR-009 B3 (S1): existential descriptor package type. Semantic
+        // handling (freeze/reflection) lands in later slices; render the
+        // canonical spelling here.
+        TypeAnnotation::Existential { witnesses, inner } => {
+            format!("exists<{}> {}", witnesses.join(", "), annotation_to_string(inner))
+        }
     }
 }
 
@@ -202,6 +208,12 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
         }
         TypeAnnotation::Null | TypeAnnotation::Undefined => SemanticType::Void,
         TypeAnnotation::Dyn(traits) => SemanticType::Named(format!("dyn {}", traits.join(" + "))),
+        // ADR-009 B3 (S1): existential descriptor package type. No legacy
+        // SemanticType representation yet — the freeze/reflection surface (S2/S3)
+        // is the semantic home. Name it by its canonical spelling (mirrors Dyn)
+        // so any premature use surfaces as an unresolved-type error rather than
+        // silently erasing to Any/Void.
+        TypeAnnotation::Existential { .. } => SemanticType::Named(annotation_to_string(ann)),
     }
 }
 

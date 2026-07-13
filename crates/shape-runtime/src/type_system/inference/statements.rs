@@ -19,6 +19,25 @@ impl TypeInferenceEngine {
     /// collapses to the `number` default — producing a kind-confused result.
     pub(crate) fn infer_assignment(&mut self, assign: &Assignment, span: Span) -> TypeResult<()> {
         let value_type = self.infer_expr(&assign.value)?;
+        // ADR-009 B3 (Dec 51, rejection-matrix row 2): a hidden `some`-witness
+        // must not escape its opening scope. Assigning a witness-typed value to
+        // a binding declared SHALLOWER than the innermost live `some` body lets
+        // the witness outlive its opening — reject unless it was repackaged as
+        // an existential (which erases the concrete witness away, so its type no
+        // longer mentions the opened var and this check passes).
+        if let Some(frame) = self.comptime_witness_frames.last() {
+            if let Some(name) = assign.pattern.as_identifier() {
+                let escapes = self
+                    .env
+                    .declaring_scope_depth(name)
+                    .is_some_and(|declared| declared < frame.body_scope_depth);
+                if escapes && self.type_mentions_active_witness(&value_type) {
+                    return Err(TypeError::ConstraintViolation(
+                        crate::comptime_reflection::WITNESS_ESCAPES_SCOPE_DIAGNOSTIC.to_string(),
+                    ));
+                }
+            }
+        }
         if let Some(name) = assign.pattern.as_identifier() {
             let scheme = self.env.lookup(name).cloned();
             let target_type = match scheme {
