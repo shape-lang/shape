@@ -720,6 +720,11 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     // generated from that catalog's single variant list.
     crate::comptime_reflection::TYPE_REF_BUILTIN_ROW,
     crate::comptime_reflection::TYPE_CATEGORY_BUILTIN_ROW,
+    // ADR-009 B1 S1 — the `reflect` row is likewise catalog-owned; its
+    // enabled-payload enumeration is generated from the same list the
+    // FrozenType descriptor-schema registration consumes
+    // (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`).
+    crate::comptime_reflection::REFLECT_BUILTIN_ROW,
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a valid Shape string literal (quotes + escapes) so it can be embedded
     // into generated source produced by the `extend (expr)` directive.
@@ -892,6 +897,60 @@ mod tests {
             **type_category,
             crate::comptime_reflection::TYPE_CATEGORY_BUILTIN_ROW
         );
+    }
+
+    /// ADR-009 B1 S1: the `reflect` row's enabled-payload enumeration must be
+    /// generated from the shared runtime-owned catalog
+    /// (`comptime_reflection::FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`) — the
+    /// same list the descriptor-schema registration consumes. A hand-written
+    /// enumeration would drift the moment a payload ticket lands.
+    #[test]
+    fn reflect_row_enumerates_enabled_payloads_from_shared_catalog() {
+        let row = collect_builtin_metadata()
+            .into_iter()
+            .find(|meta| meta.name == "reflect")
+            .expect("reflect builtin metadata should be registered");
+
+        let generated = crate::comptime_reflection::FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
+            .into_iter()
+            .map(|category| format!("`{}`", category.variant_name()))
+            .collect::<Vec<_>>()
+            .join(" | ");
+
+        assert!(
+            row.description.contains(&generated),
+            "reflect row must embed the enabled-payload enumeration generated \
+             from FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES (expected to contain \
+             {generated:?});\ndescription: {}",
+            row.description
+        );
+    }
+
+    /// ADR-009 B1 S1: the registered `reflect` row must BE the shared-catalog
+    /// descriptor — exactly once, byte-identical. Reintroducing a
+    /// hand-written row (or a duplicate that shadows the catalog one) fails
+    /// this test.
+    #[test]
+    fn reflect_row_is_the_shared_catalog_descriptor() {
+        let rows: Vec<_> = collect_builtin_metadata()
+            .into_iter()
+            .filter(|meta| meta.name == "reflect")
+            .collect();
+        assert_eq!(rows.len(), 1, "expected exactly one reflect row");
+        assert_eq!(*rows[0], crate::comptime_reflection::REFLECT_BUILTIN_ROW);
+    }
+
+    /// ADR-009 B1 S1 metadata pin: `reflect` is a comptime-only builtin.
+    /// This single predicate drives both LSP comptime-position visibility
+    /// and the compiler's outer comptime-only gating.
+    #[test]
+    fn reflect_is_a_comptime_builtin_function() {
+        assert!(is_comptime_builtin_function("reflect"));
+        // Sibling pins — the whole freeze-consuming family stays gated.
+        assert!(is_comptime_builtin_function("type_ref"));
+        assert!(is_comptime_builtin_function("type_category"));
+        // Non-comptime builtins stay ungated.
+        assert!(!is_comptime_builtin_function("range"));
     }
 
     #[test]

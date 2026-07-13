@@ -104,6 +104,134 @@ fn frozen_category_completion_filters_partial_variant_prefix() {
 }
 
 // =====================================================================
+// ADR-009 B1 (S5): reflect + the payload descriptor types. Hover flows
+// from the catalog-owned REFLECT_BUILTIN_ROW; completion visibility is
+// metadata-driven (is_comptime_builtin_function); descriptor-enum variant
+// completion is a catalog-keyed lookup over the shared runtime constants
+// (closed lists, no Unknown arm, no hand-written parallel list); semantic
+// diagnostics surface the R1/R2/R4/R5 rejection forms through the same
+// compile-error plumbing as the A1 rows.
+// =====================================================================
+
+#[test]
+fn comptime_completion_offers_reflect() {
+    ShapeTest::new("comptime {\n    \n}\n")
+        .at(pos(1, 4))
+        .expect_completion("reflect");
+}
+
+#[test]
+fn runtime_completion_hides_reflect() {
+    ShapeTest::new("")
+        .at(pos(0, 0))
+        .expect_no_completion("reflect");
+}
+
+#[test]
+fn annotation_comptime_hook_offers_reflect() {
+    ShapeTest::new(
+        "annotation inspect() {\n  targets: [type]\n  comptime post(target, ctx) {\n    \n  }\n}\n",
+    )
+    .at(pos(3, 4))
+    .expect_completion("reflect");
+}
+
+#[test]
+fn reflect_hover_exposes_typed_signature() {
+    ShapeTest::new("let reflected = comptime { reflect(type_ref(int)) }\n")
+        .at(pos(0, 29))
+        .expect_hover_contains("reflect(type_ref: TypeRef<T>) -> FrozenType<T>");
+}
+
+#[test]
+fn reflect_hover_notes_the_enabled_payload_stage() {
+    ShapeTest::new("let reflected = comptime { reflect(type_ref(int)) }\n")
+        .at(pos(0, 29))
+        .expect_hover_contains("named compile-time rejection");
+}
+
+#[test]
+fn frozen_type_completion_is_closed_to_enabled_payload_variants() {
+    ShapeTest::new("let payload = comptime { FrozenType:: }\n")
+        .at(pos(0, 37))
+        .expect_completion("Primitive")
+        .expect_completion("Never")
+        .expect_completion("Erased")
+        .expect_no_completion("Unknown")
+        .expect_no_completion("Nominal");
+}
+
+#[test]
+fn frozen_primitive_completion_is_closed_and_has_no_unknown_arm() {
+    ShapeTest::new("let payload = comptime { FrozenPrimitive:: }\n")
+        .at(pos(0, 42))
+        .expect_completion("SignedInteger")
+        .expect_completion("BinaryFloat")
+        .expect_completion("Decimal")
+        .expect_no_completion("Unknown");
+}
+
+#[test]
+fn frozen_primitive_completion_filters_partial_variant_prefix() {
+    ShapeTest::new("let payload = comptime { FrozenPrimitive::Si }\n")
+        .at(pos(0, 44))
+        .expect_completion("SignedInteger")
+        .expect_no_completion("Decimal");
+}
+
+#[test]
+fn generic_body_comptime_completion_offers_reflect() {
+    ShapeTest::new(
+        "fn describe<T>(value: T) -> string {\n  let label = comptime {\n    \n  }\n  label\n}\n",
+    )
+    .at(pos(2, 4))
+    .expect_completion("reflect");
+}
+
+#[test]
+fn generic_body_runtime_position_after_comptime_block_hides_reflect() {
+    ShapeTest::new(
+        "fn describe<T>(value: T) -> string {\n  let label = comptime {\n    type_ref(T)\n  }\n  \n  label\n}\n",
+    )
+    .at(pos(4, 2))
+    .expect_no_completion("reflect");
+}
+
+/// R1 (representative category): reflecting a non-enabled category surfaces
+/// the named per-category rejection through the LSP diagnostics path.
+#[test]
+fn reflect_non_enabled_category_has_semantic_diagnostic() {
+    ShapeTest::new("let reflected = comptime { reflect(type_ref(Array)) }\n")
+        .expect_semantic_diagnostic_contains(
+            "reflect: the Nominal payload descriptor has not landed",
+        );
+}
+
+/// R2: the legacy string-kind form (`info.kind == "record"`) is a named
+/// no-such-field rejection — descriptor schemas expose no `kind` field.
+#[test]
+fn reflect_string_kind_access_has_semantic_diagnostic() {
+    ShapeTest::new(
+        "let is_record = comptime {\n  let info = reflect(type_ref(int))\n  info.kind == \"record\"\n}\n",
+    )
+    .expect_semantic_diagnostic_contains("kind");
+}
+
+/// R4: a string argument is the named non-TypeRef rejection.
+#[test]
+fn reflect_string_argument_has_semantic_diagnostic() {
+    ShapeTest::new("let reflected = comptime { reflect(\"int\") }\n")
+        .expect_semantic_diagnostic_contains("reflect expects a TypeRef value");
+}
+
+/// R5: runtime-position reflect is comptime-only.
+#[test]
+fn runtime_position_reflect_has_semantic_diagnostic() {
+    ShapeTest::new("let reflected = reflect(type_ref(int))\n")
+        .expect_semantic_diagnostic_contains("comptime-only builtin");
+}
+
+// =====================================================================
 // ADR-009 A3 (S5): LSP surface inside comptime blocks in GENERIC fn
 // bodies. Generic template bodies are never compiled at definition
 // (functions.rs:770-776 skip), so completion/hover MUST come from the

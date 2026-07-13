@@ -2342,11 +2342,38 @@ impl BytecodeCompiler {
 
     /// Register an enum definition in the TypeSchemaRegistry
     fn register_enum(&mut self, enum_def: &EnumDef) -> Result<()> {
+        // ADR-009 B1 S3 — the comptime-injected `FrozenType` payload enum
+        // carries the Dec 50/94 catalog ORDINALS as variant ids
+        // (Primitive=0, Never=1, Erased=9), matching the ordinal-pinned
+        // unspellable descriptor schema (`builtin_schemas.rs`) the
+        // `reflect()` value carrier is built against — never densely
+        // renumbered (comptime-ABI stability, spec §3.3). The pin applies
+        // only in comptime mode when EVERY member is an enabled-payload
+        // catalog variant (i.e. exactly the injected model enum); ordinary
+        // user enums keep declaration-index ids.
+        let pinned_ordinals: Option<Vec<u16>> = if self.comptime_mode
+            && enum_def.name == shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME
+        {
+            enum_def
+                .members
+                .iter()
+                .map(|member| {
+                    shape_runtime::comptime_reflection::frozen_type_payload_variant_ordinal(
+                        &member.name,
+                    )
+                })
+                .collect()
+        } else {
+            None
+        };
         let variants: Vec<EnumVariantInfo> = enum_def
             .members
             .iter()
             .enumerate()
             .map(|(id, member)| {
+                let id = pinned_ordinals
+                    .as_ref()
+                    .map_or(id as u16, |pins| pins[id]);
                 // W18.0 (User 2026-05-23 Item 1): carry variant payload
                 // shape into the runtime EnumVariantInfo so print() can
                 // render `Red` / `Blue(42)` / `Point { x: 1, y: 2 }` per
@@ -2354,13 +2381,13 @@ impl BytecodeCompiler {
                 // is unchanged (`__payload_N` slots at offset 8/16/...);
                 // the kind here only descriptively shapes the print form.
                 match &member.kind {
-                    EnumMemberKind::Unit { .. } => EnumVariantInfo::new(&member.name, id as u16, 0),
+                    EnumMemberKind::Unit { .. } => EnumVariantInfo::new(&member.name, id, 0),
                     EnumMemberKind::Tuple(types) => {
-                        EnumVariantInfo::new(&member.name, id as u16, types.len() as u16)
+                        EnumVariantInfo::new(&member.name, id, types.len() as u16)
                     }
                     EnumMemberKind::Struct(fields) => {
                         let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
-                        EnumVariantInfo::new_struct(&member.name, id as u16, names)
+                        EnumVariantInfo::new_struct(&member.name, id, names)
                     }
                 }
             })

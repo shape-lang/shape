@@ -107,8 +107,21 @@ growth pressure on the pre-existing oversized `comptime_builtins.rs`.
 ## Still Missing
 
 1. Payload-bearing and type-indexed `FrozenType<T>` descriptors for all ten
-   categories.
-2. The sealed `FrozenPrimitive<T>` sub-algebra and exact width/domain payloads.
+   categories. PARTIALLY CLOSED (2026-07-13, ADR009-B1): `reflect(TypeRef<T>)
+   -> FrozenType<T>` is live with the first three complete payload
+   categories — Primitive, Never, Erased — at catalog-pinned ordinals 0/1/9;
+   the seven remaining categories are named compile-time reflect-rejections
+   ("payload descriptor has not landed"), never partial descriptors, while
+   `type_category` stays exhaustive at 10. Remaining payloads are B2/B4-B7
+   territory. See the B1 addendum below.
+2. The sealed `FrozenPrimitive<T>` sub-algebra and exact width/domain
+   payloads. CLOSED (2026-07-13, ADR009-B1): the sealed 10-member
+   `FrozenPrimitive` sub-algebra (Unit, Bool, Char, SignedInteger,
+   UnsignedInteger, BinaryFloat, Decimal, String, Null, Undefined) with
+   `IntegerWidth` (W8/W16/W32/W64/Arbitrary) and `FloatWidth` (W32/W64)
+   domain payloads is catalog-generated, VM+JIT-proven across every synonym
+   family, and lift-walled. `bigint` = `SignedInteger(Arbitrary)` by named
+   decision. See the B1 addendum below.
 3. Native type-expression syntax that can form `TypeRef` for tuples, records,
    callables, references, unions, erased domains, and applied generic types.
 4. Complete semantic normalization for applied nominals, object intersections,
@@ -213,3 +226,110 @@ Suite counts changed since the wave46 baseline (all strictly additive vs
   module); shape-lsp `completion::tests` 58 + `context::tests` 58 passed.
 - `just check-clean` + `scripts/check-no-dynamic.sh`: green at slice close
   (see S5 close-out in `docs/defections.md`).
+
+## ADR009-B1 Addendum (2026-07-13, ticket #5, branch adr009/b1)
+
+Ticket B1 (spec §5 Stage 2, Dec 50/94) lands `reflect(TypeRef<T>) ->
+FrozenType<T>` — the sealed payload-bearing indexed sum — with the FIRST
+complete payload categories: Primitive (the sealed 10-member
+`FrozenPrimitive` sub-algebra with exact `IntegerWidth`/`FloatWidth`
+width/domain payloads), Never, and Erased (bound sets, provably empty for
+`any` until A2). It closes Still-Missing item 2 and partially closes item 1
+above (3 of 10 payload categories; the rest are B2/B4-B7).
+
+- **The ONE query API grew.** `SemanticFreeze::payload_of` +
+  `FreezeOverlay::payload_of` sit beside `identity_of`/`category_of`
+  (`semantic_freeze.rs`); no parallel projection. Payloads derive from the
+  same single `PRIMITIVE_SYNONYM_FAMILIES` table that produces identities
+  (`type_reflection.rs`) — one construction point per spec §4.1. Descriptor
+  builders live in the new `type_reflection/payloads.rs` (file-size policy;
+  `type_reflection.rs` stays under 500 lines).
+- **Catalog-owned data model.** The sealed `FrozenPrimitive` sub-algebra,
+  the enabled-payload list, the `REFLECT_BUILTIN_ROW`, the width-domain
+  enums (`IntegerWidth` W8-W64 + `Arbitrary`, `FloatWidth` W32/W64), and
+  the LSP variant-completion lookup
+  (`reflection_enum_variant_names`) are ALL generated from the shared
+  runtime catalog (`shape-runtime/src/comptime_reflection.rs`) — no second
+  hand-written list anywhere (the exact defect A1 deleted). `bigint` is
+  `SignedInteger(IntegerWidth::Arbitrary)` by named decision.
+- **Ordinal-pinned comptime ABI.** The three constructable `FrozenType`
+  payload variants carry the Dec 50/94 catalog ORDINALS (Primitive=0,
+  Never=1, Erased=9), not dense ids, so later B tickets add variants
+  without renumbering (spec §3.3). The mini-VM's injected spellable model
+  enum is pinned to the same ordinals at `register_enum` time
+  (`frozen_type_payload_variant_ordinal`), so the spellable model and the
+  unspellable value carrier can never disagree
+  (`comptime/reflect.rs::never_and_erased_payload_arms_execute_on_vm_and_jit`
+  proves the Erased=9 arm end-to-end).
+- **Lift wall extended, same-commit discipline.** Every new descriptor
+  schema ("\u{1}comptime:FrozenType" / …FrozenPrimitive / …FrozenNever /
+  …FrozenErased, plus the IntegerWidth/FloatWidth carriers and the
+  spellable model names) gained its own named `runtime_lift_rejection` arm
+  in the SAME commit as its registration — no schema ever existed without
+  a lift wall. The comptime-result wall became a VALUE-DEEP walk
+  (`comptime_result_lift_rejection`: typed-object fields + typed-array
+  elements, executed under the mini-VM program's schema registry) after a
+  red run proved nested descriptors were silently swallowed to `Null`; the
+  fix extends the CHANNEL to call the shared wall, never the reverse.
+- **Runtime-name-collision fence.** The pre-existing runtime `reflect`
+  surface stub (`helpers.rs` name mapping → `BuiltinFunction::Reflect`,
+  executor `NotImplemented` arm) is UNTOUCHED and unit-pinned in both
+  directions; comptime `reflect` resolves to the freeze-consuming forwarder
+  by resolution order, and runtime-position `reflect` is the named
+  comptime-only rejection.
+- **Tracer discipline.** Reflecting any of the 7 non-enabled categories is
+  a NAMED per-category compile-time rejection ("reflect: the `<Category>`
+  payload descriptor has not landed (pending payload ticket); use
+  type_category for the exhaustive category") — never a partial
+  descriptor. The 10-variant `FrozenTypeCategory` catalog is untouched;
+  its completeness test (`comptime_reflection.rs`) stays the canary, and
+  `type_category` is proven exhaustive at 10 alongside `reflect` in one
+  program.
+
+### B1 rejection matrix (rows R1-R8, all named-diagnostic-asserted, green 2026-07-13)
+
+| Row | Forbidden form | Asserting tests |
+|---|---|---|
+| R1 | `reflect()` on a non-enabled category (7 categories) | e2e (both reachable forms): `comptime/reflect.rs::{reflect_on_generic_parameter_is_the_named_r1_rejection, reflect_on_nominal_types_is_the_named_r1_rejection, r1_rejection_points_at_the_exhaustive_category_layer}`; hooks: `annotations_comptime/frozen_reflection.rs::annotation_handler_reflect_r1_rejection_fires_in_hooks`; all 7 per-category diagnostics at unit level: `type_reflection/tests.rs::non_enabled_categories_reject_with_named_per_category_diagnostics`, `builder_rejects_non_enabled_categories_with_the_named_diagnostic`; compiler pin `comptime.rs::reflect_non_enabled_category_is_the_named_r1_rejection`; LSP `lsp/typed_comptime.rs::reflect_non_enabled_category_has_semantic_diagnostic`. (Tuple/Record/Callable/Reference/Union have no `type_ref` spelling until A2 — unit-pinned only, per invariant §3.7; documented in the reflect.rs suite header.) |
+| R2 | String kind access (`info.kind == "record"`, `.fields ?? []`) | `comptime/reflect.rs::{reflect_result_has_no_string_kind_field, reflect_result_has_no_nullable_fields_field}`; unit `comptime.rs::reflect_result_has_no_string_kind_field`; LSP `reflect_string_kind_access_has_semantic_diagnostic`. No descriptor schema has a `"kind"` string field or a nullable category field. |
+| R3 | Descriptor lifts to runtime (any channel) | `comptime/reflect.rs::{frozen_type_descriptor_cannot_escape_to_runtime_code, frozen_primitive_descriptor_cannot_escape_to_runtime_code, frozen_never_descriptor_cannot_escape_to_runtime_code, frozen_erased_descriptor_cannot_escape_to_runtime_code, width_domain_payloads_cannot_escape_to_runtime_code, descriptor_nested_in_an_object_cannot_escape_to_runtime_code, descriptor_nested_in_an_array_cannot_escape_to_runtime_code, descriptor_cannot_lift_through_the_set_param_value_directive}`; deep-walk unit pins `comptime.rs::{deep_lift_wall_names_a_descriptor_nested_in_an_object_result, deep_lift_wall_ignores_ordinary_comptime_results}`; per-schema arms `comptime_reflection.rs::{each_new_descriptor_schema_has_its_own_named_lift_rejection, width_domain_schemas_have_their_own_named_lift_rejection, spellable_payload_model_names_have_their_own_named_lift_rejection, lift_rejection_still_fires_for_type_ref_and_frozen_type_category, lift_rejection_ignores_ordinary_values}` |
+| R4 | Wrong arity / non-`TypeRef` argument (string, int, legacy `__ComptimeTypeRef` descriptor) | `comptime/reflect.rs::{reflect_requires_exactly_one_type_ref_argument, reflect_rejects_non_type_ref_arguments}`; unit `comptime.rs::reflect_arg_forms_are_rejected_with_named_diagnostics`; LSP `reflect_string_argument_has_semantic_diagnostic` |
+| R5 | `reflect()` at runtime position (incl. generic bodies) | `comptime/reflect.rs::{reflect_is_comptime_only, reflect_is_comptime_only_inside_generic_bodies}`; unit `comptime.rs::reflect_is_comptime_only_at_runtime_position`; collision fence (both directions) `comptime.rs::runtime_reflect_name_mapping_and_stub_arm_are_untouched`; LSP `runtime_position_reflect_has_semantic_diagnostic` + visibility rows `{runtime_completion_hides_reflect, generic_body_runtime_position_after_comptime_block_hides_reflect}` |
+| R6 | Non-exhaustive match / `Unknown`-`Any` arm on the sealed sum | `comptime/reflect.rs::{reflect_matches_are_checked_for_exhaustiveness, no_escape_arm_is_nameable_on_the_sealed_sum}`; unit `comptime.rs::reflect_match_exhaustiveness_is_enforced_over_the_injected_model`; LSP closed completion `{frozen_type_completion_is_closed_to_enabled_payload_variants, frozen_primitive_completion_is_closed_and_has_no_unknown_arm}` |
+| R7 | User code forges a descriptor | Unspellable schema names + no public constructor (structural); forged SPELLABLE model values are lift-walled: `comptime/reflect.rs::comptime_constructed_model_values_are_still_lift_walled`; unit `comptime.rs::deep_lift_wall_names_a_forged_spellable_model_value` |
+| R8 | Partially populated descriptor / `Default`-empty constructor | Structural: `FrozenPayloadDescriptor` has no `Default`; `FrozenErasedBound` is a deliberately UNINHABITED enum (a non-empty bound set is unrepresentable until A2/B2); grep at slice close over `payloads.rs`, `type_reflection.rs`, `semantic_freeze.rs`, `comptime_reflection.rs` finds no `derive(Default)`/`impl Default` on any descriptor type (wave46 row-9 discipline) |
+
+### B1 verification recipe and counts (2026-07-13, all green)
+
+Focused invocations (single cgroup lane, `direnv exec`, per AGENTS.md):
+
+- `cargo check -p shape-vm -p shape-runtime -p shape-lsp -p shape-test
+  --all-targets` — green.
+- `bash scripts/check-no-dynamic.sh` — exit 0, every per-symbol count
+  exactly at baseline (monotonic gate; no forbidden-family identifiers).
+- shape-vm `--lib`: `compiler::comptime_builtins` 33 passed (incl. the
+  9-test identity matrix, the S2 payload matrices, the E5 confinement
+  sentinel, semantic_freeze); `compiler::comptime` 109 passed / 4
+  pre-existing ignores (incl. the S3/S4 reflect pins);
+  `compiler::monomorphization` 175; `feature_tests::module_tests` 10.
+- shape-runtime `--lib`: `comptime_reflection` 30;
+  `type_schema::builtin_schemas` 12; `builtin_metadata` 7 (incl.
+  `is_comptime_builtin_function("reflect")` metadata pin).
+- shape-lsp `--lib`: 779 passed (completion catalog-lookup drift pins +
+  reflect hover pin included).
+- ShapeTest `comptime`: 152 passed with two threads (122 at the B1 branch
+  base incl. the A3-grown 30-test `frozen_type.rs`, + the 30-test
+  `reflect.rs` suite; `frozen_type.rs` and the legacy `type_info_chained`
+  suite untouched and green).
+- ShapeTest `annotations_comptime`: 50 passed at `--test-threads=1` (the
+  justfile-documented stable mode; 48 at A1/A3 close + the 2 S4
+  payload/R1 hook rows in `frozen_reflection.rs`).
+- ShapeTest `lsp` `typed_comptime`: 38 passed (24 at S3 close + 14 S5
+  rows); `structs_types` `generics_comptime`: 20 passed (A3 regression
+  surface, untouched).
+- `just check-clean`: green at slice close (canonical workspace gate).
+
+Every positive payload behavior is proven on BOTH engines via
+`expect_vm_and_jit_output`; no test exercises a non-enabled category's
+payload structure (invariant §3.7). Rejected-compromise log: the
+2026-07-13 ADR009-B1 close-out entry in `docs/defections.md`.

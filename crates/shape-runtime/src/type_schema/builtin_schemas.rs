@@ -15,6 +15,29 @@ use crate::comptime_reflection::FrozenTypeCategory;
 /// construct a lookalike nominal carrier.
 pub const COMPTIME_FROZEN_TYPE_REF_SCHEMA: &str = "\u{1}comptime:TypeRef";
 
+/// ADR-009 B1 S1 — unspellable schema identity for the payload-bearing
+/// `FrozenType` sealed indexed sum returned by `reflect(TypeRef<T>)`
+/// (Dec 50/94). Declares ONLY the enabled payload variants
+/// (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`), with variant ids pinned to
+/// the 10-category catalog ordinals.
+pub const COMPTIME_FROZEN_TYPE_SCHEMA: &str = "\u{1}comptime:FrozenType";
+
+/// ADR-009 B1 S1 — unspellable schema identity for the sealed
+/// `FrozenPrimitive` sub-algebra (the `FrozenType::Primitive` payload).
+/// Generated from the shared runtime catalog
+/// (`comptime_reflection::FROZEN_PRIMITIVE_VARIANTS`).
+pub const COMPTIME_FROZEN_PRIMITIVE_SCHEMA: &str = "\u{1}comptime:FrozenPrimitive";
+
+/// ADR-009 B1 S1 — unspellable schema identity for the `FrozenNever` marker
+/// descriptor (the `FrozenType::Never` payload). Zero fields.
+pub const COMPTIME_FROZEN_NEVER_SCHEMA: &str = "\u{1}comptime:FrozenNever";
+
+/// ADR-009 B1 S1 — unspellable schema identity for the `FrozenErased`
+/// descriptor (the `FrozenType::Erased` payload). Carries the bound-set
+/// array only — reachable today solely as the empty set via `any` (A2
+/// unlanded); no field pretends `dyn Trait` bounds exist (spec §3.7).
+pub const COMPTIME_FROZEN_ERASED_SCHEMA: &str = "\u{1}comptime:FrozenErased";
+
 // =========================================================================
 // Field index constants
 // =========================================================================
@@ -263,6 +286,82 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     let _comptime_frozen_type_ref = TypeSchemaBuilder::new(COMPTIME_FROZEN_TYPE_REF_SCHEMA)
         .int_field("identity_high")
         .int_field("identity_low")
+        .register(registry);
+
+    // -- ADR-009 B1 S1: payload-bearing descriptor schemas -----------------
+    //
+    // The four `reflect()` descriptor schemas. All four are unspellable
+    // (SOH-prefixed) so Shape source can never construct a lookalike
+    // nominal carrier, and every one has a named arm in
+    // `comptime_reflection::runtime_lift_rejection` — registered in the
+    // SAME commit, so no schema ever exists without a lift wall. No schema
+    // exposes a string `kind` field or a nullable category field
+    // (Dec 50/94 required rejection).
+
+    // `FrozenType`: the sealed indexed sum. ONLY the enabled payload
+    // variants are declared (no forgeable stub variants for the seven
+    // pending categories); variant ids are the Dec 50/94 catalog ORDINALS
+    // (Primitive=0, Never=1, Erased=9) so later B tickets extend the enum
+    // without renumbering (comptime-ABI stability, spec §3.3).
+    let _comptime_frozen_type = registry.register_enum_scoped(
+        COMPTIME_FROZEN_TYPE_SCHEMA,
+        crate::comptime_reflection::FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
+            .into_iter()
+            .map(|category| {
+                EnumVariantInfo::new(category.variant_name(), category.catalog_ordinal(), 1)
+            })
+            .collect(),
+    );
+
+    // `FrozenPrimitive`: the sealed sub-algebra, generated from the shared
+    // runtime catalog — same names, same order, same typed width/domain
+    // payload arities. The sub-algebra is complete (all members land with
+    // B1), so declaration-order ids are canonical.
+    let _comptime_frozen_primitive = registry.register_enum_scoped(
+        COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
+        crate::comptime_reflection::FROZEN_PRIMITIVE_VARIANTS
+            .iter()
+            .enumerate()
+            .map(|(id, variant)| {
+                EnumVariantInfo::new(variant.name, id as u16, variant.payload_arity)
+            })
+            .collect(),
+    );
+
+    // ADR-009 B1 S2 — width-domain enum carriers for the `FrozenPrimitive`
+    // integer/float family payloads, generated from the shared runtime
+    // catalog (`IntegerWidth::ALL` / `FloatWidth::ALL` + `variant_name`).
+    // Spellable names, following the `FrozenTypeCategory` precedent (user
+    // comptime code matches their variants); each has its own named
+    // `runtime_lift_rejection` arm registered in the same commit.
+    let _integer_width = registry.register_enum_scoped(
+        crate::comptime_reflection::INTEGER_WIDTH_SCHEMA_NAME,
+        crate::comptime_reflection::IntegerWidth::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, width)| EnumVariantInfo::new(width.variant_name(), id as u16, 0))
+            .collect(),
+    );
+    let _float_width = registry.register_enum_scoped(
+        crate::comptime_reflection::FLOAT_WIDTH_SCHEMA_NAME,
+        crate::comptime_reflection::FloatWidth::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, width)| EnumVariantInfo::new(width.variant_name(), id as u16, 0))
+            .collect(),
+    );
+
+    // `FrozenNever`: zero-field marker descriptor.
+    let _comptime_frozen_never = TypeSchemaBuilder::new(COMPTIME_FROZEN_NEVER_SCHEMA)
+        .register(registry);
+
+    // `FrozenErased`: the bound-set array only. Bounds are reachable today
+    // solely as the empty set (`any`); trait-bound elements arrive with
+    // A2/B2 — the element FieldType is informational (heap_mask + the
+    // parallel field-kind track drive reads), matching the
+    // `__ComptimeFieldDescriptor.annotations` precedent.
+    let _comptime_frozen_erased = TypeSchemaBuilder::new(COMPTIME_FROZEN_ERASED_SCHEMA)
+        .array_field("bounds", FieldType::Any)
         .register(registry);
 
     let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")

@@ -338,6 +338,323 @@ fn unknown_identity_is_rejected_at_the_freeze_boundary() {
     );
 }
 
+// ─── ADR-009 B1 S2: freeze payload query + payload descriptor builders ────
+
+mod payload_query {
+    use super::payloads::{FrozenPayloadDescriptor, pending_payload_rejection};
+    use super::*;
+    use crate::compiler::comptime_builtins::semantic_freeze;
+    use shape_runtime::comptime_reflection::{
+        FLOAT_WIDTH_SCHEMA_NAME, FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FloatWidth,
+        FrozenPrimitive, INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth,
+    };
+    use shape_runtime::type_schema::builtin_schemas::{
+        COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
+        COMPTIME_FROZEN_PRIMITIVE_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA,
+    };
+    use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+    use shape_value::{KindedSlot, NativeKind};
+
+    /// The full primitive payload matrix: every sealed-sub-algebra family
+    /// member AND every synonym resolves to the same exact width/domain
+    /// payload through the ONE query API (`payload_of` beside
+    /// `identity_of`/`category_of`). `bigint` is the named
+    /// `SignedInteger(Arbitrary)` decision.
+    #[test]
+    fn primitive_payload_matrix_covers_every_family_and_synonym() {
+        let freeze = freeze_of(|_| {});
+        let matrix: &[(&[&str], FrozenPrimitive)] = &[
+            (&["unit", "void", "()"], FrozenPrimitive::Unit),
+            (&["bool"], FrozenPrimitive::Bool),
+            (&["char"], FrozenPrimitive::Char),
+            (
+                &["int", "i64"],
+                FrozenPrimitive::SignedInteger(IntegerWidth::W64),
+            ),
+            (&["i8"], FrozenPrimitive::SignedInteger(IntegerWidth::W8)),
+            (&["i16"], FrozenPrimitive::SignedInteger(IntegerWidth::W16)),
+            (&["i32"], FrozenPrimitive::SignedInteger(IntegerWidth::W32)),
+            (&["u8"], FrozenPrimitive::UnsignedInteger(IntegerWidth::W8)),
+            (
+                &["u16"],
+                FrozenPrimitive::UnsignedInteger(IntegerWidth::W16),
+            ),
+            (
+                &["u32"],
+                FrozenPrimitive::UnsignedInteger(IntegerWidth::W32),
+            ),
+            (
+                &["u64"],
+                FrozenPrimitive::UnsignedInteger(IntegerWidth::W64),
+            ),
+            (
+                &["bigint"],
+                FrozenPrimitive::SignedInteger(IntegerWidth::Arbitrary),
+            ),
+            (
+                &["number", "f64", "float"],
+                FrozenPrimitive::BinaryFloat(FloatWidth::W64),
+            ),
+            (&["f32"], FrozenPrimitive::BinaryFloat(FloatWidth::W32)),
+            (&["decimal"], FrozenPrimitive::Decimal),
+            (&["string", "str"], FrozenPrimitive::String),
+            (&["null"], FrozenPrimitive::Null),
+            (&["undefined"], FrozenPrimitive::Undefined),
+        ];
+        for (names, expected) in matrix {
+            for name in *names {
+                let identity = freeze
+                    .identity_of(name)
+                    .unwrap_or_else(|| panic!("{name} must be frozen"));
+                assert_eq!(
+                    freeze.payload_of(identity),
+                    Ok(FrozenPayloadDescriptor::Primitive(*expected)),
+                    "payload for {name}"
+                );
+            }
+        }
+    }
+
+    /// `never` reflects to the `Never` payload; `any` reflects to `Erased`
+    /// with the empty bound set (the only reachable erased spelling until
+    /// A2 lands trait-bound syntax).
+    #[test]
+    fn never_and_erased_payloads_are_complete_for_reachable_forms() {
+        let freeze = freeze_of(|_| {});
+
+        let never = freeze.identity_of("never").expect("never identity");
+        assert_eq!(freeze.payload_of(never), Ok(FrozenPayloadDescriptor::Never));
+
+        let any = freeze.identity_of("any").expect("any identity");
+        match freeze.payload_of(any) {
+            Ok(FrozenPayloadDescriptor::Erased { bounds }) => {
+                assert!(bounds.is_empty(), "any carries the empty bound set");
+            }
+            other => panic!("any must reflect to Erased, got {other:?}"),
+        }
+    }
+
+    /// Rejection-matrix row R1: each of the 7 non-enabled categories has ONE
+    /// named per-category diagnostic — naming the category, stating the
+    /// payload descriptor has not landed, and pointing at `type_category` —
+    /// never a partial descriptor. Parameter is asserted end-to-end through
+    /// a scoped overlay identity (`parameter:{owner}:{name}`), Nominal
+    /// end-to-end through a frozen struct.
+    #[test]
+    fn non_enabled_categories_reject_with_named_per_category_diagnostics() {
+        for category in FrozenTypeCategory::ALL {
+            if FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&category) {
+                continue;
+            }
+            let diagnostic = pending_payload_rejection(category);
+            assert_eq!(
+                diagnostic,
+                format!(
+                    "reflect: the {} payload descriptor has not landed \
+                     (pending payload ticket); use type_category for the \
+                     exhaustive category",
+                    category.variant_name()
+                )
+            );
+        }
+
+        // Parameter — through a scoped overlay identity.
+        let overlay = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
+        let t = overlay.identity_of("T").expect("T identity");
+        assert_eq!(
+            overlay.payload_of(t),
+            Err(pending_payload_rejection(FrozenTypeCategory::Parameter))
+        );
+
+        // Nominal — through the base freeze.
+        let freeze = freeze_of(|compiler| add_struct(compiler, "Alpha"));
+        let alpha = freeze.identity_of("Alpha").expect("Alpha identity");
+        let error = freeze.payload_of(alpha).expect_err("Nominal must reject");
+        assert!(
+            error.contains("the Nominal payload descriptor has not landed")
+                && error.contains("use type_category"),
+            "R1 Nominal diagnostic missing: {error}"
+        );
+    }
+
+    /// The unknown-identity freeze-boundary rejection is unchanged by the
+    /// payload query.
+    #[test]
+    fn unknown_identity_payload_rejection_is_unchanged() {
+        let freeze = freeze_of(|_| {});
+        assert_eq!(
+            freeze.payload_of(FrozenTypeIdentity::INVALID),
+            Err("type_ref received an unknown semantic type identity".to_string())
+        );
+    }
+
+    // ── heap-value builders ──────────────────────────────────────────────
+
+    fn storage_of(value: &HeapValue) -> &TypedObjectStorage {
+        let HeapValue::TypedObject(ptr) = value else {
+            panic!("descriptor must be a TypedObject, got {:?}", value.kind());
+        };
+        unsafe { &*ptr.as_ptr() }
+    }
+
+    fn schema_name_of(storage: &TypedObjectStorage) -> String {
+        shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+            .expect("descriptor schema id must resolve")
+            .name
+            .clone()
+    }
+
+    /// Read `__variant` (field 0) and `__payload_0` (field 1) from an
+    /// enum-layout descriptor object.
+    fn variant_and_payload(storage: &TypedObjectStorage) -> (i64, KindedSlot) {
+        let variant = storage
+            .clone_field_kinded(0)
+            .and_then(|slot| slot.as_i64())
+            .expect("__variant must be an int");
+        let payload = storage
+            .clone_field_kinded(1)
+            .expect("__payload_0 must be readable");
+        (variant, payload)
+    }
+
+    /// `build_frozen_type_heap_value` composes schema-correct NESTED typed
+    /// objects: FrozenType{__variant: catalog ordinal, __payload_0:
+    /// FrozenPrimitive{__variant, __payload_0: width-domain enum}} — typed
+    /// descriptor data all the way down, no rendered type-name strings.
+    #[test]
+    fn builder_produces_schema_correct_nested_primitive_descriptor() {
+        let overlay = semantic_freeze::overlay_for_tests(&BytecodeCompiler::new());
+
+        // int → Primitive(SignedInteger(W64)), FrozenType variant ordinal 0.
+        let int_identity = overlay.identity_of("int").expect("int identity");
+        let frozen = payloads::build_frozen_type_heap_value(int_identity, &overlay)
+            .expect("int payload builds");
+        let frozen_storage = storage_of(&frozen);
+        assert_eq!(schema_name_of(frozen_storage), COMPTIME_FROZEN_TYPE_SCHEMA);
+        let (variant, payload) = variant_and_payload(frozen_storage);
+        assert_eq!(variant, 0, "Primitive is catalog ordinal 0");
+
+        let primitive_storage = payload
+            .as_typed_object_storage()
+            .expect("payload must be a typed object");
+        assert_eq!(
+            schema_name_of(primitive_storage),
+            COMPTIME_FROZEN_PRIMITIVE_SCHEMA
+        );
+        let (primitive_variant, width_slot) = variant_and_payload(primitive_storage);
+        // SignedInteger is declaration index 3 in the FrozenPrimitive catalog.
+        assert_eq!(primitive_variant, 3);
+        let width_storage = width_slot
+            .as_typed_object_storage()
+            .expect("width payload must be a typed object");
+        assert_eq!(schema_name_of(width_storage), INTEGER_WIDTH_SCHEMA_NAME);
+        let (width_variant, _) = (
+            width_storage
+                .clone_field_kinded(0)
+                .and_then(|slot| slot.as_i64())
+                .expect("width __variant"),
+            (),
+        );
+        assert_eq!(width_variant, 3, "W64 is IntegerWidth declaration index 3");
+
+        // bigint → SignedInteger(Arbitrary): width variant 4.
+        let bigint_identity = overlay.identity_of("bigint").expect("bigint identity");
+        let frozen = payloads::build_frozen_type_heap_value(bigint_identity, &overlay)
+            .expect("bigint payload builds");
+        let (_, payload) = variant_and_payload(storage_of(&frozen));
+        let (_, width_slot) =
+            variant_and_payload(payload.as_typed_object_storage().expect("primitive object"));
+        let width_storage = width_slot
+            .as_typed_object_storage()
+            .expect("width payload must be a typed object");
+        let arbitrary = width_storage
+            .clone_field_kinded(0)
+            .and_then(|slot| slot.as_i64())
+            .expect("width __variant");
+        assert_eq!(arbitrary, 4, "Arbitrary is IntegerWidth declaration index 4");
+
+        // number → BinaryFloat(W64): FloatWidth schema, variant 1.
+        let number_identity = overlay.identity_of("number").expect("number identity");
+        let frozen = payloads::build_frozen_type_heap_value(number_identity, &overlay)
+            .expect("number payload builds");
+        let (_, payload) = variant_and_payload(storage_of(&frozen));
+        let primitive_storage = payload.as_typed_object_storage().expect("primitive object");
+        let (primitive_variant, width_slot) = variant_and_payload(primitive_storage);
+        assert_eq!(primitive_variant, 5, "BinaryFloat is declaration index 5");
+        let width_storage = width_slot
+            .as_typed_object_storage()
+            .expect("width payload must be a typed object");
+        assert_eq!(schema_name_of(width_storage), FLOAT_WIDTH_SCHEMA_NAME);
+
+        // bool → scalar member: Null payload slot (no width domain).
+        let bool_identity = overlay.identity_of("bool").expect("bool identity");
+        let frozen = payloads::build_frozen_type_heap_value(bool_identity, &overlay)
+            .expect("bool payload builds");
+        let (_, payload) = variant_and_payload(storage_of(&frozen));
+        let primitive_storage = payload.as_typed_object_storage().expect("primitive object");
+        let (primitive_variant, scalar_payload) = variant_and_payload(primitive_storage);
+        assert_eq!(primitive_variant, 1, "Bool is declaration index 1");
+        assert_eq!(scalar_payload.kind(), NativeKind::Null);
+    }
+
+    /// never → FrozenType{__variant: 1, __payload_0: FrozenNever{}} and
+    /// any → FrozenType{__variant: 9, __payload_0: FrozenErased{bounds: []}}
+    /// — ordinal-pinned variant ids (1/9, never dense).
+    #[test]
+    fn builder_produces_never_and_erased_descriptors_at_pinned_ordinals() {
+        let overlay = semantic_freeze::overlay_for_tests(&BytecodeCompiler::new());
+
+        let never_identity = overlay.identity_of("never").expect("never identity");
+        let frozen = payloads::build_frozen_type_heap_value(never_identity, &overlay)
+            .expect("never payload builds");
+        let frozen_storage = storage_of(&frozen);
+        let (variant, payload) = variant_and_payload(frozen_storage);
+        assert_eq!(variant, 1, "Never is catalog ordinal 1");
+        let never_storage = payload
+            .as_typed_object_storage()
+            .expect("payload must be a typed object");
+        assert_eq!(schema_name_of(never_storage), COMPTIME_FROZEN_NEVER_SCHEMA);
+
+        let any_identity = overlay.identity_of("any").expect("any identity");
+        let frozen = payloads::build_frozen_type_heap_value(any_identity, &overlay)
+            .expect("any payload builds");
+        let frozen_storage = storage_of(&frozen);
+        let (variant, payload) = variant_and_payload(frozen_storage);
+        assert_eq!(variant, 9, "Erased is catalog ordinal 9, never dense 2");
+        let erased_storage = payload
+            .as_typed_object_storage()
+            .expect("payload must be a typed object");
+        assert_eq!(
+            schema_name_of(erased_storage),
+            COMPTIME_FROZEN_ERASED_SCHEMA
+        );
+        // The bound set is the empty array (the only reachable form).
+        let bounds = erased_storage
+            .clone_field_kinded(0)
+            .expect("bounds must be readable");
+        assert_eq!(
+            bounds.kind(),
+            NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)
+        );
+    }
+
+    /// The builder inherits the R1 rejection: a scoped Parameter identity
+    /// (and every other non-enabled category) is a named compile-time
+    /// rejection at the builder too — never a partial descriptor.
+    #[test]
+    fn builder_rejects_non_enabled_categories_with_the_named_diagnostic() {
+        let overlay = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
+        let t = overlay.identity_of("T").expect("T identity");
+        let error = payloads::build_frozen_type_heap_value(t, &overlay)
+            .map(|_| ())
+            .expect_err("Parameter must reject at the builder");
+        assert_eq!(
+            error,
+            pending_payload_rejection(FrozenTypeCategory::Parameter)
+        );
+    }
+}
+
 /// ADR-009 §4.1 "one kind vocabulary" (ticket A1, slice S5): confinement
 /// sentinel for the legacy `type_info` vocabulary.
 ///

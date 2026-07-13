@@ -1915,9 +1915,17 @@ impl BytecodeCompiler {
                         message: format!("Comptime block directive processing failed: {}", e),
                         location: Some(self.span_to_source_location(*span)),
                     })?;
-                if let Some(message) =
-                    shape_runtime::comptime_reflection::runtime_lift_rejection(&execution.value)
-                {
+                // ADR-009 B1 S4: value-DEEP lift wall — the shared
+                // `runtime_lift_rejection` fires on every reachable
+                // typed-object node (nested objects/arrays, spellable model
+                // forgeries), resolved against the mini-VM's own schema
+                // registry so mini-VM-registered ids can be NAMED instead of
+                // silently swallowing to `Null` on the materialization
+                // fallback (scout risk 4 bypass channel).
+                if let Some(message) = super::comptime::comptime_result_lift_rejection(
+                    &execution.value,
+                    &execution.schema_registry,
+                ) {
                     return Err(shape_ast::error::ShapeError::SemanticError {
                         message: message.to_string(),
                         location: Some(self.span_to_source_location(*span)),

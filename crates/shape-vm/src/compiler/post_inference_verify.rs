@@ -320,6 +320,43 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
         permanent: true,
         reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
     },
+    // ADR-009 B1 S1 — `FrozenErased` bound-set carrier. The unspellable
+    // (SOH-prefixed, unforgeable from source) comptime-only descriptor
+    // schema's `bounds` array is reachable today ONLY as the empty set
+    // (`any`; A2 checked type-expression syntax unlanded), and the
+    // descriptor is lift-walled out of runtime code by
+    // `comptime_reflection::runtime_lift_rejection`. The element type
+    // retypes to the TraitRef descriptor schema when ticket B2 lands —
+    // removal happens by retyping the element, not by stripping this row.
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_ERASED_SCHEMA,
+        ),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "ADR-009 B1 comptime-only FrozenErased descriptor; \
+                 bound set empty-only until A2/B2 (elements retype to \
+                 TraitRef at B2); unspellable name + runtime_lift_rejection \
+                 wall keep it out of runtime code",
+    },
+    // ADR-009 B1 S3 — the SPELLABLE `FrozenErased` payload-model struct the
+    // comptime mini-VM injects (`comptime.rs::frozen_type_payload_model_items`)
+    // mirrors the unspellable carrier: its `bounds` element type is `never`
+    // (uninhabited until A2/B2), which maps through the intermediate-tier
+    // Any arm of `type_annotation_to_field_type`. Same disposition and
+    // close-out path as the unspellable row above; the name is pinned to
+    // `comptime_reflection::frozen_type_enabled_payload_type_name(Erased)`
+    // by unit test, and `runtime_lift_rejection` walls the spellable name
+    // out of runtime code in the same commit.
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("FrozenErased"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "ADR-009 B1 S3 comptime-injected FrozenErased payload model; \
+                 bounds element type is `never` (empty-only until A2/B2); \
+                 comptime-mode-only registration + runtime_lift_rejection \
+                 wall keep it out of runtime code",
+    },
     // ----- TRANSITIONAL row (§4.D.3 + §4.D.5 + §4.D.10-emission)
     //       NARROWED at W17.2-C close (post-W17.2-B PROPAGATE landings)
     //

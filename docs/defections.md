@@ -7357,3 +7357,119 @@ persistent diagnostic-masking layer (4).
 **Bounded scope decision (pre-existing gap, not taken as part of this fix):** resolving a module's OWN nominal type by its BARE name from inside that module's comptime block (`type_ref(Point)` where the dep module defines `Point`) still yields "unknown semantic type identity": dependency structs freeze under their qualified names (`calc::numbers::Point`) while the body's identifier stays bare, and the deleted per-site builder on main read the same qualified tables — identical failure pre-branch. This is comptime name-resolution territory (B-ticket query-API extension), independent of barrier ordering; pinned in the test comment of `imported_module_comptime_reflection_consumes_a_populated_freeze`.
 
 **Cost saved:** imported-module comptime works again before the A1 merge instead of surfacing as a post-merge multi-file breakage the 12-gate set could not see (no gate exercised comptime inside an imported module).
+
+
+## 2026-07-13 — ADR009-B1 close-out: rejected compromises (payload-bearing `FrozenType<T>` via `reflect()`)
+
+Ticket ADR009-B1 (shape-lang/shape#5) landed `reflect(TypeRef<T>) ->
+FrozenType<T>` with the first complete payload categories (Primitive with the
+sealed `FrozenPrimitive` sub-algebra, Never, Erased). Compromises considered
+and REJECTED during implementation, plus the named/bounded decisions taken:
+
+**1. Declaring all 10 `FrozenType` variants with stub payload schemas.**
+The sealed sum is a 10-variant catalog (Dec 50/94) but B1 can only construct
+3 variants. Declaring all 10 in the descriptor schema — 7 of them as unit
+variants or empty-payload stubs "to be filled in by later tickets" — was
+rejected: unit variants are forgeable from source (an R7 hole), an
+empty-payload variant IS a partially populated descriptor (spec §3.1
+forbidden), and every later B ticket would churn the variant's payload arity
+(a comptime-ABI break per ticket). Chosen shape: the descriptor sum declares
+exactly the 3 constructable payload-arity-1 variants; the CATEGORY layer
+(`FrozenTypeCategory`, `type_category`) stays exhaustive at 10 untouched, and
+reflecting a non-enabled category is the named per-category R1 rejection
+("reflect: the <Category> payload descriptor has not landed (pending payload
+ticket); use type_category for the exhaustive category").
+
+**2. Dense variant numbering (0/1/2) for the enabled payload variants.**
+Numbering the 3 constructable variants densely was rejected: when B2/B4-B7
+land the remaining payload categories, dense ids renumber on every insert —
+canonical descriptors enter expansion/artifact hashes shared by VM and JIT
+(spec §3.3), so renumbering is a comptime-ABI break. Chosen: variant ids are
+pinned to the Dec 50/94 catalog ORDINALS (Primitive=0, Never=1, Erased=9)
+via `FrozenTypeCategory::catalog_ordinal()`, and the mini-VM's injected
+spellable model enum is pinned to the same ordinals at `register_enum` time
+(`frozen_type_payload_variant_ordinal`, gated on comptime_mode + the model
+enum name + every-member-pins), so the spellable model and the unspellable
+carrier can never disagree. The Erased=9 arm is proven end-to-end.
+
+**3. `bigint` as a separate top-level `FrozenPrimitive` member.**
+Rejected in favor of the named decision: `bigint` is
+`SignedInteger(IntegerWidth::Arbitrary)` — a member of the signed-integer
+FAMILY with an explicit unbounded-width domain member. A separate top-level
+member would have duplicated the family structure the Dec 50/94 list names
+("signed/unsigned integer families ... with exact width/domain payloads")
+and left `Arbitrary` unrepresentable for any future unsigned-arbitrary
+carrier. Also rejected at the carrier level: encoding widths as raw ints
+with a sentinel value for Arbitrary — untyped magic encoding. Chosen:
+`IntegerWidth`/`FloatWidth` registered as spellable unit-variant enum
+schemas generated from the shared runtime catalog (the `FrozenTypeCategory`
+precedent — users match these variants), each with its own named
+`runtime_lift_rejection` arm + lift tests in the SAME commit (an S2
+extension of the S1 data model, disclosed at slice close).
+
+**4. Erased bound-set reachability bounded to `any` (empty set) until A2/B2.**
+`type_ref` accepts bare identifiers only until A2, so the only reachable
+erased spelling is `any` — an empty bound set. Rather than stubbing a bound
+representation no source can produce (or testing pretend forms, invariant
+§3.7), `FrozenErasedBound` is a deliberately UNINHABITED enum: a non-empty
+bound set is STRUCTURALLY unrepresentable until A2 lands trait-bound syntax
+and B2 retypes the elements to `TraitRef`. The `bounds` array is complete
+and provably empty for `any` (`erased_bound_set_is_empty_for_any`, VM+JIT).
+This is surface-and-stop, not a partial descriptor: the payload is complete
+for every reachable form.
+
+**5. T-index: compiler-tracked, carrier-erased — no dynamic `Any` payload.**
+`FrozenType<T>`/`FrozenPrimitive` retain their type index in the COMPILER'S
+tracking (the outer type-check types `reflect(type_ref(T))` at the
+`FrozenType` model; the freeze/overlay supplies the identity), while the
+comptime value carrier (TypedObjectStorage over the descriptor schemas)
+erases `T` — it holds catalog ordinals + nested typed descriptors only.
+Rejected alternative: a dynamic `Any`-typed payload slot to "carry" the
+index at runtime — forbidden by Dec 50/94 and CLAUDE.md (no dynamic Any).
+No rendered type-name strings appear inside payloads (reviewed separately
+from the E5 import sentinel, which greps imports, not string renders).
+
+**Bounded named-exception rows (disclosed, not defections):** two permanent
+`post_inference_verify.rs` `WhitelistEntry` rows — the unspellable
+`COMPTIME_FROZEN_ERASED_SCHEMA` (S1) and the spellable injected
+`FrozenErased` model struct (S3) — because `bounds: Array<never>` maps
+through the intermediate-tier Any arm of the E0900 wall; both follow the
+audit-sanctioned `__ComptimeTarget`/`__ComptimeTypeInfo` §4.D.11 precedent
+(unspellable/lift-walled names, empty-only until A2/B2, retype at B2), with
+names pinned to the shared catalog constants by unit test. NOT a dynamic
+fallback: the wall stays on for everything else.
+
+**Off-plan surfaces taken (disclosed at slice close):** (a)
+`infer_function_value_binding_call` now bails for
+`is_comptime_builtin_function` names — the mini-VM's same-named unannotated
+forwarder was captured by that fast path, surfacing an unnamed generic
+arity error before the named R4 diagnostic (general rule: comptime builtins
+route through `infer_comptime_builtin_call`); (b) `ComptimeExecutionResult`
+grew a `schema_registry` carry field so the S4 value-deep lift wall
+(`comptime_result_lift_rejection`: typed-object fields + typed-array
+elements, every node through the shared `runtime_lift_rejection`) can NAME
+mini-VM-registered schemas — dense/colliding id lookup in the outer
+registry was the root cause of nested descriptors silently lifting as
+`Null`; the fix extends the CHANNEL to call the wall, never the reverse;
+(c) spellable payload-model values (`FrozenType`/`FrozenPrimitive`/
+`FrozenNever`/`FrozenErased`/`IntegerWidth`/`FloatWidth`) are
+user-constructable inside comptime exactly like `FrozenTypeCategory` —
+lift-walled by the same named arms, so R7 is held by the wall plus the
+unspellable carrier, not by spelling tricks; (d) the S5 LSP lookup
+(`reflection_enum_variant_names`) is a catalog projection, not a new list.
+
+**R8 structural close-out (grep evidence, 2026-07-13):** `grep -rn
+"derive(Default)\|impl Default"` over
+`comptime_builtins/type_reflection/payloads.rs`, `type_reflection.rs`,
+`semantic_freeze.rs`, and `shape-runtime/src/comptime_reflection.rs` finds
+NO `Default`/empty constructor on any descriptor type
+(`FrozenPayloadDescriptor`, `FrozenErasedBound`, `FrozenPrimitive`,
+`IntegerWidth`, `FloatWidth`, `SemanticFreeze`, `FrozenTypeIndex`) —
+wave46 row-9 discipline holds.
+
+**Cost saved:** each rejected compromise would have converted the tracer
+into either a forgeable/partial descriptor surface (1), a per-ticket
+comptime-ABI break (2), an untyped magic encoding (3), a pretend-coverage
+test surface (4), or a dynamic-Any reintroduction (5). Rejection-matrix
+rows R1-R8 with asserting test names: the B1 addendum in
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md`.

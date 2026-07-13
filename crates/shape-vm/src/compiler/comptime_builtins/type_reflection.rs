@@ -3,11 +3,62 @@ use crate::compiler::comptime_target;
 use sha2::{Digest, Sha256};
 use shape_ast::ast::TypeAnnotation;
 pub(crate) use shape_runtime::comptime_reflection::FrozenTypeCategory;
+use shape_runtime::comptime_reflection::{FloatWidth, FrozenPrimitive, IntegerWidth};
 use shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA;
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind};
 use std::collections::HashMap;
+
+/// ADR-009 B1 S2: payload descriptors + heap-value builders for the sealed
+/// `FrozenType` sum returned by `reflect()`.
+pub(crate) mod payloads;
+
+/// The single primitive synonym-family table (ADR-009 §4.1 canonical-inputs
+/// rule): each row carries the family's interned synonyms AND its exact
+/// width/domain payload from the sealed `FrozenPrimitive` sub-algebra
+/// (Dec 50/94). `rebuild_frozen_type_index` derives both the identity map
+/// and the identity→payload map from THIS table — there is deliberately no
+/// second name table. `bigint` is the named `SignedInteger(Arbitrary)`
+/// decision (unbounded width-domain member, logged in `docs/defections.md`).
+const PRIMITIVE_SYNONYM_FAMILIES: &[(&[&str], FrozenPrimitive)] = &[
+    (&["unit", "void", "()"], FrozenPrimitive::Unit),
+    (&["bool"], FrozenPrimitive::Bool),
+    (&["char"], FrozenPrimitive::Char),
+    (
+        &["int", "i64"],
+        FrozenPrimitive::SignedInteger(IntegerWidth::W64),
+    ),
+    (&["i8"], FrozenPrimitive::SignedInteger(IntegerWidth::W8)),
+    (&["i16"], FrozenPrimitive::SignedInteger(IntegerWidth::W16)),
+    (&["i32"], FrozenPrimitive::SignedInteger(IntegerWidth::W32)),
+    (&["u8"], FrozenPrimitive::UnsignedInteger(IntegerWidth::W8)),
+    (
+        &["u16"],
+        FrozenPrimitive::UnsignedInteger(IntegerWidth::W16),
+    ),
+    (
+        &["u32"],
+        FrozenPrimitive::UnsignedInteger(IntegerWidth::W32),
+    ),
+    (
+        &["u64"],
+        FrozenPrimitive::UnsignedInteger(IntegerWidth::W64),
+    ),
+    (
+        &["bigint"],
+        FrozenPrimitive::SignedInteger(IntegerWidth::Arbitrary),
+    ),
+    (
+        &["number", "f64", "float"],
+        FrozenPrimitive::BinaryFloat(FloatWidth::W64),
+    ),
+    (&["f32"], FrozenPrimitive::BinaryFloat(FloatWidth::W32)),
+    (&["decimal"], FrozenPrimitive::Decimal),
+    (&["string", "str"], FrozenPrimitive::String),
+    (&["null"], FrozenPrimitive::Null),
+    (&["undefined"], FrozenPrimitive::Undefined),
+];
 
 /// Stable semantic identity carried by an opaque comptime `TypeRef`.
 ///
@@ -48,6 +99,10 @@ pub(crate) struct FrozenTypeIndex {
     pub(crate) alias_defs: HashMap<String, TypeAnnotation>,
     pub(crate) frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
     pub(crate) frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
+    /// ADR-009 B1 S2: exact width/domain payload per Primitive identity,
+    /// derived from [`PRIMITIVE_SYNONYM_FAMILIES`] in the same rebuild that
+    /// interns the identities (one source, no second derivation).
+    pub(crate) frozen_primitive_payloads: HashMap<FrozenTypeIdentity, FrozenPrimitive>,
 }
 
 impl FrozenTypeIndex {
@@ -65,41 +120,48 @@ impl FrozenTypeIndex {
             .ok_or_else(|| "type_ref received an unknown semantic type identity".to_string())
     }
 
+    /// ADR-009 B1 S2: the shared query API's payload half at the index
+    /// level. Enabled payload categories (Primitive / Never / Erased)
+    /// return complete typed descriptors; every non-enabled category is
+    /// the named R1 per-category rejection — never a partial descriptor.
+    /// The unknown-identity freeze-boundary rejection is unchanged.
+    pub(super) fn payload_for_identity(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> Result<payloads::FrozenPayloadDescriptor, String> {
+        use payloads::FrozenPayloadDescriptor;
+        match self.category_for_identity(identity)? {
+            FrozenTypeCategory::Primitive => self
+                .frozen_primitive_payloads
+                .get(&identity)
+                .copied()
+                .map(FrozenPayloadDescriptor::Primitive)
+                .ok_or_else(|| {
+                    "internal invariant: a Primitive identity was frozen without its \
+                     FrozenPrimitive payload"
+                        .to_string()
+                }),
+            FrozenTypeCategory::Never => Ok(FrozenPayloadDescriptor::Never),
+            // `any` is the only reachable erased spelling until A2 lands
+            // trait-bound syntax: the bound set is complete AND empty.
+            FrozenTypeCategory::Erased => Ok(FrozenPayloadDescriptor::Erased { bounds: Vec::new() }),
+            pending => Err(payloads::pending_payload_rejection(pending)),
+        }
+    }
+
     pub(super) fn rebuild_frozen_type_index(&mut self) {
         let mut ids = HashMap::new();
         let mut categories = HashMap::new();
+        let mut primitive_payloads = HashMap::new();
 
-        intern_synonyms(
-            &mut ids,
-            &mut categories,
-            &["unit", "void", "()"],
-            FrozenTypeCategory::Primitive,
-        );
-        for names in [
-            &["bool"][..],
-            &["char"][..],
-            &["int", "i64"][..],
-            &["i8"][..],
-            &["i16"][..],
-            &["i32"][..],
-            &["u8"][..],
-            &["u16"][..],
-            &["u32"][..],
-            &["u64"][..],
-            &["bigint"][..],
-            &["number", "f64", "float"][..],
-            &["f32"][..],
-            &["decimal"][..],
-            &["string", "str"][..],
-            &["null"][..],
-            &["undefined"][..],
-        ] {
-            intern_synonyms(
+        for (names, primitive) in PRIMITIVE_SYNONYM_FAMILIES {
+            let identity = intern_synonyms(
                 &mut ids,
                 &mut categories,
                 names,
                 FrozenTypeCategory::Primitive,
             );
+            primitive_payloads.insert(identity, *primitive);
         }
         intern_synonyms(
             &mut ids,
@@ -180,6 +242,7 @@ impl FrozenTypeIndex {
 
         self.frozen_type_ids = ids;
         self.frozen_type_categories = categories;
+        self.frozen_primitive_payloads = primitive_payloads;
     }
 }
 
@@ -209,7 +272,7 @@ fn intern_synonyms(
     categories: &mut HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
     names: &[&str],
     category: FrozenTypeCategory,
-) {
+) -> FrozenTypeIdentity {
     let identity = intern_identity(
         ids,
         categories,
@@ -220,6 +283,7 @@ fn intern_synonyms(
     for name in &names[1..] {
         ids.insert((*name).to_string(), identity);
     }
+    identity
 }
 
 pub(crate) fn build_frozen_type_ref_heap_value(
@@ -236,28 +300,30 @@ pub(crate) fn build_frozen_type_ref_heap_value(
     ))
 }
 
-pub(crate) fn frozen_type_category_from_ref(
+/// Read the frozen semantic identity out of an opaque `TypeRef` argument
+/// slot. The ONE TypeRef-argument reader shared by every TypeRef-consuming
+/// intrinsic (`type_category`, `reflect` — ADR-009 B1 S3); `caller` names
+/// the intrinsic in each R4 diagnostic ("<caller> expects a TypeRef value"
+/// family), so both intrinsics reject malformed arguments identically.
+fn frozen_identity_from_ref(
     slot: &KindedSlot,
-    freeze: &FreezeOverlay,
-) -> Result<FrozenTypeCategory, String> {
+    caller: &str,
+) -> Result<FrozenTypeIdentity, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
-        return Err("type_category expects a TypeRef value".to_string());
+        return Err(format!("{caller} expects a TypeRef value"));
     }
     let storage = slot
         .as_typed_object_storage()
-        .ok_or_else(|| "type_category received a null TypeRef value".to_string())?;
+        .ok_or_else(|| format!("{caller} received a null TypeRef value"))?;
     let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
         .ok_or_else(|| {
         format!(
-            "type_category could not resolve TypeRef schema id {}",
+            "{caller} could not resolve TypeRef schema id {}",
             storage.schema_id
         )
     })?;
     if schema.name != COMPTIME_FROZEN_TYPE_REF_SCHEMA {
-        return Err(format!(
-            "type_category expects TypeRef, got '{}'",
-            schema.name
-        ));
+        return Err(format!("{caller} expects TypeRef, got '{}'", schema.name));
     }
     let identity_field = |name: &str| -> Result<i64, String> {
         let field = schema
@@ -268,11 +334,31 @@ pub(crate) fn frozen_type_category_from_ref(
             .and_then(|value| value.as_i64())
             .ok_or_else(|| format!("TypeRef {name} is not an integer"))
     };
-    let identity = FrozenTypeIdentity {
+    Ok(FrozenTypeIdentity {
         high: identity_field("identity_high")?,
         low: identity_field("identity_low")?,
-    };
+    })
+}
+
+pub(crate) fn frozen_type_category_from_ref(
+    slot: &KindedSlot,
+    freeze: &FreezeOverlay,
+) -> Result<FrozenTypeCategory, String> {
+    let identity = frozen_identity_from_ref(slot, "type_category")?;
     freeze.category_of(identity)
+}
+
+/// ADR-009 B1 S3: `reflect(TypeRef<T>) -> FrozenType<T>` — identity from
+/// the TypeRef argument (same reader as `type_category`, reflect-named R4
+/// diagnostics), payload from the ONE freeze query API (`payload_of`),
+/// carrier from the S2 payload builders. R1 per-category rejections and
+/// the unknown-identity freeze-boundary rejection propagate unchanged.
+pub(crate) fn frozen_type_from_ref(
+    slot: &KindedSlot,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    let identity = frozen_identity_from_ref(slot, "reflect")?;
+    payloads::build_frozen_type_heap_value(identity, freeze)
 }
 
 pub(crate) fn build_frozen_type_category_heap_value(

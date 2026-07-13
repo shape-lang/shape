@@ -133,3 +133,66 @@ compute()
         .with_jit()
         .expect_run_err_contains("int is not nominal, as frozen reflection correctly reports");
 }
+
+/// ADR-009 B1 S4: `reflect()` payload data inside an annotation `comptime`
+/// hook — the handler destructures the sealed `FrozenType` sum down to the
+/// width domain and bakes the payload-derived flag into a generated
+/// function consumed by a user `fn` body (VM + JIT value proof).
+#[test]
+fn annotation_handler_reflect_payload_reaches_generated_fn() {
+    let source = r#"
+annotation reflect_width() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let flag = match reflect(type_ref(int)) {
+      FrozenType::Primitive(p) => match p {
+        FrozenPrimitive::SignedInteger(w) => match w {
+          IntegerWidth::W64 => 1
+          _ => 0
+        }
+        _ => 0
+      }
+      _ => 0
+    }
+    extend (f"fn int_width_flag() -> int \{ {flag} \}")
+  }
+}
+
+@reflect_width()
+type User { id: int }
+
+fn show() -> int { int_width_flag() }
+show()
+"#;
+    expect_vm_and_jit_number(source, 1.0);
+}
+
+/// ADR-009 B1 S4 negative: the R1 per-category rejection fires inside
+/// annotation `comptime` hooks too — reflecting a Nominal user type (whose
+/// payload ticket has not landed) is the named compile-time rejection under
+/// both VM and JIT, never a partial descriptor.
+#[test]
+fn annotation_handler_reflect_r1_rejection_fires_in_hooks() {
+    let source = r#"
+annotation reflect_user() {
+  targets: [type]
+  comptime post(target, ctx) {
+    match reflect(type_ref(User)) {
+      FrozenType::Primitive(p) => 1
+      _ => 0
+    }
+  }
+}
+
+@reflect_user()
+type User { id: int }
+
+fn show() -> int { 1 }
+show()
+"#;
+    ShapeTest::new(source)
+        .expect_run_err_contains("reflect: the Nominal payload descriptor has not landed");
+    ShapeTest::new(source)
+        .with_jit()
+        .expect_run_err_contains("reflect: the Nominal payload descriptor has not landed");
+}

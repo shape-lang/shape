@@ -87,7 +87,8 @@ real exhaustive enum, and transparent aliases reuse the underlying identity.
 Raw type refs and category values cannot cross into runtime code; they must be
 consumed inside comptime. Completion, hover, signature help, enum-variant
 completion, and compile diagnostics use the same catalog and compiler path.
-This is the category layer, not yet the payload-bearing `FrozenType<T>` sum.
+This is the category layer; the payload-bearing `FrozenType<T>` sum is
+CURRENT-partial via `reflect()` (ADR009-B1, below).
 
 **CURRENT / VM+JIT - `Parameter` category from generic bodies (ADR009-A3)**
 
@@ -168,6 +169,74 @@ Book status: A1-enabled behaviors are gate-runnable in ShapeTest
 `tests/annotations_comptime/frozen_reflection.rs`, VM+JIT); book-chapter
 examples land in stage F1 per the program spec.
 
+**CURRENT-partial / VM+JIT - payload-bearing `FrozenType<T>` via `reflect()`
+(ADR009-B1, 2026-07-13)**
+
+```shape
+let label = comptime {
+    match reflect(type_ref(bigint)) {
+        FrozenType::Primitive(p) => match p {
+            FrozenPrimitive::SignedInteger(w) => match w {
+                IntegerWidth::Arbitrary => "signed:arbitrary"
+                _ => "signed:fixed"
+            }
+            _ => "other-primitive"
+        }
+        FrozenType::Never(n) => "never"
+        FrozenType::Erased(e) => "erased"
+    }
+}
+print(label)  // "signed:arbitrary"
+```
+
+`reflect(TypeRef<T>) -> FrozenType<T>` returns the sealed payload-bearing
+indexed sum (Decision 50/94) with the FIRST complete payload categories:
+
+- **`Primitive(FrozenPrimitive)`** — the sealed 10-member sub-algebra (Unit,
+  Bool, Char, SignedInteger, UnsignedInteger, BinaryFloat, Decimal, String,
+  Null, Undefined) with exact width/domain payloads (`IntegerWidth` W8-W64 +
+  `Arbitrary`, `FloatWidth` W32/W64). Synonym families coalesce to one
+  payload (`int`/`i64`, `number`/`f64`/`float`, `string`/`str`,
+  `unit`/`void`/`()`); `bigint` is `SignedInteger(IntegerWidth::Arbitrary)`
+  by named decision. Payloads are typed descriptor data, never rendered
+  type-name strings.
+- **`Never(FrozenNever)`** and **`Erased(FrozenErased)`** — the Erased bound
+  set is complete and provably empty for `any`, the only reachable erased
+  spelling until A2 lands trait-bound `type_ref` syntax.
+
+The three enabled variants carry the Dec 50/94 catalog ORDINALS (Primitive=0,
+Never=1, Erased=9), not dense ids, so later B tickets add payload variants
+without renumbering (comptime-ABI stability, spec §3.3). Reflecting a
+category whose payload ticket has not landed is a NAMED compile-time
+rejection ("reflect: the `<Category>` payload descriptor has not landed
+(pending payload ticket); use type_category for the exhaustive category") —
+never a partial descriptor — while `type_category` stays exhaustive over all
+10 categories in the same program. Descriptors have no string `kind` field
+and no nullable category fields; the sealed sum has no `Unknown`/`Any` arm
+and match exhaustiveness is enforced. Descriptors (unspellable carriers AND
+the spellable comptime model values) cannot cross into runtime code on any
+lift channel — the comptime-result wall is a value-deep walk over nested
+objects/arrays calling the shared `runtime_lift_rejection`. `reflect` is
+comptime-only (the pre-existing runtime `reflect` surface stub is untouched
+and unit-pinned); it works inside generic bodies per instantiation (A3
+overlay) and inside annotation `@comptime` hooks. LSP hover, comptime-only
+completion visibility, closed `FrozenType`/`FrozenPrimitive` variant
+completion, and semantic diagnostics all derive from the shared runtime
+catalog (`shape-runtime/src/comptime_reflection.rs`), no hand-written
+parallel rows.
+
+Evidence: `tools/shape-test/tests/comptime/reflect.rs` (VM+JIT, every
+positive program on both engines), `tests/annotations_comptime/
+frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit matrices in
+`crates/shape-vm/src/compiler/comptime_builtins/type_reflection/tests.rs`
+and `crates/shape-runtime/src/comptime_reflection.rs`; rejection-matrix
+mapping in the wave46 audit B1 addendum
+(`docs/cluster-audits/wave46-typed-comptime-first-tracers.md`).
+Book status: B1-enabled behavior is gate-runnable green on VM and JIT in
+ShapeTest; the book-chapter example lands in stage F1 per spec §3.7 (book
+examples only after gate-runnable green — satisfied for this slice; the book
+lives in shape-web, outside this worktree and this ticket).
+
 **CURRENT / compiler - generated implicit capture rejection**
 
 Annotation-generated functions are marked before body compilation. A closure
@@ -240,7 +309,7 @@ examples, rejection requirements, and implementation implications.
 | `TraitRef<Trait>` | comptime | Canonical trait identity | accepted |
 | `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |
-| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum remains TARGET (B tickets) |
+| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, and Erased payloads at catalog-pinned ordinals 0/1/9; the 7 remaining categories reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 addendum); remaining payloads TARGET (B2/B4-B7) |
 | `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
 | `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted |
 | `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted |

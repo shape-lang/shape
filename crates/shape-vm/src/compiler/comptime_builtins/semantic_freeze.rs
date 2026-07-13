@@ -128,6 +128,7 @@ impl SemanticFreeze {
             alias_defs: HashMap::new(),
             frozen_type_ids: HashMap::new(),
             frozen_type_categories: HashMap::new(),
+            frozen_primitive_payloads: HashMap::new(),
         };
 
         // Named freeze input 1: struct shapes (`struct_types` field order +
@@ -209,6 +210,19 @@ impl SemanticFreeze {
         self.index.category_for_identity(identity)
     }
 
+    /// Shared query API (ADR-009 B1 S2, spec §4.1 "as later tickets land —
+    /// payload descriptors"): the payload descriptor for a frozen identity.
+    /// Enabled categories (Primitive / Never / Erased) return complete typed
+    /// payloads; a non-enabled category is the named R1 per-category
+    /// rejection — never a partial descriptor.
+    pub(crate) fn payload_of(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
+    {
+        self.index.payload_for_identity(identity)
+    }
+
     /// The freeze's internal type index. Visible only inside
     /// `comptime_builtins` (the legacy `type_info` path reads nominal/alias/
     /// enum membership and struct field rows from the SAME frozen index —
@@ -284,6 +298,27 @@ impl FreezeOverlay {
             return Ok(FrozenTypeCategory::Parameter);
         }
         self.base.category_of(identity)
+    }
+
+    /// Shared query API (ADR-009 B1 S2): overlay-scoped generic parameters
+    /// classify as [`FrozenTypeCategory::Parameter`], whose payload ticket
+    /// has not landed — they reject with the named R1 per-category
+    /// diagnostic; everything else defers to the base freeze.
+    pub(crate) fn payload_of(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
+    {
+        if self
+            .parameters
+            .values()
+            .any(|&parameter| parameter == identity)
+        {
+            return Err(super::type_reflection::payloads::pending_payload_rejection(
+                FrozenTypeCategory::Parameter,
+            ));
+        }
+        self.base.payload_of(identity)
     }
 
     /// The shared base freeze this overlay scopes (no rebuild happened).
@@ -622,6 +657,53 @@ mod tests {
         let u = overlay.identity_of("U").expect("U identity");
         assert_eq!(freeze.identity_of("U"), None);
         assert_eq!(overlay.category_of(u), Ok(FrozenTypeCategory::Parameter));
+    }
+
+    /// ADR-009 B1 S2: `payload_of` grows the ONE query API beside
+    /// `identity_of`/`category_of` — base half on `SemanticFreeze`, overlay
+    /// half on `FreezeOverlay`. Enabled categories return complete typed
+    /// payloads; a scoped Parameter identity is the named R1 rejection
+    /// (its payload ticket has not landed); nominal defers to the base and
+    /// rejects the same way. Never a partial descriptor.
+    #[test]
+    fn payload_query_grows_the_shared_query_api() {
+        use super::super::type_reflection::payloads::FrozenPayloadDescriptor;
+        use shape_runtime::comptime_reflection::{FrozenPrimitive, IntegerWidth};
+
+        let compiler = compiler_with_module_scope_types();
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+        let overlay = FreezeOverlay::new(Arc::clone(&freeze), "map", &["T".to_string()]);
+
+        // Base half and overlay half agree for base identities.
+        let int_identity = freeze.identity_of("int").expect("int identity");
+        assert_eq!(
+            freeze.payload_of(int_identity),
+            Ok(FrozenPayloadDescriptor::Primitive(
+                FrozenPrimitive::SignedInteger(IntegerWidth::W64)
+            ))
+        );
+        assert_eq!(
+            overlay.payload_of(int_identity),
+            freeze.payload_of(int_identity)
+        );
+
+        // Overlay half: a scoped Parameter identity is the named R1
+        // per-category rejection.
+        let t = overlay.identity_of("T").expect("T identity");
+        let error = overlay.payload_of(t).expect_err("Parameter must reject");
+        assert!(
+            error.contains("the Parameter payload descriptor has not landed")
+                && error.contains("use type_category"),
+            "R1 Parameter diagnostic missing: {error}"
+        );
+
+        // Base half: Nominal rejects with its own named diagnostic.
+        let point = freeze.identity_of("Point").expect("Point identity");
+        let error = freeze.payload_of(point).expect_err("Nominal must reject");
+        assert!(
+            error.contains("the Nominal payload descriptor has not landed"),
+            "R1 Nominal diagnostic missing: {error}"
+        );
     }
 
     /// Rejection-matrix row 4 (Dec 52): freezing partial semantic state is a

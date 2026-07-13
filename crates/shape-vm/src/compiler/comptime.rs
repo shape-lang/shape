@@ -70,6 +70,17 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option
         None,
         Some("FrozenTypeCategory"),
     ),
+    // ADR-009 B1 S3 — `reflect(TypeRef<T>) -> FrozenType<T>`: forwards to
+    // the fourth freeze-consuming intrinsic. The named return type is the
+    // injected payload-model enum (`frozen_type_enum_item`), so `match`
+    // over the result resolves the sealed sum's variants and payloads.
+    (
+        "reflect",
+        1,
+        super::comptime_builtins::REFLECT_INTRINSIC,
+        None,
+        Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
+    ),
     // First typed generation fragment surface. `item_fn(...)` returns a
     // typed fragment carrier accepted by `extend (expr)`.
     ("item_fn", 3, "item_fn", None, None),
@@ -95,6 +106,14 @@ pub(crate) struct ComptimeExecutionResult {
     /// re-emits each with the driving construct's source span
     /// (comptime-excellence §4.4).
     pub warnings: Vec<super::comptime_builtins::ComptimeDiagnostic>,
+    /// ADR-009 B1 S4: the mini-VM program's schema registry, carried out so
+    /// the stage boundary can resolve schema ids the mini-VM registered
+    /// (injected payload-model enums, comptime object literals). Without it
+    /// the lift wall cannot NAME a descriptor nested inside (or forged as)
+    /// a mini-VM-registered schema value — the id would miss (or collide)
+    /// in the outer registry and the value would silently swallow to
+    /// `Null`. Consumed by [`comptime_result_lift_rejection`].
+    pub schema_registry: std::sync::Arc<shape_runtime::type_schema::TypeSchemaRegistry>,
 }
 
 /// §4.4 comptime-handler `ctx` param type. Field NAMES + ORDER match the
@@ -276,6 +295,7 @@ fn comptime_target_param_type() -> TypeAnnotation {
 
 fn comptime_builtin_forwarders() -> Vec<Item> {
     let mut items = vec![frozen_type_category_enum_item()];
+    items.extend(frozen_type_payload_model_items());
     items.extend(COMPTIME_BUILTIN_FORWARDERS.iter().map(
         |(name, arity, target_method, return_fields, named_return_type)| {
             let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
@@ -383,6 +403,125 @@ fn frozen_type_category_enum_item() -> Item {
         },
         Span::DUMMY,
     )
+}
+
+/// ADR-009 B1 S3 — the payload-model type Items injected into every
+/// mini-VM program beside `frozen_type_category_enum_item`, ALL generated
+/// from the S1 shared runtime catalog (no hand-written variant lists):
+///
+/// - `FrozenType` — the sealed sum with ONLY the enabled payload variants
+///   (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`), each a tuple variant
+///   carrying its `Frozen*` payload descriptor type. Variant ids are
+///   ordinal-pinned by `register_enum` (statements.rs) to match the
+///   unspellable value-carrier schema — see
+///   `comptime_reflection::frozen_type_payload_variant_ordinal`.
+/// - `FrozenPrimitive` — the sealed sub-algebra; the integer/float FAMILY
+///   variants carry their width-domain enum payload
+///   (`FROZEN_PRIMITIVE_VARIANTS[..].payload_type`).
+/// - `IntegerWidth` / `FloatWidth` — the width-domain enums.
+/// - `FrozenNever` / `FrozenErased` — payload descriptor structs. The
+///   `FrozenErased.bounds` element type is `never`: `dyn Trait` spellings
+///   arrive with A2/B2, so the bound set is provably empty — the honest
+///   structural form of "complete for reachable forms" (spec §3.1/§3.7).
+fn frozen_type_payload_model_items() -> Vec<Item> {
+    use shape_ast::ast::{EnumDef, EnumMember, EnumMemberKind, StructField, StructTypeDef};
+    use shape_runtime::comptime_reflection::{
+        FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
+        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME, FloatWidth,
+        INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth, frozen_type_enabled_payload_type_name,
+    };
+
+    let enum_item = |name: &str, members: Vec<EnumMember>| {
+        Item::Enum(
+            EnumDef {
+                name: name.to_string(),
+                doc_comment: None,
+                type_params: None,
+                members,
+                annotations: Vec::new(),
+            },
+            Span::DUMMY,
+        )
+    };
+    let unit_member = |name: &str| EnumMember {
+        name: name.to_string(),
+        kind: EnumMemberKind::Unit { value: None },
+        span: Span::DUMMY,
+        doc_comment: None,
+    };
+    let tuple_member = |name: &str, payload_type: &str| EnumMember {
+        name: name.to_string(),
+        kind: EnumMemberKind::Tuple(vec![TypeAnnotation::Basic(payload_type.to_string())]),
+        span: Span::DUMMY,
+        doc_comment: None,
+    };
+    let struct_item = |name: &str, fields: Vec<StructField>| {
+        Item::StructType(
+            StructTypeDef {
+                name: name.to_string(),
+                doc_comment: None,
+                type_params: None,
+                fields,
+                methods: Vec::new(),
+                annotations: Vec::new(),
+                native_layout: None,
+            },
+            Span::DUMMY,
+        )
+    };
+
+    vec![
+        enum_item(
+            FROZEN_TYPE_PAYLOAD_ENUM_NAME,
+            FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
+                .into_iter()
+                .map(|category| {
+                    tuple_member(
+                        category.variant_name(),
+                        frozen_type_enabled_payload_type_name(category)
+                            .expect("enabled payload categories carry a descriptor type name"),
+                    )
+                })
+                .collect(),
+        ),
+        enum_item(
+            "FrozenPrimitive",
+            FROZEN_PRIMITIVE_VARIANTS
+                .iter()
+                .map(|variant| match variant.payload_type {
+                    Some(payload_type) => tuple_member(variant.name, payload_type),
+                    None => unit_member(variant.name),
+                })
+                .collect(),
+        ),
+        enum_item(
+            INTEGER_WIDTH_SCHEMA_NAME,
+            IntegerWidth::ALL
+                .into_iter()
+                .map(|width| unit_member(width.variant_name()))
+                .collect(),
+        ),
+        enum_item(
+            FLOAT_WIDTH_SCHEMA_NAME,
+            FloatWidth::ALL
+                .into_iter()
+                .map(|width| unit_member(width.variant_name()))
+                .collect(),
+        ),
+        struct_item("FrozenNever", Vec::new()),
+        struct_item(
+            "FrozenErased",
+            vec![StructField {
+                annotations: Vec::new(),
+                is_comptime: false,
+                name: "bounds".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
+                type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Never)),
+                default_value: None,
+            }],
+        ),
+    ]
 }
 
 /// Ensure that the last statement in a body is a tail value (returns its result).
@@ -1459,6 +1598,7 @@ fn execute_in_runtime_with_module_bindings(
             value,
             directives,
             warnings,
+            schema_registry: Arc::new(vm.program.type_schema_registry.clone()),
         })
     };
 
@@ -1473,6 +1613,124 @@ fn execute_in_runtime_with_module_bindings(
                 location: None,
             })?;
         rt.block_on(async { run(module_bindings) })
+    }
+}
+
+/// ADR-009 B1 S4 — the VALUE-DEEP stage-boundary lift wall for comptime
+/// results that enter runtime code (`Expr::Comptime`).
+///
+/// The shallow `runtime_lift_rejection` call only saw the top-level slot,
+/// so a descriptor NESTED inside an object/array result (or forged as a
+/// mini-VM-registered spellable model value) slipped past the wall and was
+/// silently swallowed to `Null` by the `nb_to_expr` fallback (scout risk 4
+/// — the materialization bypass channel). This extends the CHANNEL to call
+/// `runtime_lift_rejection` on every reachable typed-object node — never
+/// the reverse (the wall is not weakened).
+///
+/// The walk runs with the mini-VM program's schema registry installed as
+/// the ambient scope: descriptor carriers built by the intrinsics use the
+/// order-stable builtin schema ids, but the injected spellable model enums
+/// and comptime object-literal schemas exist only in the mini-VM registry —
+/// without it their ids miss (or collide) in the outer registry and the
+/// wall cannot name them.
+pub(crate) fn comptime_result_lift_rejection(
+    value: &KindedSlot,
+    schema_registry: &std::sync::Arc<shape_runtime::type_schema::TypeSchemaRegistry>,
+) -> Option<&'static str> {
+    let _scope =
+        shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry.clone());
+    deep_descriptor_lift_rejection(value)
+}
+
+/// Recursive half of [`comptime_result_lift_rejection`]: the shared
+/// name-matched wall (`runtime_lift_rejection`) at every node, recursing
+/// through typed-object fields and typed-array elements — the only carrier
+/// shapes a comptime descriptor can nest in on the materialization channel.
+fn deep_descriptor_lift_rejection(value: &KindedSlot) -> Option<&'static str> {
+    if let Some(message) = shape_runtime::comptime_reflection::runtime_lift_rejection(value) {
+        return Some(message);
+    }
+    let bits = value.slot().raw();
+    if bits == 0 {
+        return None;
+    }
+    match value.kind() {
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            // SAFETY: `NativeKind::Ptr(HeapKind::TypedObject)` is the kind
+            // witness that these bits point to a live `TypedObjectStorage`
+            // (§2.7.16 receiver-recovery soundness rule — direct typed
+            // pointer, never `as_heap_value()`); `value` owns one
+            // strong-count share for the duration of the walk.
+            let storage: &shape_value::TypedObjectStorage =
+                unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
+            let field_count = storage.slots().len().min(storage.field_kinds.len());
+            for idx in 0..field_count {
+                let field = read_typed_object_field(
+                    storage.slots()[idx],
+                    storage.field_kinds[idx],
+                    storage.heap_mask,
+                    idx,
+                );
+                if let Some(message) = deep_descriptor_lift_rejection(&field) {
+                    return Some(message);
+                }
+            }
+            None
+        }
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            typed_array_descriptor_lift_rejection(bits as *const u8)
+        }
+        _ => None,
+    }
+}
+
+/// Typed-array arm of the deep wall: walk `TypedObjectPtr` elements (and
+/// nested arrays) through the elem-type stamp. Scalar element types cannot
+/// carry descriptors and are skipped.
+fn typed_array_descriptor_lift_rejection(array: *const u8) -> Option<&'static str> {
+    use shape_value::v2::typed_array::{
+        ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, TypedArray, read_elem_type,
+    };
+    // SAFETY (all blocks below): the caller's `NativeKind::Ptr(
+    // HeapKind::TypedArray)` kind witness proves `array` points to a live
+    // `TypedArray<T>`; the elem-type stamp selects the monomorphized
+    // element layout before any element is read.
+    let elem_type = unsafe { read_elem_type(array) };
+    match elem_type {
+        ELEM_TYPE_TYPED_OBJECT => {
+            let arr = array as *const TypedArray<*const shape_value::TypedObjectStorage>;
+            for &elem in unsafe { TypedArray::as_slice(arr) } {
+                if elem.is_null() {
+                    continue;
+                }
+                // Take one independent share so the element slot's Drop is
+                // balanced (same retain discipline as
+                // `read_typed_object_field`).
+                unsafe {
+                    shape_value::v2::refcount::v2_retain(&(*elem).header);
+                }
+                let slot = KindedSlot::from_typed_object_raw(elem);
+                let rejection = deep_descriptor_lift_rejection(&slot);
+                if rejection.is_some() {
+                    return rejection;
+                }
+            }
+            None
+        }
+        ELEM_TYPE_TYPED_ARRAY => {
+            let arr = array as *const TypedArray<*const u8>;
+            for &elem in unsafe { TypedArray::as_slice(arr) } {
+                if elem.is_null() {
+                    continue;
+                }
+                let rejection = typed_array_descriptor_lift_rejection(elem);
+                if rejection.is_some() {
+                    return rejection;
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -3171,6 +3429,346 @@ const X = comptime {
             "comptime fn bodies should allow comptime-only builtins: {:?}",
             result.err()
         );
+    }
+
+    // =====================================================================
+    // ADR-009 B1 S3 — `reflect()` wired end-to-end in the comptime path:
+    // intrinsic, forwarder, payload-model item injection, outer type-check,
+    // runtime-name-collision fence.
+    // =====================================================================
+
+    /// Parse a comptime block body from Shape source (wrapper-fn trick so
+    /// the statements parse in function-body position, matching how a
+    /// `comptime { ... }` block body reaches `execute_comptime`).
+    fn parse_comptime_body(body: &str) -> Vec<Statement> {
+        let program = shape_ast::parser::parse_program(&format!("fn __t__() {{\n{body}\n}}"))
+            .expect("comptime body must parse");
+        program
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Function(def, _) if def.name == "__t__" => Some(def.body),
+                _ => None,
+            })
+            .expect("wrapper fn present")
+    }
+
+    fn run_comptime_body(
+        body: &str,
+    ) -> shape_ast::error::Result<super::ComptimeExecutionResult> {
+        execute_comptime(
+            &parse_comptime_body(body),
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            super::test_freeze_overlay(),
+        )
+    }
+
+    /// `run_comptime_body` that must reject (the result carrier has no
+    /// `Debug`, so `expect_err` is not available on it).
+    fn run_comptime_body_err(body: &str, ctx: &str) -> shape_ast::error::ShapeError {
+        match run_comptime_body(body) {
+            Err(error) => error,
+            Ok(_) => panic!("{ctx}: comptime body must be rejected"),
+        }
+    }
+
+    /// The full enabled-payload vertical: `reflect(type_ref(int))` inside
+    /// the mini-VM resolves to the injected forwarder (NEVER lowering to
+    /// the runtime `BuiltinFunction::Reflect` stub — collision pin (b): the
+    /// stub would surface `NotImplemented phase-1b-vm-wave-5e-reflect`),
+    /// the sealed `FrozenType` sum matches through the injected payload
+    /// model, and the nested `FrozenPrimitive` / `IntegerWidth` payloads
+    /// carry the exact width/domain data.
+    #[test]
+    fn reflect_primitive_payload_matches_through_the_injected_model_enums() {
+        let result = run_comptime_body(
+            r#"
+match reflect(type_ref(int)) {
+  FrozenType::Primitive(p) => match p {
+    FrozenPrimitive::SignedInteger(w) => match w {
+      IntegerWidth::W64 => 1
+      _ => 2
+    }
+    _ => 3
+  }
+  FrozenType::Never(n) => 4
+  FrozenType::Erased(e) => 5
+}
+"#,
+        )
+        .expect("reflect over an enabled payload category must succeed");
+        assert_eq!(
+            result.value.as_i64(),
+            Some(1),
+            "int must reflect to FrozenType::Primitive(SignedInteger(W64))"
+        );
+    }
+
+    /// `bigint` is the named SignedInteger(Arbitrary) decision — the
+    /// width-domain payload distinguishes it from `int`/W64 in user code.
+    #[test]
+    fn reflect_bigint_payload_carries_the_arbitrary_width_domain() {
+        let result = run_comptime_body(
+            r#"
+match reflect(type_ref(bigint)) {
+  FrozenType::Primitive(p) => match p {
+    FrozenPrimitive::SignedInteger(w) => match w {
+      IntegerWidth::Arbitrary => 1
+      _ => 2
+    }
+    _ => 3
+  }
+  FrozenType::Never(n) => 4
+  FrozenType::Erased(e) => 5
+}
+"#,
+        )
+        .expect("bigint reflects through the enabled Primitive payload");
+        assert_eq!(result.value.as_i64(), Some(1));
+    }
+
+    /// Never and Erased payload arms select through the ordinal-pinned
+    /// variant ids (Never=1, Erased=9 — the Erased arm is the load-bearing
+    /// proof that the injected model enum and the unspellable value carrier
+    /// agree on catalog ORDINALS, not dense ids).
+    #[test]
+    fn reflect_never_and_erased_arms_use_the_ordinal_pinned_variant_ids() {
+        for (spelling, expected) in [("never", 4), ("any", 5)] {
+            let result = run_comptime_body(&format!(
+                r#"
+match reflect(type_ref({spelling})) {{
+  FrozenType::Primitive(p) => 1
+  FrozenType::Never(n) => 4
+  FrozenType::Erased(e) => 5
+}}
+"#
+            ))
+            .unwrap_or_else(|error| {
+                panic!("reflect(type_ref({spelling})) must succeed: {error:?}")
+            });
+            assert_eq!(
+                result.value.as_i64(),
+                Some(expected),
+                "reflect(type_ref({spelling})) must select the {expected} arm"
+            );
+        }
+    }
+
+    /// R1 (sanctioned tracer): reflecting a category whose payload ticket
+    /// has not landed is the NAMED per-category compile-time rejection —
+    /// never a partial descriptor. `Array` is frozen as Nominal in every
+    /// compilation unit.
+    #[test]
+    fn reflect_non_enabled_category_is_the_named_r1_rejection() {
+        let error = run_comptime_body_err(
+            "reflect(type_ref(Array))",
+            "Nominal payload has not landed; reflect must reject",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("reflect: the Nominal payload descriptor has not landed"),
+            "R1 rejection must name the category and the pending ticket family: {message}"
+        );
+        assert!(
+            message.contains("use type_category"),
+            "R1 rejection must point at the exhaustive category layer: {message}"
+        );
+    }
+
+    /// R6: a non-exhaustive match over the sealed reflect sum is the
+    /// existing exhaustiveness error (the injected model enum feeds the
+    /// mini-VM inference engine's enum registry).
+    #[test]
+    fn reflect_match_exhaustiveness_is_enforced_over_the_injected_model() {
+        let error = run_comptime_body_err(
+            r#"
+match reflect(type_ref(int)) {
+  FrozenType::Primitive(p) => 1
+}
+"#,
+            "a Primitive-only match over FrozenType is non-exhaustive",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Non-exhaustive match"),
+            "R6 must surface the existing exhaustiveness error: {message}"
+        );
+    }
+
+    /// R6 twin: no Unknown/Any arm is nameable on the sealed sum.
+    #[test]
+    fn no_unknown_variant_is_nameable_on_the_reflect_sum() {
+        let error = run_comptime_body_err(
+            r#"
+match reflect(type_ref(int)) {
+  FrozenType::Primitive(p) => 1
+  FrozenType::Never(n) => 2
+  FrozenType::Erased(e) => 3
+  FrozenType::Unknown(u) => 4
+}
+"#,
+            "FrozenType has no Unknown variant to name",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Unknown"),
+            "the rejection must name the unknown variant: {message}"
+        );
+    }
+
+    /// R5 + collision fence: outside comptime, `reflect` hits the
+    /// comptime-only rejection path (identical in shape to
+    /// `type_ref_is_comptime_only`) — the runtime stub never receives
+    /// comptime descriptors from source-level calls.
+    #[test]
+    fn reflect_is_comptime_only_at_runtime_position() {
+        let program =
+            shape_ast::parser::parse_program("let x = reflect(42)").expect("parse");
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program);
+        assert!(result.is_err(), "runtime-position reflect must be rejected");
+        let message = format!("{}", result.unwrap_err());
+        assert!(
+            message.contains("comptime-only builtin"),
+            "R5 must surface the comptime-only rejection: {message}"
+        );
+    }
+
+    /// Collision pin (a): the runtime builtin-name mapping and the executor
+    /// SURFACE stub are untouched by ADR-009 B1 — `reflect` still resolves
+    /// to `BuiltinFunction::Reflect` at the name-mapping layer, and the
+    /// `phase-1b-vm-wave-5e-reflect` NotImplemented stub arm survives. The
+    /// comptime path shadows by resolution ORDER (user forwarder before
+    /// builtin classification), never by renaming.
+    #[test]
+    fn runtime_reflect_name_mapping_and_stub_arm_are_untouched() {
+        let compiler = crate::compiler::BytecodeCompiler::new();
+        let resolution = compiler
+            .classify_builtin_function("reflect")
+            .expect("runtime reflect name mapping must stay intact");
+        match resolution {
+            crate::compiler::BuiltinNameResolution::Surface { builtin, .. } => {
+                assert_eq!(builtin, crate::bytecode::BuiltinFunction::Reflect)
+            }
+            crate::compiler::BuiltinNameResolution::InternalOnly { .. } => {
+                panic!("reflect must stay a surface builtin mapping")
+            }
+        }
+
+        let executor_source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/executor/vm_impl/builtins.rs"
+        ))
+        .expect("executor builtins source readable");
+        assert!(
+            executor_source.contains("phase-1b-vm-wave-5e-reflect"),
+            "the BuiltinFunction::Reflect SURFACE stub arm must stay untouched by B1"
+        );
+    }
+
+    /// R4: reflect's argument forms are rejected with NAMED diagnostics at
+    /// the outer type-check (mirroring the type_ref arg-form rejections) —
+    /// wrong arity, string arg, int arg, and the legacy `__ComptimeTypeRef`
+    /// descriptor (`type_info(T).type_ref`).
+    #[test]
+    fn reflect_arg_forms_are_rejected_with_named_diagnostics() {
+        for (code, expected) in [
+            (
+                "let x = comptime { reflect() }",
+                "reflect expects exactly one TypeRef argument",
+            ),
+            (
+                "let x = comptime { reflect(type_ref(int), type_ref(int)) }",
+                "reflect expects exactly one TypeRef argument",
+            ),
+            (
+                r#"let x = comptime { reflect("int") }"#,
+                "reflect expects a TypeRef value",
+            ),
+            (
+                "let x = comptime { reflect(42) }",
+                "reflect expects a TypeRef value",
+            ),
+            (
+                "let x = comptime { reflect(type_info(int).type_ref) }",
+                "reflect expects a TypeRef value",
+            ),
+        ] {
+            let program = shape_ast::parser::parse_program(code).expect("parse");
+            let result = crate::compiler::BytecodeCompiler::new().compile(&program);
+            assert!(result.is_err(), "must reject: {code}");
+            let message = format!("{}", result.unwrap_err());
+            assert!(
+                message.contains(expected),
+                "R4 for `{code}` must surface `{expected}`, got: {message}"
+            );
+        }
+    }
+
+    /// R2 (Dec 50/94 required rejection): the reflect result exposes NO
+    /// string `kind` field — the `info.kind == "record"` legacy form is a
+    /// named rejection, not a nullable/stringly access.
+    #[test]
+    fn reflect_result_has_no_string_kind_field() {
+        let error = run_comptime_body_err(
+            r#"reflect(type_ref(int)).kind"#,
+            "FrozenType exposes no string kind field",
+        );
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("kind"),
+            "R2 rejection must name the missing field: {message}"
+        );
+    }
+
+    // =====================================================================
+    // ADR-009 B1 S4 — the value-DEEP stage-boundary lift wall
+    // (`comptime_result_lift_rejection`): descriptors nested inside
+    // objects/arrays and spellable-model forgeries are NAMED at the
+    // boundary, never silently swallowed to `Null` by the `nb_to_expr`
+    // materialization fallback (scout risk 4 bypass channel).
+    // =====================================================================
+
+    /// A descriptor nested inside an object-literal result is caught by the
+    /// deep wall with the descriptor's own named message.
+    #[test]
+    fn deep_lift_wall_names_a_descriptor_nested_in_an_object_result() {
+        let result = run_comptime_body(r#"{ inner: reflect(type_ref(int)) }"#)
+            .expect("building a descriptor-bearing object INSIDE comptime is allowed");
+        assert_eq!(
+            super::comptime_result_lift_rejection(&result.value, &result.schema_registry),
+            Some("FrozenType is comptime-only reflection data and cannot enter runtime code"),
+            "the nested descriptor must be named at the stage boundary"
+        );
+    }
+
+    /// A user-forged SPELLABLE payload-model value (constructable inside
+    /// comptime exactly like `FrozenTypeCategory`) resolves through the
+    /// carried mini-VM registry and hits the spellable-name lift arm.
+    #[test]
+    fn deep_lift_wall_names_a_forged_spellable_model_value() {
+        let result = run_comptime_body("FrozenType::Primitive(FrozenPrimitive::Bool)")
+            .expect("constructing a spellable model value INSIDE comptime is allowed");
+        assert_eq!(
+            super::comptime_result_lift_rejection(&result.value, &result.schema_registry),
+            Some("FrozenType is comptime-only reflection data and cannot enter runtime code"),
+        );
+    }
+
+    /// Ordinary comptime results (scalars, plain objects) pass the deep
+    /// wall untouched — the wall names descriptors only.
+    #[test]
+    fn deep_lift_wall_ignores_ordinary_comptime_results() {
+        for body in ["42", r#"{ name: "shape", count: 2 }"#, "[1, 2, 3]"] {
+            let result = run_comptime_body(body).expect("ordinary comptime body succeeds");
+            assert_eq!(
+                super::comptime_result_lift_rejection(&result.value, &result.schema_registry),
+                None,
+                "ordinary result must remain liftable: {body}"
+            );
+        }
     }
 }
 

@@ -917,6 +917,44 @@ impl TypeInferenceEngine {
                 )?;
                 Type::Concrete(TypeAnnotation::Basic("FrozenTypeCategory".to_string()))
             }
+            // ADR-009 B1 S3 — `reflect(TypeRef<T>) -> FrozenType<T>`. R4
+            // arg-form rejections are NAMED (mirroring the `type_ref`
+            // arg-form rejections below in `infer_function_call`): wrong
+            // arity, and any argument whose resolved type is concretely NOT
+            // the opaque TypeRef schema (string, int, the legacy
+            // `__ComptimeTypeRef` descriptor object, arbitrary objects).
+            // Only a still-unresolved argument falls through to the
+            // standard constraint push.
+            "reflect" => {
+                let type_ref_schema =
+                    crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA;
+                if arg_types.len() != 1 {
+                    return Err(TypeError::ConstraintViolation(
+                        "reflect expects exactly one TypeRef argument".to_string(),
+                    ));
+                }
+                let resolved = self.solver.unifier().apply_substitutions(&arg_types[0]);
+                match resolved.to_annotation() {
+                    Some(TypeAnnotation::Basic(name)) if name == type_ref_schema => {}
+                    Some(_) => {
+                        return Err(TypeError::ConstraintViolation(
+                            "reflect expects a TypeRef value (create one with type_ref(T)); \
+                             strings and other values cannot be reflected"
+                                .to_string(),
+                        ));
+                    }
+                    None => {
+                        self.push_constraint_with_origin(
+                            arg_types[0].clone(),
+                            Type::Concrete(TypeAnnotation::Basic(type_ref_schema.to_string())),
+                            call_span,
+                        );
+                    }
+                }
+                Type::Concrete(TypeAnnotation::Basic(
+                    crate::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME.to_string(),
+                ))
+            }
             _ => {
                 return Err(TypeError::ConstraintViolation(format!(
                     "comptime builtin '{}' has no type-analysis signature",
@@ -984,6 +1022,20 @@ impl TypeInferenceEngine {
                     ));
                 }
             }
+        }
+        // ADR-009 B1 S3 — R4: reflect's arity rejection fires EARLY (before
+        // argument inference and the generic callee-scheme arity check can
+        // produce an unnamed diagnostic first), mirroring the type_ref
+        // arg-form block above. Value-form rejections (string / int /
+        // legacy descriptor) need the inferred argument type and live in
+        // `infer_comptime_builtin_call`.
+        if name == "reflect"
+            && crate::builtin_metadata::is_comptime_builtin_function(name)
+            && args.len() != 1
+        {
+            return Err(TypeError::ConstraintViolation(
+                "reflect expects exactly one TypeRef argument".to_string(),
+            ));
         }
         let type_symbol_ident_args = crate::builtin_metadata::is_comptime_builtin_function(name)
             && ((self.in_comptime_context() && matches!(name, "type_info" | "implements"))

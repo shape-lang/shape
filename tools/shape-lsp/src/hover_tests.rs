@@ -1005,6 +1005,49 @@ fn test_comptime_builtin_hover_type_category_uses_shared_catalog() {
     }
 }
 
+/// ADR-009 B1 S5: the `reflect` hover flows from the catalog-owned
+/// `REFLECT_BUILTIN_ROW` (`shape_runtime::comptime_reflection`) — typed
+/// signature, comptime-only stage note, and the enabled-payload enumeration
+/// generated from `FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES` — proving the
+/// hover path is driven by the shared catalog, not a hand-written parallel
+/// row.
+#[test]
+fn test_comptime_builtin_hover_reflect_uses_shared_catalog() {
+    let hover = get_comptime_builtin_hover("reflect");
+    assert!(hover.is_some(), "Should get hover for reflect");
+    if let Some(h) = hover {
+        if let HoverContents::Markup(markup) = h.contents {
+            assert!(
+                markup
+                    .value
+                    .contains("reflect(type_ref: TypeRef<T>) -> FrozenType<T>"),
+                "reflect hover should carry the typed signature, got: {}",
+                markup.value
+            );
+            for category in
+                shape_runtime::comptime_reflection::FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
+            {
+                assert!(
+                    markup.value.contains(category.variant_name()),
+                    "reflect hover should enumerate enabled payload variant `{}`, got: {}",
+                    category.variant_name(),
+                    markup.value
+                );
+            }
+            assert!(
+                markup.value.contains("named compile-time rejection"),
+                "reflect hover should carry the stage note, got: {}",
+                markup.value
+            );
+            assert!(
+                markup.value.contains("comptime"),
+                "reflect hover should note the comptime-only stage, got: {}",
+                markup.value
+            );
+        }
+    }
+}
+
 #[test]
 fn test_comptime_builtin_hover_build_config() {
     let hover = get_comptime_builtin_hover("build_config");
