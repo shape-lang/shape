@@ -11,6 +11,10 @@ use shape_value::KindedSlot;
 use std::collections::{HashMap, HashSet};
 
 use super::BytecodeCompiler;
+use super::comptime_builtins::expansion_provenance::{
+    ApplicationId, CanonicalHash, ComptimeStage, ExpansionIdentity, ExpansionSite,
+    GeneratedNodePath, GeneratedOrigin, GeneratorRef, SymbolReservation, TargetIdentity,
+};
 
 /// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
 /// (`materialize_computed_comptime_extends`) from the root program and the
@@ -18,6 +22,90 @@ use super::BytecodeCompiler;
 struct ComptimeAnnotationHandlers {
     handlers: Vec<shape_ast::ast::AnnotationHandler>,
     def_param_names: Vec<String>,
+}
+
+/// Canonical label for the comptime handler kind inside a generator
+/// descriptor. Total over `AnnotationHandlerType` — only the two comptime
+/// kinds reach the expansion path today, but the descriptor never fabricates.
+fn annotation_handler_kind_descriptor(
+    handler_type: &shape_ast::ast::AnnotationHandlerType,
+) -> &'static str {
+    use shape_ast::ast::AnnotationHandlerType;
+    match handler_type {
+        AnnotationHandlerType::ComptimePre => "comptime-pre",
+        AnnotationHandlerType::ComptimePost => "comptime-post",
+        AnnotationHandlerType::OnDefine => "on-define",
+        AnnotationHandlerType::Before => "before",
+        AnnotationHandlerType::After => "after",
+        AnnotationHandlerType::Metadata => "metadata",
+    }
+}
+
+/// Canonical label for the annotated target's kind inside a target-identity
+/// descriptor.
+fn annotation_target_kind_descriptor(
+    kind: shape_ast::ast::functions::AnnotationTargetKind,
+) -> &'static str {
+    use shape_ast::ast::functions::AnnotationTargetKind;
+    match kind {
+        AnnotationTargetKind::Function => "function",
+        AnnotationTargetKind::Type => "type",
+        AnnotationTargetKind::Module => "module",
+        AnnotationTargetKind::Expression => "expression",
+        AnnotationTargetKind::Block => "block",
+        AnnotationTargetKind::AwaitExpr => "await-expr",
+        AnnotationTargetKind::Binding => "binding",
+    }
+}
+
+/// Canonical dependency descriptors of one comptime expansion for ticket D1:
+/// exactly what the existing path FEEDS the handler — the `ComptimeTarget`
+/// the handler receives (fields with their type strings and field
+/// annotations, params, return type, applied annotations, captures). The
+/// full declaration-discovery dependency graph is ticket D2.
+fn comptime_target_dependency_descriptors(
+    target: &super::comptime_target::ComptimeTarget,
+) -> Vec<String> {
+    let mut descriptors = Vec::new();
+    for (field_name, field_type, field_annotations) in &target.fields {
+        descriptors.push(format!("field:{field_name}:{field_type}"));
+        for (ann_name, ann_args) in field_annotations {
+            descriptors.push(format!(
+                "field-annotation:{field_name}:{ann_name}:{}",
+                ann_args.join(",")
+            ));
+        }
+    }
+    for (param_name, param_type, is_const) in &target.params {
+        descriptors.push(format!("param:{param_name}:{param_type}:{is_const}"));
+    }
+    if let Some(return_type) = &target.return_type {
+        descriptors.push(format!("return:{return_type}"));
+    }
+    for applied in &target.annotations {
+        descriptors.push(format!("applied-annotation:{applied}"));
+    }
+    for capture in &target.captures {
+        descriptors.push(format!("capture-name:{capture}"));
+    }
+    descriptors
+}
+
+/// Canonical structural content encoding of a generated `extend` method
+/// (rejection row 3's conflicting-output detector). Taken over the
+/// handler-emitted AST — post target-substitution, PRE parameter-annotation
+/// enrichment — so the speculative pre-pass and the authoritative pass-2
+/// run of one application encode equal output equally.
+fn generated_extend_method_content(
+    type_name: &shape_ast::ast::TypeName,
+    method: &shape_ast::ast::types::MethodDef,
+) -> CanonicalHash {
+    CanonicalHash::from_canonical_decl_encoding(&format!("extend:{type_name:?}:{method:?}"))
+}
+
+/// Canonical structural content encoding of a generated free function.
+fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
+    CanonicalHash::from_canonical_decl_encoding(&format!("fn:{func_def:?}"))
 }
 
 impl BytecodeCompiler {
@@ -831,6 +919,8 @@ impl BytecodeCompiler {
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
+        // ADR-009 D1 (S2): expansion site for this handler application.
+        let expansion_site = self.annotation_expansion_site(annotation, handler, &target);
         // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns Result;
         // surface the V3-S5 ckpt-5 SURFACE through the caller's Result
         // chain instead of panicking.
@@ -851,14 +941,19 @@ impl BytecodeCompiler {
             &const_bindings,
         )?;
 
-        self.process_comptime_directives_for_function(execution.directives, &target_name, func_def)
-            .map_err(|e| ShapeError::RuntimeError {
-                message: format!(
-                    "Comptime handler '{}' directive processing failed: {}",
-                    annotation.name, e
-                ),
-                location: Some(self.span_to_source_location(handler_span)),
-            })
+        self.process_comptime_directives_for_function(
+            execution.directives,
+            &target_name,
+            func_def,
+            &expansion_site,
+        )
+        .map_err(|e| ShapeError::RuntimeError {
+            message: format!(
+                "Comptime handler '{}' directive processing failed: {}",
+                annotation.name, e
+            ),
+            location: Some(self.span_to_source_location(handler_span)),
+        })
     }
 
     // ABI flipped to `KindedSlot` per ADR-006 §2.7.10 / Q11 to align
@@ -1397,10 +1492,119 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-009 D1 (S2): build the [`ExpansionSite`] for one comptime
+    /// annotation-handler application. Called by BOTH phases of the existing
+    /// extend/materialization path — the speculative pre-pass
+    /// (`materialize_computed_comptime_extends`) and the authoritative
+    /// pass-2 handler execution sites — from the SAME AST inputs, so the two
+    /// runs of one application agree on one `ExpansionIdentity` (risk 7:
+    /// provenance must not double).
+    pub(super) fn annotation_expansion_site(
+        &self,
+        annotation: &shape_ast::ast::Annotation,
+        handler: &shape_ast::ast::AnnotationHandler,
+        target: &super::comptime_target::ComptimeTarget,
+    ) -> ExpansionSite {
+        let file = self
+            .program
+            .debug_info
+            .source_map
+            .get_file(self.current_file_id)
+            .unwrap_or("");
+        let generator = GeneratorRef::from_canonical_descriptor(format!(
+            "annotation:{}:{}",
+            annotation.name,
+            annotation_handler_kind_descriptor(&handler.handler_type)
+        ));
+        let application = ApplicationId::from_canonical_descriptor(format!(
+            "application:{}:{}:{}",
+            file, annotation.span.start, annotation.span.end
+        ));
+        let target_identity = TargetIdentity::from_canonical_descriptor(format!(
+            "{}:{}",
+            annotation_target_kind_descriptor(target.kind),
+            target.name
+        ));
+        let argument_descriptors: Vec<(String, String)> = annotation
+            .args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                (
+                    index.to_string(),
+                    super::comptime_target::expr_to_string_lossy(arg),
+                )
+            })
+            .collect();
+        let argument_refs: Vec<(&str, &str)> = argument_descriptors
+            .iter()
+            .map(|(name, descriptor)| (name.as_str(), descriptor.as_str()))
+            .collect();
+        let dependency_descriptors = comptime_target_dependency_descriptors(target);
+        let dependency_refs: Vec<&str> =
+            dependency_descriptors.iter().map(String::as_str).collect();
+        ExpansionSite::new(
+            ExpansionIdentity::new(
+                generator,
+                application,
+                target_identity,
+                ComptimeStage::AnnotationHandler,
+                CanonicalHash::from_canonical_argument_descriptors(&argument_refs),
+                CanonicalHash::from_canonical_dependency_descriptors(&dependency_refs),
+            ),
+            self.current_file_id,
+            annotation.span,
+        )
+    }
+
+    /// ADR-009 D1 (S2): build the [`ExpansionSite`] for a `comptime { }`
+    /// block emitting directives. The block is its own generator AND its own
+    /// application site (there is no separate annotation application).
+    pub(super) fn comptime_block_expansion_site(
+        &self,
+        span: Span,
+        module_path: &str,
+    ) -> ExpansionSite {
+        let file = self
+            .program
+            .debug_info
+            .source_map
+            .get_file(self.current_file_id)
+            .unwrap_or("");
+        let block_descriptor = format!("comptime-block:{}:{}:{}", file, span.start, span.end);
+        let no_arguments: [(&str, &str); 0] = [];
+        ExpansionSite::new(
+            ExpansionIdentity::new(
+                GeneratorRef::from_canonical_descriptor(block_descriptor.clone()),
+                ApplicationId::from_canonical_descriptor(format!(
+                    "application:{}:{}:{}",
+                    file, span.start, span.end
+                )),
+                TargetIdentity::from_canonical_descriptor(format!("module:{module_path}")),
+                ComptimeStage::ModuleComptimeBlock,
+                CanonicalHash::from_canonical_argument_descriptors(&no_arguments),
+                CanonicalHash::from_canonical_dependency_descriptors(&[]),
+            ),
+            self.current_file_id,
+            span,
+        )
+    }
+
+    /// Map a reservation-layer rejection (rows 1/2/3, a `String` carrying
+    /// the named diagnostic + provenance rendering) into a spanned compile
+    /// error anchored at the application site.
+    fn expansion_rejection(&self, message: String, site: &ExpansionSite) -> ShapeError {
+        ShapeError::SemanticError {
+            message,
+            location: Some(self.span_to_source_location(site.application_span())),
+        }
+    }
+
     pub(super) fn apply_comptime_extend(
         &mut self,
         mut extend: shape_ast::ast::ExtendStatement,
         target_name: &str,
+        site: &ExpansionSite,
     ) -> Result<()> {
         match &mut extend.type_name {
             shape_ast::ast::TypeName::Simple(name) if name == "target" => {
@@ -1412,18 +1616,54 @@ impl BytecodeCompiler {
             _ => {}
         }
 
+        // ADR-009 D1 (S2), rejection row 1: a generated declaration must
+        // anchor at a real application span — refused HERE, before any
+        // registration or compilation (Dec 68 required rejection).
+        let source_anchor = site
+            .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+
+        // Row-3 content fingerprints are taken over the handler-emitted
+        // method AST (post target-substitution, PRE parameter-annotation
+        // enrichment) so the pre-pass and pass-2 encodings agree.
+        let method_contents: Vec<CanonicalHash> = extend
+            .methods
+            .iter()
+            .map(|method| generated_extend_method_content(&extend.type_name, method))
+            .collect();
+
         self.annotate_comptime_extend_method_params(&mut extend.methods, target_name);
 
-        for method in &extend.methods {
+        let extend_type_str = match &extend.type_name {
+            shape_ast::ast::TypeName::Simple(name) => name.clone(),
+            shape_ast::ast::TypeName::Generic { name, .. } => name.clone(),
+        };
+
+        for (method, content) in extend.methods.iter().zip(method_contents) {
             let func_def = self.desugar_extend_method(method, &extend.type_name)?;
-            // §4.9.1: if the whole-program pre-pass already registered this
-            // generated method's SIGNATURE (so it is visible to the analyzer,
-            // method dispatch, and every user body), skip re-registering it —
-            // a second `register_function` would create a duplicate slot. The
-            // body is still compiled below, filling the pre-registered slot, so
-            // the method is compiled exactly once through the identical path.
-            if !self.materialized_comptime_fns.contains(&func_def.name) {
-                self.register_function(&func_def)?;
+            let origin = GeneratedOrigin {
+                expansion: site.identity().clone(),
+                node_path: GeneratedNodePath::decl_root(format!("extend:{extend_type_str}"))
+                    .child(format!("method:{}", method.name)),
+                source_anchor,
+            };
+            // §4.9.1 + D1 identity-keyed dedup: if the whole-program
+            // pre-pass already reserved this identity and registered the
+            // method's SIGNATURE (so it is visible to the analyzer, method
+            // dispatch, and every user body), the reservation is re-issued —
+            // skip re-registering (a second `register_function` would create
+            // a duplicate slot). The body is still compiled below, filling
+            // the pre-registered slot, so the method is compiled exactly
+            // once through the identical path.
+            match self
+                .generated_symbols
+                .reserve_generated_decl(&func_def.name, origin, content)
+            {
+                Ok(SymbolReservation::Fresh(_)) => {
+                    self.register_function(&func_def)?;
+                }
+                Ok(SymbolReservation::Reissued(_)) => {}
+                Err(message) => return Err(self.expansion_rejection(message, site)),
             }
             // Wave-38F generated-method JIT parity: hand-written `extend`
             // methods compile through the full driver (`compile_function`),
@@ -1431,7 +1671,6 @@ impl BytecodeCompiler {
             // JIT. Generated methods need the same path; the signature was
             // already registered above/pre-pass, so this only fills the body
             // and MIR for the existing function slot.
-            self.materialized_comptime_fns.insert(func_def.name.clone());
             self.compile_function(&func_def)?;
         }
         Ok(())
@@ -1466,9 +1705,11 @@ impl BytecodeCompiler {
     /// The pre-pass is speculative: any handler that fails here (missing
     /// helper, `error()` on a non-serializable field, etc.) is silently
     /// skipped — pass-2 re-runs the same handler authoritatively and surfaces
-    /// the real diagnostic with its proper span. Every free function it does
-    /// materialize is recorded in `materialized_comptime_fns` so pass-2's
-    /// `apply_comptime_extend_items` does not register it a second time.
+    /// the real diagnostic with its proper span. Every declaration it does
+    /// materialize is reserved in the compiler's `GeneratedSymbolTable`
+    /// under its `ExpansionIdentity` (ADR-009 D1) so pass-2's
+    /// `apply_comptime_extend_items` re-issues the same reservation instead
+    /// of registering it a second time.
     ///
     /// Both generated free functions and generated type-extension methods
     /// (`extend Type { method ... }`, §4.9.1) are hoisted: the extend's method
@@ -1557,6 +1798,11 @@ impl BytecodeCompiler {
                         &struct_def.name,
                         &fields,
                     );
+                    // ADR-009 D1 (S2): the pre-pass builds the SAME expansion
+                    // site pass-2 will build for this application (same ann
+                    // node, same handler AST, same ComptimeTarget inputs), so
+                    // both phases reserve one identity per generated decl.
+                    let expansion_site = self.annotation_expansion_site(ann, handler, &target);
                     let Ok(target_value) = target.to_nanboxed() else {
                         continue;
                     };
@@ -1635,23 +1881,48 @@ impl BytecodeCompiler {
                         else {
                             continue;
                         };
+                        // ADR-009 D1 (S2), rejection row 1: generated decls
+                        // must anchor at the real application span.
+                        let source_anchor = expansion_site.source_anchor().map_err(|message| {
+                            self.expansion_rejection(message, &expansion_site)
+                        })?;
                         for item in items {
                             match item {
                                 Item::Function(func_def, span) => {
-                                    if self.materialized_comptime_fns.insert(func_def.name.clone())
-                                    {
-                                        // Register the signature NOW so the
-                                        // analyzer, function-registration pass, and
-                                        // every user body (`fn main`) can resolve
-                                        // the call. The BODY is still compiled by
-                                        // pass-2's `apply_comptime_extend_items`
-                                        // (`compile_function`) when the
-                                        // annotated type compiles — the identical
-                                        // path as before this pre-pass, so the
-                                        // generated function's runtime/JIT
-                                        // characteristics are unchanged.
-                                        self.register_function(&func_def)?;
-                                        generated.push(Item::Function(func_def, span));
+                                    let content = generated_free_fn_content(&func_def);
+                                    let origin = GeneratedOrigin {
+                                        expansion: expansion_site.identity().clone(),
+                                        node_path: GeneratedNodePath::decl_root(format!(
+                                            "fn:{}",
+                                            func_def.name
+                                        )),
+                                        source_anchor,
+                                    };
+                                    match self.generated_symbols.reserve_generated_decl(
+                                        &func_def.name,
+                                        origin,
+                                        content,
+                                    ) {
+                                        Ok(SymbolReservation::Fresh(_)) => {
+                                            // Register the signature NOW so the
+                                            // analyzer, function-registration pass, and
+                                            // every user body (`fn main`) can resolve
+                                            // the call. The BODY is still compiled by
+                                            // pass-2's `apply_comptime_extend_items`
+                                            // (`compile_function`) when the
+                                            // annotated type compiles — the identical
+                                            // path as before this pre-pass, so the
+                                            // generated function's runtime/JIT
+                                            // characteristics are unchanged.
+                                            self.register_function(&func_def)?;
+                                            generated.push(Item::Function(func_def, span));
+                                        }
+                                        Ok(SymbolReservation::Reissued(_)) => {}
+                                        Err(message) => {
+                                            return Err(
+                                                self.expansion_rejection(message, &expansion_site)
+                                            );
+                                        }
                                     }
                                 }
                                 Item::Extend(extend, span) => {
@@ -1659,25 +1930,54 @@ impl BytecodeCompiler {
                                     // method (`u.to_json()`) must be visible to
                                     // the analyzer, method-dispatch resolution, and
                                     // every user body BEFORE pass-2 — exactly like
-                                    // a generated free function. Register each
-                                    // method's SIGNATURE now (keyed by its desugared
-                                    // `Type.method` name), and return the `extend`
-                                    // block so the analyzer learns the method on the
-                                    // type. Pass-2's `apply_comptime_extend` fills
-                                    // each pre-registered slot through the normal
-                                    // function driver, so generated methods get the
-                                    // same MIR/JIT surface as hand-written `extend`
-                                    // methods.
+                                    // a generated free function. Reserve each
+                                    // method's identity and register its SIGNATURE
+                                    // now (keyed by its desugared `Type.method`
+                                    // name), and return the `extend` block so the
+                                    // analyzer learns the method on the type.
+                                    // Pass-2's `apply_comptime_extend` re-issues the
+                                    // same reservation and fills each pre-registered
+                                    // slot through the normal function driver, so
+                                    // generated methods get the same MIR/JIT surface
+                                    // as hand-written `extend` methods.
+                                    let extend_type_str = match &extend.type_name {
+                                        shape_ast::ast::TypeName::Simple(name) => name.clone(),
+                                        shape_ast::ast::TypeName::Generic { name, .. } => {
+                                            name.clone()
+                                        }
+                                    };
                                     let mut any_new = false;
                                     for method in &extend.methods {
+                                        let content = generated_extend_method_content(
+                                            &extend.type_name,
+                                            method,
+                                        );
                                         let func_def =
                                             self.desugar_extend_method(method, &extend.type_name)?;
-                                        if self
-                                            .materialized_comptime_fns
-                                            .insert(func_def.name.clone())
-                                        {
-                                            self.register_function(&func_def)?;
-                                            any_new = true;
+                                        let origin = GeneratedOrigin {
+                                            expansion: expansion_site.identity().clone(),
+                                            node_path: GeneratedNodePath::decl_root(format!(
+                                                "extend:{extend_type_str}"
+                                            ))
+                                            .child(format!("method:{}", method.name)),
+                                            source_anchor,
+                                        };
+                                        match self.generated_symbols.reserve_generated_decl(
+                                            &func_def.name,
+                                            origin,
+                                            content,
+                                        ) {
+                                            Ok(SymbolReservation::Fresh(_)) => {
+                                                self.register_function(&func_def)?;
+                                                any_new = true;
+                                            }
+                                            Ok(SymbolReservation::Reissued(_)) => {}
+                                            Err(message) => {
+                                                return Err(self.expansion_rejection(
+                                                    message,
+                                                    &expansion_site,
+                                                ));
+                                            }
                                         }
                                     }
                                     if any_new {
@@ -1771,6 +2071,7 @@ impl BytecodeCompiler {
         &mut self,
         items: Vec<shape_ast::ast::Item>,
         target_name: &str,
+        site: &ExpansionSite,
     ) -> Result<()> {
         use shape_ast::ast::Item;
 
@@ -1794,19 +2095,38 @@ impl BytecodeCompiler {
             }
         }
 
-        // comptime-excellence §4.5.1: if the whole-program pre-pass already
-        // registered this generated free function's SIGNATURE (so it is visible
-        // to `fn main()` and every user body), skip re-registering it here — a
-        // second `register_function` would create a duplicate slot. The body is
-        // still compiled below via `compile_function`, which fills the
-        // pre-registered slot, so the generated function is compiled exactly
-        // once through the identical path as before the pre-pass existed.
+        // ADR-009 D1 (S2), rejection row 1: generated decls must anchor at
+        // the real application span — refused before any registration.
+        let source_anchor = site
+            .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+
+        // comptime-excellence §4.5.1 + D1 identity-keyed dedup: if the
+        // whole-program pre-pass already reserved this generated free
+        // function's identity and registered its SIGNATURE (so it is visible
+        // to `fn main()` and every user body), the reservation is re-issued —
+        // skip re-registering it here (a second `register_function` would
+        // create a duplicate slot). The body is still compiled below via
+        // `compile_function`, which fills the pre-registered slot, so the
+        // generated function is compiled exactly once through the identical
+        // path as before the pre-pass existed.
         for func_def in &functions {
-            if self.materialized_comptime_fns.contains(&func_def.name) {
-                continue;
+            let content = generated_free_fn_content(func_def);
+            let origin = GeneratedOrigin {
+                expansion: site.identity().clone(),
+                node_path: GeneratedNodePath::decl_root(format!("fn:{}", func_def.name)),
+                source_anchor,
+            };
+            match self
+                .generated_symbols
+                .reserve_generated_decl(&func_def.name, origin, content)
+            {
+                Ok(SymbolReservation::Fresh(_)) => {
+                    self.register_function(func_def)?;
+                }
+                Ok(SymbolReservation::Reissued(_)) => {}
+                Err(message) => return Err(self.expansion_rejection(message, site)),
             }
-            self.register_function(func_def)?;
-            self.materialized_comptime_fns.insert(func_def.name.clone());
         }
         for func_def in &functions {
             // WF-3D generated-fn JIT parity: compile via the FULL driver
@@ -1820,7 +2140,7 @@ impl BytecodeCompiler {
             self.compile_function(func_def)?;
         }
         for extend in extends {
-            self.apply_comptime_extend(extend, target_name)?;
+            self.apply_comptime_extend(extend, target_name, site)?;
         }
         Ok(())
     }
@@ -2074,16 +2394,17 @@ impl BytecodeCompiler {
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         target_name: &str,
+        site: &ExpansionSite,
     ) -> std::result::Result<bool, String> {
         let mut removed = false;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
-                    self.apply_comptime_extend(extend, target_name)
+                    self.apply_comptime_extend(extend, target_name, site)
                         .map_err(|e| e.to_string())?;
                 }
                 super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
-                    self.apply_comptime_extend_items(items, target_name)
+                    self.apply_comptime_extend_items(items, target_name, site)
                         .map_err(|e| e.to_string())?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
@@ -2125,16 +2446,17 @@ impl BytecodeCompiler {
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         target_name: &str,
         func_def: &mut FunctionDef,
+        site: &ExpansionSite,
     ) -> std::result::Result<bool, String> {
         let mut removed = false;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
-                    self.apply_comptime_extend(extend, target_name)
+                    self.apply_comptime_extend(extend, target_name, site)
                         .map_err(|e| e.to_string())?;
                 }
                 super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
-                    self.apply_comptime_extend_items(items, target_name)
+                    self.apply_comptime_extend_items(items, target_name, site)
                         .map_err(|e| e.to_string())?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
@@ -3480,6 +3802,254 @@ type Probe { id: int }
                 .iter()
                 .all(|d| !d.message.contains("SIDE_EFFECT")),
             "Dec 52 violated: handler side effect observed: {diagnostics:?}"
+        );
+    }
+}
+
+// ADR-009 ticket D1 (slice S2) — provenance stamping on the existing
+// two-phase extend path + identity-keyed dedup.
+//
+// Decision 68 / Decision 67 invariant 5: every generated declaration is
+// reserved in the compiler's `GeneratedSymbolTable` under a content-derived
+// `SymbolId` with full `ExpansionIdentity` + `GeneratedOrigin`. The
+// speculative pre-pass (`materialize_computed_comptime_extends`) and the
+// authoritative pass-2 compile (`apply_comptime_extend` /
+// `apply_comptime_extend_items`) are the SAME application identity — one
+// record, never two, never a doubled diagnostic. Dedup is keyed on the
+// expansion identity; name lookups are a derived view into the table.
+#[cfg(test)]
+mod s2_expansion_provenance_tests {
+    use super::BytecodeCompiler;
+    use crate::compiler::comptime_builtins::expansion_provenance::{
+        ApplicationId, CanonicalHash, ComptimeStage, ExpansionIdentity, ExpansionSite,
+        GENERATED_NODE_WITHOUT_PROVENANCE_DIAGNOSTIC, GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC,
+        GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC, GeneratorRef, TargetIdentity,
+    };
+    use shape_ast::ast::Span;
+
+    fn parse(source: &str) -> shape_ast::ast::Program {
+        shape_ast::parse_program(source).expect("test program parses")
+    }
+
+    fn first_extend(program: &shape_ast::ast::Program) -> shape_ast::ast::ExtendStatement {
+        program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Extend(extend, _) => Some(extend.clone()),
+                _ => None,
+            })
+            .expect("program contains an extend item")
+    }
+
+    /// A hand-built expansion site for driving the pass-2 registration entry
+    /// point directly (the real enforcement point for rows 1 and 3).
+    fn test_site(application_span: Span) -> ExpansionSite {
+        let no_args: [(&str, &str); 0] = [];
+        ExpansionSite::new(
+            ExpansionIdentity::new(
+                GeneratorRef::from_canonical_descriptor("annotation:test_gen:comptime-post"),
+                ApplicationId::from_canonical_descriptor("application:test:10:20"),
+                TargetIdentity::from_canonical_descriptor("type:UserRow"),
+                ComptimeStage::AnnotationHandler,
+                CanonicalHash::from_canonical_argument_descriptors(&no_args),
+                CanonicalHash::from_canonical_dependency_descriptors(&[]),
+            ),
+            0,
+            application_span,
+        )
+    }
+
+    /// Risk-7 agreement proof, extend-method shape: the generated method is
+    /// registered by the speculative pre-pass and re-seen by the
+    /// authoritative pass-2 compile under the SAME `ExpansionIdentity` —
+    /// exactly ONE record in the generated-symbol table (a disagreement
+    /// would either double the table or trip the row-2 conflict error and
+    /// fail compilation).
+    #[test]
+    fn prepass_and_pass2_agree_on_one_expansion_identity_for_generated_extend_method() {
+        let program = parse(
+            r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+"#,
+        );
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_in_place(&program)
+            .expect("generated extend method compiles through both phases");
+        assert_eq!(
+            compiler.generated_symbols.len(),
+            1,
+            "pre-pass and pass-2 must agree on ONE identity for one generated decl"
+        );
+        let id = compiler
+            .generated_symbols
+            .symbol_for_name("Point.answer")
+            .expect("generated method resolves through the derived name view");
+        let origin = compiler
+            .generated_symbols
+            .origin_of(id)
+            .expect("reserved identity has full provenance");
+        assert!(
+            origin
+                .expansion
+                .target
+                .canonical_descriptor()
+                .contains("Point"),
+            "target identity must name the annotated type, got {:?}",
+            origin.expansion.target
+        );
+        assert!(
+            origin
+                .expansion
+                .generator
+                .canonical_descriptor()
+                .contains("gen"),
+            "generator identity must name the annotation, got {:?}",
+            origin.expansion.generator
+        );
+        assert_ne!(
+            origin.source_anchor.span(),
+            Span::DUMMY,
+            "generated decls anchor at the real application span, never DUMMY"
+        );
+    }
+
+    /// Risk-7 agreement proof, free-function shape (the §4.5.1 pre-pass
+    /// visibility case): `fn main` resolves the generated free function AND
+    /// the table holds exactly one record for it after pass-2 re-runs the
+    /// same handler.
+    #[test]
+    fn prepass_and_pass2_agree_on_one_expansion_identity_for_generated_free_function() {
+        let program = parse(
+            r#"
+annotation gen2() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("fn generated_flag() -> int { 7 }")
+  }
+}
+
+@gen2()
+type Point { id: int }
+
+fn main() -> int { generated_flag() }
+"#,
+        );
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_in_place(&program)
+            .expect("generated free function compiles through both phases");
+        assert_eq!(
+            compiler.generated_symbols.len(),
+            1,
+            "pre-pass and pass-2 must agree on ONE identity for one generated decl"
+        );
+        compiler
+            .generated_symbols
+            .symbol_for_name("generated_flag")
+            .expect("generated free function resolves through the derived name view");
+    }
+
+    /// Rejection-matrix row 2: a second, conflicting definition for one
+    /// generated symbol name — two DIFFERENT applications each generating
+    /// `fn clash()` — is the named compile error carrying expansion
+    /// provenance, not a silent first-wins dedup.
+    #[test]
+    fn conflicting_generated_name_across_applications_is_the_named_row2_compile_error() {
+        let program = parse(
+            r#"
+annotation dup() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("fn clash() -> int { 1 }")
+  }
+}
+
+@dup()
+type A { id: int }
+
+@dup()
+type B { id: int }
+"#,
+        );
+        let mut compiler = BytecodeCompiler::new();
+        let error = compiler
+            .compile_in_place(&program)
+            .expect_err("two applications generating one symbol name must conflict");
+        let message = error.to_string();
+        assert!(
+            message.contains(GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC),
+            "row-2 named diagnostic missing: {message}"
+        );
+        assert!(
+            message.contains("clash"),
+            "conflict diagnostic must name the generated symbol: {message}"
+        );
+        assert!(
+            message.contains("annotation:dup"),
+            "conflict diagnostic must carry generator provenance: {message}"
+        );
+    }
+
+    /// Rejection-matrix row 3: the SAME full application identity expanded
+    /// twice with CONFLICTING output (same generated method name, different
+    /// body) is the named duplicate-identity compile error at the real
+    /// registration entry point.
+    #[test]
+    fn same_application_identity_with_conflicting_output_is_the_named_row3_compile_error() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_in_place(&parse("type UserRow { id: int }"))
+            .expect("target type compiles");
+
+        let first = first_extend(&parse("extend UserRow { method row() -> int { 1 } }"));
+        let second = first_extend(&parse("extend UserRow { method row() -> int { 2 } }"));
+        let site = test_site(Span::new(10, 20));
+
+        compiler
+            .apply_comptime_extend(first, "UserRow", &site)
+            .expect("first expansion of the identity reserves and compiles");
+        let error = compiler
+            .apply_comptime_extend(second, "UserRow", &site)
+            .expect_err("conflicting output for one reserved identity must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC),
+            "row-3 named diagnostic missing: {message}"
+        );
+    }
+
+    /// Rejection-matrix row 1 (Dec 68 required rejection): a generated
+    /// declaration whose application anchor is `Span::DUMMY` — the named
+    /// `UserRow` + dummy-span node — is refused at the registration entry
+    /// point with the named diagnostic, BEFORE any registration or compile.
+    #[test]
+    fn generated_decl_anchored_at_dummy_span_is_the_named_row1_compile_error() {
+        let mut compiler = BytecodeCompiler::new();
+        let extend = first_extend(&parse("extend UserRow { method row() -> int { 1 } }"));
+        let site = test_site(Span::DUMMY);
+
+        let error = compiler
+            .apply_comptime_extend(extend, "UserRow", &site)
+            .expect_err("a dummy-anchored generated decl must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains(GENERATED_NODE_WITHOUT_PROVENANCE_DIAGNOSTIC),
+            "row-1 named diagnostic missing: {message}"
+        );
+        assert_eq!(
+            compiler.generated_symbols.len(),
+            0,
+            "nothing may be reserved for an unanchorable generated decl"
         );
     }
 }

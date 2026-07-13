@@ -5,23 +5,18 @@
 //! stable expansion provenance. Generated text and dummy spans are not
 //! semantic representations. This module hosts the identity types
 //! ([`SymbolId`], [`ExpansionIdentity`], [`GeneratedOrigin`]) plus the
-//! compiler-owned issuing registry ([`GeneratedSymbolTable`]); slice S2 wires
-//! them onto the existing extend/materialization path
+//! compiler-owned issuing registry ([`GeneratedSymbolTable`]). Slice S2
+//! stamps them onto the existing two-phase extend/materialization path
 //! (`functions_annotations.rs::materialize_computed_comptime_extends` /
-//! `apply_comptime_extend`).
+//! `apply_comptime_extend` / `apply_comptime_extend_items`): every
+//! directive-producing site builds an [`ExpansionSite`], and every generated
+//! declaration is reserved in the table before registration.
 //!
 //! Hashing reuses the A1 canonical-descriptor SHA-256 scheme
 //! (`type_reflection.rs::FrozenTypeIdentity::from_canonical_descriptor`):
 //! 128 bits of a SHA-256 digest over CANONICAL DESCRIPTOR strings — never
 //! rendered source text, never an incrementing counter (counter-allocated
 //! identity is the recurring schema-id collision root).
-
-// D1 slice S1 lands the identity core one slice ahead of its consumers: the
-// S2 stamping pass (`materialize_computed_comptime_extends` /
-// `apply_comptime_extend`) is the first production caller. The allow below
-// keeps the canonical check gate warning-clean in the interim and MUST be
-// deleted in slice S2 when the surface is consumed.
-#![allow(dead_code)]
 
 use sha2::{Digest, Sha256};
 use shape_ast::ast::Span;
@@ -31,25 +26,31 @@ use std::collections::HashMap;
 /// symbol identity and expansion provenance — including any attempt to anchor
 /// it at `Span::DUMMY` — is a compile error, never an unstamped node
 /// (Decision 68 required rejection).
-pub(crate) const GENERATED_NODE_WITHOUT_PROVENANCE_DIAGNOSTIC: &str =
-    "generated nodes require compiler symbol identity and expansion \
+pub(crate) const GENERATED_NODE_WITHOUT_PROVENANCE_DIAGNOSTIC: &str = "generated nodes require compiler symbol identity and expansion \
      provenance: the source anchor must reference a real span in a real \
      source file, never Span::DUMMY (ADR-009 Decision 68)";
 
-/// Rejection-matrix rows 2/3 (ticket D1): a second, conflicting declaration
-/// for an already-reserved expansion identity is a compile error carrying
-/// full expansion provenance (Decision 67 invariant 5). Slice S2 attaches
-/// the generator/application/target locations at the enforcement point.
-pub(crate) const GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC: &str =
-    "duplicate generated-symbol identity: a conflicting declaration was \
+/// Rejection-matrix row 3 (ticket D1): the same full application identity
+/// expanded twice with CONFLICTING output (same reserved identity, different
+/// declaration content or origin) is a compile error carrying full expansion
+/// provenance (Decision 67 invariant 2/5).
+pub(crate) const GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC: &str = "duplicate generated-symbol identity: a conflicting declaration was \
      produced for an already-reserved expansion identity (ADR-009 \
+     Decision 67)";
+
+/// Rejection-matrix row 2 (ticket D1): one generated declaration NAME
+/// reserved by two DIFFERENT expansion identities (e.g. two annotation
+/// applications each generating `fn clash()`) is a compile error carrying
+/// both expansions' provenance — never a silent first-wins dedup (Decision
+/// 67 invariant 5).
+pub(crate) const GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC: &str = "conflicting generated-symbol definition: this declaration name is \
+     already reserved by a different expansion identity (ADR-009 \
      Decision 67)";
 
 /// Slice S4 rule (declared with the registry so no interim lookup can adopt
 /// a weaker contract): an unknown [`SymbolId`] lookup is a named error —
 /// surface-and-stop, never a silent absent-value return.
-pub(crate) const UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC: &str =
-    "unknown generated-symbol identity: no expansion provenance was \
+pub(crate) const UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC: &str = "unknown generated-symbol identity: no expansion provenance was \
      registered for the requested SymbolId (ADR-009 Decision 68)";
 
 // Domain-separation tags: each hash kind digests a distinct domain prefix so
@@ -58,6 +59,7 @@ const ARGUMENTS_HASH_DOMAIN: &str = "adr009:d1:arguments";
 const DEPENDENCIES_HASH_DOMAIN: &str = "adr009:d1:dependencies";
 const EXPANSION_IDENTITY_DOMAIN: &str = "adr009:d1:expansion-identity";
 const SYMBOL_ID_DOMAIN: &str = "adr009:d1:symbol-id";
+const GENERATED_CONTENT_DOMAIN: &str = "adr009:d1:generated-content";
 
 /// 128-bit canonical-descriptor fingerprint — the same scheme as A1's
 /// `FrozenTypeIdentity::from_canonical_descriptor` (128 bits of a SHA-256
@@ -97,7 +99,9 @@ impl CanonicalHash {
         sorted.sort_unstable();
         Self::over_framed(
             ARGUMENTS_HASH_DOMAIN,
-            sorted.iter().flat_map(|(name, descriptor)| [*name, *descriptor]),
+            sorted
+                .iter()
+                .flat_map(|(name, descriptor)| [*name, *descriptor]),
         )
     }
 
@@ -107,6 +111,16 @@ impl CanonicalHash {
         let mut sorted: Vec<&str> = descriptors.to_vec();
         sorted.sort_unstable();
         Self::over_framed(DEPENDENCIES_HASH_DOMAIN, sorted.iter().copied())
+    }
+
+    /// Hash the canonical structural AST encoding of one generated
+    /// declaration (rejection row 3's "conflicting output" detector). The
+    /// encoding is a structural fold over the emitted declaration AST —
+    /// never rendered source text (spec §3 invariant 3): equal handler
+    /// output parses to an equal encoding across the speculative pre-pass
+    /// and the authoritative pass-2 run.
+    pub(crate) fn from_canonical_decl_encoding(encoding: &str) -> Self {
+        Self::over_framed(GENERATED_CONTENT_DOMAIN, [encoding])
     }
 
     /// Canonical hex rendering, used when a hash participates in a further
@@ -306,6 +320,9 @@ impl GeneratedNodePath {
         Self { segments }
     }
 
+    // First production reader is the S4 query surface (diagnostics carry
+    // node paths); delete the allow there.
+    #[allow(dead_code)]
     pub(crate) fn segments(&self) -> &[String] {
         &self.segments
     }
@@ -350,16 +367,98 @@ pub(crate) struct GeneratedOrigin {
     pub(crate) source_anchor: SourceAnchor,
 }
 
+impl GeneratedOrigin {
+    /// Human-readable provenance line for compile errors: generator,
+    /// application, target, and the real source anchor. Diagnostics-grade
+    /// LSDS threading (three related locations) is slice S4; the named
+    /// rejection errors carry this rendering so provenance is never lost.
+    pub(crate) fn describe(&self) -> String {
+        format!(
+            "generator `{}` applied at `{}` on `{}` (anchored at file #{} span {}..{})",
+            self.expansion.generator.canonical_descriptor(),
+            self.expansion.application.canonical_descriptor(),
+            self.expansion.target.canonical_descriptor(),
+            self.source_anchor.file_id(),
+            self.source_anchor.span().start,
+            self.source_anchor.span().end,
+        )
+    }
+}
+
+/// One comptime expansion SITE: the six-component identity plus the raw
+/// application anchor (SourceMap file id + application span). Built once at
+/// each directive-producing site (`annotation_expansion_site` /
+/// `comptime_block_expansion_site` in `functions_annotations.rs`) and handed
+/// to the directive-consumption points; the anchor is validated into a
+/// [`SourceAnchor`] at the registration entry point, where a dummy span is
+/// the named row-1 compile error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpansionSite {
+    identity: ExpansionIdentity,
+    file_id: u16,
+    application_span: Span,
+}
+
+impl ExpansionSite {
+    pub(crate) fn new(identity: ExpansionIdentity, file_id: u16, application_span: Span) -> Self {
+        Self {
+            identity,
+            file_id,
+            application_span,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &ExpansionIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn application_span(&self) -> Span {
+        self.application_span
+    }
+
+    /// Validate the application anchor into a real [`SourceAnchor`].
+    /// Rejection row 1: a dummy application span cannot anchor a generated
+    /// declaration — named compile error, surface-and-stop.
+    pub(crate) fn source_anchor(&self) -> Result<SourceAnchor, String> {
+        SourceAnchor::new(self.file_id, self.application_span)
+    }
+}
+
+/// One reserved generated declaration: its full origin plus the canonical
+/// content fingerprint of the emitted declaration (rejection row 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneratedSymbolRecord {
+    origin: GeneratedOrigin,
+    content: CanonicalHash,
+}
+
+/// Outcome of reserving a generated declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SymbolReservation {
+    /// First reservation of this identity: the caller must register the
+    /// declaration as an ordinary compiler symbol.
+    Fresh(SymbolId),
+    /// The SAME identity + origin + content was already reserved (the
+    /// speculative pre-pass and the authoritative pass-2 compile agree on
+    /// one identity): skip re-registration, compile the body into the
+    /// already-registered slot.
+    Reissued(SymbolId),
+}
+
 /// Compiler-owned registry of generated-symbol identities — the SINGLE
 /// source of truth for "this declaration was generated, by whom, from
-/// where". The name-keyed `materialized_comptime_fns` set becomes a derived
-/// lookup INTO this table in slice S2, never an identity of its own.
+/// where". The formerly name-keyed `materialized_comptime_fns` set is
+/// deleted in slice S2: name lookups (`contains_name` / `symbol_for_name`)
+/// are a derived view INTO this table, never an identity of their own.
 ///
 /// Lives on `BytecodeCompiler` (`compiler/mod.rs`), initialized empty per
 /// compilation unit beside the A3 specialization overlay.
 #[derive(Debug)]
 pub(crate) struct GeneratedSymbolTable {
-    records: HashMap<SymbolId, GeneratedOrigin>,
+    records: HashMap<SymbolId, GeneratedSymbolRecord>,
+    /// Derived name index: generated function-table name -> issued
+    /// SymbolId. A lookup convenience only — identity lives in `records`.
+    names: HashMap<String, SymbolId>,
 }
 
 impl GeneratedSymbolTable {
@@ -369,38 +468,91 @@ impl GeneratedSymbolTable {
     pub(crate) fn new() -> Self {
         Self {
             records: HashMap::new(),
+            names: HashMap::new(),
         }
     }
 
-    /// Issue the compiler symbol identity for a generated declaration by
-    /// registering its full provenance. Re-issuing the SAME identity with
-    /// the SAME origin is idempotent (the speculative pre-pass and the
-    /// authoritative pass-2 compile agree on one identity); a CONFLICTING
-    /// origin for a reserved identity is the named duplicate-identity
-    /// error (slice S2 raises it as a compile error with generator +
-    /// application + target locations).
-    pub(crate) fn issue(
+    /// Reserve the compiler symbol identity for a generated declaration by
+    /// registering its full provenance and content fingerprint.
+    ///
+    /// - Fresh identity -> `Fresh` (caller registers the declaration).
+    /// - Same identity, same origin + content -> `Reissued` (pre-pass and
+    ///   pass-2 agree; idempotent).
+    /// - Same identity, conflicting origin or content -> named row-3
+    ///   duplicate-identity error (Decision 67 invariant 2/5).
+    /// - Same declaration NAME under a different identity -> named row-2
+    ///   conflict error carrying both expansions' provenance.
+    pub(crate) fn reserve_generated_decl(
         &mut self,
-        decl_name_descriptor: &str,
+        decl_name: &str,
         origin: GeneratedOrigin,
-    ) -> Result<SymbolId, String> {
-        let id = SymbolId::derive(&origin.expansion, decl_name_descriptor);
-        if let Some(existing) = self.records.get(&id) {
-            if *existing != origin {
-                return Err(GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC.to_string());
+        content: CanonicalHash,
+    ) -> Result<SymbolReservation, String> {
+        let id = SymbolId::derive(&origin.expansion, decl_name);
+        if let Some(existing_id) = self.names.get(decl_name) {
+            if *existing_id != id {
+                let existing = &self.records[existing_id];
+                return Err(format!(
+                    "{GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC}: `{decl_name}` was first \
+                     generated by {}; the conflicting definition comes from {}",
+                    existing.origin.describe(),
+                    origin.describe(),
+                ));
             }
-            return Ok(id);
         }
-        self.records.insert(id, origin);
-        Ok(id)
+        if let Some(existing) = self.records.get(&id) {
+            if existing.origin != origin || existing.content != content {
+                return Err(format!(
+                    "{GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC}: `{decl_name}` from {} \
+                     was expanded again with conflicting output",
+                    origin.describe(),
+                ));
+            }
+            return Ok(SymbolReservation::Reissued(id));
+        }
+        self.records
+            .insert(id, GeneratedSymbolRecord { origin, content });
+        self.names.insert(decl_name.to_string(), id);
+        Ok(SymbolReservation::Fresh(id))
     }
 
     /// Provenance lookup. An unknown identity is a named error — never a
     /// silent absent-value return (surface-and-stop).
+    // First production reader is the S4 query surface (unit tests consume
+    // it today); delete the allow there.
+    #[allow(dead_code)]
     pub(crate) fn origin_of(&self, id: SymbolId) -> Result<&GeneratedOrigin, String> {
         self.records
             .get(&id)
+            .map(|record| &record.origin)
             .ok_or_else(|| UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC.to_string())
+    }
+
+    /// Derived name view: resolve a generated declaration's function-table
+    /// name to its issued SymbolId. An unknown name is a named error.
+    // First production reader is the S4 query surface (unit tests consume
+    // it today); delete the allow there.
+    #[allow(dead_code)]
+    pub(crate) fn symbol_for_name(&self, decl_name: &str) -> Result<SymbolId, String> {
+        self.names
+            .get(decl_name)
+            .copied()
+            .ok_or_else(|| UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC.to_string())
+    }
+
+    /// Derived name view: was this function-table name issued for a
+    /// generated declaration? (The former `materialized_comptime_fns`
+    /// membership check.)
+    pub(crate) fn contains_name(&self, decl_name: &str) -> bool {
+        self.names.contains_key(decl_name)
+    }
+
+    /// Number of reserved generated declarations.
+    // First production reader is the S4 query surface (unit tests consume
+    // it today); delete the allow there.
+    #[allow(dead_code)]
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
     }
 }
 
@@ -438,9 +590,12 @@ mod tests {
         GeneratedOrigin {
             expansion: sample_identity(),
             node_path: GeneratedNodePath::decl_root("extend:Point").child("method:sum"),
-            source_anchor: SourceAnchor::new(0, Span::new(42, 57))
-                .expect("real span must anchor"),
+            source_anchor: SourceAnchor::new(0, Span::new(42, 57)).expect("real span must anchor"),
         }
+    }
+
+    fn sample_content() -> CanonicalHash {
+        CanonicalHash::from_canonical_decl_encoding("extend:Point:method:sum:body-encoding")
     }
 
     // (a) Hash determinism: two independent constructions from the same
@@ -454,17 +609,98 @@ mod tests {
         assert_eq!(first.fingerprint(), second.fingerprint());
 
         let mut table = GeneratedSymbolTable::new();
-        let origin_a = sample_origin();
-        let origin_b = sample_origin();
-        let id_a = table
-            .issue("method:Point.sum", origin_a)
-            .expect("first issue succeeds");
-        // Re-issuing the SAME identity + origin (speculative pre-pass then
-        // authoritative pass-2) is idempotent: same SymbolId, no conflict.
-        let id_b = table
-            .issue("method:Point.sum", origin_b)
-            .expect("idempotent re-issue succeeds");
+        let reservation_a = table
+            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .expect("first reservation succeeds");
+        let SymbolReservation::Fresh(id_a) = reservation_a else {
+            panic!("first reservation must be Fresh, got {reservation_a:?}");
+        };
+        // Reserving the SAME identity + origin + content again (speculative
+        // pre-pass then authoritative pass-2) is idempotent: same SymbolId,
+        // reported as a re-issue, no conflict.
+        let reservation_b = table
+            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .expect("idempotent re-reservation succeeds");
+        let SymbolReservation::Reissued(id_b) = reservation_b else {
+            panic!("second reservation must be Reissued, got {reservation_b:?}");
+        };
         assert_eq!(id_a, id_b);
+        assert_eq!(table.len(), 1, "one identity, one record");
+        assert_eq!(
+            table.symbol_for_name("Point.sum").expect("name resolves"),
+            id_a,
+            "the derived name view resolves to the issued SymbolId"
+        );
+        assert!(table.contains_name("Point.sum"));
+    }
+
+    // Rejection row 3 at the table (the enforcement point the registration
+    // path calls): same identity, conflicting content -> named error.
+    #[test]
+    fn conflicting_content_for_one_reserved_identity_is_the_named_row3_error() {
+        let mut table = GeneratedSymbolTable::new();
+        table
+            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .expect("first reservation succeeds");
+        let err = table
+            .reserve_generated_decl(
+                "Point.sum",
+                sample_origin(),
+                CanonicalHash::from_canonical_decl_encoding("a-different-body-encoding"),
+            )
+            .expect_err("conflicting output for one identity must be refused");
+        assert!(
+            err.contains(GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC),
+            "row-3 named diagnostic missing: {err}"
+        );
+        assert!(
+            err.contains("annotation:json_schema@app.main"),
+            "row-3 error must carry generator provenance: {err}"
+        );
+    }
+
+    // Rejection row 2 at the table: one declaration NAME reserved under two
+    // different expansion identities -> named conflict error carrying both
+    // expansions' provenance.
+    #[test]
+    fn one_name_under_two_identities_is_the_named_row2_error() {
+        let mut table = GeneratedSymbolTable::new();
+        table
+            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .expect("first reservation succeeds");
+        let other_origin = GeneratedOrigin {
+            expansion: ExpansionIdentity::new(
+                GeneratorRef::from_canonical_descriptor("annotation:json_schema@app.main"),
+                ApplicationId::from_canonical_descriptor("application:app.main:Vec2:json_schema"),
+                TargetIdentity::from_canonical_descriptor("type:app.main:Vec2"),
+                ComptimeStage::AnnotationHandler,
+                sample_arguments_hash(),
+                sample_dependencies_hash(),
+            ),
+            node_path: GeneratedNodePath::decl_root("extend:Point").child("method:sum"),
+            source_anchor: SourceAnchor::new(0, Span::new(90, 110)).expect("real span must anchor"),
+        };
+        let err = table
+            .reserve_generated_decl("Point.sum", other_origin, sample_content())
+            .expect_err("one name under two identities must be refused");
+        assert!(
+            err.contains(GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC),
+            "row-2 named diagnostic missing: {err}"
+        );
+        assert!(
+            err.contains("type:app.main:Point") && err.contains("type:app.main:Vec2"),
+            "row-2 error must carry BOTH expansions' provenance: {err}"
+        );
+    }
+
+    // Unknown-identity lookups are named errors, never silent absences.
+    #[test]
+    fn unknown_symbol_lookups_are_named_errors() {
+        let table = GeneratedSymbolTable::new();
+        let err = table
+            .symbol_for_name("never_generated")
+            .expect_err("unknown name must be a named error");
+        assert!(err.contains(UNKNOWN_GENERATED_SYMBOL_DIAGNOSTIC));
     }
 
     // (b) Sensitivity: changing ANY of the six ExpansionIdentity components
@@ -538,20 +774,27 @@ mod tests {
     #[test]
     fn symbol_id_is_sensitive_to_decl_name_descriptor() {
         let mut table = GeneratedSymbolTable::new();
-        let sum = table
-            .issue("method:Point.sum", sample_origin())
-            .expect("issue sum");
-        let scale = table
-            .issue(
-                "method:Point.scale",
+        let SymbolReservation::Fresh(sum) = table
+            .reserve_generated_decl("Point.sum", sample_origin(), sample_content())
+            .expect("reserve sum")
+        else {
+            panic!("first reservation must be Fresh");
+        };
+        let SymbolReservation::Fresh(scale) = table
+            .reserve_generated_decl(
+                "Point.scale",
                 GeneratedOrigin {
                     expansion: sample_identity(),
                     node_path: GeneratedNodePath::decl_root("extend:Point").child("method:scale"),
                     source_anchor: SourceAnchor::new(0, Span::new(42, 57))
                         .expect("real span must anchor"),
                 },
+                sample_content(),
             )
-            .expect("issue scale");
+            .expect("reserve scale")
+        else {
+            panic!("distinct-name reservation must be Fresh");
+        };
         assert_ne!(sum, scale);
     }
 
@@ -591,10 +834,8 @@ mod tests {
         let split_two = CanonicalHash::from_canonical_dependency_descriptors(&["ab", "c"]);
         assert_ne!(split_one, split_two);
 
-        let arg_split_one =
-            CanonicalHash::from_canonical_argument_descriptors(&[("a", "bc")]);
-        let arg_split_two =
-            CanonicalHash::from_canonical_argument_descriptors(&[("ab", "c")]);
+        let arg_split_one = CanonicalHash::from_canonical_argument_descriptors(&[("a", "bc")]);
+        let arg_split_two = CanonicalHash::from_canonical_argument_descriptors(&[("ab", "c")]);
         assert_ne!(arg_split_one, arg_split_two);
     }
 

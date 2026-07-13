@@ -3114,7 +3114,9 @@ impl BytecodeCompiler {
             .current_function
             .and_then(|idx| self.program.functions.get(idx))
             .map(|function| function.name.as_str())
-            .filter(|name| self.materialized_comptime_fns.contains(*name));
+            // ADR-009 D1 (S2): generated-decl membership is the
+            // GeneratedSymbolTable's derived name view.
+            .filter(|name| self.generated_symbols.contains_name(name));
         if let Some(owner) = generated_owner
             && !captured_vars.is_empty()
         {

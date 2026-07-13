@@ -1882,7 +1882,10 @@ impl BytecodeCompiler {
                 .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
                 // §4.4: re-emit any `warning()` output anchored at this block.
                 self.surface_comptime_warnings(&execution.warnings, *span);
-                self.process_comptime_directives(execution.directives, "")
+                // ADR-009 D1 (S2): the block is its own expansion site.
+                let module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+                let expansion_site = self.comptime_block_expansion_site(*span, &module_path);
+                self.process_comptime_directives(execution.directives, "", &expansion_site)
                     .map_err(|e| ShapeError::RuntimeError {
                         message: format!("Comptime block directive processing failed: {}", e),
                         location: Some(self.span_to_source_location(*span)),
@@ -4269,6 +4272,11 @@ impl BytecodeCompiler {
                         &struct_def.name,
                         &fields,
                     );
+                    // ADR-009 D1 (S2): pass-2 builds the SAME expansion site
+                    // the speculative pre-pass built for this application
+                    // (same ann node, same handler AST, same ComptimeTarget
+                    // inputs) — one identity across both phases.
+                    let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
@@ -4284,7 +4292,11 @@ impl BytecodeCompiler {
                     )?;
 
                     if self
-                        .process_comptime_directives(execution.directives, &target_name)
+                        .process_comptime_directives(
+                            execution.directives,
+                            &target_name,
+                            &expansion_site,
+                        )
                         .map_err(|e| ShapeError::RuntimeError {
                             message: format!(
                                 "Comptime handler '{}' directive processing failed: {}",
@@ -5438,16 +5450,17 @@ impl BytecodeCompiler {
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         module_name: &str,
         module_items: &mut Vec<Item>,
+        site: &super::comptime_builtins::expansion_provenance::ExpansionSite,
     ) -> std::result::Result<bool, String> {
         let mut removed = false;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
-                    self.apply_comptime_extend(extend, module_name)
+                    self.apply_comptime_extend(extend, module_name, site)
                         .map_err(|e| e.to_string())?;
                 }
                 super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
-                    self.apply_comptime_extend_items(items, module_name)
+                    self.apply_comptime_extend_items(items, module_name, site)
                         .map_err(|e| e.to_string())?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
@@ -5499,6 +5512,9 @@ impl BytecodeCompiler {
                         module_path,
                         &Self::module_target_fields(module_items),
                     );
+                    // ADR-009 D1 (S2): expansion site for this module-target
+                    // handler application.
+                    let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
@@ -5516,6 +5532,7 @@ impl BytecodeCompiler {
                             execution.directives,
                             module_path,
                             module_items,
+                            &expansion_site,
                         )
                         .map_err(|e| ShapeError::RuntimeError {
                             message: format!(
@@ -5622,11 +5639,15 @@ impl BytecodeCompiler {
             // §4.4: re-emit any `warning()` output anchored at this block.
             self.surface_comptime_warnings(&execution.warnings, span);
 
+            // ADR-009 D1 (S2): the module-scoped block is its own expansion
+            // site.
+            let expansion_site = self.comptime_block_expansion_site(span, module_path);
             if self
                 .process_comptime_directives_for_module(
                     execution.directives,
                     module_path,
                     module_items,
+                    &expansion_site,
                 )
                 .map_err(|e| ShapeError::RuntimeError {
                     message: format!("Comptime block directive processing failed: {}", e),
