@@ -521,6 +521,14 @@ fn function_item_from_fragment(
         type_annotation_from_string_or_type_ref_slot(&return_type_ref, "ItemFragment.return_type")?;
     let expr = literal_expr_from_fragment(storage, schema)?;
 
+    // ADR-009 D1 (S3): the spans below are mini-VM scaffolding — this
+    // builder runs inside comptime execution, where no application anchor
+    // exists yet. The directive-consumption points
+    // (`materialize_computed_comptime_extends` /
+    // `apply_comptime_extend_items`) re-base every decl-level span to the
+    // real application anchor via `anchor_generated_function_decl` BEFORE
+    // the declaration is reserved or registered, so no Span::default()
+    // survives onto a registered generated declaration (Decision 68).
     Ok(Item::Function(
         FunctionDef {
             name,

@@ -2489,8 +2489,13 @@ impl BytecodeCompiler {
         method: &shape_ast::ast::types::MethodDef,
         target_type: &shape_ast::ast::TypeName,
     ) -> Result<FunctionDef> {
+        // ADR-009 D1 (S3): the method's own span is the desugared decl's
+        // real anchor — never Span::DUMMY (Decision 68). For hand-written
+        // extends this is the method's location in the source file; for
+        // comptime-generated extends the expansion path re-bases the decl
+        // anchor to the application span (`anchor_generated_function_decl`).
         let (implicit_extend_type_params, receiver_type) =
-            Self::synthesize_extend_type_params(target_type);
+            Self::synthesize_extend_type_params(target_type, method.span);
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
         // Extend methods use qualified "Type.method" names to avoid collisions
@@ -2518,7 +2523,9 @@ impl BytecodeCompiler {
                     {
                         Some(shape_ast::ast::TypeParam::Type {
                             name: name.clone(),
-                            span: Span::DUMMY,
+                            // ADR-009 D1 (S3): synthesized type params anchor
+                            // at the method they are synthesized for.
+                            span: method.span,
                             doc_comment: None,
                             default_type: None,
                             trait_bounds: Vec::new(),
@@ -2567,7 +2574,9 @@ impl BytecodeCompiler {
 
         Ok(FunctionDef {
             name: format!("{}.{}", type_str, method.name),
-            name_span: Span::DUMMY,
+            // ADR-009 D1 (S3): the desugared decl anchors at the method's
+            // own span (see comment at `synthesize_extend_type_params`).
+            name_span: method.span,
             declaring_module_path: method.declaring_module_path.clone(),
             doc_comment: None,
             params,
@@ -2734,6 +2743,9 @@ impl BytecodeCompiler {
     /// such as `extend Vec<number>` keep their source annotation unchanged.
     fn synthesize_extend_type_params(
         target_type: &shape_ast::ast::TypeName,
+        // ADR-009 D1 (S3): real anchor for the synthesized type params —
+        // the method they are synthesized for, never Span::DUMMY.
+        anchor: Span,
     ) -> (
         Vec<shape_ast::ast::TypeParam>,
         Option<shape_ast::ast::TypeAnnotation>,
@@ -2742,7 +2754,7 @@ impl BytecodeCompiler {
             shape_ast::ast::TypeName::Simple(name) if matches!(name.as_str(), "Array" | "Vec") => {
                 let type_params = vec![shape_ast::ast::TypeParam::Type {
                     name: "T".to_string(),
-                    span: Span::DUMMY,
+                    span: anchor,
                     doc_comment: None,
                     default_type: None,
                     trait_bounds: Vec::new(),
@@ -2758,7 +2770,7 @@ impl BytecodeCompiler {
             {
                 let type_params = vec![shape_ast::ast::TypeParam::Type {
                     name: "N".to_string(),
-                    span: Span::DUMMY,
+                    span: anchor,
                     doc_comment: None,
                     default_type: None,
                     trait_bounds: Vec::new(),

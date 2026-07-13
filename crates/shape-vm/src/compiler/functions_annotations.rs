@@ -3,7 +3,8 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{
-    DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Statement, TypeAnnotation,
+    DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Spanned, Statement,
+    TypeAnnotation,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
@@ -106,6 +107,37 @@ fn generated_extend_method_content(
 /// Canonical structural content encoding of a generated free function.
 fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
     CanonicalHash::from_canonical_decl_encoding(&format!("fn:{func_def:?}"))
+}
+
+/// ADR-009 D1 (S3): re-base a generated declaration's DECL-LEVEL spans to
+/// the expansion's application anchor (Decision 68: no `Span::DUMMY`, no
+/// spans indexing text that is not the compiling file). Handler-emitted
+/// declarations are parsed from synthetic snippet text (`mod
+/// __module_probe__ { … }`), built from typed `__ComptimeItemFragment`s
+/// (whose scaffolding spans are `Span::default()`), or desugared from
+/// handler-body AST — none of those spans resolve inside the file being
+/// compiled, so the registered declaration anchors at the real application
+/// site instead.
+///
+/// Scope line (recorded for the wave46 D1 addendum): decl-level anchors
+/// only — the name span and synthesized type-param spans. Body-node spans
+/// keep their handler-emitted offsets until ticket D2's virtual expansion
+/// documents give generated bodies a real per-node mapping; those nodes are
+/// covered by the decl's `GeneratedOrigin.node_path` in the meantime.
+///
+/// MUST be called AFTER the row-3 content fingerprint is taken: both phases
+/// fingerprint the RAW handler-emitted AST, so anchoring before hashing in
+/// one phase only would fabricate a row-3 "conflicting output" error.
+fn anchor_generated_function_decl(func_def: &mut FunctionDef, anchor: Span) {
+    func_def.name_span = anchor;
+    if let Some(type_params) = func_def.type_params.as_mut() {
+        for type_param in type_params {
+            match type_param {
+                shape_ast::ast::TypeParam::Type { span, .. }
+                | shape_ast::ast::TypeParam::Const { span, .. } => *span = anchor,
+            }
+        }
+    }
 }
 
 impl BytecodeCompiler {
@@ -1640,7 +1672,11 @@ impl BytecodeCompiler {
         };
 
         for (method, content) in extend.methods.iter().zip(method_contents) {
-            let func_def = self.desugar_extend_method(method, &extend.type_name)?;
+            let mut func_def = self.desugar_extend_method(method, &extend.type_name)?;
+            // ADR-009 D1 (S3): the registered decl anchors at the real
+            // application span (content fingerprint above is over the raw
+            // handler-emitted AST — see `anchor_generated_function_decl`).
+            anchor_generated_function_decl(&mut func_def, site.application_span());
             let origin = GeneratedOrigin {
                 expansion: site.identity().clone(),
                 node_path: GeneratedNodePath::decl_root(format!("extend:{extend_type_str}"))
@@ -1888,8 +1924,15 @@ impl BytecodeCompiler {
                         })?;
                         for item in items {
                             match item {
-                                Item::Function(func_def, span) => {
+                                Item::Function(mut func_def, _span) => {
                                     let content = generated_free_fn_content(&func_def);
+                                    // ADR-009 D1 (S3): anchor AFTER the raw
+                                    // content fingerprint, so pass-2's raw
+                                    // hash of the same output agrees.
+                                    anchor_generated_function_decl(
+                                        &mut func_def,
+                                        expansion_site.application_span(),
+                                    );
                                     let origin = GeneratedOrigin {
                                         expansion: expansion_site.identity().clone(),
                                         node_path: GeneratedNodePath::decl_root(format!(
@@ -1915,7 +1958,10 @@ impl BytecodeCompiler {
                                             // generated function's runtime/JIT
                                             // characteristics are unchanged.
                                             self.register_function(&func_def)?;
-                                            generated.push(Item::Function(func_def, span));
+                                            generated.push(Item::Function(
+                                                func_def,
+                                                expansion_site.application_span(),
+                                            ));
                                         }
                                         Ok(SymbolReservation::Reissued(_)) => {}
                                         Err(message) => {
@@ -1925,7 +1971,7 @@ impl BytecodeCompiler {
                                         }
                                     }
                                 }
-                                Item::Extend(extend, span) => {
+                                Item::Extend(mut extend, _span) => {
                                     // §4.9.1: a comptime-emitted type-extension
                                     // method (`u.to_json()`) must be visible to
                                     // the analyzer, method-dispatch resolution, and
@@ -1952,8 +1998,15 @@ impl BytecodeCompiler {
                                             &extend.type_name,
                                             method,
                                         );
-                                        let func_def =
+                                        let mut func_def =
                                             self.desugar_extend_method(method, &extend.type_name)?;
+                                        // ADR-009 D1 (S3): anchor AFTER the
+                                        // raw content fingerprint (pass-2
+                                        // hashes the same raw AST).
+                                        anchor_generated_function_decl(
+                                            &mut func_def,
+                                            expansion_site.application_span(),
+                                        );
                                         let origin = GeneratedOrigin {
                                             expansion: expansion_site.identity().clone(),
                                             node_path: GeneratedNodePath::decl_root(format!(
@@ -1981,7 +2034,19 @@ impl BytecodeCompiler {
                                         }
                                     }
                                     if any_new {
-                                        generated.push(Item::Extend(extend, span));
+                                        // ADR-009 D1 (S3): the analysis copy
+                                        // anchors its decl-level spans at the
+                                        // application site too (method body
+                                        // spans stay handler-emitted — D2
+                                        // scope line, see
+                                        // `anchor_generated_function_decl`).
+                                        for method in &mut extend.methods {
+                                            method.span = expansion_site.application_span();
+                                        }
+                                        generated.push(Item::Extend(
+                                            extend,
+                                            expansion_site.application_span(),
+                                        ));
                                     }
                                 }
                                 _ => {}
@@ -2110,8 +2175,12 @@ impl BytecodeCompiler {
         // `compile_function`, which fills the pre-registered slot, so the
         // generated function is compiled exactly once through the identical
         // path as before the pre-pass existed.
-        for func_def in &functions {
+        for func_def in &mut functions {
             let content = generated_free_fn_content(func_def);
+            // ADR-009 D1 (S3): anchor AFTER the raw content fingerprint —
+            // the pre-pass hashed the same raw AST (see
+            // `anchor_generated_function_decl`).
+            anchor_generated_function_decl(func_def, site.application_span());
             let origin = GeneratedOrigin {
                 expansion: site.identity().clone(),
                 node_path: GeneratedNodePath::decl_root(format!("fn:{}", func_def.name)),
@@ -3075,12 +3144,18 @@ impl BytecodeCompiler {
             .map(|(module_path, _)| module_path.to_string());
         let func_def = FunctionDef {
             name: func_name.clone(),
-            name_span: Span::DUMMY,
+            // ADR-009 D1 (S3): the wrapper IS the compiled handler body, so
+            // it anchors at the handler definition — the generator's real
+            // span — never Span::DUMMY (Decision 68).
+            name_span: handler.span,
             declaring_module_path: declaring_module_path.clone(),
             doc_comment: None,
             params,
             return_type: handler.return_type.clone(),
-            body: vec![Statement::Return(Some(handler.body.clone()), Span::DUMMY)],
+            body: vec![Statement::Return(
+                Some(handler.body.clone()),
+                handler.body.span(),
+            )],
             type_params: Some(Vec::new()),
             annotations: Vec::new(),
             where_clause: None,
@@ -4050,6 +4125,249 @@ type B { id: int }
             compiler.generated_symbols.len(),
             0,
             "nothing may be reserved for an unanchorable generated decl"
+        );
+    }
+}
+
+// ADR-009 ticket D1 (slice S3) — real source anchors on generated
+// declarations.
+//
+// Decision 68: generated text and dummy spans are not semantic
+// representations. Every generated declaration the compiler registers must
+// carry spans that resolve (via `span_to_source_location`) to a REAL
+// location in the compiling file — the annotation-application site for
+// expansion-emitted decls, the handler definition for annotation-handler
+// wrappers. `Span::DUMMY` numerically equals a legitimate offset-0 span, so
+// every assertion here is on the RESOLVED line, never a `{0,0}` comparison.
+#[cfg(test)]
+mod s3_source_anchor_tests {
+    use super::BytecodeCompiler;
+    use shape_ast::ast::Span;
+
+    fn parse(source: &str) -> shape_ast::ast::Program {
+        shape_ast::parse_program(source).expect("test program parses")
+    }
+
+    /// Compile `source` with source text installed so spans resolve to real
+    /// line/column locations. `compile_in_place` moves `source_text` into
+    /// the program's debug info at the end of compilation, so the source is
+    /// re-installed afterwards for the test's own resolutions.
+    fn compiled_with_source(source: &str) -> BytecodeCompiler {
+        let program = parse(source);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        compiler
+            .compile_in_place(&program)
+            .expect("test program compiles");
+        compiler.set_source(source);
+        compiler
+    }
+
+    /// 1-indexed line of the first occurrence of `needle` in `source`.
+    fn line_of(source: &str, needle: &str) -> usize {
+        let offset = source.find(needle).expect("needle present in source");
+        source[..offset].chars().filter(|c| *c == '\n').count() + 1
+    }
+
+    fn resolved_line(compiler: &BytecodeCompiler, span: Span) -> usize {
+        compiler.span_to_source_location(span).line
+    }
+
+    /// A generated `extend target { method }` declaration (the DIRECT
+    /// handler-AST directive shape) registers with its name span anchored at
+    /// the annotation-application site — not `Span::DUMMY` resolving to
+    /// line 1 of the wrong text.
+    #[test]
+    fn generated_extend_target_method_name_span_anchors_at_the_application_site() {
+        let source = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method answer() -> int { 42 }
+    }
+  }
+}
+
+@gen()
+type Point { id: int }
+"#;
+        let compiler = compiled_with_source(source);
+        let func_def = compiler
+            .function_defs
+            .get("Point.answer")
+            .expect("generated method is registered");
+        let application_line = line_of(source, "@gen()");
+        assert_eq!(
+            resolved_line(&compiler, func_def.name_span),
+            application_line,
+            "generated method name span must resolve to the @gen() application line"
+        );
+    }
+
+    /// A generated method parsed from a SNIPPET (`extend (f"extend …")`) has
+    /// snippet-relative spans; the registered declaration must be re-based to
+    /// the application span, not left pointing into synthetic snippet text.
+    #[test]
+    fn generated_snippet_extend_method_name_span_anchors_at_the_application_site() {
+        let source = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+"#;
+        let compiler = compiled_with_source(source);
+        let func_def = compiler
+            .function_defs
+            .get("Point.answer")
+            .expect("generated method is registered");
+        let application_line = line_of(source, "@gen()");
+        assert_eq!(
+            resolved_line(&compiler, func_def.name_span),
+            application_line,
+            "snippet-parsed generated method must anchor at the application line"
+        );
+    }
+
+    /// A generated FREE function parsed from the `mod __module_probe__`
+    /// snippet anchors at the application site, and its `GeneratedOrigin`
+    /// source anchor resolves to the SAME location — the identity table and
+    /// the registered declaration agree on one real anchor.
+    #[test]
+    fn generated_free_function_anchors_at_the_application_site_not_the_snippet() {
+        let source = r#"
+annotation gen2() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("fn generated_flag() -> int { 7 }")
+  }
+}
+
+@gen2()
+type Point { id: int }
+
+fn main() -> int { generated_flag() }
+"#;
+        let compiler = compiled_with_source(source);
+        let application_line = line_of(source, "@gen2()");
+
+        let func_def = compiler
+            .function_defs
+            .get("generated_flag")
+            .expect("generated free function is registered");
+        assert_eq!(
+            resolved_line(&compiler, func_def.name_span),
+            application_line,
+            "generated free-function name span must anchor at the application line, \
+             not at snippet-relative offsets"
+        );
+
+        let id = compiler
+            .generated_symbols
+            .symbol_for_name("generated_flag")
+            .expect("generated free function has an issued SymbolId");
+        let origin = compiler
+            .generated_symbols
+            .origin_of(id)
+            .expect("issued SymbolId has full provenance");
+        assert_eq!(
+            resolved_line(&compiler, origin.source_anchor.span()),
+            application_line,
+            "GeneratedOrigin source anchor must resolve to the same application line"
+        );
+    }
+
+    /// `desugar_extend_method` carries the METHOD's own span onto the
+    /// desugared FunctionDef (name span + every synthesized type-param
+    /// span) — the hand-written extend path's real anchor.
+    #[test]
+    fn desugared_extend_method_carries_the_method_span_not_dummy() {
+        let source = "extend Vec<T> {\n  method always_one() -> int { 1 }\n}";
+        let program = parse(source);
+        let extend = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Extend(extend, _) => Some(extend.clone()),
+                _ => None,
+            })
+            .expect("program contains an extend item");
+        let method = &extend.methods[0];
+        assert_ne!(method.span, Span::DUMMY, "parser anchors the method");
+
+        let compiler = BytecodeCompiler::new();
+        let func_def = compiler
+            .desugar_extend_method(method, &extend.type_name)
+            .expect("method desugars");
+        assert_eq!(
+            func_def.name_span, method.span,
+            "desugared extend method must carry the method's own span"
+        );
+        let type_params = func_def
+            .type_params
+            .expect("generic target has type params");
+        assert!(!type_params.is_empty(), "extend Vec<T> synthesizes T");
+        for tp in &type_params {
+            let span = match tp {
+                shape_ast::ast::TypeParam::Type { span, .. } => *span,
+                shape_ast::ast::TypeParam::Const { span, .. } => *span,
+            };
+            assert_eq!(
+                span,
+                method.span,
+                "synthesized type param `{}` must anchor at the method span",
+                tp.name()
+            );
+        }
+    }
+
+    /// The specialized annotation-handler WRAPPER function (the compiled
+    /// `before`/`after` handler body) anchors at the handler definition —
+    /// the generator's real span — for both its name span and its
+    /// synthesized `Return` statement.
+    #[test]
+    fn annotation_handler_wrapper_anchors_at_the_handler_definition() {
+        let source = r#"
+annotation logged() {
+  before(args, ctx) {
+    args
+  }
+}
+
+@logged()
+fn work(x: int) -> int { x + 1 }
+
+let out = work(2)
+"#;
+        let compiler = compiled_with_source(source);
+        let handler_line = line_of(source, "before(args, ctx)");
+        let (name, wrapper) = compiler
+            .function_defs
+            .iter()
+            .find(|(name, _)| name.contains("before_wrapper"))
+            .expect("before-handler wrapper is registered");
+        assert_eq!(
+            resolved_line(&compiler, wrapper.name_span),
+            handler_line,
+            "wrapper `{name}` name span must resolve to the handler definition line"
+        );
+        let return_span = wrapper
+            .body
+            .iter()
+            .find_map(|statement| match statement {
+                shape_ast::ast::Statement::Return(_, span) => Some(*span),
+                _ => None,
+            })
+            .expect("wrapper body is a synthesized Return");
+        assert_eq!(
+            resolved_line(&compiler, return_span),
+            handler_line,
+            "wrapper Return statement must anchor at the handler body"
         );
     }
 }
