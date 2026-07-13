@@ -49,6 +49,18 @@ pub fn get_definition(
         }
     };
 
+    // ADR-009 D1 (S5): generated declarations are answered from the
+    // compiler's SymbolId/provenance query surface FIRST (Decision 66) —
+    // the text/scope providers below cannot see generated symbols and must
+    // never answer for them. Ordinary symbols fall through untouched.
+    if let Some(offset) = position_to_offset(text, position) {
+        if let Some(response) =
+            crate::generated_symbols::generated_definition(&program, text, &word, offset, uri)
+        {
+            return Some(response);
+        }
+    }
+
     // First, try to find definition in the current file
     if let Some(location) = find_definition_location(&program, &word, uri, text) {
         return Some(GotoDefinitionResponse::Scalar(location));
@@ -329,6 +341,19 @@ pub fn get_references_with_fallback(
             }
         }
     };
+    // ADR-009 D1 (S5): references on a generated declaration are answered
+    // from the compiler's SymbolId/provenance query surface (Decision 66):
+    // every AST call site + the application site. The scope/text providers
+    // below never serve generated symbols (rejection row 6 — the text-scan
+    // fallback would return decoy occurrences in comments/strings).
+    if let Some(word) = get_word_at_position(text, position) {
+        if let Some(locations) =
+            crate::generated_symbols::generated_references(&program, text, &word, offset, uri)
+        {
+            return Some(locations);
+        }
+    }
+
     let tree = crate::scope::ScopeTree::build(&program, text);
 
     // Find all references (def + uses) via scope-aware resolution

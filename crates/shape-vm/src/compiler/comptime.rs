@@ -144,6 +144,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         super::comptime_builtins::REFLECT_INTRINSIC,
         None,
         Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
+        None,
     ),
     // First typed generation fragment surface. `item_fn(...)` returns a
     // typed fragment carrier accepted by `extend (expr)`.
@@ -2558,11 +2559,19 @@ annotation reflect() {
     ) -> std::result::Result<Expr, shape_ast::error::ShapeError> {
         let mut program = shape_ast::parse_program(source).expect("source parses");
         let mut compiler = crate::compiler::BytecodeCompiler::new();
-        for item in &program.items {
-            compiler.predeclare_item_struct_schemas(item);
-            compiler
-                .predeclare_item_semantic_freeze_inputs(item)
-                .expect("freeze inputs predeclare");
+        for pass in [
+            crate::compiler::statements::SemanticFreezePredeclarePass::TypesAndTraits,
+            crate::compiler::statements::SemanticFreezePredeclarePass::Impls,
+        ] {
+            for item in &program.items {
+                if pass == crate::compiler::statements::SemanticFreezePredeclarePass::TypesAndTraits
+                {
+                    compiler.predeclare_item_struct_schemas(item);
+                }
+                compiler
+                    .predeclare_item_semantic_freeze_inputs(item, pass)
+                    .expect("freeze inputs predeclare");
+            }
         }
         compiler
             .install_semantic_freeze()

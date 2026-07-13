@@ -1972,6 +1972,22 @@ impl BytecodeCompiler {
 
     /// Compile a program to bytecode
     pub fn compile(mut self, program: &Program) -> Result<BytecodeProgram> {
+        self.compile_in_place(program)?;
+        Ok(std::mem::take(&mut self.program))
+    }
+
+    /// The full `compile` driver, borrowing the compiler so post-compile
+    /// state (e.g. the ADR-009 D1 `generated_symbols` provenance table)
+    /// remains inspectable — the compiler-owned surface the tooling queries
+    /// (Decision 66) and unit tests assert against. `compile` is the thin
+    /// consuming wrapper above; the compiled program lands in
+    /// `self.program`.
+    ///
+    /// `pub` since D1 slice S5: the LSP compiles the document through this
+    /// entry and then answers generated-symbol navigation from
+    /// `generated_symbol_query()` — the ONE query API of spec §4.1, never a
+    /// second evaluator.
+    pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
         // First: desugar the program (converts FromQuery to method chains, etc.)
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);
@@ -2417,7 +2433,9 @@ impl BytecodeCompiler {
             if self.errors.len() == 1 {
                 return Err(self.errors.remove(0));
             }
-            return Err(shape_ast::error::ShapeError::MultiError(self.errors));
+            return Err(shape_ast::error::ShapeError::MultiError(std::mem::take(
+                &mut self.errors,
+            )));
         }
 
         // Emit drops for top-level locals (from the top-level drop scope)
@@ -3030,7 +3048,7 @@ impl BytecodeCompiler {
         }
 
         // Transfer source text for error messages
-        if let Some(source) = self.source_text {
+        if let Some(source) = self.source_text.take() {
             // Set in legacy field for backward compatibility
             self.program.debug_info.source_text = source.clone();
             // Also set in source map if not already set
@@ -3060,7 +3078,7 @@ impl BytecodeCompiler {
         // carrier for the permanent classes) anchor the discipline.
         crate::compiler::post_inference_verify::verify_no_post_inference_any(&self.program)?;
 
-        Ok(self.program)
+        Ok(())
     }
 
     /// Compile a program to bytecode with source text for error messages

@@ -550,3 +550,92 @@ no rebaselines:
   parity pins).
 - Full gate list (17 commands) green at S6 close — see the S6 close-out
   entry in `docs/defections.md`.
+
+## ADR009-D1 Addendum (2026-07-13, ticket #15, branch adr009/d1)
+
+Ticket D1 (spec stage 5, Decision 68; slices S1-S6) closes Still-Missing
+item 8 for the EXISTING extend/materialization path: generated declarations
+are ordinary compiler symbols with stable expansion provenance, and the LSP
+answers navigation/references/symbols/rename/diagnostics for them from the
+compiler's query surface. The declaration-discovery fixed point (Decision
+67) and `shape-expansion://` virtual documents remain ticket D2 and were NOT
+built (structural grep sentinels pin the exclusion).
+
+- **Identity core** (`shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs`):
+  `ExpansionIdentity { generator, application, target, stage, arguments_hash,
+  dependencies_hash }` with 128-bit SHA-256 canonical-descriptor hashing
+  (A1 `FrozenTypeIdentity` scheme, length-prefix framed, domain-separated);
+  opaque content-derived `SymbolId` (constructor private to the issuing
+  module — ProofGap pattern; never a counter); `GeneratedOrigin { expansion,
+  node_path, source_anchor }` with a required real `SourceAnchor`
+  (`SourceMap` file id + span; `Span::DUMMY` refused at construction).
+- **Stamping + identity-keyed dedup**: every directive-producing site builds
+  an `ExpansionSite`; the speculative pre-pass and authoritative pass-2 build
+  it from the SAME AST inputs, so one application yields ONE identity across
+  both phases (idempotent `Fresh`/`Reissued` reservation). The name-string
+  `materialized_comptime_fns` set is DELETED; `GeneratedSymbolTable` is the
+  single source of truth (name membership is a derived view).
+- **Real source anchors**: generated decl-level spans (name span, type-param
+  spans) re-anchor to the application span at every directive-consumption
+  point; handler wrappers anchor at the generator. SCOPE LINE (S3): the
+  re-anchoring is DECL-LEVEL — body node spans keep handler-emitted offsets
+  until D2 virtual documents give generated bodies addressable text
+  (`GeneratedOrigin.node_path` covers attribution meanwhile), and
+  `function_item_from_fragment`'s `Span::default()` sites are mini-VM
+  scaffolding that never survives onto a registered declaration.
+- **Query surface + diagnostics**: `BytecodeCompiler::generated_symbol_query()`
+  answers provenance by `SymbolId`/name (unknown identity = named error, no
+  Option-shrug) plus position/name/listing FILTERS; generated-decl compile
+  failures raise C0003 anchored at the application with THREE related
+  locations (generated node incl. node path, application, generator), mapped
+  to LSP relatedInformation.
+- **LSP navigation + rename**: goto-def on a generated-method call site opens
+  the checked decl (anchored at the application until D2) and links
+  application + generator; references include AST call sites + application;
+  workspace/document symbols list qualified generated names that never occur
+  as text; rename classifies from provenance — an explicit source binder
+  (name token inside the generator/application anchors) renames by
+  RECOMPUTATION (binder token + call sites only; zero edits inside generated
+  ranges), a wholly generator-controlled (computed) name is NEVER a text
+  edit: prepare-rename declines and rename answers the named report
+  (`GENERATOR_CONTROLLED_NAME_RENAME_REPORT`) linking the generator
+  definition.
+
+### D1 rejection matrix (rows 1-10, all asserted, green 2026-07-13)
+
+| Row | Forbidden form | Enforcement + asserting tests |
+|---|---|---|
+| 1 | Generated node without identity/provenance (Span::DUMMY anchor) | `GENERATED_NODE_WITHOUT_PROVENANCE_DIAGNOSTIC` at `SourceAnchor::new` + every directive-consumption point; `expansion_provenance::tests::source_anchor_rejects_dummy_span_but_accepts_offset_zero`; `functions_annotations` s2 stamping tests |
+| 2 | One generated name under two expansion identities (silent first-wins) | `GENERATED_SYMBOL_CONFLICT_DIAGNOSTIC` carrying BOTH origins; `expansion_provenance::tests::one_name_under_two_identities_is_the_named_row2_error` |
+| 3 | One identity expanded twice with conflicting output | `GENERATED_SYMBOL_DUPLICATE_IDENTITY_DIAGNOSTIC` via content fingerprint; `expansion_provenance::tests::conflicting_content_for_one_reserved_identity_is_the_named_row3_error` |
+| 4 | Rename on a wholly generator-controlled name produces a text edit | never an edit: `lsp/generated_rename.rs::{prepare_rename_declines_on_generator_controlled_name, rename_on_generator_controlled_name_is_a_report_not_a_text_edit}`; unit `rename::tests::generator_controlled_rename_is_the_named_report_and_never_an_edit` |
+| 5 | Source-binder rename edits generated/virtual ranges | edits = source binder occurrences only; `lsp/generated_rename.rs::{rename_on_generated_method_edits_source_binder_and_call_sites_only, rename_on_generated_method_never_edits_generated_ranges, rename_on_extend_target_name_edits_source_only_and_recomputes}` |
+| 6 | LSP serves generated symbols from text scans | decoy comment/string exclusions: `lsp/generated_navigation.rs::{references_on_generated_method_exclude_comment_and_string_decoys, goto_definition_on_generated_method_excludes_decoy_lines}`; qualified-name-never-in-text: `workspace_symbols_include_generated_symbol_under_its_qualified_name`; rename decoys row 5 above |
+| 7 | Diagnostic on a generated node reports only the generated location | three related locations: `lsp/generated_provenance.rs` (application/generator/node-path notes at real lines) |
+| 8 | Hashes over rendered source text | canonical descriptors only: `expansion_provenance::tests::{argument_and_dependency_hashes_are_formatting_insensitive, descriptor_framing_prevents_concatenation_collisions, expansion_identity_fingerprint_is_sensitive_to_every_component}` |
+| 9 | D2 scope grab (fixed point, `shape-expansion://`, query graph) | grep sentinel `expansion_provenance::tests::row9_d2_scope_vocabulary_has_not_entered_the_source_tree` (URI scheme comment-only; no fixed-point/query-graph identifiers in compiler/LSP surfaces) |
+| 10 | Forbidden carrier shapes (provenance bridge/shim/adapter renames, `Option<ExpansionIdentity>`, public name-string SymbolId ctor, counter identity) | grep sentinels `expansion_provenance::tests::{row10_forbidden_provenance_carrier_shapes_are_absent, identity_core_row9_structural_grep_note}` |
+
+### D1 final verification counts (2026-07-13, all 13 gates green)
+
+Counts at branch head `118e278b` (S6 close + review round 1 — the round-1
+fix added 5 generated-symbol classification units and 4 collision
+integration tests over the S6-close numbers). Strictly additive vs base
+`adr009/base@fbff1b5d` (A1 close baselines in
+parentheses): shape-vm `compiler::comptime_builtins` 38 (19);
+`compiler::functions_annotations` 17 (3-test s3 gate at A1);
+`compiler::comptime` 101 passed / 4 pre-existing ignores (82+4);
+`compiler::monomorphization` 175; `no_dynamic` 1; shape-runtime
+`comptime_reflection` 6 (6); shape-lsp `--lib` 788 (incl. new rename +
+generated-symbol classification units); ShapeTest `lsp` 431 (399);
+`comptime` 122 (109); `annotations_comptime` 52 with two threads (48);
+`extend_blocks` 17. `cargo check -p shape-ast -p shape-vm -p shape-runtime
+-p shape-lsp -p shape-test --all-targets` clean;
+`scripts/check-no-dynamic.sh` exit 0.
+
+Pre-existing limitation carried (S3, not a D1 regression): for the
+`print(user_fn_call())` shape the JIT path writes through raw stdout instead
+of the harness CaptureAdapter — reproduced byte-for-byte with a hand-written
+control; the VM+JIT behavior-unchanged proofs in
+`annotations_comptime/generated_method_runtime.rs` therefore assert result
+values where affected.

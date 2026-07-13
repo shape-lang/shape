@@ -2029,10 +2029,14 @@ impl BytecodeCompiler {
                 .map_err(|e| self.build_comptime_failure(&e, *span, "a compile-time block"))?;
                 // §4.4: re-emit any `warning()` output anchored at this block.
                 self.surface_comptime_warnings(&execution.warnings, *span);
-                self.process_comptime_directives(execution.directives, "")
-                    .map_err(|e| ShapeError::RuntimeError {
-                        message: format!("Comptime block directive processing failed: {}", e),
-                        location: Some(self.span_to_source_location(*span)),
+                // ADR-009 D1 (S2): the block is its own expansion site.
+                let module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+                let expansion_site = self.comptime_block_expansion_site(*span, &module_path);
+                self.process_comptime_directives(execution.directives, "", &expansion_site)
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(e, "Comptime block", *span)
                     })?;
             }
             Item::Query(query, _span) => {
@@ -2660,8 +2664,13 @@ impl BytecodeCompiler {
         method: &shape_ast::ast::types::MethodDef,
         target_type: &shape_ast::ast::TypeName,
     ) -> Result<FunctionDef> {
+        // ADR-009 D1 (S3): the method's own span is the desugared decl's
+        // real anchor — never Span::DUMMY (Decision 68). For hand-written
+        // extends this is the method's location in the source file; for
+        // comptime-generated extends the expansion path re-bases the decl
+        // anchor to the application span (`anchor_generated_function_decl`).
         let (implicit_extend_type_params, receiver_type) =
-            Self::synthesize_extend_type_params(target_type);
+            Self::synthesize_extend_type_params(target_type, method.span);
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
         // Extend methods use qualified "Type.method" names to avoid collisions
@@ -2689,7 +2698,9 @@ impl BytecodeCompiler {
                     {
                         Some(shape_ast::ast::TypeParam::Type {
                             name: name.clone(),
-                            span: Span::DUMMY,
+                            // ADR-009 D1 (S3): synthesized type params anchor
+                            // at the method they are synthesized for.
+                            span: method.span,
                             doc_comment: None,
                             default_type: None,
                             trait_bounds: Vec::new(),
@@ -2738,7 +2749,9 @@ impl BytecodeCompiler {
 
         Ok(FunctionDef {
             name: format!("{}.{}", type_str, method.name),
-            name_span: Span::DUMMY,
+            // ADR-009 D1 (S3): the desugared decl anchors at the method's
+            // own span (see comment at `synthesize_extend_type_params`).
+            name_span: method.span,
             declaring_module_path: method.declaring_module_path.clone(),
             doc_comment: None,
             params,
@@ -2905,6 +2918,9 @@ impl BytecodeCompiler {
     /// such as `extend Vec<number>` keep their source annotation unchanged.
     fn synthesize_extend_type_params(
         target_type: &shape_ast::ast::TypeName,
+        // ADR-009 D1 (S3): real anchor for the synthesized type params —
+        // the method they are synthesized for, never Span::DUMMY.
+        anchor: Span,
     ) -> (
         Vec<shape_ast::ast::TypeParam>,
         Option<shape_ast::ast::TypeAnnotation>,
@@ -2913,7 +2929,7 @@ impl BytecodeCompiler {
             shape_ast::ast::TypeName::Simple(name) if matches!(name.as_str(), "Array" | "Vec") => {
                 let type_params = vec![shape_ast::ast::TypeParam::Type {
                     name: "T".to_string(),
-                    span: Span::DUMMY,
+                    span: anchor,
                     doc_comment: None,
                     default_type: None,
                     trait_bounds: Vec::new(),
@@ -2929,7 +2945,7 @@ impl BytecodeCompiler {
             {
                 let type_params = vec![shape_ast::ast::TypeParam::Type {
                     name: "N".to_string(),
-                    span: Span::DUMMY,
+                    span: anchor,
                     doc_comment: None,
                     default_type: None,
                     trait_bounds: Vec::new(),
@@ -4443,6 +4459,11 @@ impl BytecodeCompiler {
                         &struct_def.name,
                         &fields,
                     );
+                    // ADR-009 D1 (S2): pass-2 builds the SAME expansion site
+                    // the speculative pre-pass built for this application
+                    // (same ann node, same handler AST, same ComptimeTarget
+                    // inputs) — one identity across both phases.
+                    let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
@@ -4458,13 +4479,20 @@ impl BytecodeCompiler {
                     )?;
 
                     if self
-                        .process_comptime_directives(execution.directives, &target_name)
-                        .map_err(|e| ShapeError::RuntimeError {
-                            message: format!(
-                                "Comptime handler '{}' directive processing failed: {}",
-                                ann.name, e
-                            ),
-                            location: Some(self.span_to_source_location(handler_span)),
+                        .process_comptime_directives(
+                            execution.directives,
+                            &target_name,
+                            &expansion_site,
+                        )
+                        .map_err(|e| {
+                            // ADR-009 D1 (S4): provenance-carrying
+                            // generated-decl failures pass through with
+                            // their location notes intact.
+                            self.preserve_or_wrap_directive_failure(
+                                e,
+                                &format!("Comptime handler '{}'", ann.name),
+                                handler_span,
+                            )
                         })?
                     {
                         removed = true;
@@ -5612,17 +5640,16 @@ impl BytecodeCompiler {
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         module_name: &str,
         module_items: &mut Vec<Item>,
-    ) -> std::result::Result<bool, String> {
+        site: &super::comptime_builtins::expansion_provenance::ExpansionSite,
+    ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
-                    self.apply_comptime_extend(extend, module_name)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend(extend, module_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::ExtendItems { items } => {
-                    self.apply_comptime_extend_items(items, module_name)
-                        .map_err(|e| e.to_string())?;
+                    self.apply_comptime_extend_items(items, module_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     removed = true;
@@ -5633,22 +5660,19 @@ impl BytecodeCompiler {
                 }
                 super::comptime_builtins::ComptimeDirective::SetParamType { .. }
                 | super::comptime_builtins::ComptimeDirective::SetParamValue { .. } => {
-                    return Err(
-                        "`set param` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`set param` directives are only valid when compiling function targets",
+                    ));
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {
-                    return Err(
-                        "`set return` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`set return` directives are only valid when compiling function targets",
+                    ));
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceBody { .. } => {
-                    return Err(
-                        "`replace body` directives are only valid when compiling function targets"
-                            .to_string(),
-                    );
+                    return Err(Self::directive_error(
+                        "`replace body` directives are only valid when compiling function targets",
+                    ));
                 }
             }
         }
@@ -5673,6 +5697,9 @@ impl BytecodeCompiler {
                         module_path,
                         &Self::module_target_fields(module_items),
                     );
+                    // ADR-009 D1 (S2): expansion site for this module-target
+                    // handler application.
+                    let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
@@ -5690,13 +5717,17 @@ impl BytecodeCompiler {
                             execution.directives,
                             module_path,
                             module_items,
+                            &expansion_site,
                         )
-                        .map_err(|e| ShapeError::RuntimeError {
-                            message: format!(
-                                "Comptime handler '{}' directive processing failed: {}",
-                                ann.name, e
-                            ),
-                            location: Some(self.span_to_source_location(handler_span)),
+                        .map_err(|e| {
+                            // ADR-009 D1 (S4): provenance-carrying
+                            // generated-decl failures pass through with
+                            // their location notes intact.
+                            self.preserve_or_wrap_directive_failure(
+                                e,
+                                &format!("Comptime handler '{}'", ann.name),
+                                handler_span,
+                            )
                         })?
                     {
                         removed = true;
@@ -5796,15 +5827,20 @@ impl BytecodeCompiler {
             // §4.4: re-emit any `warning()` output anchored at this block.
             self.surface_comptime_warnings(&execution.warnings, span);
 
+            // ADR-009 D1 (S2): the module-scoped block is its own expansion
+            // site.
+            let expansion_site = self.comptime_block_expansion_site(span, module_path);
             if self
                 .process_comptime_directives_for_module(
                     execution.directives,
                     module_path,
                     module_items,
+                    &expansion_site,
                 )
-                .map_err(|e| ShapeError::RuntimeError {
-                    message: format!("Comptime block directive processing failed: {}", e),
-                    location: Some(self.span_to_source_location(span)),
+                .map_err(|e| {
+                    // ADR-009 D1 (S4): provenance-carrying generated-decl
+                    // failures pass through with their location notes.
+                    self.preserve_or_wrap_directive_failure(e, "Comptime block", span)
                 })?
             {
                 return Ok(true);

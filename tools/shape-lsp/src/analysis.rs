@@ -5,7 +5,7 @@
 
 use crate::annotation_discovery::AnnotationDiscovery;
 use crate::diagnostics::{
-    enrich_diagnostics_with_code_metadata, error_to_diagnostic, validate_annotations,
+    enrich_diagnostics_with_code_metadata, validate_annotations,
     validate_async_join, validate_async_structured_concurrency, validate_color_rgb_range,
     validate_comptime_builtins_context, validate_comptime_overrides,
     validate_comptime_side_effects, validate_foreign_function_types,
@@ -28,6 +28,29 @@ pub fn analyze_program_semantics(
     file_path: Option<&std::path::Path>,
     module_cache: Option<&ModuleCache>,
     workspace_root: Option<&std::path::Path>,
+) -> Vec<Diagnostic> {
+    analyze_program_semantics_for_document(
+        program,
+        text,
+        file_path,
+        module_cache,
+        workspace_root,
+        None,
+    )
+}
+
+/// [`analyze_program_semantics`] carrying the document's URI, so
+/// location-bearing error notes (e.g. the ADR-009 D1 generated-declaration
+/// provenance notes: generated node + application site + generator
+/// definition) map to LSP `relatedInformation` even when the compiled
+/// document is in-memory and its locations name no file.
+pub fn analyze_program_semantics_for_document(
+    program: &Program,
+    text: &str,
+    file_path: Option<&std::path::Path>,
+    module_cache: Option<&ModuleCache>,
+    workspace_root: Option<&std::path::Path>,
+    document_uri: Option<&tower_lsp_server::ls_types::Uri>,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -69,7 +92,10 @@ pub fn analyze_program_semantics(
     }
 
     if let Err(compile_error) = compiler.compile_with_source(program, text) {
-        let mut compile_diagnostics = error_to_diagnostic(&compile_error);
+        // Carry the document URI so location-bearing notes map to
+        // relatedInformation (file-less in-memory locations included).
+        let mut compile_diagnostics =
+            crate::diagnostics::error_to_diagnostic_with_uri(&compile_error, document_uri.cloned());
         combine_same_line_undefined_variable_diagnostics(program, text, &mut compile_diagnostics);
         diagnostics.extend(compile_diagnostics);
     }

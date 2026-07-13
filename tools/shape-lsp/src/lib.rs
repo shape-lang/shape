@@ -25,6 +25,7 @@ pub mod document_symbols;
 pub mod folding;
 pub mod foreign_lsp;
 pub mod formatting;
+pub mod generated_symbols;
 pub mod grammar_completion;
 pub mod hover;
 pub mod inlay_hints;

@@ -653,6 +653,10 @@ impl BytecodeCompiler {
                 } else {
                     target_desc.name.clone()
                 };
+                // ADR-009 D1 (S2): expansion site for this expression-target
+                // handler application.
+                let expansion_site =
+                    self.annotation_expansion_site(annotation, &handler, &target_desc);
                 // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                 // Result; surface the V3-S5 ckpt-5 SURFACE through the
                 // caller's Result chain instead of panicking.
@@ -667,13 +671,19 @@ impl BytecodeCompiler {
                 )?;
 
                 let removed = self
-                    .process_comptime_directives(execution.directives, &target_name)
-                    .map_err(|e| ShapeError::RuntimeError {
-                        message: format!(
-                            "Comptime handler '{}' directive processing failed: {}",
-                            annotation.name, e
-                        ),
-                        location: Some(self.span_to_source_location(handler_span)),
+                    .process_comptime_directives(
+                        execution.directives,
+                        &target_name,
+                        &expansion_site,
+                    )
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(
+                            e,
+                            &format!("Comptime handler '{}'", annotation.name),
+                            handler_span,
+                        )
                     })?;
 
                 if removed {
@@ -1921,10 +1931,14 @@ impl BytecodeCompiler {
                 self.surface_comptime_warnings(&execution.warnings, *span);
                 // Comptime blocks can emit directives via direct syntax.
                 // They are processed with no implicit target binding.
-                self.process_comptime_directives(execution.directives, "")
-                    .map_err(|e| shape_ast::error::ShapeError::RuntimeError {
-                        message: format!("Comptime block directive processing failed: {}", e),
-                        location: Some(self.span_to_source_location(*span)),
+                // ADR-009 D1 (S2): the block is its own expansion site.
+                let module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+                let expansion_site = self.comptime_block_expansion_site(*span, &module_path);
+                self.process_comptime_directives(execution.directives, "", &expansion_site)
+                    .map_err(|e| {
+                        // ADR-009 D1 (S4): provenance-carrying generated-decl
+                        // failures pass through with their location notes.
+                        self.preserve_or_wrap_directive_failure(e, "Comptime block", *span)
                     })?;
                 // ADR-009 B1 S4: value-DEEP lift wall — the shared
                 // `runtime_lift_rejection` fires on every reachable

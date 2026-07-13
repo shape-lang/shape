@@ -350,6 +350,41 @@ print(User { name: "Ada" }.summary())
 Direct `extend target { ... }` has applied VM/JIT evidence. This does not prove
 that computed source-string generation is acceptable.
 
+**CURRENT / compiler+LSP - generated symbol identities, expansion provenance,
+source anchors, and identity-driven tooling (Decision 68, ticket ADR009-D1,
+2026-07-13).** Scope: the EXISTING extend/materialization path; the
+declaration-discovery fixed point (Decision 67) and `shape-expansion://`
+virtual views remain TARGET (ticket D2). Every declaration generated on that
+path is an ordinary compiler symbol: the compiler issues a content-derived
+`SymbolId` with full `ExpansionIdentity { generator, application, target,
+stage, arguments_hash, dependencies_hash }` + `GeneratedOrigin { expansion,
+node_path, source_anchor }` provenance
+(`shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs`, hashing
+per the A1 canonical-descriptor SHA-256 scheme — never rendered text, never a
+counter). The speculative pre-pass and the authoritative pass-2 compile agree
+on ONE identity per application (idempotent re-issue); dedup is
+identity-keyed — the name-string `materialized_comptime_fns` set is deleted,
+and one generated name under two identities or one identity with conflicting
+output is a named compile error carrying both expansions' provenance.
+Generated declarations anchor at real source spans (`Span::DUMMY` is the
+named row-1 rejection). Tooling consumes the ONE compiler query surface
+(`BytecodeCompiler::generated_symbol_query()`), never a text scan: go-to-def
+on a generated-method call site opens the checked declaration and links the
+application + generator definition; references/workspace+document symbols
+answer via `SymbolId`; diagnostics inside generated declarations carry
+generated-node (with node path) + application + generator locations as
+related information; rename on an explicit source binder edits ONLY the
+source binder occurrences (the expansion recomputes; zero edits land in
+generated ranges), and a wholly generator-controlled name is NEVER a text
+edit — rename reports generator control and links the generator definition.
+Evidence: `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`
+(D1 addendum, rejection matrix rows 1-10 + verification counts).
+Book status: D1-enabled behaviors are gate-runnable in ShapeTest
+(`tools/shape-test/tests/lsp/{generated_navigation.rs,
+generated_provenance.rs, generated_rename.rs}` and
+`tests/annotations_comptime/generated_method_runtime.rs`, VM+JIT);
+book-chapter examples land in stage F1 per the program spec.
+
 ### Implemented But Under-Proven
 
 The compiler contains paths for `comptime pre`, `on_define`, `metadata`,
@@ -434,6 +469,8 @@ examples, rejection requirements, and implementation implications.
 - [Nominals And Members](typed-comptime/nominals-and-members.md): Decisions 55-60.
 - [Annotations And Hooks](typed-comptime/annotations-and-hooks.md): Decisions 61-65.
 - [Expansion And Tooling](typed-comptime/expansion-and-tooling.md): Decisions 66-69.
+  Decision 68 is CURRENT on the existing extend/materialization path
+  (ADR009-D1, 2026-07-13); the fixed point + virtual views remain TARGET (D2).
 - [Resources And Fragments](typed-comptime/resources-and-fragments.md): Decisions 70-73 and 95.
 - [Patterns And Control Flow](typed-comptime/patterns-and-control-flow.md): Decisions 74-76.
 - [Guards And Exhaustiveness](typed-comptime/guards-and-exhaustiveness.md): Decisions 77-79.

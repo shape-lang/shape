@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use tower_lsp_server::ls_types::{
     CodeActionOrCommand, CompletionItem, Diagnostic, DocumentSymbol, DocumentSymbolResponse,
-    FormattingOptions, Hover, HoverContents, MarkupContent, Position, Range, SymbolKind, Uri,
+    FormattingOptions, GotoDefinitionResponse, Hover, HoverContents, Location, MarkupContent,
+    Position, Range, SymbolKind, TextEdit, Uri,
 };
 
 use shape_lsp::context::CompletionContext;
@@ -248,7 +249,18 @@ impl ShapeTest {
             Ok(program) => program,
             Err(err) => return error_to_diagnostic(&err),
         };
-        shape_lsp::analysis::analyze_program_semantics(&program, &self.text, None, None, None)
+        // Carry the harness document URI so location-bearing error notes
+        // (e.g. ADR-009 D1 generated-declaration provenance) surface as
+        // `relatedInformation` exactly as they do for a real editor
+        // document.
+        shape_lsp::analysis::analyze_program_semantics_for_document(
+            &program,
+            &self.text,
+            None,
+            None,
+            None,
+            Some(&self.uri()),
+        )
     }
 
     // -- Runtime helpers ----------------------------------------------------
@@ -582,6 +594,151 @@ impl ShapeTest {
         self
     }
 
+    /// Collect every `Location` of the goto-definition response at the
+    /// current position (Scalar / Array / Link variants flattened; empty
+    /// when no definition resolves).
+    fn definition_locations(&self) -> Vec<Location> {
+        let uri = self.uri();
+        match shape_lsp::definition::get_definition(
+            &self.text,
+            self.position,
+            &uri,
+            None,
+            None,
+            None,
+        ) {
+            None => Vec::new(),
+            Some(GotoDefinitionResponse::Scalar(location)) => vec![location],
+            Some(GotoDefinitionResponse::Array(locations)) => locations,
+            Some(GotoDefinitionResponse::Link(links)) => links
+                .into_iter()
+                .map(|link| Location {
+                    uri: link.target_uri,
+                    range: link.target_range,
+                })
+                .collect(),
+        }
+    }
+
+    /// Assert the goto-definition response at the current position includes
+    /// a location starting on every expected zero-based line.
+    ///
+    /// ADR-009 D1 (S5): go-to-definition on a generated-method call site
+    /// opens the checked generated declaration AND links the source
+    /// application + generator definition (Decision 68 LSP behavior 1).
+    pub fn expect_definition_includes_lines(self, expected_lines: &[u32]) -> Self {
+        let locations = self.definition_locations();
+        let lines: Vec<u32> = locations
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect();
+        for expected in expected_lines {
+            assert!(
+                lines.contains(expected),
+                "Expected a definition location starting on line {} at ({}, {}), got lines {:?}",
+                expected,
+                self.position.line,
+                self.position.character,
+                lines
+            );
+        }
+        self
+    }
+
+    /// Assert NO goto-definition location at the current position starts on
+    /// `line` (zero-based). Negative counterpart of
+    /// [`Self::expect_definition_includes_lines`] — proves decoy text
+    /// occurrences (comments, string literals) are not served as
+    /// definitions.
+    pub fn expect_definition_excludes_line(self, line: u32) -> Self {
+        let locations = self.definition_locations();
+        let lines: Vec<u32> = locations
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect();
+        assert!(
+            !lines.contains(&line),
+            "Did not expect a definition location on line {} at ({}, {}), got lines {:?}",
+            line,
+            self.position.line,
+            self.position.character,
+            lines
+        );
+        self
+    }
+
+    /// Zero-based start lines of every find-references result at the
+    /// current position (empty when references return nothing).
+    fn reference_lines(&self) -> Vec<u32> {
+        let uri = self.uri();
+        shape_lsp::definition::get_references(&self.text, self.position, &uri)
+            .unwrap_or_default()
+            .iter()
+            .map(|location| location.range.start.line)
+            .collect()
+    }
+
+    /// Assert find-references at the current position includes a result
+    /// starting on every expected zero-based line.
+    ///
+    /// ADR-009 D1 (S5): references on a generated method include all call
+    /// sites AND the application site, resolved via the compiler-issued
+    /// SymbolId (Decision 68 LSP behavior 3).
+    pub fn expect_references_include_lines(self, expected_lines: &[u32]) -> Self {
+        let lines = self.reference_lines();
+        for expected in expected_lines {
+            assert!(
+                lines.contains(expected),
+                "Expected a reference on line {} at ({}, {}), got lines {:?}",
+                expected,
+                self.position.line,
+                self.position.character,
+                lines
+            );
+        }
+        self
+    }
+
+    /// Assert NO find-references result at the current position starts on
+    /// `line` (zero-based). ADR-009 D1 rejection row 6: a decoy text
+    /// occurrence of a generated symbol's name (comment, string literal)
+    /// must NOT be served as a reference — the text-scan path is not
+    /// answering for generated symbols.
+    pub fn expect_references_exclude_line(self, line: u32) -> Self {
+        let lines = self.reference_lines();
+        assert!(
+            !lines.contains(&line),
+            "Did not expect a reference on line {} at ({}, {}), got lines {:?}",
+            line,
+            self.position.line,
+            self.position.character,
+            lines
+        );
+        self
+    }
+
+    /// Assert the workspace-symbol listing for `query` includes a symbol
+    /// with exactly `name`.
+    ///
+    /// ADR-009 D1 (S5): workspace symbols include generated symbols via
+    /// SymbolId — including qualified generated names that never appear as
+    /// plain text in the document.
+    pub fn expect_workspace_symbol_named(self, query: &str, name: &str) -> Self {
+        let uri = self.uri();
+        let symbols = shape_lsp::document_symbols::get_workspace_symbols(&self.text, &uri, query);
+        assert!(
+            symbols.iter().any(|symbol| symbol.name == name),
+            "Expected workspace symbol named '{}' for query '{}', got: {:?}",
+            name,
+            query,
+            symbols
+                .iter()
+                .map(|symbol| symbol.name.clone())
+                .collect::<Vec<_>>()
+        );
+        self
+    }
+
     // -- Signature Help assertions ------------------------------------------
 
     /// Assert signature help at current position exists and has signatures.
@@ -735,6 +892,174 @@ impl ShapeTest {
             self.position.line,
             self.position.character
         );
+        self
+    }
+
+    /// Every same-file TextEdit the rename at the current position produces
+    /// (empty when rename declines).
+    fn rename_text_edits(&self, new_name: &str) -> Vec<TextEdit> {
+        let uri = self.uri();
+        shape_lsp::rename::rename(&self.text, &uri, self.position, new_name, None)
+            .and_then(|edit| edit.changes)
+            .map(|changes| changes.into_values().flatten().collect())
+            .unwrap_or_default()
+    }
+
+    /// Zero-based (line, character) of a byte offset in the document.
+    fn offset_position(text: &str, offset: usize) -> (u32, u32) {
+        let clamped = offset.min(text.len());
+        let mut line = 0u32;
+        let mut character = 0u32;
+        for (i, ch) in text.char_indices() {
+            if i >= clamped {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += 1;
+            }
+        }
+        (line, character)
+    }
+
+    /// Assert the rename at the current position produces edits whose start
+    /// lines include every line in `expected_lines` (zero-based).
+    ///
+    /// ADR-009 D1 (S6, rejection row 5): rename on an explicit source binder
+    /// edits the SOURCE BINDER occurrences (generator binder token + call
+    /// sites) — the expansion recomputes.
+    pub fn expect_rename_edits_include_lines(self, new_name: &str, expected_lines: &[u32]) -> Self {
+        let lines: Vec<u32> = self
+            .rename_text_edits(new_name)
+            .iter()
+            .map(|edit| edit.range.start.line)
+            .collect();
+        for expected in expected_lines {
+            assert!(
+                lines.contains(expected),
+                "Expected a rename edit on line {} at ({}, {}), got lines {:?}",
+                expected,
+                self.position.line,
+                self.position.character,
+                lines
+            );
+        }
+        self
+    }
+
+    /// Assert NO rename edit at the current position starts on `line`
+    /// (zero-based). ADR-009 D1 (S6, rejection rows 5/6): decoy text
+    /// occurrences (comments, string literals) of a generated symbol's name
+    /// are never edited — rename is not a text scan for generated symbols.
+    pub fn expect_rename_edits_exclude_line(self, new_name: &str, line: u32) -> Self {
+        let lines: Vec<u32> = self
+            .rename_text_edits(new_name)
+            .iter()
+            .map(|edit| edit.range.start.line)
+            .collect();
+        assert!(
+            !lines.contains(&line),
+            "Did not expect a rename edit on line {} at ({}, {}), got lines {:?}",
+            line,
+            self.position.line,
+            self.position.character,
+            lines
+        );
+        self
+    }
+
+    /// Assert rename at the current position produces NO workspace edit.
+    /// ADR-009 D1 (S6, rejection row 4): a wholly generator-controlled
+    /// generated name is NEVER renamed by text edit.
+    pub fn expect_rename_none(self, new_name: &str) -> Self {
+        let uri = self.uri();
+        let result = shape_lsp::rename::rename(&self.text, &uri, self.position, new_name, None);
+        assert!(
+            result.is_none(),
+            "Expected rename to decline at ({}, {}), got edits: {:?}",
+            self.position.line,
+            self.position.character,
+            result
+        );
+        self
+    }
+
+    /// Assert every rename edit at the current position lands OUTSIDE the
+    /// generated-declaration ranges reported by the compiler query surface.
+    ///
+    /// ADR-009 D1 (S6, rejection row 5): rename on an explicit source binder
+    /// edits only source-binder occurrences; ZERO edits land inside
+    /// generated ranges (the expansion recomputes).
+    pub fn expect_rename_edits_outside_generated_ranges(self, new_name: &str) -> Self {
+        let edits = self.rename_text_edits(new_name);
+        assert!(
+            !edits.is_empty(),
+            "Expected rename edits at ({}, {})",
+            self.position.line,
+            self.position.character
+        );
+        let program = shape_ast::parser::parse_program(&self.text).expect("program parses");
+        let generated = shape_lsp::generated_symbols::generated_decl_ranges(&program, &self.text);
+        assert!(
+            !generated.is_empty(),
+            "test precondition: the document must hold generated declarations"
+        );
+        for span in &generated {
+            let generated_start = Self::offset_position(&self.text, span.start);
+            let generated_end = Self::offset_position(&self.text, span.end);
+            for edit in &edits {
+                let edit_start = (edit.range.start.line, edit.range.start.character);
+                let edit_end = (edit.range.end.line, edit.range.end.character);
+                let overlaps = edit_start < generated_end && generated_start < edit_end;
+                assert!(
+                    !overlaps,
+                    "Rename edit {:?} lands inside generated range {:?}..{:?}",
+                    edit.range, generated_start, generated_end
+                );
+            }
+        }
+        self
+    }
+
+    /// Assert rename at the current position is answered with the
+    /// generator-controlled REPORT (never a text edit): the message carries
+    /// `message_contains` and the linked generator definition starts on
+    /// `generator_line` (zero-based).
+    ///
+    /// ADR-009 D1 (S6, rejection row 4 / Decision 68): when a generated name
+    /// is wholly generator-controlled, rename reports that fact and links
+    /// the generator definition.
+    pub fn expect_rename_generator_controlled(
+        self,
+        new_name: &str,
+        message_contains: &str,
+        generator_line: u32,
+    ) -> Self {
+        let uri = self.uri();
+        let outcome =
+            shape_lsp::rename::generated_rename(&self.text, &uri, self.position, new_name, None);
+        match outcome {
+            Some(shape_lsp::rename::GeneratedRename::GeneratorControlled(report)) => {
+                assert!(
+                    report.message.contains(message_contains),
+                    "Generator-controlled rename report must contain {:?}, got: {}",
+                    message_contains,
+                    report.message
+                );
+                assert_eq!(
+                    report.generator.range.start.line, generator_line,
+                    "Generator-controlled rename report must link the generator \
+                     definition on line {generator_line}, got {:?}",
+                    report.generator
+                );
+            }
+            other => panic!(
+                "Expected a generator-controlled rename report at ({}, {}), got {:?}",
+                self.position.line, self.position.character, other
+            ),
+        }
         self
     }
 
@@ -1184,6 +1509,57 @@ impl ShapeTest {
                 .map(|diag| diag.message.as_str())
                 .collect::<Vec<_>>()
         );
+        self
+    }
+
+    /// Assert one semantic diagnostic contains `message_fragment` AND
+    /// carries LSP `relatedInformation` entries matching every
+    /// `(note_fragment, zero_based_line)` pair — a related-locations
+    /// assertion, not rendered-string matching.
+    ///
+    /// ADR-009 D1 rejection row 7: a diagnostic raised on a generated
+    /// declaration must link the generated node, the application site, and
+    /// the generator definition as navigable related locations.
+    pub fn expect_semantic_diagnostic_related_locations(
+        self,
+        message_fragment: &str,
+        expected_related: &[(&str, u32)],
+    ) -> Self {
+        let diagnostics = self.collect_semantic_diagnostics();
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diag| diag.message.contains(message_fragment))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected a semantic diagnostic containing '{}', found: {:?}",
+                    message_fragment,
+                    diagnostics
+                        .iter()
+                        .map(|diag| diag.message.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let related = diagnostic.related_information.as_ref().unwrap_or_else(|| {
+            panic!(
+                "Diagnostic '{}' carries no relatedInformation; expected {:?}",
+                diagnostic.message, expected_related
+            )
+        });
+        for (note_fragment, line) in expected_related {
+            assert!(
+                related
+                    .iter()
+                    .any(|info| info.message.contains(note_fragment)
+                        && info.location.range.start.line == *line),
+                "Expected related location containing '{}' at line {}, found: {:?}",
+                note_fragment,
+                line,
+                related
+                    .iter()
+                    .map(|info| (info.message.as_str(), info.location.range.start.line))
+                    .collect::<Vec<_>>()
+            );
+        }
         self
     }
 

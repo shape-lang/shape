@@ -24,10 +24,15 @@ use shape_ast::error::ShapeError;
 
 use super::BytecodeCompiler;
 use super::comptime_builtins::ComptimeDiagnostic;
+use super::comptime_builtins::expansion_provenance::{ExpansionSite, GeneratedNodePath};
 
 /// Comptime diagnostic-id namespace (LSDS `diagnostic_id`).
 const COMPTIME_ERROR_ID: &str = "C0001";
 const COMPTIME_WARNING_ID: &str = "C0002";
+/// LSDS id for an error raised on a GENERATED declaration (ADR-009 D1
+/// rejection row 7): the diagnostic carries generated-node + application +
+/// generator locations as notes.
+const GENERATED_DECL_ERROR_ID: &str = "C0003";
 
 impl BytecodeCompiler {
     /// Build the LSDS [`shape_diagnostics::Location`] for a comptime
@@ -86,6 +91,124 @@ impl BytecodeCompiler {
             }
         }
         err
+    }
+
+    /// ADR-009 D1 (S4), rejection row 7: convert an error raised while
+    /// registering or compiling a GENERATED declaration into an LSDS
+    /// diagnostic that carries the full expansion provenance — the
+    /// generated node (declaration name + node path, anchored where the
+    /// checked declaration lives), the application site, and the
+    /// generator definition — as location-bearing [`shape_diagnostics::
+    /// DiagnosticNote`]s. The LSP diagnostic bridge maps these notes to
+    /// `relatedInformation`, so an editor can jump to all three.
+    ///
+    /// The checked generated declaration anchors at the application span
+    /// until D2 virtual documents give it its own addressable text (S3
+    /// anchoring rule) — the generated-node and application notes carry
+    /// distinct roles at one location today.
+    pub(crate) fn build_generated_decl_failure(
+        &self,
+        e: &ShapeError,
+        decl_name: &str,
+        node_path: &GeneratedNodePath,
+        site: &ExpansionSite,
+    ) -> ShapeError {
+        let message = format!(
+            "error in generated declaration `{decl_name}`: {}",
+            super::helpers::clean_comptime_message(e)
+        );
+        let application_loc = self.comptime_lsds_location(site.application_span());
+        let generator_loc = self.comptime_lsds_location(site.generator_span());
+
+        let diag = shape_diagnostics::DiagnosticBuilder::new(
+            GENERATED_DECL_ERROR_ID,
+            shape_diagnostics::Severity::Error,
+            application_loc.clone(),
+            message,
+        )
+        .with_note(shape_diagnostics::DiagnosticNote::new(
+            format!(
+                "in generated declaration `{decl_name}` (generated node {}), \
+                 whose checked declaration anchors here",
+                node_path.render()
+            ),
+            Some(application_loc.clone()),
+        ))
+        .with_note(shape_diagnostics::DiagnosticNote::new(
+            "generated from this application site",
+            Some(application_loc),
+        ))
+        .with_note(shape_diagnostics::DiagnosticNote::new(
+            "generator defined here",
+            Some(generator_loc),
+        ))
+        .build();
+
+        // LSDS is the source of truth; derive the terminal `ShapeError` and
+        // enrich the caret exactly like `build_comptime_failure`.
+        let mut err = super::functions::diagnostic_to_shape_error(&diag);
+        if let ShapeError::SemanticError {
+            location: Some(loc),
+            ..
+        } = &mut err
+        {
+            let sl = self.span_to_source_location(site.application_span());
+            loc.source_line = sl.source_line;
+            if sl.length.is_some() {
+                loc.length = sl.length;
+            }
+        }
+        err
+    }
+
+    /// ADR-009 D1 (S4): outer directive-processing wrap that PRESERVES a
+    /// provenance-carrying generated-declaration failure. The row-7
+    /// diagnostic built by [`Self::build_generated_decl_failure`] already
+    /// carries its three location notes (generated node + application +
+    /// generator); flattening it into a `format!("... failed: {e}")` string
+    /// would silently drop the locations. Everything else keeps the
+    /// existing directive-processing context wrap, byte-for-byte.
+    pub(crate) fn preserve_or_wrap_directive_failure(
+        &self,
+        e: ShapeError,
+        context: &str,
+        span: Span,
+    ) -> ShapeError {
+        if let ShapeError::SemanticError {
+            location: Some(location),
+            ..
+        } = &e
+        {
+            // Structural predicate: at the directive-processing sites the
+            // only located-and-noted SemanticError is the row-7 generated-
+            // declaration failure (its notes ARE the provenance).
+            if !location.notes.is_empty() {
+                return e;
+            }
+        }
+        // A location-less RuntimeError is a bare directive message
+        // ([`Self::directive_error`]); render it without the "Runtime
+        // error:" Display prefix, matching the pre-S4 string shape.
+        let rendered = match &e {
+            ShapeError::RuntimeError {
+                message,
+                location: None,
+            } => message.clone(),
+            other => other.to_string(),
+        };
+        ShapeError::RuntimeError {
+            message: format!("{context} directive processing failed: {rendered}"),
+            location: Some(self.span_to_source_location(span)),
+        }
+    }
+
+    /// A plain comptime-directive rejection message, located later by the
+    /// directive-processing wrap ([`Self::preserve_or_wrap_directive_failure`]).
+    pub(crate) fn directive_error(message: impl Into<String>) -> ShapeError {
+        ShapeError::RuntimeError {
+            message: message.into(),
+            location: None,
+        }
     }
 
     /// Re-emit the non-fatal `warning()` diagnostics collected during a
