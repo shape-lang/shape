@@ -73,9 +73,15 @@
 //!    registration (`register_item_functions`) runs AFTER the barrier. `dyn`
 //!    bounds and trait intersections in checked type expressions resolve
 //!    against this set. Input 1 additionally projects each struct's declared
-//!    generic arity (`struct_generic_info.type_params.len()`) for applied-
-//!    arity enforcement; enum generic arity is not recoverable from the
-//!    schema registry, so applied enum heads are arity-unchecked (surfaced).
+//!    ordered generic PARAMETER KINDS (`struct_generic_info.type_params`
+//!    mapped `TypeParam::Type`→`ParamKind::Type`, `TypeParam::Const`→
+//!    `ParamKind::Const`) for applied-arity AND type-vs-const kind
+//!    enforcement (ADR-009 B4); arity is the vector length, so there is one
+//!    projection, not a separate arity table. Enum generic arity/kinds are
+//!    not recoverable from the schema registry, so applied enum heads are
+//!    arity/kind-unchecked in the A2 spelling path and a NAMED
+//!    surface-and-stop under the B4 `param_kinds_of` query (never a guessed
+//!    kind).
 //!
 //! ## Freeze-boundary rejection (Dec 52, rejection-matrix row 4)
 //!
@@ -107,8 +113,9 @@ use super::type_reflection::{
     FrozenTypeCategory, FrozenTypeIdentity, FrozenTypeIndex, canonicalize_type_annotation,
 };
 use crate::compiler::BytecodeCompiler;
-use shape_ast::ast::TypeAnnotation;
+use shape_ast::ast::{TypeAnnotation, TypeParam};
 use shape_ast::error::{Result, ShapeError};
+use shape_runtime::comptime_reflection::ParamKind;
 use shape_runtime::type_system::annotation_as_tyvar;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -177,6 +184,38 @@ pub(crate) const NUMERIC_WIDENING_NOT_EVIDENCE_DIAGNOSTIC: &str = "legacy numeri
 /// surfaces-and-stops instead of guessing or silently missing.
 pub(crate) const AMBIGUOUS_IMPL_EVIDENCE_DIAGNOSTIC: &str = "ambiguous trait-impl evidence: an impl registered under an unqualified \
      trait name matches more than one frozen trait definition";
+
+/// ADR-009 B4 (Stage 2, Dec 54): a nominal head whose generic parameter
+/// kinds are not recoverable from the freeze — today only user-declared enum
+/// generics, whose arity/kinds the schema registry does not carry
+/// (`semantic_freeze` named freeze input 3 gap). Rather than guess a kind,
+/// the `param_kinds_of` query surfaces-and-stops with this named diagnostic;
+/// `.apply(...)` on such a constructor cannot proceed. Builtin nominal
+/// constructors (`Option`/`Result`/`Array`/collections/`Future`) and user
+/// STRUCT generics carry frozen kinds and never reach this arm.
+///
+/// NOTE: user-facing through the comptime diagnostics firewall — kept free of
+/// jargon markers (no "ADR-…", no "§", …).
+pub(crate) const ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC: &str = "generic parameter kinds are not recoverable for this nominal type: it is a \
+     generic enum, whose declared parameters the semantic freeze does not \
+     carry — arity and type-vs-const kind checking cannot proceed (only \
+     builtin constructors and struct generics carry frozen parameter kinds)";
+
+/// ADR-009 B4: `param_kinds_of` was asked for a non-nominal identity (a
+/// primitive, tuple, callable, union, …). Only nominal type constructors
+/// have generic parameter kinds; this is a named rejection, never `None`.
+pub(crate) const NOT_A_TYPE_CONSTRUCTOR_DIAGNOSTIC: &str = "this type is not a nominal type constructor: only nominal types carry \
+     generic parameter kinds";
+
+/// ADR-009 B4 (Dec 54): project one declared generic parameter to its sealed
+/// [`ParamKind`]. The ONE source of a constructor's param kinds — the AST
+/// `TypeParam` variant, never re-derived from a second table.
+pub(super) fn param_kind_of(param: &TypeParam) -> ParamKind {
+    match param {
+        TypeParam::Type { .. } => ParamKind::Type,
+        TypeParam::Const { .. } => ParamKind::Const,
+    }
+}
 
 /// B2 S1 ruled stance, landed in S5 (Dec 52 registration-complete ordering):
 /// an implementation registered AFTER the semantic-freeze barrier — the
@@ -379,21 +418,24 @@ impl SemanticFreeze {
             enum_defs: HashMap::new(),
             alias_defs: HashMap::new(),
             trait_names: compiler.known_traits.clone(),
-            struct_generic_arities: HashMap::new(),
+            struct_generic_param_kinds: HashMap::new(),
             frozen_type_ids: HashMap::new(),
             frozen_type_categories: HashMap::new(),
             frozen_primitive_payloads: HashMap::new(),
-            generic_arities: HashMap::new(),
+            generic_param_kinds: HashMap::new(),
         };
 
-        // Named freeze input 1 (arity projection, S5): declared generic
-        // arity per struct from `struct_generic_info.type_params`; the
-        // rebuild below keys it by frozen identity for alias-transparent
-        // applied-arity enforcement.
+        // Named freeze input 1 (param-kind projection, S5 arity + B4 kinds):
+        // the declared ordered generic parameter KINDS per struct from
+        // `struct_generic_info.type_params` (arity = vector length — one
+        // projection, not a second arity table). The rebuild below keys it by
+        // frozen identity for alias-transparent applied-arity/kind
+        // enforcement.
         for (name, info) in &compiler.struct_generic_info {
-            index
-                .struct_generic_arities
-                .insert(name.clone(), info.type_params.len());
+            index.struct_generic_param_kinds.insert(
+                name.clone(),
+                info.type_params.iter().map(param_kind_of).collect(),
+            );
         }
 
         // Named freeze input 1: struct shapes (`struct_types` field order +
@@ -616,6 +658,38 @@ impl SemanticFreeze {
     ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
     {
         self.index.payload_for_identity(identity)
+    }
+
+    /// Shared query API (ADR-009 B4, Dec 54): the ordered generic
+    /// PARAMETER-KIND vector for a frozen nominal constructor identity —
+    /// sibling of [`Self::category_of`] / [`Self::payload_of`], reading the
+    /// ONE param-kind projection (no second arity table). Arity is the slice
+    /// length; each element is the type-vs-const kind `.apply(...)` checks a
+    /// supplied argument against.
+    ///
+    /// - `Ok(slice)` — a builtin constructor or user struct generic with
+    ///   frozen kinds (an empty slice is a zero-parameter nominal — valid).
+    /// - `Err(_)` — a NAMED surface-and-stop: a generic enum head whose kinds
+    ///   are unrecoverable ([`ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC`],
+    ///   never a guessed kind), or a non-nominal identity
+    ///   ([`NOT_A_TYPE_CONSTRUCTOR_DIAGNOSTIC`]). Never a silent `None`.
+    pub(crate) fn param_kinds_of(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> std::result::Result<&[ParamKind], String> {
+        if let Some(kinds) = self.index.generic_param_kinds.get(&identity) {
+            return Ok(kinds.as_slice());
+        }
+        // No recorded kinds. A frozen NOMINAL identity with no kind vector is
+        // the enum-head gap (freeze input 3 does not carry enum generics) —
+        // surface-and-stop, never a guessed kind. Anything else is simply not
+        // a type constructor.
+        match self.index.frozen_type_categories.get(&identity).copied() {
+            Some(FrozenTypeCategory::Nominal) => {
+                Err(ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC.to_string())
+            }
+            _ => Err(NOT_A_TYPE_CONSTRUCTOR_DIAGNOSTIC.to_string()),
+        }
     }
 
     /// Shared query API (freeze input 4): canonical trait identity for a
@@ -933,6 +1007,19 @@ impl FreezeOverlay {
             };
         }
         self.base.payload_of(identity)
+    }
+
+    /// Shared query API (ADR-009 B4, Dec 54): the ordered generic
+    /// parameter-kind vector for a frozen nominal constructor identity.
+    /// Scoped generic parameters are never nominal type constructors (a
+    /// `parameter:{owner}:{name}` leaf has no declared generics), and
+    /// site-interned composites are never constructor heads, so the overlay
+    /// defers to the base freeze unconditionally — one query, one source.
+    pub(crate) fn param_kinds_of(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> std::result::Result<&[ParamKind], String> {
+        self.base.param_kinds_of(identity)
     }
 
     /// Shared query API passthrough (freeze input 4): trait identities are a
@@ -2426,6 +2513,14 @@ seven()
                 "FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC",
                 FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC,
             ),
+            (
+                "ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC",
+                ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC,
+            ),
+            (
+                "NOT_A_TYPE_CONSTRUCTOR_DIAGNOSTIC",
+                NOT_A_TYPE_CONSTRUCTOR_DIAGNOSTIC,
+            ),
         ] {
             assert!(
                 !comptime_message_has_jargon(text),
@@ -2437,5 +2532,138 @@ seven()
                 "{name} must pass the comptime diagnostics firewall unchanged"
             );
         }
+    }
+
+    // ========================================================================
+    // ADR-009 B4 (Dec 54): the freeze param-kind query — one param-kind
+    // projection (arity = vector length), never a second table. Builtins and
+    // user struct generics carry frozen kinds; generic enum heads are the
+    // named surface-and-stop; non-nominals are the named non-constructor
+    // rejection.
+    // ========================================================================
+
+    fn type_param(name: &str) -> shape_ast::ast::TypeParam {
+        shape_ast::ast::TypeParam::Type {
+            name: name.to_string(),
+            span: shape_ast::ast::Span::DUMMY,
+            doc_comment: None,
+            default_type: None,
+            trait_bounds: Vec::new(),
+        }
+    }
+
+    fn const_param(name: &str) -> shape_ast::ast::TypeParam {
+        shape_ast::ast::TypeParam::Const {
+            name: name.to_string(),
+            span: shape_ast::ast::Span::DUMMY,
+            doc_comment: None,
+            ty: TypeAnnotation::Basic("int".to_string()),
+            default: None,
+        }
+    }
+
+    fn add_struct_with_params(
+        compiler: &mut BytecodeCompiler,
+        name: &str,
+        params: Vec<shape_ast::ast::TypeParam>,
+    ) {
+        compiler
+            .struct_types
+            .insert(name.to_string(), (Vec::new(), shape_ast::ast::Span::DUMMY));
+        compiler.struct_generic_info.insert(
+            name.to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: params,
+                runtime_field_types: HashMap::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn param_kinds_of_projects_builtin_type_parameters() {
+        let freeze =
+            SemanticFreeze::freeze(&BytecodeCompiler::new()).expect("bare compiler must freeze");
+
+        // Arity = vector length; every builtin generic parameter is a type
+        // parameter (no builtin declares a const generic).
+        for (name, arity) in [("Array", 1), ("HashMap", 2), ("Option", 1), ("Result", 2)] {
+            let identity = freeze.identity_of(name).expect("builtin identity");
+            let kinds = freeze
+                .param_kinds_of(identity)
+                .expect("builtin has frozen kinds");
+            assert_eq!(kinds.len(), arity, "{name} arity");
+            assert!(
+                kinds.iter().all(|kind| *kind == ParamKind::Type),
+                "{name} parameters are all type parameters"
+            );
+        }
+    }
+
+    #[test]
+    fn param_kinds_of_projects_user_struct_type_and_const_parameters_in_order() {
+        let freeze = SemanticFreeze::freeze(&{
+            let mut compiler = BytecodeCompiler::new();
+            add_struct_with_params(
+                &mut compiler,
+                "Vector",
+                vec![type_param("T"), const_param("N")],
+            );
+            compiler
+        })
+        .expect("compiler with generic struct must freeze");
+
+        let identity = freeze.identity_of("Vector").expect("Vector identity");
+        assert_eq!(
+            freeze
+                .param_kinds_of(identity)
+                .expect("Vector has frozen kinds"),
+            &[ParamKind::Type, ParamKind::Const],
+            "ordered kinds project the declared type params, arity = length"
+        );
+    }
+
+    #[test]
+    fn param_kinds_of_surfaces_and_stops_on_generic_enum_heads() {
+        // Named freeze input 3: enums enter through the schema registry, which
+        // carries no generic arity/kinds — the query surfaces-and-stops with a
+        // NAMED diagnostic, never a guessed kind and never a silent None.
+        let freeze = SemanticFreeze::freeze(&compiler_with_module_scope_types())
+            .expect("module-scope compiler must freeze");
+        let color = freeze.identity_of("Color").expect("Color enum identity");
+        assert_eq!(freeze.category_of(color), Ok(FrozenTypeCategory::Nominal));
+        let error = freeze
+            .param_kinds_of(color)
+            .expect_err("enum head kinds are unrecoverable — surface-and-stop");
+        assert_eq!(error, ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC);
+    }
+
+    #[test]
+    fn param_kinds_of_rejects_non_nominal_identities() {
+        let freeze =
+            SemanticFreeze::freeze(&BytecodeCompiler::new()).expect("bare compiler must freeze");
+        let int_identity = freeze.identity_of("int").expect("int identity");
+        let error = freeze
+            .param_kinds_of(int_identity)
+            .expect_err("a primitive is not a type constructor");
+        assert_eq!(error, NOT_A_TYPE_CONSTRUCTOR_DIAGNOSTIC);
+    }
+
+    #[test]
+    fn param_kinds_query_flows_through_the_overlay_unchanged() {
+        let freeze = SemanticFreeze::freeze(&{
+            let mut compiler = BytecodeCompiler::new();
+            add_struct_with_params(&mut compiler, "Box", vec![type_param("T")]);
+            compiler
+        })
+        .expect("compiler with generic struct must freeze");
+        // A scoped overlay never shadows a nominal constructor's kinds.
+        let overlay = FreezeOverlay::new(freeze, "map", &["T".to_string()]);
+        let identity = overlay.identity_of("Box").expect("Box identity");
+        assert_eq!(
+            overlay
+                .param_kinds_of(identity)
+                .expect("overlay defers to base"),
+            &[ParamKind::Type]
+        );
     }
 }

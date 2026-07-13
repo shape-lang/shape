@@ -637,3 +637,68 @@ fn hover_on_some_witness_name_shows_opened_hidden_witness() {
 fn inlay_on_some_bound_iteration_shows_opened_descriptor() {
     ShapeTest::new(SOME_BOUND_ITERATION).expect_type_hint_label("FrozenType<T>");
 }
+
+// =====================================================================
+// ADR-009 ticket B4 (Stage 2, Dec 54): LSP surface for the uniform
+// nominal-application free-function builtins `type_constructor` /
+// `const_arg`. Both behaviors are driven by the shared-catalog rows
+// (`comptime_reflection.rs::{TYPE_CONSTRUCTOR_BUILTIN_ROW,
+// CONST_ARG_BUILTIN_ROW}` spliced verbatim into
+// `builtin_metadata::CORE_BUILTINS`) — a hand-written parallel LSP row is
+// a defect; a red test here is fixed by enriching the shared rows.
+// `apply` / `refine` / `type_argument` are METHOD forwarders, not free
+// builtins, so the smallest complete free-function surface is these two
+// rows (matching the A2/B1/B2 precedent).
+// =====================================================================
+
+#[test]
+fn comptime_completion_offers_uniform_application_builtins() {
+    ShapeTest::new("comptime {\n    \n}\n")
+        .at(pos(1, 4))
+        .expect_completion("type_constructor")
+        .expect_completion("const_arg");
+}
+
+#[test]
+fn runtime_completion_hides_uniform_application_builtins() {
+    ShapeTest::new("")
+        .at(pos(0, 0))
+        .expect_no_completion("type_constructor")
+        .expect_no_completion("const_arg");
+}
+
+#[test]
+fn type_constructor_hover_explains_constructor_capability() {
+    ShapeTest::new(
+        "let c = comptime { type_constructor(Option) }\n",
+    )
+    .at(pos(0, 22))
+    .expect_hover_contains("type_constructor(C) -> TypeConstructorRef<C>")
+    .expect_hover_contains("nominal type head")
+    .expect_hover_contains("Only valid inside comptime blocks");
+}
+
+#[test]
+fn const_arg_hover_explains_const_application() {
+    ShapeTest::new(
+        "let a = comptime { const_arg(5) }\n",
+    )
+    .at(pos(0, 22))
+    .expect_hover_contains("const_arg(N) -> ConstArg")
+    .expect_hover_contains("checked const argument")
+    .expect_hover_contains("const-generic");
+}
+
+#[test]
+fn type_constructor_offers_signature_help() {
+    ShapeTest::new("let c = comptime { type_constructor( ) }\n")
+        .at(pos(0, 36))
+        .expect_signature_help();
+}
+
+#[test]
+fn const_arg_offers_signature_help() {
+    ShapeTest::new("let a = comptime { const_arg( ) }\n")
+        .at(pos(0, 29))
+        .expect_signature_help();
+}

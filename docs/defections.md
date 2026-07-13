@@ -7956,3 +7956,62 @@ design-index row (`docs/design/typed-comptime.md`) and Decision 51
 the loop out of comptime — refused, it would change the feature (comptime-only
 sugar per Dec 51) to fake a proof; the honest position is that a comptime
 feature's JIT proof is a comptime→runtime boundary proof.
+
+## 2026-07-13 — ADR009-B4 S2: uniform nominal-application carriers + orchestration (considered-but-rejected compromises)
+
+Slice S2 wires the S1 model (`TypeConstructorRef` / `AppliedType` descriptors,
+`canonical_apply`/`canonical_refine`/`type_argument`) into comptime execution:
+two reserved carrier schemas (`\u{1}comptime:TypeConstructorRef`,
+`\u{1}comptime:AppliedType`), the `ParamKind` vocabulary enum, five SOH
+intrinsics (`type_constructor` / `const_arg` / `apply` / `refine` /
+`type_argument`), the site-rewrite (`type_constructor(Head)` identity-literal
+lowering + the `apply`/`refine`/`type_argument` method-call surface), and the
+parser reject-message redirect. Lift walls registered in the SAME commit as the
+schemas (B1 discipline). Identity-equality against the A2 applied spelling
+(`identity(apply(constructor(Option), [int])) == identity(type_ref(Option<int>))`
+both directions) is proven at the carrier layer.
+
+**Considered and rejected:**
+
+(a) **A second param-kind table on the `TypeConstructorRef` carrier.** The plan
+sketch stored the ordered parameter kinds as a `ParamKind` array field on the
+constructor carrier. Rejected: `.apply(...)` re-reads the declared kinds through
+the ONE freeze projection (`FreezeOverlay::param_kinds_of`, S1's
+`generic_param_kinds`), so a snapshotted array would be exactly the "second
+arity/param-kind table" CLAUDE.md forbids — a drift attractor. The carrier
+stores head identity halves only; the freeze stays the single authority. The
+`ParamKind` enum is still registered (schema + lift-reject arm +
+`reflection_enum_variant_names`) as the classification vocabulary and the LSP
+completion surface.
+
+(b) **A third reserved schema for `const_arg`.** Rejected in favor of reusing
+the opaque `TypeRef` carrier as a pure identity transport for the const value's
+`const:int:{value}` identity. `.apply(...)` classifies each argument's kind by
+consulting the freeze (`category_of` succeeds ⇒ a frozen TYPE ⇒ `Type` arg;
+fails ⇒ a `const_arg` identity ⇒ `Const` arg), then checks the classified kind
+against the position's DECLARED kind. This is sound because an unknown/forged
+type identity never reaches `.apply` as a built carrier — `type_ref(Unknown)`
+already rejects at the TypeRef builder — so the only non-frozen-type identities
+that arrive are `const_arg` products. No JSON/Any/partial descriptor; identity
+halves only.
+
+(c) **`applied.type_argument<I>()` turbofish.** The `<I>` const-generic method
+syntax is not in the `MethodCall` AST (no `const_args` field), and adding one is
+a ~8-file exhaustive-match AST change out of this slice's scope. S2 ships the
+checked-int form `applied.type_argument(I)` — `I` is still a checked const index
+(named out-of-range rejection), just carried as a positional argument.
+
+(d) **Growing a `TypeAnnotation` const carrier for inline
+`type_ref(Head<..., N, ...>)`.** Rejected (unchanged from A2 S3): the inline
+bare-const form stays a named parse-time rejection; B4's checked const path is
+the `const_arg(N)` builder applied through `type_constructor(Head).apply(...)`.
+The primary.rs reject MESSAGE now redirects to that builder.
+
+(e) **Gating the `apply`/`refine`/`type_argument` method-call rewrite on
+receiver-type analysis.** The rewrite matches those three method names
+syntactically inside comptime code (the `type_ref`/`trait_ref` name-match
+precedent). A user method of the same name inside a comptime block would be
+rewritten and then rejected by the intrinsic's schema-name check (a named "expected
+a compiler-issued …" error), never silently mis-dispatched. Receiver-type
+resolution in the rewrite would be a second evaluator (Dec 66 territory); the
+schema-name-checked decode is the sound backstop.

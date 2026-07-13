@@ -3,11 +3,16 @@ use crate::compiler::comptime_target;
 use sha2::{Digest, Sha256};
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 pub(crate) use shape_runtime::comptime_reflection::FrozenTypeCategory;
-use shape_runtime::comptime_reflection::{FloatWidth, FrozenPrimitive, IntegerWidth};
-use shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA;
+use shape_runtime::comptime_reflection::{FloatWidth, FrozenPrimitive, IntegerWidth, ParamKind};
+use shape_runtime::type_schema::TypeSchema;
+use shape_runtime::type_schema::builtin_schemas::{
+    COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+};
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr, TypedObjectStorage};
-use shape_value::{KindedSlot, NativeKind};
+use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, stamp_elem_type};
+use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::collections::HashMap;
 
 /// ADR-009 B1 S2: payload descriptors + heap-value builders for the sealed
@@ -132,23 +137,29 @@ pub(crate) struct FrozenTypeIndex {
     /// intersections in checked type expressions resolve against this set;
     /// an unknown bound is a named rejection in the unknown-identity family.
     pub(crate) trait_names: std::collections::HashSet<String>,
-    /// ADR-009 A2 (slice S5): declared generic arity per user STRUCT name —
-    /// the freeze-input projection of `struct_generic_info.type_params`
-    /// (part of named freeze input 1). Enum generic arity is NOT recoverable
-    /// from the schema registry today, so applied enum heads are arity-
-    /// unchecked (surfaced S5 decision — no guessing).
-    pub(crate) struct_generic_arities: HashMap<String, usize>,
+    /// ADR-009 A2 (slice S5) + B4 (Dec 54): declared ordered generic
+    /// PARAMETER KINDS per user STRUCT name — the freeze-input projection of
+    /// `struct_generic_info.type_params` (each `TypeParam` mapped to its
+    /// [`ParamKind`], part of named freeze input 1). Arity is the vector
+    /// length: ONE projection, not a separate arity table. Enum generic
+    /// arity/kinds are NOT recoverable from the schema registry today, so
+    /// applied enum heads are arity/kind-unchecked in the A2 spelling path
+    /// and a named surface-and-stop under the B4 `param_kinds_of` query
+    /// (no guessing).
+    pub(crate) struct_generic_param_kinds: HashMap<String, Vec<ParamKind>>,
     pub(crate) frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
     pub(crate) frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
     /// ADR-009 B1 S2: exact width/domain payload per Primitive identity,
     /// derived from [`PRIMITIVE_SYNONYM_FAMILIES`] in the same rebuild that
     /// interns the identities (one source, no second derivation).
     pub(crate) frozen_primitive_payloads: HashMap<FrozenTypeIdentity, FrozenPrimitive>,
-    /// ADR-009 A2 (slice S5): identity-keyed declared arity for applicable
-    /// nominal heads (builtin table + user structs), built by
-    /// `rebuild_frozen_type_index`. Identity-keyed so alias heads inherit
-    /// their target's arity transparently (Dec 53).
-    pub(crate) generic_arities: HashMap<FrozenTypeIdentity, usize>,
+    /// ADR-009 A2 (slice S5) + B4 (Dec 54): identity-keyed declared ordered
+    /// generic PARAMETER KINDS for applicable nominal heads (builtin table +
+    /// user structs), built by `rebuild_frozen_type_index`. Arity is the
+    /// vector length — the SINGLE arity/kind source (spec: no second table).
+    /// Identity-keyed so alias heads inherit their target's kinds transparently
+    /// (Dec 53).
+    pub(crate) generic_param_kinds: HashMap<FrozenTypeIdentity, Vec<ParamKind>>,
 }
 
 impl FrozenTypeIndex {
@@ -210,7 +221,7 @@ impl FrozenTypeIndex {
         let mut ids = HashMap::new();
         let mut categories = HashMap::new();
         let mut primitive_payloads = HashMap::new();
-        let mut arities: HashMap<FrozenTypeIdentity, usize> = HashMap::new();
+        let mut param_kinds: HashMap<FrozenTypeIdentity, Vec<ParamKind>> = HashMap::new();
 
         for (names, primitive) in PRIMITIVE_SYNONYM_FAMILIES {
             let identity = intern_synonyms(
@@ -236,7 +247,10 @@ impl FrozenTypeIndex {
 
         // Builtin nominal constructors: one table carries name AND declared
         // arity (S5 R5 — arity is a freeze fact, enforced by the single
-        // canonicalizer, identity-keyed so alias heads inherit it).
+        // canonicalizer, identity-keyed so alias heads inherit it). Every
+        // builtin generic parameter is a TYPE parameter (ADR-009 B4, Dec 54):
+        // no builtin declares a const generic, so arity `n` projects to
+        // `[ParamKind::Type; n]` — arity is the vector length.
         for (name, arity) in [
             ("Array", 1),
             ("Vec", 1),
@@ -257,7 +271,7 @@ impl FrozenTypeIndex {
                 &format!("nominal:{name}"),
                 FrozenTypeCategory::Nominal,
             );
-            arities.insert(identity, arity);
+            param_kinds.insert(identity, vec![ParamKind::Type; arity]);
         }
 
         let mut nominal_names: Vec<_> = self
@@ -276,10 +290,11 @@ impl FrozenTypeIndex {
                 &format!("nominal:{name}"),
                 FrozenTypeCategory::Nominal,
             );
-            // User-struct arity from the declared type parameters (freeze
-            // input 1 projection). Enums have no entry — arity-unchecked.
-            if let Some(arity) = self.struct_generic_arities.get(&name) {
-                arities.insert(identity, *arity);
+            // User-struct param kinds from the declared type parameters
+            // (freeze input 1 projection; arity = vector length). Enums have
+            // no entry — arity/kind-unchecked (B4 `param_kinds_of` surfaces).
+            if let Some(kinds) = self.struct_generic_param_kinds.get(&name) {
+                param_kinds.insert(identity, kinds.clone());
             }
         }
 
@@ -322,7 +337,7 @@ impl FrozenTypeIndex {
                     };
                     let is_trait = |name: &str| self.trait_names.contains(name);
                     let applied_arity =
-                        |identity: FrozenTypeIdentity| arities.get(&identity).copied();
+                        |identity: FrozenTypeIdentity| param_kinds.get(&identity).map(Vec::len);
                     canonicalize_with(
                         target,
                         &LeafScope {
@@ -341,8 +356,8 @@ impl FrozenTypeIndex {
                         "canonical type identity collision across semantic categories"
                     );
                 }
-                changed |= ids.insert((*alias).clone(), canonical.identity)
-                    != Some(canonical.identity);
+                changed |=
+                    ids.insert((*alias).clone(), canonical.identity) != Some(canonical.identity);
             }
             if !changed {
                 break;
@@ -352,7 +367,7 @@ impl FrozenTypeIndex {
         self.frozen_type_ids = ids;
         self.frozen_type_categories = categories;
         self.frozen_primitive_payloads = primitive_payloads;
-        self.generic_arities = arities;
+        self.generic_param_kinds = param_kinds;
     }
 }
 
@@ -493,7 +508,8 @@ pub(super) fn canonicalize_type_annotation(
     };
     let index = overlay.base().index();
     let is_trait = |name: &str| index.trait_names.contains(name);
-    let applied_arity = |identity: FrozenTypeIdentity| index.generic_arities.get(&identity).copied();
+    let applied_arity =
+        |identity: FrozenTypeIdentity| index.generic_param_kinds.get(&identity).map(Vec::len);
     canonicalize_with(
         annotation,
         &LeafScope {
@@ -825,9 +841,7 @@ fn canonical_record(
     }
     let rendered: Vec<String> = entries
         .iter()
-        .map(|(name, optional, hex)| {
-            format!("{name}{}:{hex}", if *optional { "?" } else { "" })
-        })
+        .map(|(name, optional, hex)| format!("{name}{}:{hex}", if *optional { "?" } else { "" }))
         .collect();
     Ok(composite(
         format!("record:{{{}}}", rendered.join(",")),
@@ -875,6 +889,634 @@ fn canonical_applied(
     ))
 }
 
+// ============================================================================
+// ADR-009 B4 (Stage 2, Dec 54): uniform nominal application — constructor
+// descriptors + apply/refine/type_argument canonicalizers over the SAME
+// frozen identities A2 mints. One model for zero-arg nominals, builtins, user
+// generics, and const-generic applications; no per-type reflection variant.
+//
+// Identity-equality is the load-bearing invariant: `canonical_apply` over a
+// `Type` argument reproduces `canonical_applied`'s EXACT
+// `applied:<head_hex><arg_hex,…>` descriptor, so
+// `identity(apply(constructor(Option), [int]))` equals
+// `identity(type_ref(Option<int>))` both directions. Const arguments extend
+// the SAME uniform hex-embedding grammar (no descriptor fork); they have no
+// A2 spelling (the parser rejects untyped const applications) and are checked
+// only through this path.
+// ============================================================================
+
+/// The compile-time descriptor for a nominal type CONSTRUCTOR
+/// (`type_constructor<C>()`). Carries the frozen head identity — the SAME
+/// `identity_hex(head)` A2's applied path embeds, so [`canonical_apply`]
+/// reproduces the exact `applied:` descriptor — plus its own constructor
+/// identity (distinct from the bare nominal leaf and from any application).
+///
+/// Compile-time-only, confined to `comptime_builtins` (`pub(super)`): it never
+/// escapes as a runtime carrier; the public `TypeConstructorRef` transports
+/// only the 128-bit head identity halves (S2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConstructorDescriptor {
+    /// The frozen nominal head this constructor applies over.
+    pub(super) head_identity: FrozenTypeIdentity,
+    /// `constructor:<head_hex>` — the constructor's own canonical descriptor.
+    pub(super) descriptor: String,
+    /// Hash of [`Self::descriptor`].
+    pub(super) identity: FrozenTypeIdentity,
+}
+
+/// One checked argument supplied to [`canonical_apply`]. Uniform over BOTH
+/// parameter kinds: a `Type` argument is a checked `TypeRef` identity; a
+/// `Const` argument is a checked `const_arg` value canonicalized to its own
+/// identity. Both contribute their `identity_hex` to the applied descriptor,
+/// so a mixed type/const application embeds uniformly as `applied:h<h,h,…>` —
+/// no per-kind descriptor grammar fork (spec §3.1: no untyped argument
+/// arrays, no partial descriptors).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AppliedArg {
+    /// A checked type argument, carrying its frozen `TypeRef` identity.
+    Type(FrozenTypeIdentity),
+    /// A checked const argument, carrying its canonical const-value identity.
+    Const(FrozenTypeIdentity),
+}
+
+impl AppliedArg {
+    /// The declared parameter kind this argument must be applied against.
+    pub(super) fn kind(self) -> ParamKind {
+        match self {
+            Self::Type(_) => ParamKind::Type,
+            Self::Const(_) => ParamKind::Const,
+        }
+    }
+
+    /// The frozen identity this argument embeds into the applied descriptor.
+    pub(super) fn identity(self) -> FrozenTypeIdentity {
+        match self {
+            Self::Type(identity) | Self::Const(identity) => identity,
+        }
+    }
+}
+
+/// The decomposition of an `applied:` descriptor recovered by
+/// [`canonical_refine`]: the frozen head identity and the ordered argument
+/// identities. Descriptors embed every argument as a bare `identity_hex`
+/// (kind-erased), so refine recovers identities, not kinds — the round-trip
+/// contract [`type_argument`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RefinedApplication {
+    pub(super) head_identity: FrozenTypeIdentity,
+    pub(super) arg_identities: Vec<FrozenTypeIdentity>,
+}
+
+/// The 32-lowercase-hex inverse of [`identity_hex`]: parse a child-embedding
+/// hex back to its [`FrozenTypeIdentity`]. `None` for any string that is not
+/// exactly 32 hex digits (so a malformed / truncated descriptor refines to
+/// `None`, never a fabricated identity).
+pub(super) fn identity_from_hex(hex: &str) -> Option<FrozenTypeIdentity> {
+    if hex.len() != 32 {
+        return None;
+    }
+    let high = u64::from_str_radix(hex.get(0..16)?, 16).ok()? as i64;
+    let low = u64::from_str_radix(hex.get(16..32)?, 16).ok()? as i64;
+    Some(FrozenTypeIdentity { high, low })
+}
+
+/// ADR-009 B4: mint a constructor descriptor for the nominal head `head`
+/// (`type_constructor<C>()`). The head resolves through the ONE freeze query
+/// API; a non-nominal head is the named non-Nominal rejection (the same wall
+/// [`canonical_applied`] raises), an unknown name the named unknown-identity
+/// rejection. The minted descriptor is distinct from the bare nominal leaf so
+/// a `TypeConstructorRef` is never confused with a `TypeRef`.
+pub(super) fn canonical_constructor(
+    head: &str,
+    overlay: &FreezeOverlay,
+) -> Result<ConstructorDescriptor, String> {
+    let Some(identity) = overlay.identity_of(head) else {
+        return Err(format!(
+            "type_constructor received an unknown semantic type identity: type name \
+             '{head}' is not frozen in this compilation unit"
+        ));
+    };
+    let category = overlay.category_of(identity)?;
+    if category != FrozenTypeCategory::Nominal {
+        return Err(format!(
+            "type_constructor cannot build a constructor for '{head}': only nominal \
+             type constructors accept type arguments (found category {})",
+            category.variant_name()
+        ));
+    }
+    let descriptor = format!("constructor:{}", identity_hex(identity));
+    let constructor_identity = FrozenTypeIdentity::from_canonical_descriptor(&descriptor);
+    Ok(ConstructorDescriptor {
+        head_identity: identity,
+        descriptor,
+        identity: constructor_identity,
+    })
+}
+
+/// ADR-009 B4: mint a checked const argument from an integer value
+/// (`const_arg(N)` for a `const N: int` parameter). The value canonicalizes
+/// to its own `const:int:{value}` identity so it embeds uniformly in the
+/// applied descriptor. Only this checked path produces a const argument — a
+/// bare/untyped const literal keeps the parser's R9 rejection.
+pub(super) fn canonical_const_arg(value: i64) -> AppliedArg {
+    AppliedArg::Const(FrozenTypeIdentity::from_canonical_descriptor(&format!(
+        "const:int:{value}"
+    )))
+}
+
+/// ADR-009 B4: apply checked arguments to a constructor, producing the
+/// canonical `TypeRef<Applied>`. Arity and type-vs-const kind checks reuse the
+/// ONE param-kind projection through [`FreezeOverlay::param_kinds_of`] — never
+/// a re-derived arity/kind table; a generic enum head surfaces-and-stops there
+/// (never a guessed kind). A `Type`-argument application reproduces
+/// [`canonical_applied`]'s exact descriptor, so its identity equals the A2
+/// `type_ref(Head<Args>)` spelling.
+pub(super) fn canonical_apply(
+    constructor: &ConstructorDescriptor,
+    args: &[AppliedArg],
+    overlay: &FreezeOverlay,
+) -> Result<CanonicalType, String> {
+    let kinds = overlay.param_kinds_of(constructor.head_identity)?;
+    if kinds.len() != args.len() {
+        return Err(format!(
+            "apply on type constructor '{}' expects {} type argument(s), but {} were \
+             provided",
+            constructor_head_name(constructor, overlay),
+            kinds.len(),
+            args.len()
+        ));
+    }
+    for (position, (declared, supplied)) in kinds.iter().zip(args).enumerate() {
+        if *declared != supplied.kind() {
+            return Err(format!(
+                "apply argument {position} has the wrong kind: parameter is a \
+                 {}-parameter but a {}-argument was supplied",
+                declared.variant_name(),
+                supplied.kind().variant_name()
+            ));
+        }
+    }
+    if args.is_empty() {
+        // A zero-argument application IS the bare nominal (the A2 spelling
+        // `type_ref(Head)` — no `applied:h<>` descriptor exists); this keeps
+        // the model uniform for zero-arg nominals, and refine over the result
+        // returns None (round-trips only over genuine applications).
+        return Ok(CanonicalType {
+            descriptor: identity_hex(constructor.head_identity),
+            category: FrozenTypeCategory::Nominal,
+            identity: constructor.head_identity,
+        });
+    }
+    let embedded: Vec<String> = args
+        .iter()
+        .map(|arg| identity_hex(arg.identity()))
+        .collect();
+    Ok(composite(
+        format!(
+            "applied:{}<{}>",
+            identity_hex(constructor.head_identity),
+            embedded.join(",")
+        ),
+        FrozenTypeCategory::Nominal,
+    ))
+}
+
+/// Best-effort diagnostic name for a constructor head: the frozen type name if
+/// one froze to this identity, else the raw hex (a builtin/user nominal always
+/// has a name; the hex fallback is defensive).
+fn constructor_head_name(constructor: &ConstructorDescriptor, overlay: &FreezeOverlay) -> String {
+    overlay
+        .type_names_for_identity(constructor.head_identity)
+        .first()
+        .map(|name| (*name).to_string())
+        .unwrap_or_else(|| identity_hex(constructor.head_identity))
+}
+
+/// ADR-009 B4: decompose an `applied:` descriptor back to its head identity
+/// and ordered argument identities (`nominal.refine(constructor)`). Returns
+/// `None` for a bare-nominal / non-applied descriptor — refine round-trips
+/// only over genuine applications, never a partial answer, never an error.
+pub(super) fn canonical_refine(applied_descriptor: &str) -> Option<RefinedApplication> {
+    let body = applied_descriptor.strip_prefix("applied:")?;
+    let head_identity = identity_from_hex(body.get(0..32)?)?;
+    let inner = body.get(32..)?.strip_prefix('<')?.strip_suffix('>')?;
+    let mut arg_identities = Vec::new();
+    if !inner.is_empty() {
+        for arg_hex in inner.split(',') {
+            arg_identities.push(identity_from_hex(arg_hex)?);
+        }
+    }
+    Some(RefinedApplication {
+        head_identity,
+        arg_identities,
+    })
+}
+
+/// ADR-009 B4: the frozen identity of the `index`-th argument of a refined
+/// application (`applied.type_argument<I>()`). `index` is a checked const
+/// index, not a string key; an out-of-range index is a named rejection.
+pub(super) fn type_argument(
+    applied: &RefinedApplication,
+    index: usize,
+) -> Result<FrozenTypeIdentity, String> {
+    applied.arg_identities.get(index).copied().ok_or_else(|| {
+        format!(
+            "type_argument index {index} is out of range: this applied type has {} type \
+             argument(s)",
+            applied.arg_identities.len()
+        )
+    })
+}
+
+// ============================================================================
+// ADR-009 B4 (Stage 2, Dec 54) slice S2: runtime carriers + orchestration for
+// uniform nominal application. `type_constructor(C)` issues a
+// `TypeConstructorRef` carrying the frozen HEAD identity; `.apply(args)` checks
+// arity/kind through the ONE freeze param-kind projection and issues an
+// `AppliedType` whose identity is EQUAL to the A2 `type_ref(Head<Args>)`
+// spelling; `.refine(constructor)` and `.type_argument(i)` read the stored
+// head/arg identities directly (no one-way-hash inversion). Every decode is
+// schema-name-checked (the TraitRef/ImplRef forgery-blocking precedent); every
+// identity crosses as int halves — no strings, no partial descriptors.
+// ============================================================================
+
+/// Rebuild the pure [`ConstructorDescriptor`] from a frozen head identity — the
+/// runtime inverse of the S1 name-keyed [`canonical_constructor`]. The
+/// intrinsic transports only the head identity halves (no name string), so this
+/// re-mints the `constructor:<head_hex>` descriptor + its own identity exactly
+/// as the name-keyed path does. Kept private: `canonical_apply` is the only
+/// consumer.
+fn constructor_descriptor_from_head(head_identity: FrozenTypeIdentity) -> ConstructorDescriptor {
+    let descriptor = format!("constructor:{}", identity_hex(head_identity));
+    let identity = FrozenTypeIdentity::from_canonical_descriptor(&descriptor);
+    ConstructorDescriptor {
+        head_identity,
+        descriptor,
+        identity,
+    }
+}
+
+/// Schema-name-checked storage getter for a reserved B4 carrier — the local
+/// sibling of `frozen_identity_from_ref`, blocking forged carriers structurally
+/// (the TraitRef/ImplRef precedent). `label` names the carrier in diagnostics.
+fn reserved_storage<'a>(
+    slot: &'a KindedSlot,
+    expected_schema: &str,
+    label: &str,
+) -> Result<(TypeSchema, &'a TypedObjectStorage), String> {
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
+        return Err(format!("expected a compiler-issued {label} value"));
+    }
+    let storage = slot
+        .as_typed_object_storage()
+        .ok_or_else(|| format!("received a null {label} value"))?;
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| format!("could not resolve {label} schema id {}", storage.schema_id))?;
+    if schema.name != expected_schema {
+        return Err(format!(
+            "expected {label}, got '{}' — only the compiler issues {label} values",
+            schema.name
+        ));
+    }
+    Ok((schema, storage))
+}
+
+/// Read one 128-bit identity from two int-half fields of a decoded carrier.
+fn identity_halves_of(
+    schema: &TypeSchema,
+    storage: &TypedObjectStorage,
+    high_field: &str,
+    low_field: &str,
+) -> Result<FrozenTypeIdentity, String> {
+    let read = |name: &str| -> Result<i64, String> {
+        let field = schema
+            .get_field(name)
+            .ok_or_else(|| format!("carrier schema '{}' has no {name} field", schema.name))?;
+        storage
+            .clone_field_kinded(field.index as usize)
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| format!("carrier field {name} is not an integer"))
+    };
+    Ok(FrozenTypeIdentity {
+        high: read(high_field)?,
+        low: read(low_field)?,
+    })
+}
+
+/// ADR-009 B4: mint a `TypeConstructorRef` carrier for a frozen head identity.
+/// The head is re-validated as a `Nominal` through the freeze (an unknown/
+/// INVALID identity is the named unknown-constructor rejection R6, a non-nominal
+/// the named non-Nominal rejection R5) so a forged or malformed head cannot
+/// produce a usable constructor. Only the head identity halves are stored — the
+/// ordered param kinds stay a freeze fact re-read at apply time (no second
+/// table).
+pub(crate) fn build_type_constructor_ref_heap_value(
+    head_identity: FrozenTypeIdentity,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    if head_identity == FrozenTypeIdentity::INVALID {
+        return Err("type_constructor received an unknown semantic type identity: the name is \
+                    not a frozen nominal type constructor in this compilation unit"
+            .to_string());
+    }
+    let category = freeze.category_of(head_identity)?;
+    if category != FrozenTypeCategory::Nominal {
+        return Err(format!(
+            "type_constructor cannot build a constructor for this type: only nominal type \
+             constructors accept type arguments (found category {})",
+            category.variant_name()
+        ));
+    }
+    typed_slot_into_heap_value(typed_object_for_named_schema(
+        COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
+        &[
+            ("identity_high", KindedSlot::from_int(head_identity.high)),
+            ("identity_low", KindedSlot::from_int(head_identity.low)),
+        ],
+    ))
+}
+
+/// Read the frozen head identity out of a `TypeConstructorRef` carrier
+/// (schema-name-checked).
+fn type_constructor_head_from_ref(slot: &KindedSlot) -> Result<FrozenTypeIdentity, String> {
+    let (schema, storage) = reserved_storage(
+        slot,
+        COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
+        "TypeConstructorRef",
+    )?;
+    identity_halves_of(&schema, storage, "identity_high", "identity_low")
+}
+
+/// ADR-009 B4: mint a checked const argument carrier (`const_arg(N)`). The
+/// value canonicalizes to its own `const:int:{value}` identity (S1
+/// [`canonical_const_arg`]); the carrier reuses the opaque `TypeRef` schema as
+/// a pure identity transport (it never resolves as a frozen TYPE — `.apply`
+/// classifies it as `Const` precisely because `category_of` rejects it, which
+/// is what distinguishes it from a `type_ref` argument). Documented in
+/// `docs/defections.md`.
+pub(crate) fn build_const_arg_ref_heap_value(value: i64) -> Result<HeapValue, String> {
+    let identity = canonical_const_arg(value).identity();
+    typed_slot_into_heap_value(typed_object_for_named_schema(
+        COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+        &[
+            ("identity_high", KindedSlot::from_int(identity.high)),
+            ("identity_low", KindedSlot::from_int(identity.low)),
+        ],
+    ))
+}
+
+/// Read one opaque argument's identity from a borrowed typed-object storage
+/// (no owning `KindedSlot` is constructed, so nothing releases the borrowed
+/// element on drop). Both `type_ref` and `const_arg` args carry the reserved
+/// `TypeRef` schema — a foreign schema is a named rejection.
+fn arg_identity_from_storage(storage: &TypedObjectStorage) -> Result<FrozenTypeIdentity, String> {
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| {
+            format!("could not resolve apply-argument schema id {}", storage.schema_id)
+        })?;
+    if schema.name != COMPTIME_FROZEN_TYPE_REF_SCHEMA {
+        return Err(format!(
+            "apply arguments must be checked type_ref / const_arg values, got '{}' — untyped \
+             argument arrays cannot construct an application",
+            schema.name
+        ));
+    }
+    identity_halves_of(&schema, storage, "identity_high", "identity_low")
+}
+
+/// Classify a supplied argument identity by consulting the freeze: a frozen
+/// TYPE identity is a `Type` argument, anything else (a `const_arg`'s
+/// `const:int:{value}` identity) is a `Const` argument. `canonical_apply` then
+/// checks the classified kind against the constructor's DECLARED param kind
+/// (freeze authority) — this only decides which kind the argument *presents*,
+/// never what the position *requires*.
+fn classify_applied_arg(identity: FrozenTypeIdentity, freeze: &FreezeOverlay) -> AppliedArg {
+    if freeze.category_of(identity).is_ok() {
+        AppliedArg::Type(identity)
+    } else {
+        AppliedArg::Const(identity)
+    }
+}
+
+/// Build the interleaved `high, low, …` int array of the ordered argument
+/// identities for an `AppliedType` carrier.
+fn build_arg_identity_array(args: &[FrozenTypeIdentity]) -> KindedSlot {
+    let array = TypedArray::<i64>::with_capacity((args.len() * 2) as u32);
+    // SAFETY: freshly allocated array pointer; stamping the element type +
+    // pushing i64 halves mirrors the `frozen_erased_descriptor_slot` pattern.
+    unsafe {
+        stamp_elem_type(array as *mut u8, ELEM_TYPE_I64);
+        for id in args {
+            TypedArray::push(array, id.high);
+            TypedArray::push(array, id.low);
+        }
+    }
+    KindedSlot::new(
+        ValueSlot::from_raw(array as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+/// Read the ordered argument identities back out of an `AppliedType` carrier's
+/// interleaved `high, low, …` int array.
+fn read_arg_identity_array(slot: &KindedSlot) -> Result<Vec<FrozenTypeIdentity>, String> {
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err("AppliedType arg_identities field is not an array".to_string());
+    }
+    let ptr = slot.raw() as *const TypedArray<i64>;
+    if ptr.is_null() {
+        return Err("AppliedType arg_identities array is null".to_string());
+    }
+    // SAFETY: the kind witness + non-null check prove this is a live i64 array;
+    // we only read halves, never take ownership.
+    let out = unsafe {
+        let len = TypedArray::len(ptr);
+        if len % 2 != 0 {
+            return Err("AppliedType arg_identities array has an odd length".to_string());
+        }
+        let mut out = Vec::with_capacity((len / 2) as usize);
+        let mut i = 0;
+        while i < len {
+            let high = TypedArray::get(ptr, i).ok_or("AppliedType arg identity read out of range")?;
+            let low =
+                TypedArray::get(ptr, i + 1).ok_or("AppliedType arg identity read out of range")?;
+            out.push(FrozenTypeIdentity { high, low });
+            i += 2;
+        }
+        out
+    };
+    Ok(out)
+}
+
+/// Build an `AppliedType` carrier from a completed application.
+fn build_applied_type_heap_value(
+    applied_identity: FrozenTypeIdentity,
+    head_identity: FrozenTypeIdentity,
+    args: &[FrozenTypeIdentity],
+) -> Result<HeapValue, String> {
+    typed_slot_into_heap_value(typed_object_for_named_schema(
+        COMPTIME_APPLIED_TYPE_SCHEMA,
+        &[
+            ("identity_high", KindedSlot::from_int(applied_identity.high)),
+            ("identity_low", KindedSlot::from_int(applied_identity.low)),
+            (
+                "head_identity_high",
+                KindedSlot::from_int(head_identity.high),
+            ),
+            ("head_identity_low", KindedSlot::from_int(head_identity.low)),
+            ("arg_identities", build_arg_identity_array(args)),
+        ],
+    ))
+}
+
+/// The decoded triple carried by an `AppliedType` value.
+struct DecodedApplication {
+    head_identity: FrozenTypeIdentity,
+    arg_identities: Vec<FrozenTypeIdentity>,
+}
+
+/// True when `slot` is an `AppliedType` carrier (schema-name-checked). Used by
+/// `refine` to answer `None` for a non-applied receiver rather than erroring.
+fn is_applied_type_carrier(slot: &KindedSlot) -> bool {
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
+        return false;
+    }
+    let Some(storage) = slot.as_typed_object_storage() else {
+        return false;
+    };
+    shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .map(|schema| schema.name == COMPTIME_APPLIED_TYPE_SCHEMA)
+        .unwrap_or(false)
+}
+
+/// Schema-name-checked decode of an `AppliedType` carrier.
+fn decode_applied_type(slot: &KindedSlot) -> Result<DecodedApplication, String> {
+    let (schema, storage) = reserved_storage(slot, COMPTIME_APPLIED_TYPE_SCHEMA, "AppliedType")?;
+    let head_identity =
+        identity_halves_of(&schema, storage, "head_identity_high", "head_identity_low")?;
+    let args_field = schema
+        .get_field("arg_identities")
+        .ok_or("AppliedType schema has no arg_identities field")?;
+    let args_slot = storage
+        .clone_field_kinded(args_field.index as usize)
+        .ok_or("AppliedType arg_identities field is unreadable")?;
+    let arg_identities = read_arg_identity_array(&args_slot)?;
+    Ok(DecodedApplication {
+        head_identity,
+        arg_identities,
+    })
+}
+
+/// ADR-009 B4: `constructor.apply(args)` — the uniform application entry. The
+/// receiver head is decoded from the `TypeConstructorRef` carrier; each argument
+/// is a checked `type_ref` / `const_arg` carrier read from the argument array
+/// (an untyped array element is rejection R4). Arity + type-vs-const kind are
+/// checked through the ONE freeze param-kind projection inside
+/// [`canonical_apply`] (a generic enum head surfaces-and-stops there); the
+/// resulting identity EQUALS the A2 `type_ref(Head<Args>)` spelling.
+pub(crate) fn apply_to_constructor(
+    receiver: &KindedSlot,
+    args_array: &KindedSlot,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    let head_identity = type_constructor_head_from_ref(receiver)?;
+    let constructor = constructor_descriptor_from_head(head_identity);
+
+    // Decode the argument array element-by-element from borrowed storages.
+    if args_array.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err("apply expects its arguments as a checked array of type_ref / const_arg \
+                    values"
+            .to_string());
+    }
+    let array_ptr = args_array.raw() as *const TypedArray<*const TypedObjectStorage>;
+    if array_ptr.is_null() {
+        return Err("apply received a null argument array".to_string());
+    }
+    // SAFETY: kind witness + non-null check prove this is a live typed-object
+    // array; each element is a borrowed storage pointer (no ownership taken).
+    let mut applied_args = Vec::new();
+    let mut arg_identities = Vec::new();
+    unsafe {
+        let len = TypedArray::len(array_ptr);
+        for i in 0..len {
+            let elem = TypedArray::get(array_ptr, i)
+                .ok_or("apply argument array read out of range")?;
+            if elem.is_null() {
+                return Err("apply received a null argument".to_string());
+            }
+            let identity = arg_identity_from_storage(&*elem)?;
+            applied_args.push(classify_applied_arg(identity, freeze));
+            arg_identities.push(identity);
+        }
+    }
+
+    let applied = canonical_apply(&constructor, &applied_args, freeze)?;
+    build_applied_type_heap_value(applied.identity, head_identity, &arg_identities)
+}
+
+/// ADR-009 B4: `applied.refine(constructor)` — round-trips ONLY over a genuine
+/// application whose head matches the constructor. Returns `Some(AppliedType)`
+/// on a head match, `None` otherwise (never an error, never partial — R7).
+pub(crate) fn refine_application(
+    applied: &KindedSlot,
+    constructor: &KindedSlot,
+) -> Result<Option<HeapValue>, String> {
+    // R7: refine round-trips ONLY over a genuine application. A bare-nominal
+    // `type_ref(...)` (or any non-AppliedType carrier) has no stored structure
+    // to recover — that is `None`, never an error and never a partial answer.
+    if !is_applied_type_carrier(applied) {
+        return Ok(None);
+    }
+    let decoded = decode_applied_type(applied)?;
+    let head_identity = type_constructor_head_from_ref(constructor)?;
+    if decoded.head_identity != head_identity {
+        return Ok(None);
+    }
+    // Recover the canonical applied identity so the returned carrier is
+    // identity-EQUAL to the input (round-trip stability). Re-mint from the
+    // stored head + args rather than re-reading the input's identity field, so
+    // the descriptor grammar stays the single source.
+    let embedded: Vec<String> = decoded
+        .arg_identities
+        .iter()
+        .map(|id| identity_hex(*id))
+        .collect();
+    let applied_identity = FrozenTypeIdentity::from_canonical_descriptor(&format!(
+        "applied:{}<{}>",
+        identity_hex(head_identity),
+        embedded.join(",")
+    ));
+    Ok(Some(build_applied_type_heap_value(
+        applied_identity,
+        head_identity,
+        &decoded.arg_identities,
+    )?))
+}
+
+/// ADR-009 B4: `applied.type_argument(index)` — the frozen identity of the
+/// `index`-th argument, re-issued as a `TypeRef`. A checked const index; an
+/// out-of-range index is the named rejection (S1 [`type_argument`]). A const
+/// argument at that position rejects at the `TypeRef` builder (it is not a
+/// frozen value type) — `type_argument` recovers TYPE arguments.
+pub(crate) fn applied_type_argument(
+    applied: &KindedSlot,
+    index: i64,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    let decoded = decode_applied_type(applied)?;
+    let refined = RefinedApplication {
+        head_identity: decoded.head_identity,
+        arg_identities: decoded.arg_identities,
+    };
+    if index < 0 {
+        return Err(format!(
+            "type_argument index {index} is out of range: index must be non-negative"
+        ));
+    }
+    let identity = type_argument(&refined, index as usize)?;
+    build_frozen_type_ref_heap_value(identity, freeze)
+}
+
 pub(crate) fn build_frozen_type_ref_heap_value(
     identity: FrozenTypeIdentity,
     freeze: &FreezeOverlay,
@@ -902,10 +1544,7 @@ pub(crate) fn build_frozen_type_ref_heap_value(
 /// intrinsic (`type_category`, `reflect` — ADR-009 B1 S3); `caller` names
 /// the intrinsic in each R4 diagnostic ("<caller> expects a TypeRef value"
 /// family), so both intrinsics reject malformed arguments identically.
-fn frozen_identity_from_ref(
-    slot: &KindedSlot,
-    caller: &str,
-) -> Result<FrozenTypeIdentity, String> {
+fn frozen_identity_from_ref(slot: &KindedSlot, caller: &str) -> Result<FrozenTypeIdentity, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
         return Err(format!("{caller} expects a TypeRef value"));
     }

@@ -1431,14 +1431,27 @@ fn named_user_type_concrete(
     if compiler.struct_types.contains_key(name) || monomorphized_struct_base.is_some() {
         return Some(ConcreteType::named_struct(name, struct_layout));
     }
-    if compiler
-        .type_tracker
-        .schema_registry()
-        .get(name)
-        .map(|schema| schema.get_enum_info().is_some())
-        .unwrap_or(false)
-    {
-        return Some(ConcreteType::named_enum(name, enum_layout));
+    if let Some(schema) = compiler.type_tracker.schema_registry().get(name) {
+        if schema.get_enum_info().is_some() {
+            return Some(ConcreteType::named_enum(name, enum_layout));
+        }
+        // ADR-009 B4 (Stage 2, Dec 54): symmetric struct arm. A field-bearing,
+        // non-enum schema present in the registry but NOT in `struct_types` is a
+        // reserved/injected TypedObject schema (the comptime reflection carriers
+        // `TypeRef` / `TypeConstructorRef` / `AppliedType` are the driving case).
+        // They are `TypedObjectStorage`-backed at runtime — the same
+        // `Ptr(HeapKind::TypedObject)` carrier as a user struct — so resolving
+        // their name to a named struct lets the uniform-application site rewrite's
+        // synthesized carrier array (`.apply(a, b)` → an array of these carriers,
+        // read back by `apply_to_constructor` as `TypedArray<*const
+        // TypedObjectStorage>`) prove its element kind through the ONE typed-array
+        // kind table (`should_use_typed_array(Struct) → TypedObject`) instead of
+        // surface-and-stopping. User structs are unaffected (they already resolve
+        // via `struct_types` above); the only NEW resolutions are registry-only
+        // schemas. Per ADR-006 §2.7.5 the element kind is a producer-side proof.
+        if !schema.fields.is_empty() {
+            return Some(ConcreteType::named_struct(name, struct_layout));
+        }
     }
     None
 }

@@ -52,6 +52,25 @@ pub const COMPTIME_FROZEN_TRAIT_REF_SCHEMA: &str = "\u{1}comptime:TraitRef";
 /// descriptor fingerprints.
 pub const COMPTIME_FROZEN_IMPL_REF_SCHEMA: &str = "\u{1}comptime:ImplRef";
 
+/// ADR-009 B4 (Stage 2, Dec 54) — unspellable schema identity for a compiler-
+/// issued `TypeConstructorRef` (`type_constructor(C)`). Carries the frozen
+/// nominal HEAD identity halves only: the ordered parameter kinds are a freeze
+/// fact re-read through the single param-kind projection at `.apply(...)` time,
+/// never a second table snapshotted into the carrier (CLAUDE.md "no second
+/// arity/param-kind table"). The SOH prefix keeps it unspellable so source can
+/// never forge a constructor.
+pub const COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA: &str = "\u{1}comptime:TypeConstructorRef";
+
+/// ADR-009 B4 (Stage 2, Dec 54) — unspellable schema identity for an
+/// `AppliedType` (the result of `constructor.apply(args)`). Carries the applied
+/// identity halves (identity-EQUAL to the A2 `type_ref(Head<Args>)` spelling),
+/// the frozen head identity halves, and the ordered argument identities as an
+/// interleaved `high, low, …` int array — enough to `refine(...)` the
+/// application and read `type_argument(i)` WITHOUT inverting the one-way
+/// SHA-256 identity hash. Identities only: no descriptor strings, no partial
+/// descriptors (spec §3.1).
+pub const COMPTIME_APPLIED_TYPE_SCHEMA: &str = "\u{1}comptime:AppliedType";
+
 // =========================================================================
 // Field index constants
 // =========================================================================
@@ -405,6 +424,49 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .int_field("impl_identity_low")
         .register(registry);
 
+    // -- ADR-009 B4 (Stage 2, Dec 54): uniform nominal application ----------
+    //
+    // `ParamKind` is the sealed shared-catalog vocabulary (`Type` | `Const`)
+    // the freeze's per-constructor kind vector is built from and `.apply(...)`
+    // checks each supplied argument against. Registered here as a spellable
+    // enum (the `FrozenTypeCategory` precedent) so LSP completes its variants
+    // and the value carrier route stays walled by its own
+    // `runtime_lift_rejection` arm — registered in the SAME commit as this
+    // schema. Generated from the shared runtime catalog (`ParamKind::ALL`);
+    // no second hand-written kind list.
+    let _param_kind = registry.register_enum_scoped(
+        crate::comptime_reflection::PARAM_KIND_SCHEMA_NAME,
+        crate::comptime_reflection::ParamKind::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, kind)| EnumVariantInfo::new(kind.variant_name(), id as u16, 0))
+            .collect(),
+    );
+
+    // `TypeConstructorRef`: the frozen nominal HEAD identity halves only. The
+    // ordered parameter kinds are re-read from the freeze at `.apply(...)`
+    // (single param-kind authority), never a second table baked into the
+    // carrier. SOH-prefixed name + schema-name-checked decode blocks forged
+    // constructors structurally (the TraitRef/ImplRef precedent).
+    let _comptime_type_constructor_ref =
+        TypeSchemaBuilder::new(COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA)
+            .int_field("identity_high")
+            .int_field("identity_low")
+            .register(registry);
+
+    // `AppliedType`: applied identity halves (identity-EQUAL to the A2
+    // `type_ref(Head<Args>)` spelling), head identity halves, and the ordered
+    // argument identities as an interleaved `high, low, …` int array. Enough
+    // to `refine(...)` and `type_argument(i)` from stored identities, never by
+    // inverting the one-way SHA-256 hash. No descriptor strings.
+    let _comptime_applied_type = TypeSchemaBuilder::new(COMPTIME_APPLIED_TYPE_SCHEMA)
+        .int_field("identity_high")
+        .int_field("identity_low")
+        .int_field("head_identity_high")
+        .int_field("head_identity_low")
+        .array_field("arg_identities", FieldType::I64)
+        .register(registry);
+
     let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")
         .string_field("kind")
         .string_field("name")
@@ -549,6 +611,31 @@ mod tests {
         assert!(registry.has_type(COMPTIME_FROZEN_IMPL_REF_SCHEMA));
         assert!(registry.has_type("FrozenTypeCategory"));
         assert!(registry.has_type("__ComptimeItemFragment"));
+
+        // ADR-009 B4 (Stage 2, Dec 54): uniform nominal-application carriers +
+        // the ParamKind vocabulary.
+        assert!(registry.has_type(COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA));
+        assert!(registry.has_type(COMPTIME_APPLIED_TYPE_SCHEMA));
+        assert!(registry.has_type(crate::comptime_reflection::PARAM_KIND_SCHEMA_NAME));
+
+        let constructor = registry
+            .get(COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA)
+            .unwrap();
+        assert_eq!(constructor.field_count(), 2);
+        assert!(constructor.get_field("identity_high").is_some());
+        assert!(constructor.get_field("identity_low").is_some());
+
+        let applied = registry.get(COMPTIME_APPLIED_TYPE_SCHEMA).unwrap();
+        assert_eq!(applied.field_count(), 5);
+        assert!(applied.get_field("head_identity_high").is_some());
+        assert!(applied.get_field("arg_identities").is_some());
+
+        // ParamKind is a two-variant enum (Type | Const).
+        let param_kind = registry
+            .get(crate::comptime_reflection::PARAM_KIND_SCHEMA_NAME)
+            .unwrap();
+        assert!(param_kind.variant_id("Type").is_some());
+        assert!(param_kind.variant_id("Const").is_some());
 
         // Check field counts
         let any_error = registry.get_by_id(ids.any_error).unwrap();

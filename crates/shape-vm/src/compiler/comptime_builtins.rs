@@ -59,6 +59,15 @@ pub(crate) const REFLECT_INTRINSIC: &str = "\u{1}comptime:reflect";
 pub(crate) const TRAIT_REF_INTRINSIC: &str = "\u{1}comptime:trait-ref";
 pub(crate) const FIND_IMPL_INTRINSIC: &str = "\u{1}comptime:find-impl";
 
+// ADR-009 B4 (Stage 2, Dec 54): uniform nominal-application intrinsics. All
+// SOH-prefixed (unspellable); reached only through the comptime forwarders /
+// method-call site rewrite in `comptime.rs` (identity-literal transport).
+pub(crate) const TYPE_CONSTRUCTOR_INTRINSIC: &str = "\u{1}comptime:type-constructor";
+pub(crate) const CONST_ARG_INTRINSIC: &str = "\u{1}comptime:const-arg";
+pub(crate) const APPLY_INTRINSIC: &str = "\u{1}comptime:apply";
+pub(crate) const REFINE_INTRINSIC: &str = "\u{1}comptime:refine";
+pub(crate) const TYPE_ARGUMENT_INTRINSIC: &str = "\u{1}comptime:type-argument";
+
 /// Directives emitted during comptime execution (e.g., from `extend target`).
 #[derive(Debug, Clone)]
 pub(crate) enum ComptimeDirective {
@@ -1192,6 +1201,204 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
             let frozen = frozen_type_from_ref(type_ref, &freeze_for_reflect)?;
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(frozen),
+            )))
+        },
+    );
+
+    // ADR-009 B4 (Stage 2, Dec 54) — uniform nominal-application intrinsics,
+    // registered against the SAME per-compilation-unit freeze handle. Each
+    // needing the freeze clones the `Arc`; carriers/decoders are the
+    // schema-name-checked, forgery-blocking builders in `type_reflection.rs`.
+    let type_constructor_ref_schema =
+        shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA;
+    let applied_type_schema =
+        shape_runtime::type_schema::builtin_schemas::COMPTIME_APPLIED_TYPE_SCHEMA;
+
+    // `type_constructor(C)` — head identity halves (identity-literal transport
+    // from the site rewrite) → opaque TypeConstructorRef.
+    let freeze_for_constructor = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        TYPE_CONSTRUCTOR_INTRINSIC,
+        "Create an opaque TypeConstructorRef from a compiler-issued frozen nominal head identity",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_high".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_low".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject(type_constructor_ref_schema.to_string()),
+        move |slots, _ctx| {
+            let identity_part = |index: usize| {
+                slots.get(index).and_then(KindedSlot::as_i64).ok_or_else(|| {
+                    "internal type_constructor identity transport is invalid".to_string()
+                })
+            };
+            let identity = FrozenTypeIdentity {
+                high: identity_part(0)?,
+                low: identity_part(1)?,
+            };
+            let carrier = type_reflection::build_type_constructor_ref_heap_value(
+                identity,
+                &freeze_for_constructor,
+            )?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(carrier),
+            )))
+        },
+    );
+
+    // `const_arg(N)` — a checked const argument carrier (identity transport for
+    // a const-generic application argument). No freeze needed.
+    register_typed_function(
+        module,
+        CONST_ARG_INTRINSIC,
+        "Create a checked const argument for a const-generic type application",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "value".to_string(),
+            type_name: "int".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::OpaqueTypedObject(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA.to_string(),
+        ),
+        move |slots, _ctx| {
+            let value = slots
+                .first()
+                .and_then(KindedSlot::as_i64)
+                .ok_or_else(|| "const_arg expects an integer value".to_string())?;
+            let carrier = type_reflection::build_const_arg_ref_heap_value(value)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(carrier),
+            )))
+        },
+    );
+
+    // `.apply(constructor, args)` — the receiver + a checked array of
+    // type_ref/const_arg carriers (method-call site rewrite). Produces an
+    // AppliedType whose identity EQUALS the A2 `type_ref(Head<Args>)` spelling.
+    let freeze_for_apply = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        APPLY_INTRINSIC,
+        "Apply checked type/const arguments to a TypeConstructorRef, producing an AppliedType",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "constructor".to_string(),
+                type_name: type_constructor_ref_schema.to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "args".to_string(),
+                type_name: "Array".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject(applied_type_schema.to_string()),
+        move |slots, _ctx| {
+            let receiver = slots
+                .first()
+                .ok_or_else(|| "apply expects a TypeConstructorRef receiver".to_string())?;
+            let args = slots
+                .get(1)
+                .ok_or_else(|| "apply expects an argument array".to_string())?;
+            let carrier =
+                type_reflection::apply_to_constructor(receiver, args, &freeze_for_apply)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(carrier),
+            )))
+        },
+    );
+
+    // `.refine(applied, constructor)` — Some(AppliedType) on a head match, else
+    // None (round-trips only over genuine applications). No freeze needed.
+    register_typed_function(
+        module,
+        REFINE_INTRINSIC,
+        "Refine an AppliedType against a TypeConstructorRef, recovering the application or None",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "applied".to_string(),
+                type_name: applied_type_schema.to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "constructor".to_string(),
+                type_name: type_constructor_ref_schema.to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::Option(Box::new(ConcreteType::OpaqueTypedObject(
+            applied_type_schema.to_string(),
+        ))),
+        move |slots, _ctx| {
+            let applied = slots
+                .first()
+                .ok_or_else(|| "refine expects an AppliedType receiver".to_string())?;
+            let constructor = slots
+                .get(1)
+                .ok_or_else(|| "refine expects a TypeConstructorRef argument".to_string())?;
+            match type_reflection::refine_application(applied, constructor)? {
+                Some(carrier) => Ok(TypedReturn::Some(ConcreteReturn::OpaqueTypedObject(Arc::new(
+                    carrier,
+                )))),
+                None => Ok(TypedReturn::None),
+            }
+        },
+    );
+
+    // `.type_argument(applied, index)` — the index-th type argument re-issued as
+    // a TypeRef. Needs the freeze to validate the recovered identity.
+    let freeze_for_type_argument = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        TYPE_ARGUMENT_INTRINSIC,
+        "Return the index-th type argument of an AppliedType as a TypeRef",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "applied".to_string(),
+                type_name: applied_type_schema.to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "index".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA.to_string(),
+        ),
+        move |slots, _ctx| {
+            let applied = slots
+                .first()
+                .ok_or_else(|| "type_argument expects an AppliedType receiver".to_string())?;
+            let index = slots
+                .get(1)
+                .and_then(KindedSlot::as_i64)
+                .ok_or_else(|| "type_argument expects an integer index".to_string())?;
+            let carrier = type_reflection::applied_type_argument(
+                applied,
+                index,
+                &freeze_for_type_argument,
+            )?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(carrier),
             )))
         },
     );

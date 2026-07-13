@@ -438,8 +438,15 @@ fn parse_type_ref_call(pair: Pair<Rule>) -> Result<Expr> {
                 }
             }
             Rule::type_ref_const_generic_reject => {
+                // ADR-009 B4 (Stage 2, Dec 54): a bare const literal inside a
+                // `type_ref(...)` type application stays a named rejection (no
+                // TypeAnnotation const carrier exists — spec §3.7). The CHECKED
+                // path is the const-argument builder: `const_arg(N)` applied
+                // through `type_constructor(Head).apply(...)`.
                 return Err(ShapeError::ParseError {
-                    message: "const-generic type applications are not yet supported in type_ref"
+                    message: "const-generic type applications are not supported in type_ref; \
+                              build one with const_arg(N) applied through \
+                              type_constructor(Head).apply(...)"
                         .to_string(),
                     location: Some(pair_location(&inner)),
                 });

@@ -7,3 +7,4 @@ mod functions;
 mod reflect;
 mod trait_evidence;
 mod type_info_chained;
+mod typed_constructor;
