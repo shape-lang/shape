@@ -561,57 +561,65 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
 /// compiler-issued identity. The walk is fully recursive so natural nested forms
 /// work too — `print(type_info(User).name)`, `if implements(T, "Ord") { ... }`,
 /// `let n = type_info(field.type).name`, etc. — not only a bare top-level
-/// statement. The outer type-checker accepts the same bare-identifier form
-/// (inference/access.rs `type_symbol_ident_args`), so the two paths agree.
+/// statement. The outer type-checker accepts exactly the same `type_ref`
+/// argument shapes — a bare identifier OR the checked type-expression carrier
+/// `Expr::TypeSyntax` (inference/access.rs `is_type_ref_builtin` gate) — so
+/// the two paths agree; change both together (ADR-009 A2 lockstep contract).
+///
+/// ADR-009 A2 (slice S4): returns `Err` when a checked type expression fails
+/// canonicalization (unresolved leaf at any depth, inference hole, Dec 50/94
+/// normalization rejection). The error propagates out of the comptime entry
+/// points BEFORE the user's comptime code compiles or executes (Dec 52 freeze
+/// boundary) — never an `INVALID` sentinel, never a partial descriptor.
 fn rewrite_comptime_type_symbol_args(
     stmt: &mut Statement,
     freeze: &super::comptime_builtins::FreezeOverlay,
-) {
+) -> Result<()> {
     match stmt {
-        Statement::Expression(expr, _) => rewrite_comptime_type_symbol_args_expr(expr, freeze),
-        Statement::Return(Some(expr), _) => rewrite_comptime_type_symbol_args_expr(expr, freeze),
+        Statement::Expression(expr, _) => rewrite_comptime_type_symbol_args_expr(expr, freeze)?,
+        Statement::Return(Some(expr), _) => rewrite_comptime_type_symbol_args_expr(expr, freeze)?,
         Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
         Statement::VariableDecl(decl, _) => {
             if let Some(init) = &mut decl.value {
-                rewrite_comptime_type_symbol_args_expr(init, freeze);
+                rewrite_comptime_type_symbol_args_expr(init, freeze)?;
             }
         }
         Statement::Assignment(assign, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut assign.value, freeze);
+            rewrite_comptime_type_symbol_args_expr(&mut assign.value, freeze)?;
         }
         Statement::For(for_loop, _) => {
             match &mut for_loop.init {
                 shape_ast::ast::ForInit::ForIn { iter, .. } => {
-                    rewrite_comptime_type_symbol_args_expr(iter, freeze);
+                    rewrite_comptime_type_symbol_args_expr(iter, freeze)?;
                 }
                 shape_ast::ast::ForInit::ForC {
                     init,
                     condition,
                     update,
                 } => {
-                    rewrite_comptime_type_symbol_args(init, freeze);
-                    rewrite_comptime_type_symbol_args_expr(condition, freeze);
-                    rewrite_comptime_type_symbol_args_expr(update, freeze);
+                    rewrite_comptime_type_symbol_args(init, freeze)?;
+                    rewrite_comptime_type_symbol_args_expr(condition, freeze)?;
+                    rewrite_comptime_type_symbol_args_expr(update, freeze)?;
                 }
             }
             for s in &mut for_loop.body {
-                rewrite_comptime_type_symbol_args(s, freeze);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
         }
         Statement::While(while_loop, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, freeze);
+            rewrite_comptime_type_symbol_args_expr(&mut while_loop.condition, freeze)?;
             for s in &mut while_loop.body {
-                rewrite_comptime_type_symbol_args(s, freeze);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
         }
         Statement::If(if_stmt, _) => {
-            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, freeze);
+            rewrite_comptime_type_symbol_args_expr(&mut if_stmt.condition, freeze)?;
             for s in &mut if_stmt.then_body {
-                rewrite_comptime_type_symbol_args(s, freeze);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
             if let Some(else_body) = &mut if_stmt.else_body {
                 for s in else_body {
-                    rewrite_comptime_type_symbol_args(s, freeze);
+                    rewrite_comptime_type_symbol_args(s, freeze)?;
                 }
             }
         }
@@ -620,11 +628,11 @@ fn rewrite_comptime_type_symbol_args(
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }
         | Statement::ExtendItemsExpr { expression, .. } => {
-            rewrite_comptime_type_symbol_args_expr(expression, freeze);
+            rewrite_comptime_type_symbol_args_expr(expression, freeze)?;
         }
         Statement::ReplaceBody { body, .. } => {
             for s in body {
-                rewrite_comptime_type_symbol_args(s, freeze);
+                rewrite_comptime_type_symbol_args(s, freeze)?;
             }
         }
         // Directives with no embedded expression / already-parsed payloads.
@@ -633,12 +641,13 @@ fn rewrite_comptime_type_symbol_args(
         | Statement::SetParamType { .. }
         | Statement::SetReturnType { .. } => {}
     }
+    Ok(())
 }
 
 fn rewrite_comptime_type_symbol_args_expr(
     expr: &mut Expr,
     freeze: &super::comptime_builtins::FreezeOverlay,
-) {
+) -> Result<()> {
     // Rewrite this call's own bare-identifier args if it is a reflection call.
     if let Expr::FunctionCall { name, args, .. } = expr {
         if name == "type_info" || name == "implements" {
@@ -648,11 +657,34 @@ fn rewrite_comptime_type_symbol_args_expr(
                 }
             }
         } else if name == "type_ref" {
-            if let [Expr::Identifier(ident, span)] = args.as_slice() {
-                let identity = freeze
-                    .identity_of(ident)
-                    .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID);
-                let span = *span;
+            // ADR-009 A2 (S4): two accepted argument shapes, one identity
+            // scheme. A bare identifier resolves through the freeze's
+            // name-keyed query (A1 behavior, unchanged — unresolved names
+            // flow the INVALID sentinel to the intrinsic's named rejection);
+            // the checked type-expression carrier canonicalizes through the
+            // SAME overlay (leaves resolve via `identity_of`, so a leaf
+            // spelled bare or inside a composite reaches one identity) and
+            // rejects HERE, at compile time, with the canonicalizer's named
+            // error before user comptime executes (Dec 52).
+            let lowered = match args.as_slice() {
+                [Expr::Identifier(ident, span)] => Some((
+                    freeze
+                        .identity_of(ident)
+                        .unwrap_or(super::comptime_builtins::FrozenTypeIdentity::INVALID),
+                    *span,
+                )),
+                [Expr::TypeSyntax(annotation, span)] => Some((
+                    freeze.canonicalize_type(annotation).map_err(|message| {
+                        ShapeError::SemanticError {
+                            message,
+                            location: None,
+                        }
+                    })?,
+                    *span,
+                )),
+                _ => None,
+            };
+            if let Some((identity, span)) = lowered {
                 *name = TYPE_REF_FORWARDER.to_string();
                 *args = vec![
                     Expr::Literal(shape_ast::ast::Literal::Int(identity.high), span),
@@ -664,18 +696,18 @@ fn rewrite_comptime_type_symbol_args_expr(
 
     // Recurse into every child expression so nested reflection calls
     // (`print(type_info(User).name)`) are rewritten too.
-    let recur = |child: &mut Expr| {
-        rewrite_comptime_type_symbol_args_expr(child, freeze);
+    let recur = |child: &mut Expr| -> Result<()> {
+        rewrite_comptime_type_symbol_args_expr(child, freeze)
     };
     match expr {
         Expr::FunctionCall {
             args, named_args, ..
         } => {
             for a in args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
         }
         Expr::MethodCall {
@@ -684,73 +716,73 @@ fn rewrite_comptime_type_symbol_args_expr(
             named_args,
             ..
         } => {
-            recur(receiver);
+            recur(receiver)?;
             for a in args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
         }
         Expr::QualifiedFunctionCall {
             args, named_args, ..
         } => {
             for a in args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a);
+                recur(a)?;
             }
         }
-        Expr::PropertyAccess { object, .. } => recur(object),
+        Expr::PropertyAccess { object, .. } => recur(object)?,
         Expr::IndexAccess {
             object,
             index,
             end_index,
             ..
         } => {
-            recur(object);
-            recur(index);
+            recur(object)?;
+            recur(index)?;
             if let Some(end) = end_index {
-                recur(end);
+                recur(end)?;
             }
         }
         Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
-            recur(left);
-            recur(right);
+            recur(left)?;
+            recur(right)?;
         }
-        Expr::UnaryOp { operand, .. } => recur(operand),
+        Expr::UnaryOp { operand, .. } => recur(operand)?,
         Expr::Conditional {
             condition,
             then_expr,
             else_expr,
             ..
         } => {
-            recur(condition);
-            recur(then_expr);
+            recur(condition)?;
+            recur(then_expr)?;
             if let Some(e) = else_expr {
-                recur(e);
+                recur(e)?;
             }
         }
         Expr::Match(match_expr, _) => {
-            recur(&mut match_expr.scrutinee);
+            recur(&mut match_expr.scrutinee)?;
             for arm in &mut match_expr.arms {
                 if let Some(guard) = &mut arm.guard {
-                    recur(guard);
+                    recur(guard)?;
                 }
-                recur(&mut arm.body);
+                recur(&mut arm.body)?;
             }
         }
         Expr::Array(elems, _) => {
             for e in elems.iter_mut() {
-                recur(e);
+                recur(e)?;
             }
         }
         Expr::Object(entries, _) => {
             for entry in entries.iter_mut() {
                 match entry {
-                    shape_ast::ast::ObjectEntry::Field { value, .. } => recur(value),
-                    shape_ast::ast::ObjectEntry::Spread(e) => recur(e),
+                    shape_ast::ast::ObjectEntry::Field { value, .. } => recur(value)?,
+                    shape_ast::ast::ObjectEntry::Spread(e) => recur(e)?,
                 }
             }
         }
@@ -763,16 +795,16 @@ fn rewrite_comptime_type_symbol_args_expr(
             for item in &mut block.items {
                 match item {
                     shape_ast::ast::BlockItem::Statement(s) => {
-                        rewrite_comptime_type_symbol_args(s, freeze);
+                        rewrite_comptime_type_symbol_args(s, freeze)?;
                     }
-                    shape_ast::ast::BlockItem::Expression(e) => recur(e),
+                    shape_ast::ast::BlockItem::Expression(e) => recur(e)?,
                     shape_ast::ast::BlockItem::VariableDecl(decl) => {
                         if let Some(init) = &mut decl.value {
-                            recur(init);
+                            recur(init)?;
                         }
                     }
                     shape_ast::ast::BlockItem::Assignment(assign) => {
-                        recur(&mut assign.value);
+                        recur(&mut assign.value)?;
                     }
                 }
             }
@@ -781,20 +813,21 @@ fn rewrite_comptime_type_symbol_args_expr(
         | Expr::Await(inner, _)
         | Expr::Spread(inner, _)
         | Expr::AsyncScope(inner, _)
-        | Expr::Reference { expr: inner, .. } => recur(inner),
-        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => recur(inner),
+        | Expr::Reference { expr: inner, .. } => recur(inner)?,
+        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => recur(inner)?,
         Expr::Range { start, end, .. } => {
             if let Some(s) = start {
-                recur(s);
+                recur(s)?;
             }
             if let Some(e) = end {
-                recur(e);
+                recur(e)?;
             }
         }
         // Leaves and constructs that do not embed a reflection call in
         // practical comptime code are left untouched.
         _ => {}
     }
+    Ok(())
 }
 
 /// Execute statements at compile time (comptime) and return the result.
@@ -859,7 +892,7 @@ pub(crate) fn execute_comptime_with_context(
     // internal string payloads. `type_ref(T)` instead receives a compiler-issued
     // semantic identity; user-provided strings never construct a TypeRef.
     for stmt in &mut body {
-        rewrite_comptime_type_symbol_args(stmt, freeze.as_ref());
+        rewrite_comptime_type_symbol_args(stmt, freeze.as_ref())?;
     }
     ensure_tail_return(&mut body);
 
@@ -1437,7 +1470,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // type-symbol rewrite as comptime blocks — `type_ref(User)` becomes the
     // compiler-issued identity forwarder resolved against the shared freeze.
     let mut body_statement = Statement::Return(Some(handler_body.clone()), Span::DUMMY);
-    rewrite_comptime_type_symbol_args(&mut body_statement, freeze.as_ref());
+    rewrite_comptime_type_symbol_args(&mut body_statement, freeze.as_ref())?;
 
     // Wrap the handler body in a function that takes the target parameter.
     let func_name = "__comptime_handler_fn__".to_string();
@@ -2194,11 +2227,290 @@ annotation reflect() {
             &crate::compiler::BytecodeCompiler::new(),
         );
         let mut statement = Statement::Return(Some(handler_body), Span::DUMMY);
-        super::rewrite_comptime_type_symbol_args(&mut statement, freeze.as_ref());
+        super::rewrite_comptime_type_symbol_args(&mut statement, freeze.as_ref())
+            .expect("bare-identifier rewrite cannot fail");
         let rendered = format!("{statement:?}");
         assert!(
             !rendered.contains("\"type_ref\""),
             "handler-body type_ref call must be rewritten to the identity forwarder: {rendered}"
+        );
+    }
+
+    /// ADR-009 A2 (S3): the `Expr::TypeSyntax` carrier is grammatically
+    /// producible only as the `type_ref(...)` argument, but AST producers
+    /// (transforms, comptime-generated code) could misplace it. Outside the
+    /// type_ref argument position it must be a NAMED compile error — never
+    /// a silently compiled value (surface-and-stop).
+    #[test]
+    fn type_syntax_outside_type_ref_is_a_named_compile_error() {
+        let mut program = shape_ast::parse_program("let x = 1;").expect("baseline parses");
+        // Swap the initializer for a hand-built type-syntax carrier —
+        // no source spelling can produce this placement.
+        match program.items.get_mut(0) {
+            Some(shape_ast::ast::Item::Statement(
+                shape_ast::ast::Statement::VariableDecl(decl, _),
+                _,
+            )) => {
+                decl.value = Some(shape_ast::ast::Expr::TypeSyntax(
+                    shape_ast::ast::TypeAnnotation::Tuple(vec![
+                        shape_ast::ast::TypeAnnotation::Basic("int".to_string()),
+                        shape_ast::ast::TypeAnnotation::Basic("string".to_string()),
+                    ]),
+                    Span::DUMMY,
+                ));
+            }
+            other => panic!("expected variable decl item, got {other:?}"),
+        }
+        let err = crate::compiler::BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("type syntax outside type_ref must not compile");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("type syntax is only valid as the type_ref argument"),
+            "expected the named surface-and-stop diagnostic, got: {rendered}"
+        );
+    }
+
+    // =====================================================================
+    // ADR-009 A2 (slice S4): rewrite-arm unit tests — the checked
+    // type-expression carrier lowers through the shared overlay canonicalizer
+    // to the SAME identity forwarder as the bare-identifier arm, and
+    // canonicalization failure is a compile-time error out of the rewrite
+    // (Dec 52 — before user comptime executes).
+    // =====================================================================
+
+    /// Parse `let x = <expr>;`, rewrite against a fresh test freeze overlay,
+    /// and return the lowered initializer expression.
+    fn rewrite_type_ref_initializer(
+        source: &str,
+    ) -> std::result::Result<Expr, shape_ast::error::ShapeError> {
+        let mut program = shape_ast::parse_program(source).expect("source parses");
+        let mut stmt = match program.items.remove(0) {
+            shape_ast::ast::Item::Statement(stmt, _) => stmt,
+            other => panic!("expected statement item, got {other:?}"),
+        };
+        let freeze = super::test_freeze_overlay();
+        super::rewrite_comptime_type_symbol_args(&mut stmt, freeze.as_ref())?;
+        match stmt {
+            Statement::VariableDecl(decl, _) => Ok(decl.value.expect("initializer present")),
+            other => panic!("expected variable decl, got {other:?}"),
+        }
+    }
+
+    /// Assert the expression is the lowered identity forwarder and return its
+    /// `(identity_high, identity_low)` literal pair.
+    fn forwarder_identity_literals(expr: &Expr) -> (i64, i64) {
+        match expr {
+            Expr::FunctionCall { name, args, .. } => {
+                assert_eq!(
+                    name,
+                    super::TYPE_REF_FORWARDER,
+                    "must lower to the identity forwarder"
+                );
+                match args.as_slice() {
+                    [
+                        Expr::Literal(Literal::Int(high), _),
+                        Expr::Literal(Literal::Int(low), _),
+                    ] => (*high, *low),
+                    other => panic!("expected two int identity literals, got {other:?}"),
+                }
+            }
+            other => panic!("expected forwarder call, got {other:?}"),
+        }
+    }
+
+    /// Cross-site identity equality: the same composite spelled at two sites
+    /// (and rewritten through two independent overlays over the same freeze
+    /// input) lowers to bit-identical identity literals; a structurally
+    /// different spelling (member order) lowers to a distinct identity.
+    #[test]
+    fn composite_type_ref_identity_is_equal_across_rewrite_sites() {
+        let first = rewrite_type_ref_initializer("let a = type_ref([int, string]);")
+            .expect("composite form rewrites");
+        let second = rewrite_type_ref_initializer("let b = type_ref([int,   string]);")
+            .expect("composite form rewrites");
+        assert_eq!(
+            forwarder_identity_literals(&first),
+            forwarder_identity_literals(&second),
+            "same composite spelled at two sites must share one frozen identity"
+        );
+        let swapped = rewrite_type_ref_initializer("let c = type_ref([string, int]);")
+            .expect("composite form rewrites");
+        assert_ne!(
+            forwarder_identity_literals(&first),
+            forwarder_identity_literals(&swapped),
+            "tuple member order is identity-significant"
+        );
+    }
+
+    /// Dec 52 rejection placement: an unresolved leaf at depth inside a
+    /// checked type expression is a NAMED compile error out of the rewrite
+    /// itself — user comptime never executes, no INVALID sentinel flows.
+    #[test]
+    fn composite_type_ref_with_unresolved_leaf_is_a_compile_error_before_comptime_runs() {
+        let err = rewrite_type_ref_initializer("let a = type_ref(Option<Bogus>);")
+            .expect_err("unresolved leaf must reject at rewrite time");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("unknown semantic type identity"),
+            "expected the named unknown-identity family, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Bogus"),
+            "the diagnostic must name the unresolved leaf, got: {rendered}"
+        );
+    }
+
+    /// Two-arm agreement: a leaf spelled bare (`type_ref(int)`, the
+    /// historical Identifier lowering) and the same leaf hand-built as the
+    /// type-syntax carrier resolve to ONE identity — the canonicalizer
+    /// resolves leaf names through the same `identity_of` query the
+    /// bare-identifier arm uses. (No source spelling produces `TypeSyntax`
+    /// for a bare name; S3 keeps the Identifier lowering.)
+    #[test]
+    fn bare_identifier_and_type_syntax_leaf_share_one_identity() {
+        let bare =
+            rewrite_type_ref_initializer("let a = type_ref(int);").expect("bare form rewrites");
+
+        let mut stmt = Statement::Expression(
+            Expr::FunctionCall {
+                name: "type_ref".to_string(),
+                const_args: Vec::new(),
+                args: vec![Expr::TypeSyntax(
+                    shape_ast::ast::TypeAnnotation::Basic("int".to_string()),
+                    Span::DUMMY,
+                )],
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            },
+            Span::DUMMY,
+        );
+        let freeze = super::test_freeze_overlay();
+        super::rewrite_comptime_type_symbol_args(&mut stmt, freeze.as_ref())
+            .expect("leaf type syntax rewrites");
+        let Statement::Expression(syntax_form, _) = stmt else {
+            panic!("expected expression statement");
+        };
+
+        assert_eq!(
+            forwarder_identity_literals(&bare),
+            forwarder_identity_literals(&syntax_form),
+            "bare-identifier and type-syntax arms must agree on leaf identity"
+        );
+    }
+
+    // =====================================================================
+    // ADR-009 A2 (slice S5): identity-stability proofs through the REAL
+    // predeclare + freeze-barrier path. Unlike `rewrite_type_ref_initializer`
+    // (empty test freeze), this helper runs the production registration-
+    // complete sequence over the program's own declarations, then rewrites
+    // the LAST statement's initializer — so alias fixpoints, trait
+    // predeclare, and struct generic info all flow exactly as in `compile()`.
+    // =====================================================================
+
+    /// Predeclare every item of `source` (structs + semantic-freeze inputs),
+    /// install the freeze barrier, then rewrite the last statement's
+    /// `let ... = type_ref(...)` initializer through the site overlay.
+    fn rewrite_program_type_ref_initializer(
+        source: &str,
+    ) -> std::result::Result<Expr, shape_ast::error::ShapeError> {
+        let mut program = shape_ast::parse_program(source).expect("source parses");
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        for item in &program.items {
+            compiler.predeclare_item_struct_schemas(item);
+            compiler
+                .predeclare_item_semantic_freeze_inputs(item)
+                .expect("freeze inputs predeclare");
+        }
+        compiler
+            .install_semantic_freeze()
+            .expect("registration-complete state freezes");
+        let freeze = compiler
+            .comptime_freeze_overlay()
+            .expect("post-barrier site obtains the handle");
+        let mut stmt = match program.items.pop() {
+            Some(shape_ast::ast::Item::Statement(stmt, _)) => stmt,
+            other => panic!("expected trailing statement item, got {other:?}"),
+        };
+        super::rewrite_comptime_type_symbol_args(&mut stmt, freeze.as_ref())?;
+        match stmt {
+            Statement::VariableDecl(decl, _) => Ok(decl.value.expect("initializer present")),
+            other => panic!("expected variable decl, got {other:?}"),
+        }
+    }
+
+    fn program_identity_literals(source: &str) -> (i64, i64) {
+        let expr = rewrite_program_type_ref_initializer(source)
+            .unwrap_or_else(|error| panic!("program must rewrite: {error:?}"));
+        forwarder_identity_literals(&expr)
+    }
+
+    /// S5 R7 (Dec 53): alias normalization holds THROUGH applied forms on the
+    /// production path — `type Ids = Array<UserId>` (bare alias name, the
+    /// Identifier arm) and `type_ref(Array<int>)` (checked type syntax) lower
+    /// to bit-identical frozen identities.
+    #[test]
+    fn alias_identity_normalizes_through_applied_forms_end_to_end() {
+        let preamble = "type UserId = int\ntype Ids = Array<UserId>\n";
+        assert_eq!(
+            program_identity_literals(&format!("{preamble}let a = type_ref(Ids);")),
+            program_identity_literals(&format!("{preamble}let a = type_ref(Array<int>);")),
+            "alias-through-applied identity must equal the spelled applied form"
+        );
+        // The alias spelled INSIDE a checked type expression agrees too.
+        assert_eq!(
+            program_identity_literals(&format!("{preamble}let a = type_ref(Array<UserId>);")),
+            program_identity_literals(&format!("{preamble}let a = type_ref(Array<int>);")),
+        );
+    }
+
+    /// S5 R11: identity is declaration-order independent — inserting an
+    /// unrelated type declaration, reordering record fields, and reordering
+    /// union members all leave the identity literals bit-identical.
+    #[test]
+    fn composite_identity_is_declaration_order_independent_across_program_variants() {
+        let record = program_identity_literals("let a = type_ref({x: int, y: string});");
+        assert_eq!(
+            record,
+            program_identity_literals(
+                "type Unrelated { z: int }\nlet a = type_ref({x: int, y: string});"
+            ),
+            "an unrelated type declaration must not perturb a composite identity"
+        );
+        assert_eq!(
+            record,
+            program_identity_literals(
+                "type Unrelated { z: int }\nlet a = type_ref({y: string, x: int});"
+            ),
+            "record-field source order must not perturb the identity"
+        );
+
+        assert_eq!(
+            program_identity_literals("let a = type_ref(int | string);"),
+            program_identity_literals("let a = type_ref(string | int);"),
+            "union-member source order must not perturb the identity"
+        );
+    }
+
+    /// S5 R8 (Dec 50/94 rule 3): a trait intersection in type position
+    /// (`Speak + Walk`) erases to the SAME identity as the `dyn` spelling,
+    /// and an object intersection reaches the directly-spelled record's
+    /// identity — both through the production predeclare path (traits are a
+    /// named freeze input registered BEFORE the barrier).
+    #[test]
+    fn intersection_identities_normalize_per_dec_50_94_end_to_end() {
+        let traits =
+            "trait Speak { fn speak(self) -> string; }\ntrait Walk { fn walk(self) -> string; }\n";
+        assert_eq!(
+            program_identity_literals(&format!("{traits}let a = type_ref(Speak + Walk);")),
+            program_identity_literals(&format!("{traits}let a = type_ref(dyn Walk + Speak);")),
+            "trait intersection must erase to the dyn bound-set identity"
+        );
+
+        assert_eq!(
+            program_identity_literals("let a = type_ref({a: int} + {b: string});"),
+            program_identity_literals("let a = type_ref({b: string, a: int});"),
+            "object intersection must reach the directly-spelled record identity"
         );
     }
 

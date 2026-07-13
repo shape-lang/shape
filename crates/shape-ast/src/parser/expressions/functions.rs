@@ -198,38 +198,46 @@ pub fn parse_regular_function_expr(pair: Pair<Rule>) -> Result<Expr> {
 /// Parse argument list with support for named arguments
 /// Returns (positional_args, named_args)
 pub fn parse_arg_list(pair: Pair<Rule>) -> Result<(Vec<Expr>, Vec<(String, Expr)>)> {
+    if let Some(arg_list) = pair.into_inner().next() {
+        parse_arg_list_pairs(arg_list)
+    } else {
+        Ok((Vec::new(), Vec::new()))
+    }
+}
+
+/// Parse a `Rule::arg_list` pair directly (no wrapping call pair).
+/// Returns (positional_args, named_args)
+pub fn parse_arg_list_pairs(arg_list: Pair<Rule>) -> Result<(Vec<Expr>, Vec<(String, Expr)>)> {
     let mut positional_args = Vec::new();
     let mut named_args = Vec::new();
 
-    if let Some(arg_list) = pair.into_inner().next() {
-        for argument in arg_list.into_inner() {
-            match argument.as_rule() {
-                Rule::argument => {
-                    // Unwrap the argument to get named_arg or expression
-                    let inner = argument.into_inner().next().unwrap();
-                    match inner.as_rule() {
-                        Rule::named_arg => {
-                            let mut parts = inner.into_inner();
-                            let name = parts.next().unwrap().as_str().to_string();
-                            let value = super::parse_expression(parts.next().unwrap())?;
-                            named_args.push((name, value));
-                        }
-                        _ => {
-                            // It's an expression (positional argument)
-                            positional_args.push(super::parse_expression(inner)?);
-                        }
+    for argument in arg_list.into_inner() {
+        match argument.as_rule() {
+            Rule::argument => {
+                // Unwrap the argument to get named_arg or expression
+                let inner = argument.into_inner().next().unwrap();
+                match inner.as_rule() {
+                    Rule::named_arg => {
+                        let mut parts = inner.into_inner();
+                        let name = parts.next().unwrap().as_str().to_string();
+                        let value = super::parse_expression(parts.next().unwrap())?;
+                        named_args.push((name, value));
+                    }
+                    _ => {
+                        // It's an expression (positional argument)
+                        positional_args.push(super::parse_expression(inner)?);
                     }
                 }
-                Rule::named_arg => {
-                    let mut parts = argument.into_inner();
-                    let name = parts.next().unwrap().as_str().to_string();
-                    let value = super::parse_expression(parts.next().unwrap())?;
-                    named_args.push((name, value));
-                }
-                _ => {
-                    // Direct expression (for backward compatibility)
-                    positional_args.push(super::parse_expression(argument)?);
-                }
+            }
+            Rule::named_arg => {
+                let mut parts = argument.into_inner();
+                let name = parts.next().unwrap().as_str().to_string();
+                let value = super::parse_expression(parts.next().unwrap())?;
+                named_args.push((name, value));
+            }
+            _ => {
+                // Direct expression (for backward compatibility)
+                positional_args.push(super::parse_expression(argument)?);
             }
         }
     }

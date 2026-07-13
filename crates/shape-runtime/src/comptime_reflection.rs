@@ -404,16 +404,16 @@ pub const REFLECT_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
 pub const TYPE_REF_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
     name: "type_ref",
     signature: "type_ref(T) -> TypeRef<T>",
-    description: "Create an opaque compiler-issued identity for type syntax. Strings cannot construct a TypeRef. Only valid inside comptime blocks.",
+    description: "Create an opaque compiler-issued identity for checked type syntax (ADR-009 A2): bare names (int, Point), tuples [T, U], records {field: T}, callables (T) -> R, references &T / &mut T, unions T | U, erased domains any / dyn Trait, and applied generics such as Option<int>. Strings cannot construct a TypeRef. Only valid inside comptime blocks.",
     category: "Comptime",
     parameters: &[BuiltinParam {
         name: "T",
         param_type: "type",
         optional: false,
-        description: "A type resolved by the compiler",
+        description: "A type expression resolved by the compiler",
     }],
     return_type: "TypeRef<T>",
-    example: Some("comptime { type_ref(Point) }"),
+    example: Some("comptime { type_ref(Option<int>) }"),
 };
 
 /// LSP-visible builtin row for `type_category`, owned by the shared
@@ -547,6 +547,41 @@ mod tests {
         assert_eq!(TYPE_CATEGORY_BUILTIN_ROW.name, "type_category");
         assert_eq!(TYPE_CATEGORY_BUILTIN_ROW.category, "Comptime");
         assert_eq!(TYPE_CATEGORY_BUILTIN_ROW.return_type, "FrozenTypeCategory");
+    }
+
+    /// ADR-009 A2 (S6): the catalog-owned `type_ref` row documents the
+    /// checked type-expression surface (every accepted composite form) while
+    /// keeping the pinned rejection/identity phrases intact.
+    #[test]
+    fn type_ref_row_documents_the_checked_type_expression_surface() {
+        for phrase in [
+            "tuples",
+            "records",
+            "callables",
+            "references",
+            "unions",
+            "dyn",
+            "applied generics",
+        ] {
+            assert!(
+                TYPE_REF_BUILTIN_ROW.description.contains(phrase),
+                "type_ref row description should mention '{}', got: {}",
+                phrase,
+                TYPE_REF_BUILTIN_ROW.description
+            );
+        }
+        // Pinned phrases (asserted by the public LSP matrix) survive the
+        // surface update.
+        assert!(
+            TYPE_REF_BUILTIN_ROW
+                .description
+                .contains("Strings cannot construct a TypeRef")
+        );
+        assert!(
+            TYPE_REF_BUILTIN_ROW
+                .description
+                .contains("Only valid inside comptime blocks")
+        );
     }
 
     /// The `type_ref` row is catalog-owned and keeps the load-bearing hover

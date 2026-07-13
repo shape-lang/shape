@@ -1393,6 +1393,8 @@ impl BytecodeCompiler {
             | Expr::Break(None, _)
             | Expr::Return(None, _)
             | Expr::Continue(..)
+            // ADR-009 A2: type syntax is a leaf — no scoped names inside.
+            | Expr::TypeSyntax(..)
             | Expr::Unit(..) => {}
         }
     }

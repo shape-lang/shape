@@ -449,6 +449,9 @@ fn expr(e: &mut Expr, sigs: &Signatures, err: &mut Option<ShapeError>) {
                 }
             }
         }
+        // ADR-009 A2: type syntax has no child expressions and no named
+        // args to rebind.
+        Expr::TypeSyntax(_, _) => {}
         Expr::TypeAssertion {
             expr: inner,
             meta_param_overrides,

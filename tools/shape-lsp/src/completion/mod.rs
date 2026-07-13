@@ -30,8 +30,9 @@ pub use methods::{
 pub use providers::provider_completions;
 pub use snippets::{create_snippet, snippet_completions};
 pub use types::{
-    is_column_type, pipe_target_completions, property_completion_item, property_completions,
-    resolve_base_type, resolve_object_type, resolve_property_type, type_completions,
+    in_scope_type_param_completions, is_column_type, pipe_target_completions,
+    primitive_type_completions, property_completion_item, property_completions, resolve_base_type,
+    resolve_object_type, resolve_property_type, type_completions,
 };
 
 use crate::annotation_discovery::AnnotationDiscovery;
@@ -238,6 +239,20 @@ pub fn get_completions_with_context(
         CompletionContext::TypeAnnotation => {
             // Show type names
             completions.extend(type_completions());
+            // ADR-009 A2 (S6): type positions (`let x: |`, `type_ref(|`)
+            // also offer primitive spellings, user-declared type names, and
+            // in-scope generic type parameters — and never value bindings.
+            completions.extend(types::primitive_type_completions());
+            let type_symbols: Vec<_> = user_symbols
+                .iter()
+                .filter(|s| s.kind == SymbolKind::Type)
+                .cloned()
+                .collect();
+            completions.extend(symbols_to_completions(&type_symbols));
+            completions.extend(types::in_scope_type_param_completions(
+                text,
+                position.line as usize,
+            ));
         }
         CompletionContext::FunctionCall {
             function,

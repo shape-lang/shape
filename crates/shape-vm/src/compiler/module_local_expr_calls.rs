@@ -348,8 +348,11 @@ impl BytecodeCompiler {
                 }
             }
             // Terminal expression variants have no child expressions.
+            // (ADR-009 A2: type syntax carries a TypeAnnotation only — no
+            // calls to qualify.)
             Expr::Literal(_, _)
             | Expr::Identifier(_, _)
+            | Expr::TypeSyntax(_, _)
             | Expr::DataDateTimeRef(_, _)
             | Expr::TimeRef(_, _)
             | Expr::DateTime(_, _)

@@ -29,14 +29,28 @@
 //!    data into the shared surface or documents it as freeze input") they are
 //!    documented here as named freeze inputs. The freeze does not re-derive
 //!    struct shapes from any other surface.
-//! 2. **Type aliases** — `BytecodeCompiler::type_aliases` (named freeze
-//!    input, same rationale).
+//! 2. **Type aliases** — alias names from `BytecodeCompiler::type_aliases`;
+//!    the full target annotation from the type-inference environment's alias
+//!    entry (`type_inference.env.lookup_type_alias`). Both stores are written
+//!    by the same `Item::TypeAlias` registration from the one source
+//!    declaration; the environment carries the structural annotation
+//!    (composite targets like `type Pair = [int, string]`), the string table
+//!    only a simple-name projection (named freeze input, same rationale).
 //! 3. **Enums** — `BytecodeCompiler::type_tracker.schema_registry()`, the
 //!    canonical schema registry.
 //! 4. **Unresolved-inference-variable detection** — the analyzer's canonical
 //!    `\u{1}tyvar:` annotation encoding (`annotation_as_tyvar`), i.e. the
 //!    exact vocabulary the `TypeInferenceEngine` substitution store uses.
 //!    No parallel encoding is introduced.
+//! 5. **Trait names** (ADR-009 A2, slice S5) — `BytecodeCompiler::known_traits`.
+//!    Trait items predeclare their names alongside aliases/enums
+//!    (`predeclare_item_semantic_freeze_inputs`) because full pass-1 trait
+//!    registration (`register_item_functions`) runs AFTER the barrier. `dyn`
+//!    bounds and trait intersections in checked type expressions resolve
+//!    against this set. Input 1 additionally projects each struct's declared
+//!    generic arity (`struct_generic_info.type_params.len()`) for applied-
+//!    arity enforcement; enum generic arity is not recoverable from the
+//!    schema registry, so applied enum heads are arity-unchecked (surfaced).
 //!
 //! ## Freeze-boundary rejection (Dec 52, rejection-matrix row 4)
 //!
@@ -64,13 +78,15 @@
 //! `freeze_pins_identity_scheme_through_the_query_api` below and the 9-test
 //! identity matrix in `type_reflection/tests.rs` are the ongoing tripwires.
 
-use super::type_reflection::{FrozenTypeCategory, FrozenTypeIdentity, FrozenTypeIndex};
+use super::type_reflection::{
+    FrozenTypeCategory, FrozenTypeIdentity, FrozenTypeIndex, canonicalize_type_annotation,
+};
 use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::TypeAnnotation;
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::annotation_as_tyvar;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Rejection-matrix row 3 (ticket A1): a comptime site that cannot obtain
 /// the per-compilation-unit freeze handle is a compile error — never an
@@ -126,10 +142,23 @@ impl SemanticFreeze {
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             alias_defs: HashMap::new(),
+            trait_names: compiler.known_traits.clone(),
+            struct_generic_arities: HashMap::new(),
             frozen_type_ids: HashMap::new(),
             frozen_type_categories: HashMap::new(),
             frozen_primitive_payloads: HashMap::new(),
+            generic_arities: HashMap::new(),
         };
+
+        // Named freeze input 1 (arity projection, S5): declared generic
+        // arity per struct from `struct_generic_info.type_params`; the
+        // rebuild below keys it by frozen identity for alias-transparent
+        // applied-arity enforcement.
+        for (name, info) in &compiler.struct_generic_info {
+            index
+                .struct_generic_arities
+                .insert(name.clone(), info.type_params.len());
+        }
 
         // Named freeze input 1: struct shapes (`struct_types` field order +
         // `struct_generic_info.runtime_field_types` field annotations).
@@ -157,9 +186,24 @@ impl SemanticFreeze {
             index.struct_defs.insert(name.clone(), ordered);
         }
 
-        // Named freeze input 2: type aliases (`type_aliases`).
+        // Named freeze input 2: type aliases. Alias NAMES come from
+        // `type_aliases`; the full target annotation comes from the
+        // type-inference environment's alias entry — the compiler's
+        // `Item::TypeAlias` registration writes both stores from the one
+        // source declaration (single fact, one richer projection): the string
+        // table keeps only a simple-name projection (a composite target like
+        // `type Pair = [int, string]` is stored as a debug string there),
+        // while the environment entry preserves the structural annotation the
+        // A2 composite canonicalizer needs. Entries absent from the
+        // environment (test-fabricated compilers) fall back to the
+        // simple-name projection unchanged.
         for (alias, target) in &compiler.type_aliases {
-            let annotation = TypeAnnotation::Basic(target.clone());
+            let annotation = compiler
+                .type_inference
+                .env
+                .lookup_type_alias(alias)
+                .map(|entry| entry.type_annotation.clone())
+                .unwrap_or_else(|| TypeAnnotation::Basic(target.clone()));
             if annotation_has_unresolved_inference_variable(&annotation) {
                 return Err(SemanticFreezeError::UnresolvedInferenceVariable {
                     subject: format!("type alias {alias}"),
@@ -241,6 +285,19 @@ impl SemanticFreeze {
 /// over a same-named parameter, exactly as `intern_identity`'s early return
 /// did.
 ///
+/// ADR-009 A2 (slice S2): the overlay additionally carries the site-interned
+/// composite identities minted by [`FreezeOverlay::canonicalize_type`]
+/// (tuples, records, callables, references, unions, erased trait objects,
+/// applied generics). This is an extension of the ONE query API (spec §4.1)
+/// — the memo is folded into the EXISTING [`FreezeOverlay::category_of`]
+/// query (resolution order: scoped parameters → site-interned composites →
+/// base), never a parallel lookup entry point and never a per-site rebuild
+/// of the shared base index. The same `Arc<FreezeOverlay>` that performs the
+/// comptime rewrite flows to the reflection intrinsics
+/// (`execute_comptime_with_context` passes one handle to both), so composite
+/// identities minted at rewrite time are classifiable at intrinsic time with
+/// zero intrinsic-side changes.
+///
 /// Known semantic edge (inherited, unchanged): a module-level alias whose
 /// target is a function type parameter resolved through the old per-site
 /// rebuild's fixpoint; that shape is not valid Shape at module scope and is
@@ -249,6 +306,10 @@ impl SemanticFreeze {
 pub(crate) struct FreezeOverlay {
     base: Arc<SemanticFreeze>,
     parameters: HashMap<String, FrozenTypeIdentity>,
+    /// Site-interned composite identities (S2). Interior-mutable because the
+    /// overlay is shared as `Arc<FreezeOverlay>` between the rewrite and the
+    /// intrinsics; populated ONLY by [`FreezeOverlay::canonicalize_type`].
+    composites: Mutex<HashMap<FrozenTypeIdentity, FrozenTypeCategory>>,
 }
 
 impl FreezeOverlay {
@@ -273,7 +334,40 @@ impl FreezeOverlay {
             ));
             parameters.insert(name.clone(), identity);
         }
-        Self { base, parameters }
+        Self {
+            base,
+            parameters,
+            composites: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// ADR-009 A2 (slice S2): canonicalize a resolved type expression through
+    /// THE single canonicalizer
+    /// ([`super::type_reflection::canonicalize_type_annotation`], slice S1 —
+    /// leaves resolve back through this overlay's own query API) and intern
+    /// the resulting identity so the EXISTING [`FreezeOverlay::category_of`]
+    /// query answers it structurally. Failure is always the canonicalizer's
+    /// named error — nothing is interned on error, and
+    /// [`FrozenTypeIdentity::INVALID`] is never produced here.
+    pub(crate) fn canonicalize_type(
+        &self,
+        annotation: &TypeAnnotation,
+    ) -> std::result::Result<FrozenTypeIdentity, String> {
+        let canonical = canonicalize_type_annotation(annotation, self)?;
+        let mut composites = self
+            .composites
+            .lock()
+            .expect("freeze-overlay composite memo lock poisoned");
+        if let Some(previous) = composites.insert(canonical.identity, canonical.category) {
+            // Same collision discipline as `intern_identity`: one identity,
+            // one category — a cross-category descriptor collision is an
+            // internal-invariant violation, never silent.
+            assert_eq!(
+                previous, canonical.category,
+                "canonical type identity collision across semantic categories"
+            );
+        }
+        Ok(canonical.identity)
     }
 
     /// Shared query API: base identities first (interning-order parity), then
@@ -285,7 +379,9 @@ impl FreezeOverlay {
     }
 
     /// Shared query API: overlay parameters classify as
-    /// [`FrozenTypeCategory::Parameter`]; everything else defers to the base.
+    /// [`FrozenTypeCategory::Parameter`]; site-interned composites (S2)
+    /// answer their structural category; everything else defers to the base.
+    /// One query, three layers — no second lookup entry point exists.
     pub(crate) fn category_of(
         &self,
         identity: FrozenTypeIdentity,
@@ -296,6 +392,15 @@ impl FreezeOverlay {
             .any(|&parameter| parameter == identity)
         {
             return Ok(FrozenTypeCategory::Parameter);
+        }
+        if let Some(category) = self
+            .composites
+            .lock()
+            .expect("freeze-overlay composite memo lock poisoned")
+            .get(&identity)
+            .copied()
+        {
+            return Ok(category);
         }
         self.base.category_of(identity)
     }
@@ -338,7 +443,11 @@ impl FreezeOverlay {
 /// annotation structurally contains the analyzer's canonical unresolved
 /// inference-variable marker. Exhaustive over `TypeAnnotation` so a new
 /// variant forces this walk to be revisited.
-fn annotation_has_unresolved_inference_variable(annotation: &TypeAnnotation) -> bool {
+///
+/// `pub(super)`: the A2 composite canonicalizer (`type_reflection`) reuses
+/// this exact predicate for its inference-hole rejection — one detector, no
+/// second derivation.
+pub(super) fn annotation_has_unresolved_inference_variable(annotation: &TypeAnnotation) -> bool {
     if annotation_as_tyvar(annotation).is_some() {
         return true;
     }
@@ -772,6 +881,181 @@ mod tests {
         let error = SemanticFreeze::freeze(&compiler)
             .expect_err("nested partial semantic state must not freeze");
         assert!(error.diagnostic().contains("unresolved inference variable"));
+    }
+
+    // ========================================================================
+    // ADR-009 A2 (slice S2): FreezeOverlay composite-category query-API
+    // extension. Composite identities minted by `canonicalize_type` are
+    // answered by the SAME `category_of` query (resolution order: scoped
+    // parameters → site-interned composites → base) — one query API per
+    // spec §4.1, no new lookup entry point, no per-site rebuild, no
+    // Default/empty construction path (rejection-matrix row 9).
+    // ========================================================================
+
+    /// (a) Canonicalize-and-intern of a composite through the overlay makes
+    /// `category_of(identity)` answer the structural category, while scoped
+    /// parameters and base leaves keep answering exactly as before. The
+    /// shared base freeze is never mutated (site-scoped memo, no rebuild).
+    #[test]
+    fn canonicalized_composite_identity_is_answered_by_the_same_category_query() {
+        use shape_ast::ast::TypePath;
+        let compiler = compiler_with_module_scope_types();
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+        let overlay = FreezeOverlay::new(Arc::clone(&freeze), "map", &["T".to_string()]);
+
+        let forms: Vec<(TypeAnnotation, FrozenTypeCategory)> = vec![
+            (
+                TypeAnnotation::Tuple(vec![
+                    TypeAnnotation::Basic("int".to_string()),
+                    TypeAnnotation::Basic("string".to_string()),
+                ]),
+                FrozenTypeCategory::Tuple,
+            ),
+            (
+                TypeAnnotation::Union(vec![
+                    TypeAnnotation::Basic("int".to_string()),
+                    TypeAnnotation::Basic("string".to_string()),
+                ]),
+                FrozenTypeCategory::Union,
+            ),
+            (
+                TypeAnnotation::Borrow {
+                    mutable: false,
+                    inner: Box::new(TypeAnnotation::Basic("Point".to_string())),
+                },
+                FrozenTypeCategory::Reference,
+            ),
+            (
+                TypeAnnotation::Generic {
+                    name: TypePath::simple("Option"),
+                    args: vec![TypeAnnotation::Basic("int".to_string())],
+                },
+                FrozenTypeCategory::Nominal,
+            ),
+        ];
+        for (annotation, expected) in forms {
+            let identity = overlay
+                .canonicalize_type(&annotation)
+                .expect("composite type expression canonicalizes");
+            assert_eq!(
+                overlay.category_of(identity),
+                Ok(expected),
+                "the ONE category query must answer the interned composite"
+            );
+            // Site-scoped: the shared base freeze is NOT mutated by interning.
+            assert!(
+                freeze.category_of(identity).is_err(),
+                "base freeze must not learn site-interned composite identities"
+            );
+        }
+        // Scoped parameters and base leaves resolve through the same query,
+        // unchanged by a populated composite memo.
+        let t = overlay.identity_of("T").expect("scoped parameter T");
+        assert_eq!(overlay.category_of(t), Ok(FrozenTypeCategory::Parameter));
+        let point = overlay.identity_of("Point").expect("base nominal Point");
+        assert_eq!(overlay.category_of(point), Ok(FrozenTypeCategory::Nominal));
+    }
+
+    /// (b) An identity never interned anywhere still rejects through the
+    /// SAME query with the EXACT named diagnostic text — pinned by
+    /// `frozen_type.rs` row-2 and
+    /// `lsp::typed_comptime::unresolved_type_ref_has_semantic_diagnostic`.
+    /// A populated memo must not change the rejection for identities it
+    /// does not hold.
+    #[test]
+    fn un_interned_identity_keeps_the_named_unknown_identity_rejection() {
+        let compiler = compiler_with_module_scope_types();
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+        let overlay = FreezeOverlay::new(Arc::clone(&freeze), "<module>", &[]);
+        overlay
+            .canonicalize_type(&TypeAnnotation::Tuple(vec![
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Basic("string".to_string()),
+            ]))
+            .expect("composite type expression canonicalizes");
+
+        let named = "type_ref received an unknown semantic type identity".to_string();
+        let never_interned =
+            FrozenTypeIdentity::from_canonical_descriptor("test:never-interned-identity");
+        assert_eq!(overlay.category_of(never_interned), Err(named.clone()));
+        assert_eq!(overlay.category_of(FrozenTypeIdentity::INVALID), Err(named));
+    }
+
+    /// (c) A3 declaration-stability: the same applied-over-Parameter form
+    /// interned through two overlays with the SAME owner yields the
+    /// identical identity; a different owner yields a different one.
+    #[test]
+    fn applied_over_parameter_identity_is_stable_across_same_owner_overlays() {
+        use shape_ast::ast::TypePath;
+        let freeze = SemanticFreeze::freeze(&BytecodeCompiler::new()).expect("empty unit freezes");
+        let params = vec!["T".to_string()];
+        let annotation = TypeAnnotation::Generic {
+            name: TypePath::simple("Option"),
+            args: vec![TypeAnnotation::Basic("T".to_string())],
+        };
+
+        let map_a = FreezeOverlay::new(Arc::clone(&freeze), "map", &params);
+        let map_b = FreezeOverlay::new(Arc::clone(&freeze), "map", &params);
+        let filter = FreezeOverlay::new(Arc::clone(&freeze), "filter", &params);
+
+        let a = map_a
+            .canonicalize_type(&annotation)
+            .expect("applied-over-parameter form canonicalizes");
+        let b = map_b
+            .canonicalize_type(&annotation)
+            .expect("applied-over-parameter form canonicalizes");
+        assert_eq!(
+            a, b,
+            "same owner must yield the identical applied-over-parameter identity"
+        );
+        assert_eq!(map_a.category_of(a), Ok(FrozenTypeCategory::Nominal));
+        assert_eq!(map_b.category_of(b), Ok(FrozenTypeCategory::Nominal));
+
+        let f = filter
+            .canonicalize_type(&annotation)
+            .expect("applied-over-parameter form canonicalizes");
+        assert_ne!(
+            f, a,
+            "a different owner embeds a different parameter identity"
+        );
+    }
+
+    /// (d) Rejection-matrix row 9: the S2 memo adds NO Default/empty
+    /// construction path — no freeze surface implements `Default`.
+    /// Method-resolution detector: the inherent `implements_default` exists
+    /// only when `T: Default`; otherwise the trait method answers false.
+    #[test]
+    fn s2_memo_adds_no_default_or_empty_construction_path() {
+        struct DefaultDetector<T>(std::marker::PhantomData<T>);
+        trait NoDefaultConstruction {
+            fn implements_default(&self) -> bool {
+                false
+            }
+        }
+        impl<T> NoDefaultConstruction for DefaultDetector<T> {}
+        impl<T: Default> DefaultDetector<T> {
+            fn implements_default(&self) -> bool {
+                true
+            }
+        }
+
+        assert!(
+            !DefaultDetector::<FreezeOverlay>(std::marker::PhantomData).implements_default(),
+            "FreezeOverlay must not grow a Default/empty construction path"
+        );
+        assert!(
+            !DefaultDetector::<SemanticFreeze>(std::marker::PhantomData).implements_default(),
+            "SemanticFreeze must not grow a Default/empty construction path"
+        );
+        assert!(
+            !DefaultDetector::<FrozenTypeIndex>(std::marker::PhantomData).implements_default(),
+            "FrozenTypeIndex must not grow a Default/empty construction path"
+        );
+        // Sanity: the detector does report a real Default impl.
+        assert!(
+            DefaultDetector::<HashMap<String, FrozenTypeIdentity>>(std::marker::PhantomData)
+                .implements_default()
+        );
     }
 
     /// The barrier installs the freeze exactly once per compilation unit; a

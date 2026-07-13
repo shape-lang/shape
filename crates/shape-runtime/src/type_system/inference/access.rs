@@ -1003,7 +1003,16 @@ impl TypeInferenceEngine {
             name == "type_ref" && crate::builtin_metadata::is_comptime_builtin_function(name);
         if is_type_ref_builtin {
             match args {
-                [Expr::Identifier(..)] => {}
+                // ADR-009 A2 (slice S4) lockstep contract: this accepted-shape
+                // set mirrors the comptime rewrite arm
+                // (shape-vm compiler/comptime.rs
+                // `rewrite_comptime_type_symbol_args_expr`) — a bare
+                // compiler-resolved identifier OR the checked type-expression
+                // carrier `Expr::TypeSyntax` (tuples, records, callables,
+                // references, unions, erased dyn, applied generics). Any
+                // drift between the two produces compile-passes-then-
+                // comptime-fails splits; change both together.
+                [Expr::Identifier(..)] | [Expr::TypeSyntax(..)] => {}
                 [Expr::Literal(shape_ast::ast::Literal::String(_), _)] => {
                     return Err(TypeError::ConstraintViolation(
                         "type_ref expects compiler-resolved type syntax; strings cannot construct TypeRef"
@@ -1042,6 +1051,16 @@ impl TypeInferenceEngine {
                 || is_type_ref_builtin);
         let mut arg_types: Vec<Type> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
+            // ADR-009 A2 (S4): the type-syntax carrier is never inferred as a
+            // value expression — it carries the same unspellable typed-syntax
+            // marker as the bare-identifier form (one marker, two accepted
+            // spellings; identical to the comptime rewrite's two arms).
+            if is_type_ref_builtin && matches!(arg, Expr::TypeSyntax(..)) {
+                arg_types.push(Type::Concrete(TypeAnnotation::Basic(
+                    crate::builtin_metadata::COMPTIME_TYPE_SYNTAX_MARKER.to_string(),
+                )));
+                continue;
+            }
             if type_symbol_ident_args && matches!(arg, Expr::Identifier(..)) {
                 arg_types.push(if name == "type_ref" {
                     Type::Concrete(TypeAnnotation::Basic(

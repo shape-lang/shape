@@ -450,7 +450,10 @@ impl EnvironmentAnalyzer {
             | Expr::DataRef(..)
             | Expr::DataDateTimeRef(..)
             | Expr::TimeRef(..)
-            | Expr::PatternRef(..) => {
+            | Expr::PatternRef(..)
+            // ADR-009 A2: type syntax carries a TypeAnnotation only — no
+            // variable references to capture.
+            | Expr::TypeSyntax(..) => {
                 // No variables to analyze
             }
             Expr::DataRelativeAccess {

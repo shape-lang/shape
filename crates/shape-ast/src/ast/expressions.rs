@@ -131,6 +131,16 @@ pub enum Expr {
     ListComprehension(Box<super::expr_helpers::ListComprehension>, Span),
     /// Block expression: { let x = 10; x + 5 }
     Block(super::expr_helpers::BlockExpr, Span),
+    /// Checked type syntax in expression position (ADR-009 A2).
+    ///
+    /// Produced ONLY by the `type_ref_call` grammar rule for composite
+    /// type-expression arguments (`type_ref([int, string])`,
+    /// `type_ref(Option<int>)`, ...). It is a carrier for a parsed
+    /// `TypeAnnotation`; it is NOT a value expression. Every consumer
+    /// outside the `type_ref(...)` argument position must reject it with
+    /// the named error "type syntax is only valid as the type_ref
+    /// argument" — never a silent no-op value (surface-and-stop).
+    TypeSyntax(TypeAnnotation, Span),
     /// Type assertion: expr as Type or expr as Type { param: value }
     TypeAssertion {
         expr: Box<Expr>,
@@ -343,6 +353,7 @@ impl Spanned for Expr {
             Expr::Array(_, span) => *span,
             Expr::ListComprehension(_, span) => *span,
             Expr::Block(_, span) => *span,
+            Expr::TypeSyntax(_, span) => *span,
             Expr::TypeAssertion { span, .. } => *span,
             Expr::InstanceOf { span, .. } => *span,
             Expr::FunctionExpr { span, .. } => *span,

@@ -1110,12 +1110,24 @@ impl BytecodeCompiler {
             Item::Enum(enum_def, _) => {
                 self.register_enum(enum_def)?;
             }
+            // ADR-009 A2 (slice S5): trait NAMES are a named semantic-freeze
+            // input (input 5) — `dyn` bounds / trait intersections in
+            // `type_ref` resolve against the frozen trait-name set. Pass-1
+            // registration (`register_item_functions`) runs AFTER the
+            // barrier, so the name set must predeclare here. Name-set only;
+            // full `TraitDef` registration stays in pass 1 (idempotent).
+            Item::Trait(trait_def, _) => {
+                self.known_traits.insert(trait_def.name.clone());
+            }
             Item::Export(export, _) => match &export.item {
                 ExportItem::TypeAlias(type_alias) => {
                     self.predeclare_type_alias_freeze_input(type_alias);
                 }
                 ExportItem::Enum(enum_def) => {
                     self.register_enum(enum_def)?;
+                }
+                ExportItem::Trait(trait_def) => {
+                    self.known_traits.insert(trait_def.name.clone());
                 }
                 _ => {}
             },
@@ -1147,10 +1159,17 @@ impl BytecodeCompiler {
     /// inputs. Keep in lockstep with the two predeclare matches above.
     pub(super) fn item_can_carry_semantic_freeze_inputs(item: &Item) -> bool {
         match item {
-            Item::StructType(..) | Item::TypeAlias(..) | Item::Enum(..) | Item::Module(..) => true,
+            Item::StructType(..)
+            | Item::TypeAlias(..)
+            | Item::Enum(..)
+            | Item::Trait(..)
+            | Item::Module(..) => true,
             Item::Export(export, _) => matches!(
                 &export.item,
-                ExportItem::Struct(_) | ExportItem::TypeAlias(_) | ExportItem::Enum(_)
+                ExportItem::Struct(_)
+                    | ExportItem::TypeAlias(_)
+                    | ExportItem::Enum(_)
+                    | ExportItem::Trait(_)
             ),
             _ => false,
         }
@@ -1159,6 +1178,18 @@ impl BytecodeCompiler {
     /// Alias half of `predeclare_item_semantic_freeze_inputs`: the same
     /// name→target mapping the pass-2 `Item::TypeAlias` arm records into
     /// `self.type_aliases` (single derivation, registered earlier).
+    ///
+    /// ADR-009 A2 (slice S4): the pass-2 arm's SECOND projection of the same
+    /// declaration — the full target annotation in the type-inference
+    /// environment (`define_type_alias`) — is registered here too. The
+    /// semantic freeze reads the structural annotation from that entry
+    /// (named freeze input 2), so a COMPOSITE alias target (`type Pair =
+    /// [int, string]`) must be visible at the registration-complete barrier,
+    /// not only after the alias item compiles in pass 2; otherwise the S1
+    /// alias fixpoint sees only the debug-string projection and `type_ref(
+    /// Pair)` rejects while `type_ref([int, string])` succeeds (R7/Dec-53
+    /// identity split). Pass 2 re-registers the identical entry (plain
+    /// insert, same source declaration — idempotent).
     fn predeclare_type_alias_freeze_input(&mut self, type_alias: &shape_ast::ast::TypeAliasDef) {
         let base_type_name = match &type_alias.type_annotation {
             TypeAnnotation::Basic(name) => Some(name.clone()),
@@ -1168,6 +1199,11 @@ impl BytecodeCompiler {
         self.type_aliases.insert(
             type_alias.name.clone(),
             base_type_name.unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
+        );
+        self.type_inference.env.define_type_alias(
+            &type_alias.name,
+            &type_alias.type_annotation,
+            type_alias.meta_param_overrides.clone(),
         );
     }
 

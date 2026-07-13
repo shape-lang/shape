@@ -105,6 +105,35 @@ compute()
     expect_vm_and_jit_number(source, 7.0);
 }
 
+/// ADR-009 A2 (slice S4): a composite type-expression form (`type_ref(
+/// [int, string])`) inside an ANNOTATION HANDLER body canonicalizes through
+/// the same shared freeze overlay as comptime blocks — the handler-body
+/// rewrite path (`execute_comptime_with_annotation_handler`) consumes the
+/// type-syntax carrier identically, and the generated function proves the
+/// structural category end-to-end under VM and JIT.
+#[test]
+fn annotation_handler_composite_type_expression_reaches_generated_fn() {
+    let source = r#"
+annotation reflect_tuple() {
+  targets: [type]
+  comptime post(target, ctx) {
+    let flag = match type_category(type_ref([int, string])) {
+      FrozenTypeCategory::Tuple => 1
+      _ => 0
+    }
+    extend (f"fn tuple_flag() -> int \{ {flag} \}")
+  }
+}
+
+@reflect_tuple()
+type User { id: int }
+
+fn show() -> int { tuple_flag() }
+show()
+"#;
+    expect_vm_and_jit_number(source, 1.0);
+}
+
 /// Negative counterpart of the function-target case: the handler's frozen
 /// category assertion FAILING must surface the handler's `error()` as a
 /// compile error — proving the handler really consulted the freeze (a

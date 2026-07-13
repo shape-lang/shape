@@ -124,6 +124,9 @@ growth pressure on the pre-existing oversized `comptime_builtins.rs`.
    decision. See the B1 addendum below.
 3. Native type-expression syntax that can form `TypeRef` for tuples, records,
    callables, references, unions, erased domains, and applied generic types.
+   CLOSED (2026-07-13, ADR009-A2, ticket #4) — see the A2 addendum below;
+   const-generic applications remain a named parse-time rejection until
+   B4/Dec-54 lands the const carrier.
 4. Complete semantic normalization for applied nominals, object intersections,
    and trait intersections on every call path. The declared-generic-parameter
    half of this gap is CLOSED (2026-07-12, ADR009-A3): the generic-call
@@ -333,3 +336,104 @@ Every positive payload behavior is proven on BOTH engines via
 `expect_vm_and_jit_output`; no test exercises a non-enabled category's
 payload structure (invariant §3.7). Rejected-compromise log: the
 2026-07-13 ADR009-B1 close-out entry in `docs/defections.md`.
+
+## ADR009-A2 Addendum (2026-07-13, ticket #4, branch adr009/a2)
+
+Ticket A2 (spec Stage 1, gap #3 above) closes the native type-expression
+syntax gap: `type_ref(...)` accepts the full checked type grammar, forming
+canonical `TypeRef` identities through ONE canonicalizer.
+
+### Accepted spellings (exact, per the S3 grammar)
+
+| Form | Spelling | Category |
+|---|---|---|
+| Bare names | `type_ref(int)`, `type_ref(Point)`, `type_ref(T)`, `type_ref(any)` | Primitive / Nominal / Parameter / Erased |
+| Tuples | `type_ref([int, string])` | Tuple |
+| Records | `type_ref({x: int})`, `type_ref({x?: int})` (optionality significant) | Record |
+| Callables | `type_ref((int) -> bool)` | Callable |
+| References | `type_ref(&T)`, `type_ref(&mut T)` (mutability significant) | Reference |
+| Unions | `type_ref(int \| string)` (deduped, byte-sorted, singleton collapses) | Union |
+| Erased | `type_ref(any)`, `type_ref(dyn Speak)`, `type_ref(dyn A + B)` (bounds sorted) | Erased |
+| Applied generics | `type_ref(Option<int>)`, `type_ref(Array<User>)`, user generics, nested `Option<Array<int>>` | Nominal (with typed args) |
+
+Deliberate surface choices: the spelling stays `type_ref(T)` — NOT the
+Dec-48 turbofish `type_ref<T>()`; constructor-identity reclassification is
+ticket B4. Bare generic heads (`type_ref(Option)`) stay `Nominal`, pinned by
+`frozen_type.rs::enum_and_builtin_container_types_are_nominal`, in recorded
+tension with the 2026-05-31 bare-unparameterized-generic ruling — B4's call.
+Record-field identity is fixed as byte-sorted-by-field-name (Dec 50/94 are
+silent on ordering; sorting delivers R11 declaration-order independence).
+Const-generic applications (`type_ref(Array<3>)`) are a named parse-time
+rejection ("const-generic type applications are not yet supported in
+type_ref") — no `TypeAnnotation` const carrier, no descriptor bytes minted
+(see the S3 defections entry). Applied ENUM heads are arity-UNCHECKED
+(enum type-params are not recoverable from the schema registry at freeze
+time — documented in the freeze module; wiring a compiler-side store is a
+deferred decision, not silently taken).
+
+### Architecture (extends A1, no parallel surfaces)
+
+- ONE canonicalizer `canonicalize_type_annotation` in
+  `shape-vm/src/compiler/comptime_builtins/type_reflection.rs`: resolved
+  `TypeAnnotation` -> (canonical descriptor, `FrozenTypeCategory`,
+  `FrozenTypeIdentity`). Leaves resolve ONLY through the overlay query API
+  (alias/synonym/parameter normalization inherited, never re-implemented).
+  The descriptor grammar comment is the B4/B7 ABI substrate — identities are
+  SHA-256 over descriptor bytes; changing the grammar re-hashes (ABI break).
+- `FreezeOverlay` grew an interior-mutable composite memo FOLDED INTO the
+  existing `category_of` query (spec §4.1 one-query-API; resolution order:
+  scoped parameters -> site-interned composites -> base). No new lookup
+  entry point, no per-site rebuild, nothing interned on error.
+- Parser: dedicated `type_ref_call` pest rule, type-annotation-first ordered
+  choice with expression fallback (all A1 named rejections preserved); new
+  carrier `Expr::TypeSyntax(TypeAnnotation, Span)` walked through the full
+  exhaustive-match cascade with named surface-and-stop errors outside
+  `type_ref` position. Bare identifiers keep the A1 `Expr::Identifier`
+  lowering byte-identically.
+- Rewrite + checker in lockstep: `rewrite_comptime_type_symbol_args`
+  (Result-ified) and `access.rs` accept exactly
+  `[Expr::Identifier] | [Expr::TypeSyntax]`; canonicalization failures are
+  named compile errors BEFORE user comptime executes (Dec 52).
+- Alias fixpoint interns composite alias targets (`type Pair = [int,
+  string]`) through the same canonicalizer, so bare alias names agree with
+  spelled composites (R7/Dec-53 — no identity split).
+- LSP: textual `type_ref(` type-position detection
+  (`context.rs::is_in_type_ref_type_position`, wins over the ComptimeBlock
+  context, works in generic bodies and nested comptime blocks) routes to the
+  EXISTING type-annotation completion provider, which now also offers
+  primitive spellings, user-declared type names, and in-scope generic type
+  parameters — never value bindings. `type_ref` hover/signature rows stay
+  generated from the shared runtime catalog (`comptime_reflection.rs`).
+
+### A2 rejection matrix (all named-diagnostic-asserted, green 2026-07-13)
+
+| Row | Forbidden form | Asserting tests (frozen_type.rs unless noted) |
+|---|---|---|
+| R1 | String spells a composite type | `composite_string_type_ref_construction_is_still_a_string_rejection`; lsp `composite_string_type_ref_has_semantic_diagnostic` |
+| R2 | Unresolved leaf at depth (incl. `dyn NoSuchTrait`) | `unresolved_leaf_*` family naming the leaf; lsp `nested_unresolved_type_ref_has_semantic_diagnostic` |
+| R3 | Inference holes | `_` parses as an ordinary never-frozen NAME (unknown-identity naming `_`); Dec-52 hole family pinned at unit level (no source spelling can smuggle an analyzer tyvar) |
+| R5 | Applied arity mismatch | builtin + user-struct arity from freeze facts (`type_ref applied type 'H' expects N type argument(s)...`); enum heads unchecked (documented) |
+| R6 | Const-generic application | S3 named parse rejection re-fired e2e |
+| R7 | Alias minted as distinct identity | positive proof: `type_ref(Ids) == type_ref(Array<int>) == type_ref(Array<UserId>)` bit-identical |
+| R8 | Intersection survives as variant | object∩ == directly-spelled record identity; trait∩ == `dyn` erased identity; mixed = named rejection |
+| R9 | Non-type expressions | row-7 re-fired over the S3 expression fallback |
+| R11 | Order-dependent identity | unrelated-decl insertion + field/member source reorder = bit-identical identity literals |
+| R12 | Composite TypeRef escapes to runtime | both comptime-only guards re-fired |
+| R14 | Legacy path learns composite forms | `type_info([int, string])` parses as a VALUE array; confinement sentinel unchanged |
+
+### A2 final verification counts (2026-07-13, all strictly additive vs the A1/A3 close baselines)
+
+- shape-vm `compiler::comptime_builtins`: 45 passed (A1 close: 19);
+  `compiler::comptime`: 115 passed / 4 pre-existing ignores (A1 close: 82);
+  `functions_annotations` s3 freeze gate: 3; `compiler::monomorphization`:
+  175 — all passed.
+- shape-runtime: `comptime_reflection` 7 (6 + the A2 row-surface test),
+  `type_schema::builtin_schemas` 6, `builtin_metadata` 4 — all passed.
+- shape-ast lib: 550 passed.
+- ShapeTest `comptime`: 151 passed (A1 close: 109). ShapeTest
+  `annotations_comptime`: 49 passed (A1 close: 48).
+- ShapeTest `lsp`: FULL target 414 passed (A1 close: 399; +12 S3-S5 module
+  additions, +3 S6 completion/hover); shape-lsp lib: 787 passed
+  (A1 close: 772; +9 context detection, +6 type-param/primitive provider).
+- `cargo check --all-targets` across shape-ast/-vm/-runtime/-lsp/-jit/-test:
+  clean. `scripts/check-no-dynamic.sh`: exit 0.
