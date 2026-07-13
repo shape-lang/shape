@@ -26,6 +26,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub(crate) mod semantic_freeze;
+// ADR-009 (ticket B2, slice S3): opaque TraitRef/ImplRef carriers + the
+// schema-name-checked evidence decode. New code lives in the submodule, not
+// in this (already oversized) parent.
+mod trait_evidence;
 mod type_reflection;
 
 pub(crate) use semantic_freeze::FreezeOverlay;
@@ -46,6 +50,12 @@ pub(crate) const TYPE_CATEGORY_INTRINSIC: &str = "\u{1}comptime:type-category";
 /// name reaches it only through the comptime forwarder (`comptime.rs`) —
 /// the runtime `reflect` builtin mapping (`helpers.rs`) is untouched.
 pub(crate) const REFLECT_INTRINSIC: &str = "\u{1}comptime:reflect";
+
+// ADR-009 (ticket B2, slice S4): trait-identity + implementation-evidence
+// intrinsics. Registered in `trait_evidence.rs`; the SOH prefix keeps them
+// unspellable in Shape source (identity-literal transport only, Dec 49).
+pub(crate) const TRAIT_REF_INTRINSIC: &str = "\u{1}comptime:trait-ref";
+pub(crate) const FIND_IMPL_INTRINSIC: &str = "\u{1}comptime:find-impl";
 
 /// Directives emitted during comptime execution (e.g., from `extend target`).
 #[derive(Debug, Clone)]
@@ -597,11 +607,26 @@ fn nb_str(s: &str) -> KindedSlot {
 /// Supported key forms:
 /// - Legacy: "TraitName::TypeName"
 /// - Canonical: "TraitName::TypeName::ImplNameOrDefault"
+///
+/// `site_time_impl_keys` (slice S5) is the superset key snapshot visible at
+/// the comptime site (live keys + J-CT.2 `comptime impl` pairs); it feeds
+/// ONLY `find_impl`'s named Dec 52 post-barrier ordering diagnostic — never
+/// evidence, never the legacy `implements` path.
 pub(crate) fn create_comptime_builtins_module(
     trait_impl_keys: HashSet<String>,
+    site_time_impl_keys: HashSet<String>,
     freeze: Arc<FreezeOverlay>,
 ) -> ModuleExports {
     let mut module = comptime_builtins_module_base(trait_impl_keys);
+    // ADR-009 B2 (slice S4): `trait_ref` / `find_impl` consume the SAME
+    // freeze handle — implementation evidence comes ONLY from the frozen
+    // barrier truth (freeze inputs 4/5), never from the legacy
+    // `trait_impl_keys` set above (E5 deletes that path).
+    trait_evidence::register_trait_evidence_builtins(
+        &mut module,
+        Arc::clone(&freeze),
+        site_time_impl_keys,
+    );
     register_frozen_reflection_builtins(&mut module, freeze);
     module
 }
@@ -1279,6 +1304,7 @@ mod tests {
     fn test_comptime_builtins_module_created() {
         let module = create_comptime_builtins_module(
             Default::default(),
+            Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
         assert_eq!(module.name, "__comptime__");
@@ -1288,6 +1314,7 @@ mod tests {
     fn test_comptime_warning_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(
+            Default::default(),
             Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
@@ -1308,6 +1335,7 @@ mod tests {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(
             Default::default(),
+            Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
         let error = module
@@ -1325,6 +1353,7 @@ mod tests {
     fn test_comptime_implements_returns_false_when_not_registered() {
         let module = create_comptime_builtins_module(
             Default::default(),
+            Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
         let result = module
@@ -1341,6 +1370,7 @@ mod tests {
         impls.insert("Display::Currency".to_string());
         let module = create_comptime_builtins_module(
             impls,
+            Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
         let result = module
@@ -1356,6 +1386,7 @@ mod tests {
         impls.insert("Serializable::number".to_string());
         let module = create_comptime_builtins_module(
             impls,
+            Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
         let result = module
@@ -1369,6 +1400,7 @@ mod tests {
     fn test_comptime_build_config_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(
+            Default::default(),
             Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
@@ -1420,7 +1452,11 @@ mod freeze_handle_module_tests {
         let int_identity = overlay
             .identity_of("int")
             .expect("int is frozen in every unit");
-        let module = create_comptime_builtins_module(Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            Arc::clone(&overlay),
+        );
         let ctx = test_ctx();
 
         let type_ref = module
@@ -1498,7 +1534,7 @@ mod freeze_handle_module_tests {
         let int_identity = overlay
             .identity_of("int")
             .expect("int is frozen in every unit");
-        let module = create_comptime_builtins_module(Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
         let ctx = test_ctx();
 
         let reflect = module
@@ -1553,7 +1589,7 @@ mod freeze_handle_module_tests {
         let nominal_identity = overlay
             .identity_of("Array")
             .expect("Array is frozen as a builtin nominal");
-        let module = create_comptime_builtins_module(Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
         let ctx = test_ctx();
 
         let reflect = module
@@ -1573,7 +1609,7 @@ mod freeze_handle_module_tests {
     #[test]
     fn reflect_intrinsic_rejects_non_type_ref_args_and_unknown_identities() {
         let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
-        let module = create_comptime_builtins_module(Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
         let ctx = test_ctx();
         let reflect = module
             .typed_exports()

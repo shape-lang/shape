@@ -1,7 +1,8 @@
 use crate::builtin_metadata::{BuiltinMetadata, BuiltinParam};
 use crate::type_schema::builtin_schemas::{
-    COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
-    COMPTIME_FROZEN_PRIMITIVE_SCHEMA, COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+    COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_IMPL_REF_SCHEMA,
+    COMPTIME_FROZEN_NEVER_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
+    COMPTIME_FROZEN_TRAIT_REF_SCHEMA, COMPTIME_FROZEN_TYPE_REF_SCHEMA,
     COMPTIME_FROZEN_TYPE_SCHEMA,
 };
 use shape_value::heap_value::HeapKind;
@@ -434,6 +435,56 @@ pub const TYPE_CATEGORY_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
     example: Some("comptime { type_category(type_ref(Point)) }"),
 };
 
+/// LSP-visible builtin row for `trait_ref`, owned by the shared reflection
+/// catalog (ADR-009 ticket B2, slice S3). `builtin_metadata::CORE_BUILTINS`
+/// includes this descriptor verbatim; it must not be duplicated as a
+/// hand-written row. Dec 49: a trait is a DISTINCT identity kind from a
+/// value type — a TraitRef is never a TypeRef.
+pub const TRAIT_REF_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
+    name: "trait_ref",
+    signature: "trait_ref(Tr) -> TraitRef<Tr>",
+    description: "Create an opaque compiler-issued identity for a declared trait; a trait is not a value type, so a TraitRef is a distinct identity kind from TypeRef. Strings cannot construct a TraitRef. Only valid inside comptime blocks.",
+    category: "Comptime",
+    parameters: &[BuiltinParam {
+        name: "Tr",
+        param_type: "trait",
+        optional: false,
+        description: "A trait declared before the semantic-freeze barrier",
+    }],
+    return_type: "TraitRef<Tr>",
+    example: Some("comptime { trait_ref(Serializable) }"),
+};
+
+/// LSP-visible builtin row for `find_impl`, owned by the shared reflection
+/// catalog (ADR-009 ticket B2, slice S3). Evidence is branch-scoped and
+/// compiler-issued (Dec 49): an unimplemented pair is `None` — never an
+/// error and never partial evidence — and a boolean can never stand in for
+/// an `ImplRef`.
+pub const FIND_IMPL_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
+    name: "find_impl",
+    signature: "find_impl(type_ref: TypeRef<T>, trait_ref: TraitRef<Tr>) -> Option<ImplRef<T, Tr>>",
+    description: "Look up compiler-issued implementation evidence for the exact (type, trait) identity pair frozen at the semantic-freeze barrier. An unimplemented pair is None — never an error and never partial evidence. A boolean cannot authorize an operation that requires implementation evidence. Only valid inside comptime blocks.",
+    category: "Comptime",
+    parameters: &[
+        BuiltinParam {
+            name: "type_ref",
+            param_type: "TypeRef<T>",
+            optional: false,
+            description: "Compiler-issued type identity",
+        },
+        BuiltinParam {
+            name: "trait_ref",
+            param_type: "TraitRef<Tr>",
+            optional: false,
+            description: "Compiler-issued trait identity",
+        },
+    ],
+    return_type: "Option<ImplRef<T, Tr>>",
+    example: Some(
+        "comptime { match find_impl(type_ref(User), trait_ref(Serializable)) { Some(proof) => /* consume evidence */, None => /* no impl */ } }",
+    ),
+};
+
 /// Return a diagnostic when a compile-stage capability is about to be baked
 /// into ordinary runtime code. Scalar comptime results remain liftable; typed
 /// reflection capabilities must be consumed before the stage boundary.
@@ -480,6 +531,14 @@ pub fn runtime_lift_rejection(value: &KindedSlot) -> Option<&'static str> {
         FLOAT_WIDTH_SCHEMA_NAME => {
             Some("FloatWidth is comptime-only reflection data and cannot enter runtime code")
         }
+        // ADR-009 (ticket B2, slice S3) rejection R6: trait identities and
+        // implementation evidence never cross the stage boundary.
+        COMPTIME_FROZEN_TRAIT_REF_SCHEMA => {
+            Some("TraitRef is a comptime-only compiler capability and cannot enter runtime code")
+        }
+        COMPTIME_FROZEN_IMPL_REF_SCHEMA => Some(
+            "ImplRef is comptime-only implementation evidence and cannot enter runtime code",
+        ),
         _ => None,
     }
 }
@@ -582,6 +641,108 @@ mod tests {
                 .description
                 .contains("Only valid inside comptime blocks")
         );
+    }
+
+    /// ADR-009 (ticket B2, slice S3): the `trait_ref` row is catalog-owned
+    /// with the load-bearing hover phrases — a trait is a DISTINCT identity
+    /// kind, never a value type, and strings cannot construct a TraitRef.
+    #[test]
+    fn trait_ref_row_is_catalog_owned_with_typed_signature() {
+        assert_eq!(TRAIT_REF_BUILTIN_ROW.name, "trait_ref");
+        assert_eq!(
+            TRAIT_REF_BUILTIN_ROW.signature,
+            "trait_ref(Tr) -> TraitRef<Tr>"
+        );
+        assert_eq!(TRAIT_REF_BUILTIN_ROW.return_type, "TraitRef<Tr>");
+        assert_eq!(TRAIT_REF_BUILTIN_ROW.category, "Comptime");
+        assert!(
+            TRAIT_REF_BUILTIN_ROW
+                .description
+                .contains("opaque compiler-issued identity")
+        );
+        assert!(
+            TRAIT_REF_BUILTIN_ROW
+                .description
+                .contains("a trait is not a value type")
+        );
+        assert!(
+            TRAIT_REF_BUILTIN_ROW
+                .description
+                .contains("Strings cannot construct a TraitRef")
+        );
+    }
+
+    /// ADR-009 (ticket B2, slice S3): the `find_impl` row is catalog-owned;
+    /// evidence is `Option<ImplRef<T, Tr>>` (unimplemented pair = `None`,
+    /// never an error, never partial evidence) and a boolean can never
+    /// authorize evidence-requiring generation (Dec 49).
+    #[test]
+    fn find_impl_row_is_catalog_owned_returning_optional_evidence() {
+        assert_eq!(FIND_IMPL_BUILTIN_ROW.name, "find_impl");
+        assert_eq!(
+            FIND_IMPL_BUILTIN_ROW.signature,
+            "find_impl(type_ref: TypeRef<T>, trait_ref: TraitRef<Tr>) -> Option<ImplRef<T, Tr>>"
+        );
+        assert_eq!(FIND_IMPL_BUILTIN_ROW.return_type, "Option<ImplRef<T, Tr>>");
+        assert_eq!(FIND_IMPL_BUILTIN_ROW.category, "Comptime");
+        assert!(
+            FIND_IMPL_BUILTIN_ROW
+                .description
+                .contains("implementation evidence")
+        );
+        assert!(FIND_IMPL_BUILTIN_ROW.description.contains("None"));
+        assert!(
+            FIND_IMPL_BUILTIN_ROW
+                .description
+                .contains("boolean cannot authorize")
+        );
+    }
+
+    /// ADR-009 (ticket B2, slice S3) rejection R6, A1 row-5 mirror: the
+    /// reserved TraitRef/ImplRef carriers cannot lift past the stage
+    /// boundary into runtime code — named diagnostics, keyed by the
+    /// unspellable schema names. Scalars stay liftable.
+    #[test]
+    fn runtime_lift_rejection_names_trait_evidence_as_comptime_only() {
+        use crate::type_schema::builtin_schemas::{
+            COMPTIME_FROZEN_IMPL_REF_SCHEMA, COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
+        };
+        use crate::type_schema::typed_object_for_named_schema;
+
+        let trait_ref = typed_object_for_named_schema(
+            COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
+            &[
+                ("identity_high", KindedSlot::from_int(11)),
+                ("identity_low", KindedSlot::from_int(22)),
+            ],
+        );
+        let rejection = runtime_lift_rejection(&trait_ref).expect("TraitRef must not lift");
+        assert!(
+            rejection.contains("TraitRef is a comptime-only compiler capability"),
+            "{rejection}"
+        );
+        assert!(rejection.contains("cannot enter runtime code"), "{rejection}");
+
+        let impl_ref = typed_object_for_named_schema(
+            COMPTIME_FROZEN_IMPL_REF_SCHEMA,
+            &[
+                ("trait_identity_high", KindedSlot::from_int(1)),
+                ("trait_identity_low", KindedSlot::from_int(2)),
+                ("type_identity_high", KindedSlot::from_int(3)),
+                ("type_identity_low", KindedSlot::from_int(4)),
+                ("impl_identity_high", KindedSlot::from_int(5)),
+                ("impl_identity_low", KindedSlot::from_int(6)),
+            ],
+        );
+        let rejection = runtime_lift_rejection(&impl_ref).expect("ImplRef must not lift");
+        assert!(
+            rejection.contains("ImplRef is comptime-only implementation evidence"),
+            "{rejection}"
+        );
+        assert!(rejection.contains("cannot enter runtime code"), "{rejection}");
+
+        // Scalar comptime results remain liftable.
+        assert_eq!(runtime_lift_rejection(&KindedSlot::from_int(7)), None);
     }
 
     /// The `type_ref` row is catalog-owned and keeps the load-bearing hover

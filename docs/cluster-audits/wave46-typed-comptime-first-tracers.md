@@ -437,3 +437,116 @@ deferred decision, not silently taken).
   (A1 close: 772; +9 context detection, +6 type-param/primitive provider).
 - `cargo check --all-targets` across shape-ast/-vm/-runtime/-lsp/-jit/-test:
   clean. `scripts/check-no-dynamic.sh`: exit 0.
+
+
+## ADR009-B2 Addendum (2026-07-13, ticket #6, branch adr009/b2)
+
+Ticket B2 (spec Stage 2, Dec 49, slices S1-S6) adds typed trait identity and
+implementation evidence on top of the A1 freeze surface. Nothing here
+re-derives trait/impl truth from a parallel table; the legacy
+`implements(T, Trait)` string path is byte-untouched (E5 deletes it).
+
+- **Barrier-ordering: two-sub-pass predeclare walk (S1).** Trait defs and
+  trait impls historically registered AFTER the freeze barrier
+  (`register_item_functions` / pass-2 `Item::Impl`), which is why the legacy
+  `implements` re-reads `env.trait_impl_keys()` live at every comptime site —
+  the per-site pattern A1 deleted for types.
+  `predeclare_item_semantic_freeze_inputs` (statements.rs) gained
+  `Item::Trait` / `Item::Impl` / `ExportItem::Trait` arms run as TWO
+  sub-passes (`SemanticFreezePredeclarePass::TypesAndTraits`, then `Impls`)
+  because source/topological order does not guarantee trait-before-impl and
+  `register_trait_impl` validation needs the trait present. Both entry
+  points are wired: `compile()`'s predeclare loop and the graph entry's
+  qualified dep-module walk (deps then root, twice) — the A1-review-round-1
+  imported-module regression class is covered by barrier-truth tests for a
+  root AND an imported dep module. The impl arm mirrors the analyzer's
+  `register_impl` exactly, so the analyzer's later re-registration is an
+  idempotent Ok (registry.rs:315-330).
+- **Freeze inputs 4 and 5 (S2).** `SemanticFreeze::freeze` reads the
+  barrier-complete env registry ONCE into: (4) trait identities — a separate
+  `frozen_trait_ids` map, NEVER interned into `FrozenTypeIndex.
+  frozen_type_ids` (so `type_ref(TraitName)` cannot resolve as a type and
+  the cross-category collision assertion stays sound) and NO
+  `FrozenTypeCategory::Trait` variant (Dec 50 rule 5, structural pin test);
+  (5) impl evidence — `FrozenImplEvidence` facts keyed
+  `(trait_identity, type_identity)`, default + named impls distinct.
+- **Identity-descriptor scheme.** Canonical descriptors `trait:{name}` and
+  `impl:{trait}:{type}:{impl_name_or___default__}` go through
+  `FrozenTypeIdentity::from_canonical_descriptor` (128-bit SHA-256, never
+  counter-allocated). The unit e2e
+  `trait_evidence::tests::find_impl_evidence_artifact_carries_canonical_freeze_identities`
+  proves the evidence artifact returned by `find_impl -> Some(proof)`
+  carries exactly the canonical trait/type/impl identity hashes — Dec 49's
+  "canonical trait and implementation identities enter generated-artifact
+  fingerprints".
+- **Public surface (S4).** `trait_ref(Trait)` (positional bare-ident form —
+  Dec 49's turbofish spelling lands with ticket A2; deviation logged in
+  `docs/defections.md`) lowers via the comptime rewrite to
+  frozen-trait-identity int literals (identity-literal transport, no
+  strings). `find_impl` queries ONLY `FreezeOverlay::impl_evidence_of` —
+  proven by passing EMPTY legacy `trait_impl_keys` in the unit e2e — and
+  returns `TypedReturn::Some(ImplRef)/None` (R9: unimplemented pair =
+  `None`, never an error, never partial). Reserved unspellable carriers
+  `"\u{1}comptime:TraitRef"` / `"\u{1}comptime:ImplRef"`; the ImplRef schema
+  carries all three identity pairs (trait + type + impl). Positive Dec-49
+  proof green under VM AND JIT
+  (`find_impl_some_arm_consumes_evidence_under_vm_and_jit`).
+- **Ruled stances (named surface-and-stops, never silent `None`):**
+  blanket-impl satisfaction, legacy numeric widening, ambiguous
+  unqualified-impl attribution, named-impls-only pairs, and post-barrier
+  (comptime-generated/derived) implementations. All firewall-safe (pinned by
+  `semantic_freeze::tests::b2_user_facing_diagnostics_are_firewall_safe`).
+- **LSP rows are catalog-generated.** `TRAIT_REF_BUILTIN_ROW` /
+  `FIND_IMPL_BUILTIN_ROW` live in the shared runtime catalog
+  (`comptime_reflection.rs`) and are spliced verbatim into `CORE_BUILTINS`;
+  completion/hover/signature help/diagnostics are driven by those rows
+  (parity pins `hover_tests.rs::test_comptime_builtin_hover_{trait_ref,find_impl}_uses_shared_catalog`).
+
+### B2 rejection matrix (rows R1-R9 + post-barrier, all named-diagnostic-asserted, green 2026-07-13)
+
+Public e2e rows live in `tools/shape-test/tests/comptime/trait_evidence.rs`,
+LSP twins in `tools/shape-test/tests/lsp/typed_comptime.rs`, unit pins in
+`crates/shape-vm/src/compiler/comptime_builtins/trait_evidence.rs` and
+`semantic_freeze.rs`:
+
+| Row | Forbidden form | Asserting tests |
+|---|---|---|
+| R1 | Trait-as-type: `type_ref(TraitName)` | `trait_evidence.rs::r1_trait_as_type_is_the_named_traits_are_not_value_types_rejection`; A1-row-2 guard `r1_upgrade_keeps_the_generic_diagnostic_for_unknown_names`; unit `trait_evidence::tests::type_ref_carrier_rejects_a_frozen_trait_identity_with_the_named_r1_text`; LSP twins `typed_comptime.rs::{trait_as_type_ref_has_semantic_diagnostic, unknown_name_keeps_generic_diagnostic_with_traits_declared}` |
+| R2 | Type-as-trait: `trait_ref(User)` / `trait_ref(int)` | `r2_type_as_trait_only_a_declared_trait_forms_a_trait_ref`; LSP twin `type_as_trait_ref_has_semantic_diagnostic` |
+| R3 | Name-string lookup | `r3_strings_cannot_construct_trait_refs`; `r3_find_impl_rejects_name_string_lookup`; LSP twins `{string_trait_ref_construction, find_impl_string_lookup}_has_semantic_diagnostic` |
+| R4 | Boolean-authorized generation (incl. `implements(...)` result) | `r4_boolean_cannot_authorize_implementation_evidence`; LSP twin `boolean_authorized_generation_has_semantic_diagnostic` |
+| R5 | Evidence escaping its branch (minimal sound: stage boundary + Some-arm-only issuance) | `r5_impl_ref_evidence_cannot_escape_the_comptime_stage_boundary`; LSP twin `raw_impl_ref_escape_has_semantic_diagnostic`; Some-arm-only issuance is structural (only `find_impl` builds `ImplRef`; R7 blocks forgery) |
+| R6 | TraitRef/ImplRef escaping to runtime | `r6_trait_ref_cannot_escape_to_runtime_code`; unit `comptime_reflection::tests::runtime_lift_rejection_names_trait_evidence_as_comptime_only`; LSP twin `raw_trait_ref_escape_has_semantic_diagnostic` |
+| R7 | Forged evidence (arbitrary values / legacy descriptors / hand-built objects) | `r7_arbitrary_values_and_legacy_descriptors_cannot_forge_evidence`; unit `trait_evidence::tests::{trait_ref_carrier_rejects_identities_the_freeze_never_issued, impl_ref_decode_rejects_forged_or_lookalike_evidence, trait_ref_decode_is_schema_name_checked}` (structural: schema-name-checked opaque decode + freeze re-validation) |
+| R8 | Wrong arity / wrong argument forms | `r8_trait_ref_arity_and_wrong_forms_are_named_rejections`; `r8_find_impl_arity_is_a_named_rejection`; LSP twins `{trait_ref_arity, find_impl_arity}_has_semantic_diagnostic` |
+| R9 | Missing-impl fabrication | `find_impl_unimplemented_pair_is_none_never_an_error` (`None` — never an error, never a default/partial `ImplRef`); unit `find_impl_unimplemented_pair_executes_the_none_arm` |
+| + | Post-barrier (comptime-generated/derived) impl queried as evidence | `post_barrier_comptime_generated_impls_are_a_named_stop_not_none`; unit `trait_evidence::tests::post_barrier_registered_pair_is_the_named_ordering_stop_never_a_silent_none` — a Dec 52 ordering stop, never masqueraded as `find_impl -> None` |
+
+R10 (structural, diff-review): no extension of `implements()`/`TypeKindLabel`
+(E5-confinement sentinel green; `comptime_builtins.rs` diff across B2 =
+2 intrinsic-name constants + 1 registration call + the
+`create_comptime_builtins_module` signature), no parallel trait table, no
+`FrozenTypeCategory::Trait`, identities only via
+`from_canonical_descriptor`, `check-no-dynamic` green at every slice close.
+
+### B2 final verification counts (this addendum's date)
+
+All strictly additive vs base `adr009/base@fbff1b5d` (A1+A3); no deletions,
+no rebaselines:
+
+- shape-vm `compiler::comptime_builtins`: 50 passed (A1's 19 + S1 barrier
+  tests, S2 identity/evidence matrix, S3/S4 carrier + intrinsic unit e2es,
+  S5 post-barrier pin, S6 firewall-safety pin).
+- shape-runtime: `comptime_reflection` 11, `builtin_metadata` 5,
+  `type_schema::builtin_schemas` 8 — all passed (TraitRef/ImplRef schema,
+  catalog-row, and generated-row drift tests included).
+- ShapeTest `comptime`: 138 passed with two threads (109 at A1 close, plus
+  the A3 generic-body matrix merged in base and the 16-test
+  `trait_evidence.rs` matrix: pre-flight, positive VM+JIT proof, None arm,
+  pair-discrimination, R1-R8 rows, post-barrier stop).
+- ShapeTest `lsp` `typed_comptime` module: 40 passed (A1/A3's 23 + the 17
+  B2 completion/hover/signature/diagnostic-twin tests).
+- shape-lsp `--lib hover`: 98 passed (incl. the two B2 shared-catalog
+  parity pins).
+- Full gate list (17 commands) green at S6 close — see the S6 close-out
+  entry in `docs/defections.md`.

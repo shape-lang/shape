@@ -1768,3 +1768,49 @@ fn legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path() {
          E5-deletes confinement marker"
     );
 }
+
+// ── ADR-009 (ticket B2, slice S2): trait/impl identities enter the SAME
+// canonical SHA-256 descriptor scheme, as a DISTINCT identity kind. ──
+
+/// Dec 49: canonical trait and impl identities are reproducible descriptor
+/// hashes (`trait:{name}` / `impl:{trait}:{type}:{impl_name_or_default}`),
+/// never counter-allocated, and each descriptor space is disjoint.
+#[test]
+fn trait_and_impl_descriptors_enter_the_canonical_identity_scheme() {
+    let trait_identity = FrozenTypeIdentity::for_trait("Greetable");
+    assert_eq!(
+        trait_identity,
+        FrozenTypeIdentity::from_canonical_descriptor("trait:Greetable")
+    );
+    // A trait is not a value type: same name, disjoint descriptor space.
+    assert_ne!(
+        trait_identity,
+        FrozenTypeIdentity::from_canonical_descriptor("nominal:Greetable")
+    );
+
+    let default_impl = FrozenTypeIdentity::for_impl("Greetable", "User", None);
+    assert_eq!(
+        default_impl,
+        FrozenTypeIdentity::from_canonical_descriptor("impl:Greetable:User:__default__")
+    );
+    let named_impl = FrozenTypeIdentity::for_impl("Greetable", "User", Some("Loud"));
+    assert_eq!(
+        named_impl,
+        FrozenTypeIdentity::from_canonical_descriptor("impl:Greetable:User:Loud")
+    );
+    assert_ne!(default_impl, named_impl);
+    assert_ne!(default_impl, trait_identity);
+    assert_ne!(named_impl, trait_identity);
+}
+
+/// Dec 50 rule 5 structural pin: traits use `TraitRef` — there is NO
+/// `FrozenTypeCategory::Trait` variant, and none may be added.
+#[test]
+fn frozen_type_category_has_no_trait_variant() {
+    assert!(
+        FrozenTypeCategory::ALL
+            .iter()
+            .all(|category| category.variant_name() != "Trait"),
+        "Dec 50 rule 5: traits are not FrozenType categories"
+    );
+}

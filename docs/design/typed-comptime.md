@@ -287,6 +287,37 @@ Evidence: `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`
 Book status: A2-enabled behaviors are gate-runnable in ShapeTest (VM+JIT);
 book-chapter examples land in stage F1 per the program spec.
 
+**CURRENT / VM+JIT - typed trait identity and implementation evidence
+(ticket B2, 2026-07-13).** `trait_ref(Trait)` yields an opaque
+compiler-issued `TraitRef` — a DISTINCT identity kind from `TypeRef` (Dec 49:
+a trait is not a value type; trait identities are never interned as type
+identities, and there is no `FrozenTypeCategory::Trait` variant per Dec 50
+rule 5). `find_impl(type_ref, trait_ref) -> Option<ImplRef<T, Tr>>` answers
+ONLY from implementation evidence frozen at the same registration-complete
+barrier (freeze inputs 4/5 in `semantic_freeze.rs`, read once from the
+analyzer env registry via a two-sub-pass trait-then-impl predeclare walk over
+both compile entry points); an unimplemented pair is `None` — never an error,
+never partial evidence. The canonical descriptors (`trait:{name}`,
+`impl:{trait}:{type}:{impl_name_or_default}`) enter the same 128-bit SHA-256
+identity scheme as type identities, so canonical trait and implementation
+identities enter generated-artifact fingerprints. Evidence is consumed in the
+`Some(proof)` match arm (Dec 49 positive form, proven VM+JIT); branch scoping
+is enforced as stage-boundary lift rejection plus Some-arm-only issuance (the
+schema-name-checked opaque decode blocks forged evidence structurally).
+Rejection matrix R1-R9 named-diagnostic-asserted with LSP semantic-diagnostic
+twins; blanket-impl satisfaction, legacy numeric widening, ambiguous
+unqualified-impl attribution, and post-barrier (comptime-generated/derived)
+implementations are named surface-and-stops, never silent `None`. Spelling:
+the landed surface is positional `trait_ref(Serializable)` matching the
+landed `type_ref(int)`; Dec 49's `trait_ref<Serializable>()` turbofish lands
+with ticket A2 (deviation logged in `docs/defections.md`). Legacy
+`implements(T, Trait)` remains untouched until E5 deletes it. Evidence:
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md` (B2 addendum).
+Book status: B2-enabled behaviors are gate-runnable in ShapeTest
+(`tools/shape-test/tests/comptime/trait_evidence.rs`,
+`tests/lsp/typed_comptime.rs`, VM+JIT); the gate-runnable book example lands
+with F1 or earlier per spec §3.7.
+
 **CURRENT / compiler - generated implicit capture rejection**
 
 Annotation-generated functions are marked before body compilation. A closure
@@ -356,8 +387,8 @@ examples, rejection requirements, and implementation implications.
 |---|---|---|---|
 | `ConstValue<T>` / literal lifting | comptime | Move closed values into generated code | accepted |
 | `TypeRef<T>` | comptime | Canonical type identity | accepted; CURRENT / VM+JIT — A1 canonical semantic freeze: one per-unit freeze barrier, shared query API, annotation-handler handle threading (wave46 A1 addendum); A2 checked type-expression surface CURRENT / VM+JIT — tuples `[T, U]`, records `{field: T}`, callables `(T) -> R`, references `&T`/`&mut T`, unions `T \| U`, erased `any`/`dyn Trait`, applied generics `Option<int>` incl. alias normalization through applied forms (wave46 A2 addendum) |
-| `TraitRef<Trait>` | comptime | Canonical trait identity | accepted |
-| `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted |
+| `TraitRef<Trait>` | comptime | Canonical trait identity | accepted; CURRENT / VM+JIT — B2 distinct frozen trait identity (`trait:{name}` SHA-256 descriptors, never interned as type identities; positional `trait_ref(Trait)` surface, turbofish pending A2) (wave46 B2 addendum) |
+| `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted; CURRENT / VM+JIT — B2 `find_impl(type_ref, trait_ref) -> Option<ImplRef<T, Tr>>` over barrier-frozen evidence, Some-arm consumption + None arm proven VM+JIT; branch scoping = stage-boundary lift rejection + Some-arm-only issuance (wave46 B2 addendum) |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |
 | `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, and Erased payloads at catalog-pinned ordinals 0/1/9; the 7 remaining categories reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 addendum); remaining payloads TARGET (B2/B4-B7) |
 | `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |

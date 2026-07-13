@@ -38,6 +38,20 @@ pub const COMPTIME_FROZEN_NEVER_SCHEMA: &str = "\u{1}comptime:FrozenNever";
 /// unlanded); no field pretends `dyn Trait` bounds exist (spec §3.7).
 pub const COMPTIME_FROZEN_ERASED_SCHEMA: &str = "\u{1}comptime:FrozenErased";
 
+/// Unspellable schema identity for compiler-issued comptime `TraitRef`
+/// values (ADR-009 ticket B2, Dec 49). A trait is not a value type: the
+/// TraitRef carrier is a DISTINCT identity kind from the TypeRef carrier,
+/// with its own reserved schema.
+pub const COMPTIME_FROZEN_TRAIT_REF_SCHEMA: &str = "\u{1}comptime:TraitRef";
+
+/// Unspellable schema identity for compiler-issued comptime `ImplRef`
+/// implementation evidence (ADR-009 ticket B2, Dec 49). Carries the frozen
+/// identity halves of the exact `(trait, type)` pair PLUS the impl's own
+/// canonical identity, so evidence is tied to the exact pair and the exact
+/// (possibly named) impl whose canonical identity enters generated-artifact
+/// descriptor fingerprints.
+pub const COMPTIME_FROZEN_IMPL_REF_SCHEMA: &str = "\u{1}comptime:ImplRef";
+
 // =========================================================================
 // Field index constants
 // =========================================================================
@@ -364,6 +378,33 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .array_field("bounds", FieldType::Any)
         .register(registry);
 
+    // ADR-009 (ticket B2, slice S3): reserved opaque carriers for
+    // compiler-issued trait identities and implementation evidence (Dec 49).
+    // Identity halves only — no name/kind text fields, so no name-based
+    // lookup survives into the carriers. The SOH-prefixed names cannot be
+    // spelled in Shape source: source code can never construct a lookalike
+    // carrier (the schema-name-checked decode in shape-vm's
+    // `comptime_builtins/trait_evidence.rs` therefore blocks forged evidence
+    // structurally).
+    let _comptime_frozen_trait_ref = TypeSchemaBuilder::new(COMPTIME_FROZEN_TRAIT_REF_SCHEMA)
+        .int_field("identity_high")
+        .int_field("identity_low")
+        .register(registry);
+
+    // `ImplRef` ties evidence to the exact `(trait, type)` identity pair AND
+    // to the exact (possibly named) impl: the impl's canonical identity
+    // (`impl:{trait}:{type}:{impl_name_or_default}` descriptor hash) rides
+    // in the carrier so it can enter generated-artifact descriptor
+    // fingerprints (Dec 49).
+    let _comptime_frozen_impl_ref = TypeSchemaBuilder::new(COMPTIME_FROZEN_IMPL_REF_SCHEMA)
+        .int_field("trait_identity_high")
+        .int_field("trait_identity_low")
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .int_field("impl_identity_high")
+        .int_field("impl_identity_low")
+        .register(registry);
+
     let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")
         .string_field("kind")
         .string_field("name")
@@ -504,6 +545,8 @@ mod tests {
         assert!(registry.has_type("__ComptimeTypeInfo"));
         assert!(registry.has_type("__ComptimeTypeRef"));
         assert!(registry.has_type(COMPTIME_FROZEN_TYPE_REF_SCHEMA));
+        assert!(registry.has_type(COMPTIME_FROZEN_TRAIT_REF_SCHEMA));
+        assert!(registry.has_type(COMPTIME_FROZEN_IMPL_REF_SCHEMA));
         assert!(registry.has_type("FrozenTypeCategory"));
         assert!(registry.has_type("__ComptimeItemFragment"));
 

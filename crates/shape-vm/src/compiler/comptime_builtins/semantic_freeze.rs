@@ -38,7 +38,32 @@
 //!    only a simple-name projection (named freeze input, same rationale).
 //! 3. **Enums** — `BytecodeCompiler::type_tracker.schema_registry()`, the
 //!    canonical schema registry.
-//! 4. **Unresolved-inference-variable detection** — the analyzer's canonical
+//! 4. **Trait identities** (ticket B2, slice S2) —
+//!    `compiler.type_inference.env` trait-def registry
+//!    (`all_trait_defs()`), populated at the barrier by the B2 S1
+//!    two-sub-pass predeclare walk. Read ONCE here; no per-site re-read.
+//!    Traits are a DISTINCT identity kind (Dec 49): canonical
+//!    `trait:{name}` descriptors in the SEPARATE `frozen_trait_ids` map —
+//!    never interned into `FrozenTypeIndex.frozen_type_ids` (so
+//!    `type_ref(TraitName)` keeps failing and `intern_identity`'s
+//!    cross-category collision assertion never sees them), and with NO
+//!    `FrozenTypeCategory::Trait` variant (Dec 50 rule 5).
+//! 5. **Impl evidence** (ticket B2, slice S2) — the same env registry's
+//!    trait-impl entries (`all_trait_impl_entries()`, default AND named
+//!    impls), frozen as [`FrozenImplEvidence`] keyed
+//!    `(trait_identity, type_identity)` with canonical
+//!    `impl:{trait}:{type}:{impl_name_or_default}` descriptor identities.
+//!    Ruled stance (B2): only direct (default + named) impls freeze as
+//!    evidence; blanket-impl satisfaction and the legacy `implements`
+//!    int→number widening rule do NOT silently become evidence — querying a
+//!    pair the legacy path would have satisfied through them is a NAMED
+//!    surface-and-stop diagnostic, never a silent `None`
+//!    (considered-compromise log lands in defections.md, slice S6). An impl
+//!    whose trait/target has no frozen identity is un-queryable by
+//!    construction (no `trait_ref`/`type_ref` can name it) and is skipped;
+//!    an impl whose unqualified trait name matches more than one frozen
+//!    trait poisons the candidate pairs so the query surfaces-and-stops.
+//! 6. **Unresolved-inference-variable detection** — the analyzer's canonical
 //!    `\u{1}tyvar:` annotation encoding (`annotation_as_tyvar`), i.e. the
 //!    exact vocabulary the `TypeInferenceEngine` substitution store uses.
 //!    No parallel encoding is introduced.
@@ -85,7 +110,7 @@ use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::TypeAnnotation;
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::annotation_as_tyvar;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Rejection-matrix row 3 (ticket A1): a comptime site that cannot obtain
@@ -103,6 +128,10 @@ pub(crate) enum SemanticFreezeError {
     /// Rejection-matrix row 4: the named subject cannot be frozen because its
     /// type still contains an unresolved inference variable.
     UnresolvedInferenceVariable { subject: String },
+    /// B2 S2 (Dec 52): two impl registrations collapse to the same canonical
+    /// evidence slot (e.g. synonym targets `number`/`f64`) but carry
+    /// DIFFERING facts — an ambiguously populated freeze cannot exist.
+    ConflictingImplEvidence { subject: String },
 }
 
 impl SemanticFreezeError {
@@ -112,7 +141,198 @@ impl SemanticFreezeError {
                 "semantic freeze rejected: {subject} cannot be frozen because \
                  its type contains an unresolved inference variable"
             ),
+            Self::ConflictingImplEvidence { subject } => format!(
+                "semantic freeze rejected: conflicting trait-impl facts for \
+                 {subject} — two registrations collapse to the same canonical \
+                 evidence identity but carry different facts"
+            ),
         }
+    }
+}
+
+/// B2 S2 ruled stance (recorded in `docs/defections.md`): blanket-impl
+/// satisfaction is not frozen evidence.
+///
+/// NOTE: this text is user-facing through the comptime diagnostics firewall
+/// (`helpers.rs::sanitize_comptime_internal`) — it must stay free of jargon
+/// markers (no "ADR-…", no "§", …) or the firewall replaces it wholesale
+/// (pinned by `b2_user_facing_diagnostics_are_firewall_safe`).
+pub(crate) const BLANKET_IMPL_NOT_EVIDENCE_DIAGNOSTIC: &str = "blanket-impl satisfaction is not frozen implementation evidence: the \
+     queried pair has no direct (default or named) impl, and the trait has \
+     blanket impls whose satisfaction the semantic freeze does not certify \
+     — only direct implementations are compiler-issued evidence";
+
+/// B2 S2 ruled stance (recorded in `docs/defections.md`): the legacy
+/// `implements` int→number widening rule is not frozen evidence (E5 deletes
+/// the legacy rule). Firewall-safe text — see the note on
+/// [`BLANKET_IMPL_NOT_EVIDENCE_DIAGNOSTIC`].
+pub(crate) const NUMERIC_WIDENING_NOT_EVIDENCE_DIAGNOSTIC: &str = "legacy numeric widening is not frozen implementation evidence: the \
+     queried integer type has no direct impl for this trait — an impl \
+     registered for `number` does not certify the integer family (the \
+     widening rule belongs to the legacy `implements` builtin, which is \
+     scheduled for deletion)";
+
+/// B2 S2: an impl registered under an unqualified trait name that matches
+/// more than one frozen trait def cannot be attributed — the query
+/// surfaces-and-stops instead of guessing or silently missing.
+pub(crate) const AMBIGUOUS_IMPL_EVIDENCE_DIAGNOSTIC: &str = "ambiguous trait-impl evidence: an impl registered under an unqualified \
+     trait name matches more than one frozen trait definition";
+
+/// B2 S1 ruled stance, landed in S5 (Dec 52 registration-complete ordering):
+/// an implementation registered AFTER the semantic-freeze barrier — the
+/// comptime-generated families (annotation/extend paths, From/TryFrom-derived
+/// Into/TryInto, J-CT.2 `comptime impl` blocks) — is NOT frozen evidence.
+/// Querying such a pair through `find_impl` is this named surface-and-stop;
+/// it must never masquerade as the genuinely-unimplemented `None` answer.
+///
+/// NOTE: this text is user-facing through the comptime diagnostics firewall
+/// (`helpers.rs::sanitize_comptime_internal`) — it must stay free of the
+/// jargon markers (no "ADR-…", no "§", …) or the firewall replaces it
+/// wholesale with the generic not-available sentence.
+pub(crate) const POST_BARRIER_IMPL_NOT_EVIDENCE_DIAGNOSTIC: &str = "implementation registered after the semantic-freeze barrier is not \
+     frozen implementation evidence: find_impl answers from \
+     registration-complete barrier truth only, and this (type, trait) pair's \
+     implementation was generated after the barrier (comptime-generated and \
+     derived implementations are not barrier truth) — never a silent None";
+
+/// ADR-009 (ticket B2, slice S2) named freeze input 5: ONE frozen trait-impl
+/// fact (the `TraitImplEntry` shape read once at the barrier) — compiler-
+/// issued evidence that `target_type` implements `trait_name`. `identity` is
+/// the canonical impl-descriptor hash
+/// (`impl:{trait}:{type}:{impl_name_or_default}`), so canonical trait and
+/// implementation identities enter the SHA-256 fingerprint scheme (Dec 49).
+#[derive(Debug, Clone)]
+pub(crate) struct FrozenImplEvidence {
+    /// Canonical impl identity (distinct per named impl).
+    pub(crate) identity: FrozenTypeIdentity,
+    /// The implemented trait's frozen identity (freeze input 4).
+    pub(crate) trait_identity: FrozenTypeIdentity,
+    /// The implementing type's frozen identity (value-type scheme).
+    pub(crate) type_identity: FrozenTypeIdentity,
+    /// Canonical (resolved) trait def name.
+    pub(crate) trait_name: String,
+    /// Target type name as registered (qualified where qualified).
+    pub(crate) target_type: String,
+    /// `impl Trait for Type as Name` selector (`None` = default impl).
+    pub(crate) impl_name: Option<String>,
+    /// Method names provided by this impl.
+    pub(crate) method_names: Vec<String>,
+    /// Associated type bindings: name → concrete type.
+    pub(crate) associated_types: HashMap<String, TypeAnnotation>,
+}
+
+impl FrozenImplEvidence {
+    /// Fact equality for canonical-slot coalescing (synonym targets like
+    /// `number`/`f64`): method set + associated-type bindings.
+    fn same_facts(&self, other: &Self) -> bool {
+        let mut mine = self.method_names.clone();
+        mine.sort();
+        let mut theirs = other.method_names.clone();
+        theirs.sort();
+        mine == theirs && self.associated_types == other.associated_types
+    }
+}
+
+/// All frozen evidence for one `(trait, type)` identity pair: at most one
+/// default impl plus the named impls, each with a distinct canonical
+/// identity. Constructed only inside [`SemanticFreeze::freeze`] — no
+/// `Default`, no empty public constructor.
+#[derive(Debug, Clone)]
+pub(crate) struct FrozenImplEvidenceSet {
+    default_impl: Option<FrozenImplEvidence>,
+    named_impls: Vec<FrozenImplEvidence>,
+}
+
+impl FrozenImplEvidenceSet {
+    /// Evidence for the default impl (`impl Trait for Type`), if any.
+    pub(crate) fn default_impl(&self) -> Option<&FrozenImplEvidence> {
+        self.default_impl.as_ref()
+    }
+
+    /// Evidence for named impls (`impl Trait for Type as Name`), sorted by
+    /// impl name for deterministic enumeration.
+    pub(crate) fn named_impls(&self) -> &[FrozenImplEvidence] {
+        &self.named_impls
+    }
+
+    /// Insert one frozen fact. A second registration for the same canonical
+    /// slot must carry identical facts (synonym-target coalescing keeps the
+    /// deterministically-first entry); differing facts reject the freeze
+    /// (Dec 52: never an ambiguously populated freeze).
+    fn insert(
+        &mut self,
+        evidence: FrozenImplEvidence,
+    ) -> std::result::Result<(), SemanticFreezeError> {
+        let existing = match &evidence.impl_name {
+            None => self.default_impl.as_ref(),
+            Some(name) => self
+                .named_impls
+                .iter()
+                .find(|entry| entry.impl_name.as_deref() == Some(name)),
+        };
+        if let Some(existing) = existing {
+            if existing.same_facts(&evidence) {
+                return Ok(());
+            }
+            return Err(SemanticFreezeError::ConflictingImplEvidence {
+                subject: format!(
+                    "impl {} for {} ({})",
+                    evidence.trait_name,
+                    evidence.target_type,
+                    evidence.impl_name.as_deref().unwrap_or("default")
+                ),
+            });
+        }
+        match evidence.impl_name {
+            None => self.default_impl = Some(evidence),
+            Some(_) => self.named_impls.push(evidence),
+        }
+        Ok(())
+    }
+}
+
+/// Resolution of an impl entry's AS-WRITTEN trait name against the frozen
+/// trait-def names (freeze input 4). Impl entries register their trait name
+/// as written while dep-module trait defs register qualified
+/// (`qualify_module_item` qualifies the impl TARGET but not the trait name —
+/// B2 S1), so resolution tries: exact name, then module-relative (the impl
+/// lives in its target's module), then unique suffix.
+enum TraitResolution {
+    Resolved(String, FrozenTypeIdentity),
+    Ambiguous(Vec<(String, FrozenTypeIdentity)>),
+    Unknown,
+}
+
+fn resolve_frozen_trait(
+    frozen_trait_ids: &HashMap<String, FrozenTypeIdentity>,
+    as_written: &str,
+    impl_target: Option<&str>,
+) -> TraitResolution {
+    if let Some(&identity) = frozen_trait_ids.get(as_written) {
+        return TraitResolution::Resolved(as_written.to_string(), identity);
+    }
+    if let Some(target) = impl_target
+        && let Some(split) = target.rfind("::")
+    {
+        let candidate = format!("{}::{}", &target[..split], as_written);
+        if let Some(&identity) = frozen_trait_ids.get(&candidate) {
+            return TraitResolution::Resolved(candidate, identity);
+        }
+    }
+    let suffix = format!("::{as_written}");
+    let mut matches: Vec<(String, FrozenTypeIdentity)> = frozen_trait_ids
+        .iter()
+        .filter(|(name, _)| name.ends_with(&suffix))
+        .map(|(name, &identity)| (name.clone(), identity))
+        .collect();
+    matches.sort_by(|left, right| left.0.cmp(&right.0));
+    match matches.len() {
+        0 => TraitResolution::Unknown,
+        1 => {
+            let (name, identity) = matches.pop().expect("exactly one match");
+            TraitResolution::Resolved(name, identity)
+        }
+        _ => TraitResolution::Ambiguous(matches),
     }
 }
 
@@ -125,6 +345,22 @@ impl SemanticFreezeError {
 #[derive(Debug)]
 pub(crate) struct SemanticFreeze {
     index: FrozenTypeIndex,
+    /// Freeze input 4: canonical trait identities, keyed by registered trait
+    /// def name. A DISTINCT identity kind (Dec 49) — deliberately a separate
+    /// map from `index.frozen_type_ids` so `type_ref(TraitName)` keeps
+    /// failing and no `FrozenTypeCategory` ever describes a trait (Dec 50
+    /// rule 5).
+    frozen_trait_ids: HashMap<String, FrozenTypeIdentity>,
+    /// Freeze input 5: direct (default + named) impl evidence keyed
+    /// `(trait_identity, type_identity)`.
+    impl_evidence: HashMap<(FrozenTypeIdentity, FrozenTypeIdentity), FrozenImplEvidenceSet>,
+    /// Candidate pairs poisoned by an ambiguously-attributable impl (value =
+    /// the as-written trait name, for the diagnostic).
+    ambiguous_impl_pairs: HashMap<(FrozenTypeIdentity, FrozenTypeIdentity), String>,
+    /// Traits carrying at least one blanket impl (`impl<T: Bound> Trait for
+    /// T`) — consulted for the ruled surface-and-stop stance, never as
+    /// evidence.
+    blanket_impl_traits: HashSet<FrozenTypeIdentity>,
 }
 
 impl SemanticFreeze {
@@ -238,7 +474,122 @@ impl SemanticFreeze {
         // The base freeze is module-scoped: function type parameters enter
         // ONLY through a `FreezeOverlay`, never through the base index.
         index.rebuild_frozen_type_index();
-        Ok(Arc::new(Self { index }))
+
+        // Named freeze input 4: trait identities — read ONCE from the
+        // barrier-complete env registry (populated by the B2 S1 two-sub-pass
+        // predeclare walk; `all_trait_defs()` is the single truth source).
+        let env = &compiler.type_inference.env;
+        let mut frozen_trait_ids = HashMap::new();
+        for def in env.all_trait_defs() {
+            frozen_trait_ids.insert(def.name.clone(), FrozenTypeIdentity::for_trait(&def.name));
+        }
+        // Mirror of `intern_identity`'s cross-category assertion for the
+        // distinct trait kind: a trait identity may never collide with a
+        // frozen value-type identity (disjoint descriptor spaces).
+        for identity in frozen_trait_ids.values() {
+            assert!(
+                !index.frozen_type_categories.contains_key(identity),
+                "canonical trait identity collision with a value-type identity"
+            );
+        }
+
+        // Named freeze input 5: impl evidence — read ONCE from the same
+        // barrier-complete registry (`all_trait_impl_entries()`, default AND
+        // named impls), keyed `(trait_identity, type_identity)`. Sorted for
+        // deterministic slot coalescing.
+        let mut entries: Vec<_> = env.all_trait_impl_entries().collect();
+        entries.sort_by(|left, right| {
+            (&left.trait_name, &left.target_type, &left.impl_name).cmp(&(
+                &right.trait_name,
+                &right.target_type,
+                &right.impl_name,
+            ))
+        });
+        let mut impl_evidence: HashMap<
+            (FrozenTypeIdentity, FrozenTypeIdentity),
+            FrozenImplEvidenceSet,
+        > = HashMap::new();
+        let mut ambiguous_impl_pairs = HashMap::new();
+        for entry in entries {
+            let Some(type_identity) = index.frozen_type_id(&entry.target_type) else {
+                // A target type with no frozen identity can never be named by
+                // a `type_ref` (the only key into evidence): un-queryable by
+                // construction — sound skip, not a masked miss.
+                continue;
+            };
+            let (canonical_trait_name, trait_identity) = match resolve_frozen_trait(
+                &frozen_trait_ids,
+                &entry.trait_name,
+                Some(&entry.target_type),
+            ) {
+                TraitResolution::Resolved(name, identity) => (name, identity),
+                // A trait with no frozen def can never be named by a
+                // `trait_ref`: un-queryable — sound skip.
+                TraitResolution::Unknown => continue,
+                // More than one frozen candidate: poison every candidate
+                // pair so the QUERY surfaces-and-stops (named diagnostic)
+                // instead of guessing or silently missing.
+                TraitResolution::Ambiguous(candidates) => {
+                    for (_, candidate) in candidates {
+                        ambiguous_impl_pairs
+                            .insert((candidate, type_identity), entry.trait_name.clone());
+                    }
+                    continue;
+                }
+            };
+            let evidence = FrozenImplEvidence {
+                identity: FrozenTypeIdentity::for_impl(
+                    &canonical_trait_name,
+                    &entry.target_type,
+                    entry.impl_name.as_deref(),
+                ),
+                trait_identity,
+                type_identity,
+                trait_name: canonical_trait_name,
+                target_type: entry.target_type.clone(),
+                impl_name: entry.impl_name.clone(),
+                method_names: entry.method_names.clone(),
+                associated_types: entry.associated_types.clone(),
+            };
+            impl_evidence
+                .entry((trait_identity, type_identity))
+                .or_insert_with(|| FrozenImplEvidenceSet {
+                    default_impl: None,
+                    named_impls: Vec::new(),
+                })
+                .insert(evidence)?;
+        }
+        for set in impl_evidence.values_mut() {
+            set.named_impls
+                .sort_by(|left, right| left.impl_name.cmp(&right.impl_name));
+        }
+
+        // Ruled stance input: traits with blanket impls, so the query can
+        // surface-and-stop instead of silently under-reporting (satisfaction
+        // through a blanket impl is NOT frozen evidence).
+        let mut blanket_impl_traits = HashSet::new();
+        for blanket in env.all_blanket_impl_entries() {
+            match resolve_frozen_trait(&frozen_trait_ids, &blanket.trait_name, None) {
+                TraitResolution::Resolved(_, identity) => {
+                    blanket_impl_traits.insert(identity);
+                }
+                // Conservative: every candidate surfaces.
+                TraitResolution::Ambiguous(candidates) => {
+                    for (_, identity) in candidates {
+                        blanket_impl_traits.insert(identity);
+                    }
+                }
+                TraitResolution::Unknown => {}
+            }
+        }
+
+        Ok(Arc::new(Self {
+            index,
+            frozen_trait_ids,
+            impl_evidence,
+            ambiguous_impl_pairs,
+            blanket_impl_traits,
+        }))
     }
 
     /// Shared query API: canonical semantic identity for a resolvable name.
@@ -265,6 +616,97 @@ impl SemanticFreeze {
     ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
     {
         self.index.payload_for_identity(identity)
+    }
+
+    /// Shared query API (freeze input 4): canonical trait identity for a
+    /// registered trait def name. A DISTINCT identity kind: value-type names
+    /// resolve to `None` here, trait names resolve to `None` in
+    /// [`Self::identity_of`].
+    pub(crate) fn trait_identity_of(&self, name: &str) -> Option<FrozenTypeIdentity> {
+        self.frozen_trait_ids.get(name).copied()
+    }
+
+    /// Shared query API (freeze input 4, reverse direction): true when
+    /// `identity` is one of the trait identities this freeze issued. The
+    /// opaque `TraitRef` carrier builders/decoders (`trait_evidence.rs`,
+    /// slice S3) consult this so an identity the freeze never issued is a
+    /// named rejection (R7 forged evidence), never a usable TraitRef.
+    pub(crate) fn is_frozen_trait_identity(&self, identity: FrozenTypeIdentity) -> bool {
+        self.frozen_trait_ids
+            .values()
+            .any(|&frozen| frozen == identity)
+    }
+
+    /// Shared query API (freeze input 5): frozen impl evidence for a
+    /// `(trait, type)` identity pair.
+    ///
+    /// - `Ok(Some(_))` — direct (default and/or named) impl facts frozen at
+    ///   the barrier.
+    /// - `Ok(None)` — the pair is genuinely unimplemented in barrier truth.
+    /// - `Err(_)` — named surface-and-stop (B2 ruled stance): no frozen
+    ///   evidence exists but the legacy `implements` path would have
+    ///   answered through a non-evidence rule (blanket-impl satisfaction,
+    ///   int→number widening), or the impl's attribution was ambiguous.
+    ///   Never a silent `None` for those cases.
+    pub(crate) fn impl_evidence_of(
+        &self,
+        trait_identity: FrozenTypeIdentity,
+        type_identity: FrozenTypeIdentity,
+    ) -> std::result::Result<Option<&FrozenImplEvidenceSet>, String> {
+        if let Some(set) = self.impl_evidence.get(&(trait_identity, type_identity)) {
+            return Ok(Some(set));
+        }
+        if let Some(as_written) = self
+            .ambiguous_impl_pairs
+            .get(&(trait_identity, type_identity))
+        {
+            return Err(format!(
+                "{AMBIGUOUS_IMPL_EVIDENCE_DIAGNOSTIC} (impl registered as '{as_written}')"
+            ));
+        }
+        if self.is_integer_family_identity(type_identity)
+            && let Some(number) = self.index.frozen_type_id("number")
+            && self.impl_evidence.contains_key(&(trait_identity, number))
+        {
+            return Err(NUMERIC_WIDENING_NOT_EVIDENCE_DIAGNOSTIC.to_string());
+        }
+        if self.blanket_impl_traits.contains(&trait_identity) {
+            return Err(BLANKET_IMPL_NOT_EVIDENCE_DIAGNOSTIC.to_string());
+        }
+        Ok(None)
+    }
+
+    /// Reverse direction of freeze input 4 (slice S5): the registered trait
+    /// def names that froze to `identity`. Used by the S5 post-barrier
+    /// ordering diagnostic (`trait_evidence.rs`) to name a Dec 52 violation
+    /// — never to answer an evidence query.
+    pub(crate) fn trait_names_for_identity(&self, identity: FrozenTypeIdentity) -> Vec<&str> {
+        self.frozen_trait_ids
+            .iter()
+            .filter(|&(_, &frozen)| frozen == identity)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Reverse direction of the frozen TYPE identity map (slice S5): every
+    /// name (including primitive synonyms) that froze to `identity`. Same
+    /// diagnostic-only consumer contract as
+    /// [`Self::trait_names_for_identity`].
+    pub(crate) fn type_names_for_identity(&self, identity: FrozenTypeIdentity) -> Vec<&str> {
+        self.index
+            .frozen_type_ids
+            .iter()
+            .filter(|&(_, &frozen)| frozen == identity)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// True when `identity` is a frozen integer-family primitive (the family
+    /// the legacy `implements` widening rule promoted to `number`).
+    fn is_integer_family_identity(&self, identity: FrozenTypeIdentity) -> bool {
+        ["int", "i8", "i16", "i32", "u8", "u16", "u32", "u64"]
+            .iter()
+            .any(|name| self.index.frozen_type_id(name) == Some(identity))
     }
 
     /// The freeze's internal type index. Visible only inside
@@ -471,6 +913,46 @@ impl FreezeOverlay {
         self.base.payload_of(identity)
     }
 
+    /// Shared query API passthrough (freeze input 4): trait identities are a
+    /// DISTINCT identity kind — scoped generic parameters never shadow them,
+    /// so the overlay defers to the base freeze unconditionally.
+    pub(crate) fn trait_identity_of(&self, name: &str) -> Option<FrozenTypeIdentity> {
+        self.base.trait_identity_of(name)
+    }
+
+    /// Shared query API passthrough (freeze input 4, reverse direction):
+    /// scoped generic parameters are never traits, so the overlay defers to
+    /// the base freeze unconditionally.
+    pub(crate) fn is_frozen_trait_identity(&self, identity: FrozenTypeIdentity) -> bool {
+        self.base.is_frozen_trait_identity(identity)
+    }
+
+    /// Shared query API passthrough (freeze input 5): impl evidence lives
+    /// only in the base freeze (an overlay parameter is never an
+    /// implementing type in barrier truth).
+    pub(crate) fn impl_evidence_of(
+        &self,
+        trait_identity: FrozenTypeIdentity,
+        type_identity: FrozenTypeIdentity,
+    ) -> std::result::Result<Option<&FrozenImplEvidenceSet>, String> {
+        self.base.impl_evidence_of(trait_identity, type_identity)
+    }
+
+    /// Shared query API passthrough (S5, reverse direction of freeze input
+    /// 4): defers to the base freeze unconditionally — scoped generic
+    /// parameters are never traits.
+    pub(crate) fn trait_names_for_identity(&self, identity: FrozenTypeIdentity) -> Vec<&str> {
+        self.base.trait_names_for_identity(identity)
+    }
+
+    /// Shared query API passthrough (S5, reverse TYPE-identity direction):
+    /// defers to the base freeze — an overlay parameter identity has no
+    /// registered impl-target name in barrier truth, so the base map is the
+    /// complete diagnostic-name source.
+    pub(crate) fn type_names_for_identity(&self, identity: FrozenTypeIdentity) -> Vec<&str> {
+        self.base.type_names_for_identity(identity)
+    }
+
     /// The shared base freeze this overlay scopes (no rebuild happened).
     pub(crate) fn base(&self) -> &Arc<SemanticFreeze> {
         &self.base
@@ -545,6 +1027,21 @@ impl BytecodeCompiler {
         let freeze = SemanticFreeze::freeze(self)
             .map_err(|error| ShapeError::TypeError(error.diagnostic()))?;
         self.semantic_freeze = Some(freeze);
+        // ADR-009 (ticket B2, slice S1) test oracle: snapshot the analyzer
+        // env's trait/impl truth exactly at the barrier so tests can assert
+        // registration-completeness THROUGH the real entry points. Test
+        // instrumentation only — superseded when S2 freezes trait identities
+        // and impl evidence as named freeze inputs (then the freeze query API
+        // itself becomes the observation point).
+        #[cfg(test)]
+        barrier_env_truth_for_tests::record(
+            self.type_inference
+                .env
+                .all_trait_defs()
+                .map(|t| t.name.clone())
+                .collect(),
+            self.type_inference.env.trait_impl_keys(),
+        );
         Ok(())
     }
 
@@ -610,6 +1107,48 @@ impl BytecodeCompiler {
 pub(crate) fn overlay_for_tests(compiler: &BytecodeCompiler) -> Arc<FreezeOverlay> {
     let freeze = SemanticFreeze::freeze(compiler).expect("test compiler state must freeze");
     Arc::new(FreezeOverlay::new(freeze, "<module>", &[]))
+}
+
+/// ADR-009 (ticket B2, slice S1) test oracle: the analyzer env's trait/impl
+/// truth as observed AT `install_semantic_freeze` time (the registration-
+/// complete barrier), captured per test thread. Both entry points
+/// (`compile()` and `compile_with_graph_and_prelude`) consume the compiler,
+/// so the barrier-time state is otherwise unobservable from a test. This is
+/// cfg(test) instrumentation over the single truth source (the env
+/// registry), not a parallel table; S2's trait-identity/impl-evidence freeze
+/// inputs supersede it as the observation surface.
+#[cfg(test)]
+pub(crate) mod barrier_env_truth_for_tests {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct BarrierEnvTruth {
+        /// Trait names registered in `type_inference.env` at the barrier.
+        pub(crate) trait_names: HashSet<String>,
+        /// `env.trait_impl_keys()` (legacy 2-part + canonical 3-part keys)
+        /// at the barrier.
+        pub(crate) trait_impl_keys: HashSet<String>,
+    }
+
+    thread_local! {
+        static ENV_TRUTH_AT_BARRIER: RefCell<Option<BarrierEnvTruth>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(crate) fn record(trait_names: HashSet<String>, trait_impl_keys: HashSet<String>) {
+        ENV_TRUTH_AT_BARRIER.with(|cell| {
+            *cell.borrow_mut() = Some(BarrierEnvTruth {
+                trait_names,
+                trait_impl_keys,
+            });
+        });
+    }
+
+    /// Take the truth captured by the most recent barrier on this thread.
+    pub(crate) fn take() -> Option<BarrierEnvTruth> {
+        ENV_TRUTH_AT_BARRIER.with(|cell| cell.borrow_mut().take())
+    }
 }
 
 #[cfg(test)]
@@ -1123,5 +1662,721 @@ mod tests {
             matches!(&error, ShapeError::TypeError(message) if message.contains("exactly once")),
             "unexpected error: {error:?}"
         );
+    }
+
+    // ── ADR-009 (ticket B2, slice S1): barrier-time trait/impl truth. ──
+    //
+    // Trait definitions and trait-impl registrations must be visible in
+    // `compiler.type_inference.env` AT `install_semantic_freeze` time — for
+    // both entry points. Before S1, trait defs registered in
+    // `register_item_functions` (after the barrier) and impls later still
+    // (pass-2 `Item::Impl`), so S2's trait-identity / impl-evidence freeze
+    // inputs would have frozen an EMPTY table — a Dec 52 ordering violation
+    // that would masquerade as `find_impl` → None.
+
+    /// Root (`compile()`) entry point: trait + default impl + named impl
+    /// truth is in the env when the barrier runs.
+    #[test]
+    fn trait_and_impl_truth_is_in_env_at_barrier_for_root_program() {
+        let source = r#"
+type User { name: string }
+trait Greetable {
+    method greet() -> string;
+}
+impl Greetable for User {
+    method greet() { "Hello, " + self.name }
+}
+impl Greetable for User as Loud {
+    method greet() { "HELLO, " + self.name }
+}
+let u = User { name: "Alice" }
+u.greet()
+"#;
+        let program = shape_ast::parse_program(source).expect("program parses");
+        let compiler = BytecodeCompiler::new();
+        compiler.compile(&program).expect("program compiles");
+
+        let truth = barrier_env_truth_for_tests::take()
+            .expect("compile() must run the semantic-freeze barrier");
+        assert!(
+            truth.trait_names.contains("Greetable"),
+            "trait def must be registered in env at the barrier; saw: {:?}",
+            truth.trait_names
+        );
+        assert!(
+            truth.trait_impl_keys.contains("Greetable::User"),
+            "default impl must be registered in env at the barrier; saw: {:?}",
+            truth.trait_impl_keys
+        );
+        assert!(
+            truth.trait_impl_keys.contains("Greetable::User::Loud"),
+            "named impl must be registered (canonical 3-part key) at the barrier; saw: {:?}",
+            truth.trait_impl_keys
+        );
+    }
+
+    /// Two-sub-pass ordering: an impl declared BEFORE its trait in source
+    /// order still registers at the barrier (all traits predeclare first,
+    /// then impls, so `register_trait_impl` validation never fires against
+    /// an unregistered trait).
+    #[test]
+    fn impl_declared_before_its_trait_is_barrier_truth() {
+        let source = r#"
+type User { name: string }
+impl Greetable for User {
+    method greet() { "Hello, " + self.name }
+}
+trait Greetable {
+    method greet() -> string;
+}
+let u = User { name: "Alice" }
+u.greet()
+"#;
+        let program = shape_ast::parse_program(source).expect("program parses");
+        let compiler = BytecodeCompiler::new();
+        // Compile outcome is not the subject here (source order of trait vs
+        // impl may be diagnosed elsewhere); the barrier must still have run
+        // over trait-complete state.
+        let _ = compiler.compile(&program);
+
+        let truth = barrier_env_truth_for_tests::take()
+            .expect("compile() must run the semantic-freeze barrier");
+        assert!(
+            truth.trait_names.contains("Greetable"),
+            "trait declared after the impl must still be barrier truth; saw: {:?}",
+            truth.trait_names
+        );
+        assert!(
+            truth.trait_impl_keys.contains("Greetable::User"),
+            "impl declared before its trait must still be barrier truth; saw: {:?}",
+            truth.trait_impl_keys
+        );
+    }
+
+    /// Two-sub-pass validation: an INVALID impl (missing a required method)
+    /// is NOT barrier truth even when it precedes its trait in source order
+    /// — because traits predeclare first, `register_trait_impl` validation
+    /// sees the trait def and rejects the impl.
+    #[test]
+    fn invalid_impl_before_its_trait_is_not_barrier_truth() {
+        let source = r#"
+type User { name: string }
+impl Greetable for User {
+}
+trait Greetable {
+    method greet() -> string;
+}
+let x = 1
+x
+"#;
+        let program = shape_ast::parse_program(source).expect("program parses");
+        let compiler = BytecodeCompiler::new();
+        // The program is invalid (impl misses `greet`); the analyzer reports
+        // it AFTER the barrier. Only the barrier-time truth is asserted.
+        let _ = compiler.compile(&program);
+
+        let truth = barrier_env_truth_for_tests::take()
+            .expect("compile() must run the semantic-freeze barrier");
+        assert!(
+            truth.trait_names.contains("Greetable"),
+            "trait must be barrier truth; saw: {:?}",
+            truth.trait_names
+        );
+        assert!(
+            !truth.trait_impl_keys.contains("Greetable::User"),
+            "an impl missing a required method must NOT be barrier truth; saw: {:?}",
+            truth.trait_impl_keys
+        );
+    }
+
+    // ── ADR-009 (ticket B2, slice S2): freeze inputs 4/5 — distinct trait
+    // identities + impl evidence. ──
+
+    fn trait_def(name: &str) -> shape_ast::ast::TraitDef {
+        shape_ast::ast::TraitDef {
+            name: name.to_string(),
+            doc_comment: None,
+            type_params: None,
+            super_traits: Vec::new(),
+            members: Vec::new(),
+            annotations: Vec::new(),
+            is_comptime: false,
+        }
+    }
+
+    fn add_struct(compiler: &mut BytecodeCompiler, name: &str) {
+        compiler
+            .struct_types
+            .insert(name.to_string(), (Vec::new(), shape_ast::ast::Span::DUMMY));
+    }
+
+    /// Freeze input 4 (Dec 49 / Dec 50 rule 5): trait identities are a
+    /// DISTINCT identity kind — stable across builds (canonical
+    /// `trait:{name}` descriptor hash, not an ordinal), distinct from a
+    /// same-named struct's type identity, NEVER interned into
+    /// `frozen_type_ids` (`type_ref(TraitName)` keeps failing), and with NO
+    /// `FrozenTypeCategory` (there is no `Trait` variant).
+    #[test]
+    fn trait_identity_is_a_distinct_stable_identity_kind() {
+        let build = || {
+            let mut compiler = BytecodeCompiler::new();
+            // Same-named VALUE type next to the trait.
+            add_struct(&mut compiler, "Greetable");
+            compiler
+                .type_inference
+                .env
+                .define_trait(&trait_def("Greetable"));
+            compiler
+                .type_inference
+                .env
+                .define_trait(&trait_def("Serializable"));
+            SemanticFreeze::freeze(&compiler).expect("resolved state freezes")
+        };
+        let freeze = build();
+
+        let greetable_trait = freeze
+            .trait_identity_of("Greetable")
+            .expect("trait identity frozen");
+        // Stable across builds: reproducible from the canonical descriptor.
+        assert_eq!(
+            build().trait_identity_of("Greetable"),
+            Some(greetable_trait)
+        );
+        assert_eq!(
+            greetable_trait,
+            FrozenTypeIdentity::from_canonical_descriptor("trait:Greetable")
+        );
+        // Distinct from the same-named struct's type identity.
+        let greetable_type = freeze.identity_of("Greetable").expect("nominal identity");
+        assert_ne!(greetable_trait, greetable_type);
+        // Distinct kind: a trait-only name never enters `frozen_type_ids`…
+        assert!(freeze.trait_identity_of("Serializable").is_some());
+        assert_eq!(freeze.identity_of("Serializable"), None);
+        // …and a trait identity has no `FrozenTypeCategory` (Dec 50 rule 5).
+        assert!(freeze.category_of(greetable_trait).is_err());
+        // Types are not traits either: value-type names have no trait identity.
+        assert_eq!(freeze.trait_identity_of("int"), None);
+    }
+
+    /// Freeze input 5: named impls (`impl Trait for Type as Name`) freeze as
+    /// DISTINCT evidence identities next to the default impl, all through the
+    /// canonical `impl:{trait}:{type}:{impl_name_or_default}` descriptor.
+    #[test]
+    fn named_impls_freeze_distinct_evidence_identities() {
+        let mut compiler = BytecodeCompiler::new();
+        add_struct(&mut compiler, "User");
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Greetable"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Greetable", "User", vec!["greet".to_string()])
+            .expect("default impl registers");
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl_named("Greetable", "User", "Loud", vec!["greet".to_string()])
+            .expect("named impl registers");
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+
+        let trait_id = freeze.trait_identity_of("Greetable").expect("trait id");
+        let type_id = freeze.identity_of("User").expect("type id");
+        let set = freeze
+            .impl_evidence_of(trait_id, type_id)
+            .expect("implemented pair is never a surface-and-stop")
+            .expect("implemented pair has evidence");
+        let default_impl = set.default_impl().expect("default impl evidence");
+        assert_eq!(
+            default_impl.identity,
+            FrozenTypeIdentity::from_canonical_descriptor("impl:Greetable:User:__default__")
+        );
+        assert_eq!(default_impl.method_names, vec!["greet".to_string()]);
+        assert_eq!(set.named_impls().len(), 1);
+        let named = &set.named_impls()[0];
+        assert_eq!(named.impl_name.as_deref(), Some("Loud"));
+        assert_eq!(
+            named.identity,
+            FrozenTypeIdentity::from_canonical_descriptor("impl:Greetable:User:Loud")
+        );
+        assert_ne!(named.identity, default_impl.identity);
+        // Impl identities are their own kind: never the trait's or type's.
+        for identity in [default_impl.identity, named.identity] {
+            assert_ne!(identity, trait_id);
+            assert_ne!(identity, type_id);
+        }
+    }
+
+    /// Freeze input 5, negative half: an unimplemented pair has NO evidence
+    /// entry — `Ok(None)`, never a fabricated/partial entry and never an
+    /// error for a genuine miss.
+    #[test]
+    fn unimplemented_pair_has_no_evidence_entry() {
+        let mut compiler = BytecodeCompiler::new();
+        add_struct(&mut compiler, "User");
+        add_struct(&mut compiler, "Order");
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Greetable"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Greetable", "User", Vec::new())
+            .expect("impl registers");
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+
+        let trait_id = freeze.trait_identity_of("Greetable").expect("trait id");
+        let user = freeze.identity_of("User").expect("User id");
+        let order = freeze.identity_of("Order").expect("Order id");
+        assert!(
+            freeze
+                .impl_evidence_of(trait_id, user)
+                .expect("implemented pair resolves")
+                .is_some()
+        );
+        assert!(
+            freeze
+                .impl_evidence_of(trait_id, order)
+                .expect("genuine miss is not an error")
+                .is_none()
+        );
+        assert!(
+            freeze
+                .impl_evidence_of(trait_id, freeze.identity_of("string").expect("string id"))
+                .expect("genuine miss is not an error")
+                .is_none()
+        );
+    }
+
+    /// Ruled stance (B2 S2): blanket-impl satisfaction does NOT silently
+    /// become implementation evidence — a pair that only a blanket impl
+    /// could satisfy is a NAMED surface-and-stop diagnostic, never a silent
+    /// `None` (considered-compromise log lands in defections.md, S6).
+    #[test]
+    fn blanket_impl_satisfaction_is_not_frozen_evidence() {
+        let mut compiler = BytecodeCompiler::new();
+        add_struct(&mut compiler, "User");
+        add_struct(&mut compiler, "Order");
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Printable"));
+        compiler
+            .type_inference
+            .env
+            .register_blanket_impl("Printable", Vec::new(), Vec::new());
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Printable", "Order", Vec::new())
+            .expect("direct impl registers");
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+
+        let trait_id = freeze.trait_identity_of("Printable").expect("trait id");
+        // Direct evidence still answers for the directly-implemented pair.
+        assert!(
+            freeze
+                .impl_evidence_of(trait_id, freeze.identity_of("Order").expect("Order id"))
+                .expect("direct impl resolves")
+                .is_some()
+        );
+        // Blanket-only pair: named diagnostic.
+        let error = freeze
+            .impl_evidence_of(trait_id, freeze.identity_of("User").expect("User id"))
+            .expect_err("blanket-only satisfaction must surface-and-stop");
+        assert!(
+            error.contains("blanket-impl satisfaction is not frozen implementation evidence"),
+            "named blanket stance missing from: {error}"
+        );
+    }
+
+    /// Ruled stance (B2 S2): the legacy `implements` int→number widening
+    /// rule does NOT silently become evidence — a NAMED surface-and-stop
+    /// diagnostic, never a silent `None` (E5 deletes the legacy rule).
+    #[test]
+    fn legacy_numeric_widening_is_not_frozen_evidence() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Scalable"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Scalable", "number", Vec::new())
+            .expect("impl registers");
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+
+        let trait_id = freeze.trait_identity_of("Scalable").expect("trait id");
+        assert!(
+            freeze
+                .impl_evidence_of(trait_id, freeze.identity_of("number").expect("number id"))
+                .expect("direct impl resolves")
+                .is_some()
+        );
+        let error = freeze
+            .impl_evidence_of(trait_id, freeze.identity_of("int").expect("int id"))
+            .expect_err("widening satisfaction must surface-and-stop");
+        assert!(
+            error.contains("legacy numeric widening is not frozen implementation evidence"),
+            "named widening stance missing from: {error}"
+        );
+        // A non-numeric miss stays a plain genuine None.
+        assert!(
+            freeze
+                .impl_evidence_of(trait_id, freeze.identity_of("string").expect("string id"))
+                .expect("genuine miss is not an error")
+                .is_none()
+        );
+    }
+
+    /// Impl entries register their trait name AS WRITTEN (unqualified) while
+    /// dep-module trait defs register qualified (`qualify_module_item`
+    /// qualifies the impl TARGET but not the trait name — B2 S1). Evidence
+    /// resolution anchors the impl to the qualified frozen trait:
+    /// module-relative first (the impl lives in its target's module), then
+    /// unique suffix.
+    #[test]
+    fn dep_module_impl_anchors_to_the_qualified_frozen_trait() {
+        let mut compiler = BytecodeCompiler::new();
+        add_struct(&mut compiler, "calc::numbers::User");
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("calc::numbers::Greetable"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Greetable", "calc::numbers::User", Vec::new())
+            .expect("impl registers");
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+
+        let trait_id = freeze
+            .trait_identity_of("calc::numbers::Greetable")
+            .expect("qualified trait id");
+        let type_id = freeze
+            .identity_of("calc::numbers::User")
+            .expect("qualified type id");
+        let set = freeze
+            .impl_evidence_of(trait_id, type_id)
+            .expect("resolves")
+            .expect("evidence frozen under the qualified pair");
+        let evidence = set.default_impl().expect("default impl evidence");
+        assert_eq!(evidence.trait_name, "calc::numbers::Greetable");
+        assert_eq!(
+            evidence.identity,
+            FrozenTypeIdentity::from_canonical_descriptor(
+                "impl:calc::numbers::Greetable:calc::numbers::User:__default__"
+            )
+        );
+    }
+
+    /// An impl whose as-written trait name matches MORE THAN ONE frozen
+    /// trait def cannot be attributed: the affected candidate pairs are
+    /// poisoned so the QUERY is a named surface-and-stop — never a guess,
+    /// never a silent miss.
+    #[test]
+    fn ambiguous_unqualified_impl_trait_is_query_time_surface_and_stop() {
+        let mut compiler = BytecodeCompiler::new();
+        add_struct(&mut compiler, "c::User");
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("a::Marker"));
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("b::Marker"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Marker", "c::User", Vec::new())
+            .expect("impl registers");
+        let freeze = SemanticFreeze::freeze(&compiler).expect("resolved state freezes");
+
+        let type_id = freeze.identity_of("c::User").expect("type id");
+        for name in ["a::Marker", "b::Marker"] {
+            let trait_id = freeze.trait_identity_of(name).expect("candidate trait id");
+            let error = freeze
+                .impl_evidence_of(trait_id, type_id)
+                .expect_err("ambiguous attribution must not guess or silently miss");
+            assert!(
+                error.contains("ambiguous trait-impl evidence"),
+                "named ambiguity diagnostic missing from: {error}"
+            );
+        }
+    }
+
+    /// Synonym-target registrations (`number`/`f64`) coalesce to ONE frozen
+    /// evidence slot when their facts are identical…
+    #[test]
+    fn synonym_target_impls_with_identical_facts_coalesce() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Scalable"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Scalable", "number", vec!["abs".to_string()])
+            .expect("impl registers");
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Scalable", "f64", vec!["abs".to_string()])
+            .expect("synonym impl registers");
+        let freeze = SemanticFreeze::freeze(&compiler).expect("identical facts coalesce");
+
+        let trait_id = freeze.trait_identity_of("Scalable").expect("trait id");
+        let set = freeze
+            .impl_evidence_of(trait_id, freeze.identity_of("number").expect("number id"))
+            .expect("resolves")
+            .expect("evidence frozen");
+        assert!(set.default_impl().is_some());
+        assert!(set.named_impls().is_empty());
+    }
+
+    /// …but registrations that collapse to the same canonical slot with
+    /// DIFFERING facts reject the whole freeze (Dec 52: never an ambiguously
+    /// populated freeze).
+    #[test]
+    fn conflicting_impl_facts_reject_the_freeze() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Scalable"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Scalable", "number", vec!["abs".to_string()])
+            .expect("impl registers");
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Scalable", "f64", vec!["ceil".to_string()])
+            .expect("synonym impl registers (registry keys by string)");
+
+        let error = SemanticFreeze::freeze(&compiler)
+            .expect_err("conflicting canonical evidence must not freeze");
+        assert!(
+            error.diagnostic().contains("conflicting trait-impl facts"),
+            "named conflict diagnostic missing from: {}",
+            error.diagnostic()
+        );
+        assert!(
+            error.diagnostic().contains("Scalable"),
+            "diagnostic must name the subject: {}",
+            error.diagnostic()
+        );
+    }
+
+    /// Trait/evidence queries pass through the overlay unchanged (traits are
+    /// a distinct identity kind — scoped generic parameters never shadow
+    /// them) and the A3 specialization overlay still composes.
+    #[test]
+    fn overlay_passes_trait_queries_through_and_composes_with_specialization_overlay() {
+        let mut compiler = BytecodeCompiler::new();
+        add_struct(&mut compiler, "User");
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Greetable"));
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Greetable", "User", Vec::new())
+            .expect("impl registers");
+        compiler
+            .install_semantic_freeze()
+            .expect("registration-complete state freezes");
+        compiler.specialization_type_param_overlay =
+            Some(("map".to_string(), vec!["T".to_string()]));
+
+        let overlay = compiler
+            .comptime_freeze_overlay()
+            .expect("post-barrier site obtains the handle");
+        // A3 composition: the specialization overlay still supplies T.
+        let t = overlay.identity_of("T").expect("specialized T identity");
+        assert_eq!(
+            t,
+            FrozenTypeIdentity::from_canonical_descriptor("parameter:map:T")
+        );
+        // Trait queries pass through to the shared base freeze.
+        let trait_id = overlay
+            .trait_identity_of("Greetable")
+            .expect("trait id through overlay");
+        assert_eq!(
+            overlay.base().trait_identity_of("Greetable"),
+            Some(trait_id)
+        );
+        let type_id = overlay.identity_of("User").expect("type id");
+        assert!(
+            overlay
+                .impl_evidence_of(trait_id, type_id)
+                .expect("evidence through overlay")
+                .is_some()
+        );
+    }
+
+    /// Ruled stance (B2 S1/S2): the freeze is FREEZE-TIME truth — an impl
+    /// registered after the barrier (comptime-generated / annotation /
+    /// extend families) is not frozen evidence. The freeze factually reports
+    /// no evidence; slice S5 lands the named diagnostic that keeps this from
+    /// masquerading as `find_impl` → None at the public surface.
+    #[test]
+    fn post_barrier_impl_registration_is_not_frozen_evidence() {
+        let mut compiler = BytecodeCompiler::new();
+        add_struct(&mut compiler, "User");
+        compiler
+            .type_inference
+            .env
+            .define_trait(&trait_def("Greetable"));
+        compiler
+            .install_semantic_freeze()
+            .expect("registration-complete state freezes");
+        // Post-barrier registration (the annotation/extend/comptime family).
+        compiler
+            .type_inference
+            .env
+            .register_trait_impl("Greetable", "User", Vec::new())
+            .expect("post-barrier impl registers into the live env");
+
+        let freeze = Arc::clone(compiler.semantic_freeze.as_ref().expect("freeze installed"));
+        let trait_id = freeze.trait_identity_of("Greetable").expect("trait id");
+        let type_id = freeze.identity_of("User").expect("type id");
+        assert!(
+            freeze
+                .impl_evidence_of(trait_id, type_id)
+                .expect("freeze-time truth resolves")
+                .is_none(),
+            "post-barrier registration must not appear as frozen evidence"
+        );
+    }
+
+    /// Graph (`compile_with_graph_and_prelude`) entry point — the
+    /// A1-review-round-1 regression class: trait/impl truth declared in an
+    /// IMPORTED dependency module is in the env when the pre-Phase-1 unit
+    /// barrier runs (dep traits register under their qualified names; the
+    /// impl's trait name stays as written, per `qualify_module_item`).
+    #[test]
+    fn trait_and_impl_truth_is_in_env_at_barrier_for_imported_dep_module() {
+        let numbers = r#"
+pub type User { name: string }
+pub trait Greetable {
+    method greet() -> string;
+}
+impl Greetable for User {
+    method greet() { "Hello, " + self.name }
+}
+pub fn seven() -> int { 7 }
+"#;
+        let main = r#"
+from calc::numbers use { seven }
+seven()
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("calc")).unwrap();
+        std::fs::write(dir.path().join("calc/numbers.shape"), numbers).unwrap();
+
+        let program = shape_ast::parse_program(main).expect("main parses");
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        loader.add_module_path(dir.path().to_path_buf());
+        let (graph, stdlib_names, prelude_imports) =
+            crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+                .expect("graph builds");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
+        compiler
+            .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
+            .expect("graph program compiles");
+
+        let truth = barrier_env_truth_for_tests::take()
+            .expect("graph entry point must run the semantic-freeze barrier");
+        assert!(
+            truth.trait_names.contains("calc::numbers::Greetable"),
+            "dep-module trait must be barrier truth under its qualified name; saw: {:?}",
+            truth.trait_names
+        );
+        assert!(
+            truth
+                .trait_impl_keys
+                .contains("Greetable::calc::numbers::User"),
+            "dep-module impl must be barrier truth (trait as written, target qualified); saw: {:?}",
+            truth.trait_impl_keys
+        );
+    }
+
+    /// B2 S6: every B2 stance/rejection diagnostic raised on the comptime
+    /// mini-VM execution path must survive the comptime diagnostics firewall
+    /// unchanged. The firewall (`helpers.rs::sanitize_comptime_internal`,
+    /// reached via `clean_comptime_message` on every failed comptime
+    /// execution) wholesale-replaces any message containing internal jargon
+    /// markers ("ADR-", "§", …) with a generic not-available sentence — a
+    /// named surface-and-stop whose text gets masked is a silent diagnostic
+    /// regression at the user surface.
+    ///
+    /// Deliberately NOT in the list: `NO_FREEZE_HANDLE_DIAGNOSTIC` (A1). It
+    /// is raised as a `CompileError` from `comptime_freeze_overlay` BEFORE
+    /// any mini-VM execution, so it never routes through
+    /// `clean_comptime_message`; its "(ADR-009 §4.1)" citation is an A1
+    /// compile-error surface outside this ticket's territory.
+    #[test]
+    fn b2_user_facing_diagnostics_are_firewall_safe() {
+        use crate::compiler::comptime_builtins::trait_evidence::{
+            FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC, FORGED_IMPL_EVIDENCE_DIAGNOSTIC,
+            FORGED_TRAIT_REF_DIAGNOSTIC, TRAIT_NOT_A_VALUE_TYPE_DIAGNOSTIC,
+            TRAIT_REF_NOT_A_TRAIT_DIAGNOSTIC,
+        };
+        use crate::compiler::helpers::{comptime_message_has_jargon, sanitize_comptime_internal};
+
+        for (name, text) in [
+            (
+                "BLANKET_IMPL_NOT_EVIDENCE_DIAGNOSTIC",
+                BLANKET_IMPL_NOT_EVIDENCE_DIAGNOSTIC,
+            ),
+            (
+                "NUMERIC_WIDENING_NOT_EVIDENCE_DIAGNOSTIC",
+                NUMERIC_WIDENING_NOT_EVIDENCE_DIAGNOSTIC,
+            ),
+            (
+                "AMBIGUOUS_IMPL_EVIDENCE_DIAGNOSTIC",
+                AMBIGUOUS_IMPL_EVIDENCE_DIAGNOSTIC,
+            ),
+            (
+                "POST_BARRIER_IMPL_NOT_EVIDENCE_DIAGNOSTIC",
+                POST_BARRIER_IMPL_NOT_EVIDENCE_DIAGNOSTIC,
+            ),
+            ("FORGED_TRAIT_REF_DIAGNOSTIC", FORGED_TRAIT_REF_DIAGNOSTIC),
+            (
+                "FORGED_IMPL_EVIDENCE_DIAGNOSTIC",
+                FORGED_IMPL_EVIDENCE_DIAGNOSTIC,
+            ),
+            (
+                "TRAIT_REF_NOT_A_TRAIT_DIAGNOSTIC",
+                TRAIT_REF_NOT_A_TRAIT_DIAGNOSTIC,
+            ),
+            (
+                "TRAIT_NOT_A_VALUE_TYPE_DIAGNOSTIC",
+                TRAIT_NOT_A_VALUE_TYPE_DIAGNOSTIC,
+            ),
+            (
+                "FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC",
+                FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC,
+            ),
+        ] {
+            assert!(
+                !comptime_message_has_jargon(text),
+                "{name} carries internal jargon and would be firewall-masked user-facing: {text}"
+            );
+            assert_eq!(
+                sanitize_comptime_internal(text),
+                text,
+                "{name} must pass the comptime diagnostics firewall unchanged"
+            );
+        }
     }
 }

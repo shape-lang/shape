@@ -19,6 +19,61 @@ fn opaque_type_ref_schema_contains_only_identity_halves() {
     );
 }
 
+/// ADR-009 (ticket B2, slice S3): the reserved `TraitRef` carrier is opaque —
+/// identity halves only, no name/kind/source text (Dec 49: no name-based
+/// lookup survives into the carrier).
+#[test]
+fn opaque_trait_ref_schema_contains_only_identity_halves() {
+    let mut registry = TypeSchemaRegistry::new();
+    register_builtin_schemas(&mut registry);
+
+    let trait_ref = registry.get(COMPTIME_FROZEN_TRAIT_REF_SCHEMA).unwrap();
+    let fields: Vec<_> = trait_ref
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(fields, ["identity_high", "identity_low"]);
+    assert!(
+        !fields
+            .iter()
+            .any(|name| matches!(*name, "name" | "kind" | "source"))
+    );
+}
+
+/// ADR-009 (ticket B2, slice S3): the reserved `ImplRef` carrier ties
+/// evidence to the exact `(type, trait)` identity pair AND to the exact
+/// (possibly named) impl whose canonical identity enters generated-artifact
+/// descriptor fingerprints (Dec 49). Identity halves only — no text fields.
+#[test]
+fn opaque_impl_ref_schema_ties_evidence_to_the_exact_pair_and_impl() {
+    let mut registry = TypeSchemaRegistry::new();
+    register_builtin_schemas(&mut registry);
+
+    let impl_ref = registry.get(COMPTIME_FROZEN_IMPL_REF_SCHEMA).unwrap();
+    let fields: Vec<_> = impl_ref
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            "trait_identity_high",
+            "trait_identity_low",
+            "type_identity_high",
+            "type_identity_low",
+            "impl_identity_high",
+            "impl_identity_low",
+        ]
+    );
+    assert!(
+        !fields
+            .iter()
+            .any(|name| matches!(*name, "name" | "kind" | "source" | "trait" | "impl_name"))
+    );
+}
+
 /// ADR-009 B1 S1: the four payload-descriptor schemas register with
 /// unspellable (`\u{1}`-prefixed) names, so Shape source can never construct
 /// a lookalike nominal carrier (rejection-matrix row R7).

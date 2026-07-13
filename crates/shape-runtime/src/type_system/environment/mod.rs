@@ -10,7 +10,7 @@ mod registry;
 pub use evolution::{
     CanonicalField, CanonicalType, ControlFlowContext, EvolvedField, TypeEvolution,
 };
-pub use registry::{RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
+pub use registry::{BlanketImplEntry, RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
 
 use super::*;
 use evolution::EvolutionRegistry;
@@ -1616,6 +1616,24 @@ impl TypeEnvironment {
     /// Get all trait implementation keys ("TraitName::TypeName") as a set
     pub fn trait_impl_keys(&self) -> std::collections::HashSet<String> {
         self.type_registry.trait_impl_keys()
+    }
+
+    /// ADR-009 (ticket B2, slice S1): enumerate every registered trait
+    /// definition (single-truth-source read for the semantic freeze).
+    pub fn all_trait_defs(&self) -> impl Iterator<Item = &TraitDef> {
+        self.type_registry.all_trait_defs()
+    }
+
+    /// ADR-009 (ticket B2, slice S1): enumerate every registered trait
+    /// implementation entry — default AND named impls.
+    pub fn all_trait_impl_entries(&self) -> impl Iterator<Item = &TraitImplEntry> {
+        self.type_registry.all_trait_impl_entries()
+    }
+
+    /// ADR-009 (ticket B2, slice S1): enumerate every registered blanket
+    /// implementation entry (`impl<T: Bound> Trait for T`).
+    pub fn all_blanket_impl_entries(&self) -> impl Iterator<Item = &BlanketImplEntry> {
+        self.type_registry.all_blanket_impl_entries()
     }
 
     /// Get the transitive closure of supertrait names for a given trait.
