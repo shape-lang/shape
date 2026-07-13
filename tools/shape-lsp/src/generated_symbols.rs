@@ -369,16 +369,23 @@ pub fn generated_references(
 pub enum GeneratedRenameClassification {
     /// The name is an EXPLICIT SOURCE BINDER: the expansion takes it from
     /// source (the name token appears inside the generator definition or
-    /// the application anchor). Rename edits ONLY these source occurrences
-    /// — the expansion recomputes; generated ranges receive zero edits.
+    /// the application anchor, outside comments). Rename edits ONLY these
+    /// source occurrences — the expansion recomputes; CALL-SITE edits never
+    /// land inside generated ranges. Binder spans are exempt from the
+    /// generated-range guard: they live inside compiler-resolved SOURCE
+    /// anchors, and in D1 the checked-decl anchor coincides with the
+    /// application anchor (an application-anchored binder like
+    /// `@gen("answer")` is source, not generated text).
     SourceBinder {
         /// Name-token occurrences inside the compiler-provided generator /
         /// application anchors (a span refinement of compiler-resolved
-        /// anchors, not symbol discovery by text scan).
+        /// anchors, not symbol discovery by text scan; comment content is
+        /// excluded — comments never bind).
         binder_spans: Vec<Span>,
         /// AST-resolved call-site name tokens of the generated symbol.
         call_site_spans: Vec<Span>,
-        /// Checked-decl anchors — rename edits must never land here.
+        /// Checked-decl anchors — call-site rename edits must never land
+        /// here (binder spans are exempt, see the variant doc).
         generated_ranges: Vec<Span>,
     },
     /// The name is WHOLLY GENERATOR-CONTROLLED: it is computed by the
@@ -391,10 +398,105 @@ pub enum GeneratedRenameClassification {
     },
 }
 
+/// Comment ranges (line `//` / doc `///`, nested block `/* */`) over the
+/// whole document, string-aware: a `//` or `/*` inside a string literal
+/// (e.g. the extend f-string snippet) or char literal never opens a
+/// comment, and a `"` inside a comment never opens string state. Comments
+/// are non-semantic text — a name token inside one can never be a source
+/// binder the expansion consumes (round-2 review finding 2) — so the
+/// binder detector filters occurrences against this list.
+fn comment_ranges(text: &str) -> Vec<Span> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                if bytes[i..].starts_with(b"\"\"\"") {
+                    // Triple-quoted string: skip to the closing delimiter.
+                    i += 3;
+                    while i < bytes.len() && !bytes[i..].starts_with(b"\"\"\"") {
+                        i += 1;
+                    }
+                    i = (i + 3).min(bytes.len());
+                } else {
+                    // Simple / formatted string: skip content, honoring
+                    // backslash escapes (`\"` stays inside the string).
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i = (i + 1).min(bytes.len());
+                }
+            }
+            b'\'' => {
+                // Char literal ('x', '\n', '\u{1F600}'): skip it so a '"'
+                // payload never opens string state. A quote with no nearby
+                // close is not a char literal — treated as ordinary text.
+                let limit = (i + 12).min(bytes.len());
+                let mut j = i + 1;
+                let mut closed = None;
+                while j < limit {
+                    match bytes[j] {
+                        b'\\' => j += 2,
+                        b'\'' => {
+                            closed = Some(j);
+                            break;
+                        }
+                        _ => j += 1,
+                    }
+                }
+                i = match closed {
+                    Some(close) => close + 1,
+                    None => i + 1,
+                };
+            }
+            b'/' if bytes[i + 1..].first() == Some(&b'/') => {
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                ranges.push(Span::new(start, i));
+            }
+            b'/' if bytes[i + 1..].first() == Some(&b'*') => {
+                let start = i;
+                let mut depth = 1usize;
+                i += 2;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i..].starts_with(b"/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes[i..].starts_with(b"*/") {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                ranges.push(Span::new(start, i));
+            }
+            _ => i += 1,
+        }
+    }
+    ranges
+}
+
 /// Every identifier-bounded occurrence of `name` INSIDE a compiler-provided
 /// anchor span — the source-binder detector. This refines a span the
 /// provenance query surface already resolved; it never scans the document.
-fn binder_token_spans_in(text: &str, anchor: Span, name: &str) -> Vec<Span> {
+/// Occurrences inside `comment_spans` are skipped: comments are
+/// non-semantic text and can never bind a generated name (round-2 review
+/// finding 2 — a decoy comment inside the generator flipped a computed
+/// name to SourceBinder and produced a corrupting text rename).
+fn binder_token_spans_in(
+    text: &str,
+    anchor: Span,
+    name: &str,
+    comment_spans: &[Span],
+) -> Vec<Span> {
     let end = anchor.end.min(text.len());
     let Some(slice) = text.get(anchor.start..end) else {
         return Vec::new();
@@ -413,8 +515,13 @@ fn binder_token_spans_in(text: &str, anchor: Span, name: &str) -> Vec<Span> {
             .chars()
             .next()
             .is_none_or(|ch| !(ch.is_alphanumeric() || ch == '_'));
-        if before_is_boundary && after_is_boundary {
-            spans.push(Span::new(anchor.start + at, anchor.start + at + name.len()));
+        let token_start = anchor.start + at;
+        let token_end = token_start + name.len();
+        let inside_comment = comment_spans
+            .iter()
+            .any(|comment| token_start < comment.end && comment.start < token_end);
+        if before_is_boundary && after_is_boundary && !inside_comment {
+            spans.push(Span::new(token_start, token_end));
         }
         from = at + name.len();
     }
@@ -460,14 +567,17 @@ pub fn classify_generated_rename(
     if !ordinary_declaration_spans(program, word, cursor_kind).is_empty() {
         return None;
     }
+    let comment_spans = comment_ranges(text);
     let mut binder_spans: Vec<Span> = Vec::new();
     let mut every_match_is_source_bound = true;
     for provenance in &matches {
-        let mut spans = binder_token_spans_in(text, provenance.generator.span(), word);
+        let mut spans =
+            binder_token_spans_in(text, provenance.generator.span(), word, &comment_spans);
         spans.extend(binder_token_spans_in(
             text,
             provenance.application.span(),
             word,
+            &comment_spans,
         ));
         if spans.is_empty() {
             every_match_is_source_bound = false;
@@ -766,15 +876,13 @@ let qualified = m::answer()
             qualified_call_offset(COLLIDING_PROGRAM),
         ] {
             assert!(
-                generated_definition(&program, COLLIDING_PROGRAM, "answer", offset, &uri)
-                    .is_none(),
+                generated_definition(&program, COLLIDING_PROGRAM, "answer", offset, &uri).is_none(),
                 "a function-kind `answer` call (offset {offset}) resolves to \
                  a hand-written function: the generated gate must fall \
                  through so the ordinary providers serve the true definition"
             );
             assert!(
-                generated_references(&program, COLLIDING_PROGRAM, "answer", offset, &uri)
-                    .is_none(),
+                generated_references(&program, COLLIDING_PROGRAM, "answer", offset, &uri).is_none(),
                 "references on the ordinary call (offset {offset}) must fall through"
             );
             assert!(
@@ -919,6 +1027,202 @@ let b = o.answer()
             classify_generated_rename(&program, METHOD_COLLIDING_PROGRAM, "answer", offset)
                 .is_none(),
             "an ambiguous method-call site must not classify for rename"
+        );
+    }
+
+    /// Round-2 review finding 2: the generated name is COMPUTED
+    /// (`an{suffix}`), but a COMMENT inside the generator mentions the
+    /// computed name. Comments are non-semantic text — a token inside one
+    /// can never be a source binder the expansion consumes — so the
+    /// classification must stay GENERATOR-CONTROLLED (the pre-fix raw text
+    /// scan flipped it to SourceBinder and emitted a corrupting text edit:
+    /// comment token + call sites edited, expansion still generating the
+    /// old name).
+    const LINE_COMMENT_DECOY_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    // decoy: the computed method is called answer
+    let suffix = "swer"
+    extend (f"extend {target.name} \{ method an{suffix}() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let x = p.answer()
+"#;
+
+    /// Block-comment variant of the round-2 finding-2 decoy.
+    const BLOCK_COMMENT_DECOY_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    /* decoy: the computed method is called answer */
+    let suffix = "swer"
+    extend (f"extend {target.name} \{ method an{suffix}() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let x = p.answer()
+"#;
+
+    #[test]
+    fn comment_ranges_are_string_aware_and_handle_nesting() {
+        // `//` inside a string (the extend f-string snippet shape) never
+        // opens a comment.
+        let text = r#"let url = "http://host/answer" // real comment"#;
+        let ranges = comment_ranges(text);
+        assert_eq!(
+            ranges.len(),
+            1,
+            "only the trailing line comment: {ranges:?}"
+        );
+        assert_eq!(&text[ranges[0].start..ranges[0].end], "// real comment");
+
+        // Nested block comments close at the OUTER `*/`.
+        let text = "let a = 1 /* outer /* inner */ still */ let b = 2";
+        let ranges = comment_ranges(text);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            &text[ranges[0].start..ranges[0].end],
+            "/* outer /* inner */ still */"
+        );
+
+        // Doc comments are comments; a `"` inside a comment does not open
+        // string state; a char-literal `'"'` does not open string state.
+        let text = "/// doc \" answer\nlet q = '\"'\n// tail answer";
+        let ranges = comment_ranges(text);
+        assert_eq!(ranges.len(), 2, "doc + tail line comment: {ranges:?}");
+        assert!(text[ranges[0].start..ranges[0].end].starts_with("/// doc"));
+        assert!(text[ranges[1].start..ranges[1].end].starts_with("// tail"));
+
+        // Escaped quote stays inside the string: the comment-looking text
+        // after it is still string content.
+        let text = r#"let s = "a \" // not a comment" // yes comment"#;
+        let ranges = comment_ranges(text);
+        assert_eq!(ranges.len(), 1, "{ranges:?}");
+        assert_eq!(&text[ranges[0].start..ranges[0].end], "// yes comment");
+    }
+
+    #[test]
+    fn comment_decoys_inside_the_generator_stay_generator_controlled() {
+        for (label, source) in [
+            ("line comment", LINE_COMMENT_DECOY_PROGRAM),
+            ("block comment", BLOCK_COMMENT_DECOY_PROGRAM),
+        ] {
+            let program = parse_program(source).expect("parses");
+            let offset = source.find("p.answer()").expect("call site") + 2;
+            let classification = classify_generated_rename(&program, source, "answer", offset)
+                .expect("generated symbol position classifies");
+            assert!(
+                matches!(
+                    classification,
+                    GeneratedRenameClassification::GeneratorControlled { .. }
+                ),
+                "a computed name mentioned only in a {label} inside the \
+                 generator must stay generator-controlled (comments are \
+                 never source binders), got {classification:?}"
+            );
+        }
+    }
+
+    /// Adverse-direction control for the comment filter: a name written
+    /// LITERALLY inside the extend f-string snippet in the generator IS an
+    /// explicit source binder (editing it recomputes the expansion) — the
+    /// comment filter must not swallow string content.
+    const FSTRING_BINDER_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let x = p.answer()
+"#;
+
+    #[test]
+    fn fstring_snippet_binder_in_the_generator_stays_a_source_binder() {
+        let program = parse_program(FSTRING_BINDER_PROGRAM).expect("parses");
+        let offset = FSTRING_BINDER_PROGRAM
+            .find("p.answer()")
+            .expect("call site")
+            + 2;
+        let classification =
+            classify_generated_rename(&program, FSTRING_BINDER_PROGRAM, "answer", offset)
+                .expect("generated symbol position classifies");
+        let GeneratedRenameClassification::SourceBinder { binder_spans, .. } = classification
+        else {
+            panic!(
+                "a name written literally in the extend snippet is a source \
+                 binder, got {classification:?}"
+            );
+        };
+        assert!(
+            binder_spans
+                .iter()
+                .any(|span| &FSTRING_BINDER_PROGRAM[span.start..span.end] == "answer"),
+            "the snippet binder token must be reported: {binder_spans:?}"
+        );
+    }
+
+    /// Round-2 review finding 1 (classification half): a name bound ONLY at
+    /// the APPLICATION site (`@gen("answer")` — the annotation argument the
+    /// handler splices into the extend snippet) is an explicit source
+    /// binder; the binder span sits inside the application anchor.
+    const APPLICATION_BINDER_PROGRAM: &str = r#"
+annotation gen(mname) {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method {mname}() -> int \{ 1 \} \}")
+  }
+}
+
+@gen("answer")
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+"#;
+
+    #[test]
+    fn application_argument_binder_classifies_as_source_binder_with_application_span() {
+        let program = parse_program(APPLICATION_BINDER_PROGRAM).expect("parses");
+        let offset = APPLICATION_BINDER_PROGRAM
+            .find("p.answer()")
+            .expect("call site")
+            + 2;
+        let classification =
+            classify_generated_rename(&program, APPLICATION_BINDER_PROGRAM, "answer", offset)
+                .expect("generated symbol position classifies");
+        let GeneratedRenameClassification::SourceBinder { binder_spans, .. } = classification
+        else {
+            panic!(
+                "the annotation argument `\"answer\"` is a source binder \
+                 (renaming it recomputes), got {classification:?}"
+            );
+        };
+        let application_token = APPLICATION_BINDER_PROGRAM
+            .find("@gen(\"answer\")")
+            .expect("application site")
+            + "@gen(\"".len();
+        assert!(
+            binder_spans
+                .iter()
+                .any(|span| span.start == application_token),
+            "the application-argument binder token must be reported: \
+             {binder_spans:?} (expected a span starting at {application_token})"
         );
     }
 

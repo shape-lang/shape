@@ -231,6 +231,92 @@ fn rename_on_colliding_ordinary_call_edits_the_ordinary_declaration() {
         .expect_rename_edits_include_lines("solution", &[10, 17]);
 }
 
+/// Round-2 review finding 1: the method name is bound at the APPLICATION
+/// site — `@gen("answer")` passes the name the handler splices into the
+/// extend snippet. Zero-based lines:
+///  4      extend (f"... method {mname}() ...")  <- name spliced from param
+///  8  @gen("answer")                            <- application binder token
+/// 12  let a = p.answer()                        <- call site (cursor here)
+///
+/// In D1 the checked-decl anchor COINCIDES with the application anchor;
+/// the pre-fix row-5 retain-guard dropped exactly the application-anchored
+/// binder edit, renaming only the call sites — after recomputation the
+/// generated symbol kept its old name while every call site used the new
+/// one (a corrupting partial rename).
+const APPLICATION_BINDER_PROGRAM: &str = r#"
+annotation gen(mname) {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method {mname}() -> int \{ 1 \} \}")
+  }
+}
+
+@gen("answer")
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+"#;
+
+/// Round-2 review finding 1: rename on an application-anchored source
+/// binder edits BOTH the application binder token (line 8) and the call
+/// site (line 12) — the binder edit is source text and must survive the
+/// generated-range guard despite the D1 anchor coincidence.
+#[test]
+fn rename_on_application_bound_name_edits_the_application_binder_and_call_site() {
+    ShapeTest::new(APPLICATION_BINDER_PROGRAM)
+        .at(pos(12, 11))
+        .expect_rename_edits_include_lines("solution", &[8, 12]);
+}
+
+/// Round-2 review finding 2: the generated name is COMPUTED (`an{suffix}`)
+/// but a COMMENT inside the generator mentions it. Zero-based lines:
+///  3    comptime post(target, ctx) {            <- generator definition
+///  4      // decoy: the computed method is called answer
+///  6      extend (f"... method an{suffix}() ...")  <- computed name
+/// 14  let x = p.answer()                        <- call site (cursor here)
+///
+/// Comments are non-semantic text — a token inside one can never be a
+/// source binder the expansion consumes. The pre-fix raw text scan flipped
+/// the classification to SourceBinder and emitted a corrupting workspace
+/// edit (comment token + call sites) while the expansion kept generating
+/// the old name, silently violating the row-4 "never a text edit"
+/// guarantee.
+const COMMENT_DECOY_GENERATOR_CONTROLLED_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    // decoy: the computed method is called answer
+    let suffix = "swer"
+    extend (f"extend {target.name} \{ method an{suffix}() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+
+let p = Point { id: 1 }
+let x = p.answer()
+"#;
+
+/// Round-2 review finding 2 (adverse direction of the row-4 boundary): a
+/// comment decoy INSIDE the generator must not flip a computed name to a
+/// text rename — prepare-rename still declines and rename still answers
+/// the named generator-controlled report linking the generator definition
+/// (line 3).
+#[test]
+fn comment_decoy_inside_generator_keeps_the_name_generator_controlled() {
+    ShapeTest::new(COMMENT_DECOY_GENERATOR_CONTROLLED_PROGRAM)
+        .at(pos(14, 11))
+        .expect_prepare_rename_none()
+        .expect_rename_none("solution")
+        .expect_rename_generator_controlled(
+            "solution",
+            shape_lsp::rename::GENERATOR_CONTROLLED_NAME_RENAME_REPORT,
+            3,
+        );
+}
+
 /// Rename on the GENERATED method call site edits the generator binder
 /// token (line 5) and the method call site (line 16) only — the ordinary
 /// declarations (lines 10, 19) and call sites (plain line 17, qualified

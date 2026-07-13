@@ -39,8 +39,10 @@ pub struct GeneratorControlledRename {
 #[derive(Debug, Clone, PartialEq)]
 pub enum GeneratedRename {
     /// The name is an explicit source binder: edits cover ONLY the source
-    /// binder occurrences (generator binder token + call sites); the
-    /// expansion recomputes. Zero edits land inside generated ranges.
+    /// binder occurrences (generator/application binder token + call
+    /// sites); the expansion recomputes. Call-site edits never land inside
+    /// generated ranges (binder tokens live inside compiler-resolved
+    /// source anchors, which in D1 coincide with the checked-decl anchors).
     Edits(WorkspaceEdit),
     /// The name is wholly generator-controlled: never a text edit.
     GeneratorControlled(GeneratorControlledRename),
@@ -52,8 +54,9 @@ pub enum GeneratedRename {
 ///
 /// Source-binder names (the expansion takes them from source) rename by
 /// RECOMPUTATION: the edits cover only the source binder occurrences
-/// (generator binder token + AST call sites); zero edits land inside
-/// generated ranges. Generator-controlled names are never a text edit.
+/// (generator/application binder token + AST call sites); call-site edits
+/// never land inside generated ranges. Generator-controlled names are
+/// never a text edit.
 pub fn generated_rename(
     text: &str,
     uri: &Uri,
@@ -79,17 +82,26 @@ pub fn generated_rename(
             call_site_spans,
             generated_ranges,
         } => {
-            let mut spans: Vec<_> = binder_spans;
-            spans.extend(call_site_spans);
-            spans.sort_by_key(|span| span.start);
-            spans.dedup();
-            // Rejection row 5 enforcement: an edit may never land inside a
-            // generated range (the generated declaration recomputes).
+            // Rejection row 5 enforcement: a CALL-SITE edit may never land
+            // inside a generated range (the generated declaration
+            // recomputes). BINDER spans are exempt by construction: they
+            // are name tokens found inside compiler-resolved SOURCE anchors
+            // (generator definition / application site), and in D1 the
+            // checked-decl anchor COINCIDES with the application anchor —
+            // guarding binders too would cancel exactly the
+            // application-anchored source binders (`@gen("answer")`),
+            // leaving a partial, corrupting rename: call sites renamed,
+            // expansion still generating the old name (round-2 review
+            // finding 1).
+            let mut spans: Vec<_> = call_site_spans;
             spans.retain(|span| {
                 !generated_ranges
                     .iter()
                     .any(|generated| span.start < generated.end && generated.start < span.end)
             });
+            spans.extend(binder_spans);
+            spans.sort_by_key(|span| span.start);
+            spans.dedup();
             if spans.is_empty() {
                 return None;
             }
@@ -859,6 +871,49 @@ let x = p.answer()
             .is_none(),
             "rename must decline a generator-controlled name"
         );
+    }
+
+    /// Round-2 review finding 1: the method name is bound at the
+    /// APPLICATION site (`@gen("answer")` — the annotation argument the
+    /// handler splices into the extend snippet). In D1 the checked-decl
+    /// anchor COINCIDES with the application anchor, so the row-5
+    /// "no edits inside generated ranges" guard must not cancel
+    /// application-anchored binder edits — they are source text.
+    const APPLICATION_BINDER_PROGRAM: &str = r#"
+annotation gen(mname) {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method {mname}() -> int \{ 1 \} \}")
+  }
+}
+
+@gen("answer")
+type Point { id: int }
+
+let p = Point { id: 1 }
+let a = p.answer()
+"#;
+
+    /// Round-2 review finding 1: rename on an application-anchored source
+    /// binder edits BOTH the application binder token (line 8) and the call
+    /// site (line 12). The pre-fix retain-guard dropped the binder edit
+    /// (binder span inside the coincident checked-decl anchor), renaming
+    /// only the call sites — after recomputation the generated symbol kept
+    /// its old name while every call site used the new one.
+    #[test]
+    fn application_binder_rename_edits_the_application_token_and_call_sites() {
+        let uri = Uri::from_file_path("/test.shape").unwrap();
+        let position = call_site_position(APPLICATION_BINDER_PROGRAM);
+        let edit = rename(APPLICATION_BINDER_PROGRAM, &uri, position, "solution", None)
+            .expect("application-binder rename produces edits");
+        let edits = &edit.changes.expect("changes")[&uri];
+        let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
+        assert!(
+            lines.contains(&8),
+            "the application binder token (`@gen(\"answer\")`) must be \
+             edited — dropping it makes the rename partial and corrupting: {lines:?}"
+        );
+        assert!(lines.contains(&12), "call site edited: {lines:?}");
     }
 
     /// Rejection row 4 (prepare): prepare-rename declines on a
