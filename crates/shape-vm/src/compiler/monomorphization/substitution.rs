@@ -694,6 +694,16 @@ fn substitute_const_in_statement(
             span: *span,
         },
 
+        Statement::SetParamTypeExpr {
+            param_name,
+            expression,
+            span,
+        } => Statement::SetParamTypeExpr {
+            param_name: param_name.clone(),
+            expression: substitute_const_in_expr(expression, const_subs),
+            span: *span,
+        },
+
         Statement::SetReturnType {
             type_annotation,
             span,
@@ -1581,6 +1591,16 @@ fn substitute_statement(stmt: &Statement, subs: &HashMap<String, ConcreteType>) 
             expression,
             span,
         } => Statement::SetParamValue {
+            param_name: param_name.clone(),
+            expression: substitute_expr(expression, subs),
+            span: *span,
+        },
+
+        Statement::SetParamTypeExpr {
+            param_name,
+            expression,
+            span,
+        } => Statement::SetParamTypeExpr {
             param_name: param_name.clone(),
             expression: substitute_expr(expression, subs),
             span: *span,
@@ -3836,6 +3856,7 @@ mod tests {
             Statement::Extend(_, _) => {}
             Statement::SetParamType { .. } | Statement::SetReturnType { .. } => {}
             Statement::SetParamValue { expression, .. }
+            | Statement::SetParamTypeExpr { expression, .. }
             | Statement::SetReturnExpr { expression, .. }
             | Statement::ReplaceBodyExpr { expression, .. }
             | Statement::ReplaceModuleExpr { expression, .. }

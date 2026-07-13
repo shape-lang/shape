@@ -310,6 +310,7 @@ fn statement(stmt: &mut Statement, sigs: &Signatures, err: &mut Option<ShapeErro
         }
         // Annotation-handler mutation statements — recurse into embedded exprs.
         Statement::SetParamValue { expression, .. }
+        | Statement::SetParamTypeExpr { expression, .. }
         | Statement::SetReturnExpr { expression, .. }
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }

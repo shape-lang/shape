@@ -2,6 +2,9 @@
 
 Status: architecture accepted through ADR-009; implementation in vertical slices
 
+Implementation program (remaining work, tickets, blocking edges):
+[typed-comptime-implementation.md](typed-comptime-implementation.md)
+
 This document defines Shape's target comptime model. Every target example is
 illustrative syntax until an ADR accepts the spelling and implementation proves
 it. Current examples are labeled separately and must have repository evidence.

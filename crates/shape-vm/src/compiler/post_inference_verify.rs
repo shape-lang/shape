@@ -120,6 +120,15 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
         reason: "VM-state introspection (call payload args); \
                  state_builtins/core.rs:89",
     },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("Delta"),
+        section: "§4.D.15",
+        permanent: true,
+        reason: "VM-state diff/patch carrier; state_builtins/core.rs:91-105; \
+                 per-delta value kind is carried by HashMapKindedRef plus \
+                 TypedObjectStorage::field_kinds per ADR-006 §2.7.7/Q9 \
+                 + §2.7.26",
+    },
     // W17.2-C namespaced-state-builtins prefix exception. The
     // `std::core::state::*` registered schemas (FrameState / VmState /
     // ModuleState / CallPayload / Delta / FunctionRef) carry
@@ -686,11 +695,11 @@ mod tests {
     }
 
     /// §4.D.15 VM-state introspection — FrameState/VmState/ModuleState/
-    /// CallPayload. All four whitelist-rule-allowed.
+    /// CallPayload/Delta. All five whitelist-rule-allowed.
     #[test]
     fn positive_vm_state_introspection_passes() {
         let mut reg = TypeSchemaRegistry::new();
-        for name in &["FrameState", "VmState", "ModuleState", "CallPayload"] {
+        for name in &["FrameState", "VmState", "ModuleState", "CallPayload", "Delta"] {
             let id = reg.allocate_id();
             let schema =
                 TypeSchema::with_id(id, *name, vec![("contents".to_string(), FieldType::Any)]);

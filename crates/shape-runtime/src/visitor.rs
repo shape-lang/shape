@@ -508,6 +508,9 @@ pub fn walk_stmt<V: Visitor>(visitor: &mut V, stmt: &Statement) {
         Statement::SetParamType { .. }
         | Statement::SetReturnType { .. }
         | Statement::SetReturnExpr { .. } => {}
+        Statement::SetParamTypeExpr { expression, .. } => {
+            walk_expr(visitor, expression);
+        }
         Statement::SetParamValue { expression, .. } => {
             walk_expr(visitor, expression);
         }
