@@ -2492,6 +2492,27 @@ annotation reflect() {
         );
     }
 
+    /// Review round 1 (A2): the grammar admits parenthesized type
+    /// annotations (`non_array_type ::= … | "(" type_annotation ")"`), and
+    /// `parse_type_annotation` collapses a union only at len==1, so
+    /// `(int | string) | bool` reaches the canonicalizer as a NESTED union.
+    /// Union membership is an associative set — the parenthesized spelling
+    /// must mint the SAME frozen identity as the flat spelling, and members
+    /// reached through nesting must not escape dedup.
+    #[test]
+    fn parenthesized_union_spelling_mints_the_flat_union_identity() {
+        assert_eq!(
+            program_identity_literals("let a = type_ref((int | string) | bool);"),
+            program_identity_literals("let a = type_ref(int | string | bool);"),
+            "nested union spelling must flatten to the flat set-semantic identity"
+        );
+        assert_eq!(
+            program_identity_literals("let a = type_ref(int | (int | string));"),
+            program_identity_literals("let a = type_ref(int | string);"),
+            "a member reached through nesting must not escape dedup"
+        );
+    }
+
     /// S5 R8 (Dec 50/94 rule 3): a trait intersection in type position
     /// (`Speak + Walk`) erases to the SAME identity as the `dyn` spelling,
     /// and an object intersection reaches the directly-spelled record's

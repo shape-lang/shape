@@ -415,10 +415,13 @@ pub(super) fn identity_hex(identity: FrozenTypeIdentity) -> String {
 ///   significant; `?` marks an optional parameter; names insignificant.
 /// * **Reference** — `reference:&h` / `reference:&mut h`; mutability is
 ///   descriptor-significant.
-/// * **Union** — `union:(h|h|…)`; members deduped and byte-sorted by their
-///   hex embedding (source order/duplication insignificant); a union whose
-///   members all coalesce to one identity IS that member (no singleton
-///   union descriptor exists).
+/// * **Union** — `union:(h|h|…)`; membership is an associative SET: a
+///   syntactically nested union (the parenthesized spelling the grammar
+///   admits, `(int | string) | bool`) splices its members into the
+///   enclosing union, then members dedup and byte-sort by their hex
+///   embedding (source order/duplication/grouping insignificant); a union
+///   whose members all coalesce to one identity IS that member (no
+///   singleton union descriptor exists).
 /// * **Erased** — bare `any` resolves as the frozen erased leaf; trait
 ///   objects are `erased:dyn A+B` with the bound set sorted + deduped by
 ///   source path name (traits carry no frozen identity — Dec 50/94 erases
@@ -566,11 +569,21 @@ fn canonicalize_resolved(
             ))
         }
         TypeAnnotation::Union(items) => {
-            if items.is_empty() {
+            // Union membership is an associative set (descriptor grammar
+            // above): a syntactically nested union splices its members into
+            // the enclosing union BEFORE dedup/byte-sort, so
+            // `(int | string) | bool` and `int | string | bool` mint one
+            // identity and `int | (int | string)` cannot escape member
+            // dedup. Descriptors are the B4/B7 ABI substrate — an opaque
+            // nested-union embedding would fork semantically equal unions
+            // into distinct identities.
+            let mut flattened = Vec::with_capacity(items.len());
+            flatten_union_members(items, &mut flattened);
+            if flattened.is_empty() {
                 return Err("type_ref union type must name at least one member".to_string());
             }
-            let mut members = Vec::with_capacity(items.len());
-            for item in items {
+            let mut members = Vec::with_capacity(flattened.len());
+            for item in flattened {
                 members.push(canonicalize_resolved(item, scope)?);
             }
             let mut embedded: Vec<String> = members
@@ -651,6 +664,20 @@ fn canonicalize_resolved(
                 names.push(name);
             }
             canonical_erased_bounds(names)
+        }
+    }
+}
+
+/// Union members splice associatively (set semantics — see the descriptor
+/// grammar on [`canonicalize_type_annotation`]): a syntactically nested
+/// union contributes its members to the enclosing union, never an opaque
+/// child identity. Purely structural — leaves (including alias names) are
+/// untouched and still resolve through the one freeze query API.
+fn flatten_union_members<'a>(items: &'a [TypeAnnotation], out: &mut Vec<&'a TypeAnnotation>) {
+    for item in items {
+        match item {
+            TypeAnnotation::Union(nested) => flatten_union_members(nested, out),
+            other => out.push(other),
         }
     }
 }
