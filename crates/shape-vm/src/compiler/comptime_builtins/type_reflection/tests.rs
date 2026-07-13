@@ -639,6 +639,89 @@ fn union_members_are_deduped_and_byte_sorted_and_singleton_collapses() {
     );
 }
 
+/// Review round 1 (A2): union membership is an associative SET — a
+/// syntactically nested union (the parenthesized spelling the grammar admits
+/// via `non_array_type ::= … | "(" type_annotation ")"`) splices its members
+/// into the enclosing union BEFORE dedup/byte-sort, so semantically equal
+/// union spellings mint ONE ABI identity and members reached through nesting
+/// cannot escape dedup.
+#[test]
+fn nested_unions_flatten_to_the_flat_set_semantic_identity() {
+    let overlay = module_overlay(|_| {});
+
+    let flat = canon(
+        &overlay,
+        &TypeAnnotation::Union(vec![basic("int"), basic("string"), basic("bool")]),
+    );
+    // (int | string) | bool — left-nested spelling.
+    let left_nested = canon(
+        &overlay,
+        &TypeAnnotation::Union(vec![
+            TypeAnnotation::Union(vec![basic("int"), basic("string")]),
+            basic("bool"),
+        ]),
+    );
+    // int | (string | bool) — right-nested spelling.
+    let right_nested = canon(
+        &overlay,
+        &TypeAnnotation::Union(vec![
+            basic("int"),
+            TypeAnnotation::Union(vec![basic("string"), basic("bool")]),
+        ]),
+    );
+    assert_eq!(
+        left_nested.identity, flat.identity,
+        "(int | string) | bool must mint the flat union identity"
+    );
+    assert_eq!(
+        right_nested.identity, flat.identity,
+        "int | (string | bool) must mint the flat union identity"
+    );
+    // The descriptor is the FLAT three-member form — leaf hexes only, never
+    // an embedded nested-union identity hex.
+    let mut hexes = vec![
+        leaf_hex(&overlay, "int"),
+        leaf_hex(&overlay, "string"),
+        leaf_hex(&overlay, "bool"),
+    ];
+    hexes.sort();
+    assert_eq!(flat.descriptor, format!("union:({})", hexes.join("|")));
+    assert_eq!(left_nested.descriptor, flat.descriptor);
+
+    // Members reached through nesting cannot escape dedup:
+    // int | (int | string) == int | string.
+    let int_or_string = canon(
+        &overlay,
+        &TypeAnnotation::Union(vec![basic("int"), basic("string")]),
+    );
+    let dup_through_nesting = canon(
+        &overlay,
+        &TypeAnnotation::Union(vec![
+            basic("int"),
+            TypeAnnotation::Union(vec![basic("int"), basic("string")]),
+        ]),
+    );
+    assert_eq!(
+        dup_through_nesting.identity, int_or_string.identity,
+        "a member reached through nesting must not escape dedup"
+    );
+
+    // Singleton collapse holds through nesting: (int | i64) | int IS int.
+    let collapsed = canon(
+        &overlay,
+        &TypeAnnotation::Union(vec![
+            TypeAnnotation::Union(vec![basic("int"), basic("i64")]),
+            basic("int"),
+        ]),
+    );
+    assert_eq!(collapsed.category, FrozenTypeCategory::Primitive);
+    assert_eq!(
+        Some(collapsed.identity),
+        overlay.identity_of("int"),
+        "a nested union whose members all coalesce collapses to the member"
+    );
+}
+
 #[test]
 fn erased_any_and_dyn_bound_sets_are_order_independent() {
     // S5: dyn bounds resolve against the frozen trait-name set, so the
