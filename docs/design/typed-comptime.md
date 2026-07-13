@@ -276,13 +276,17 @@ Decisions 50/94: transparent aliases normalize away through applied forms
 `Record`, trait intersections to `Erased` bound sets. Unresolved names at
 any depth and inference holes are named freeze rejections at compile time,
 before user comptime executes (Decision 52); applied arity is enforced from
-freeze facts; const-generic applications are a named parse-time rejection
-until B4/Dec-54 lands the const carrier. LSP completion inside the
+freeze facts; const-generic applications inside `type_ref(...)` stay a named
+parse-time rejection, and B4/Dec-54 has landed the const carrier — the checked
+const path is `const_arg(N)` applied through `type_constructor(Head).apply(...)`
+(the parse-time rejection message now redirects there). LSP completion inside the
 `type_ref(` type position routes to the type-annotation provider
 (primitives, user types, in-scope generic parameters — never value
 bindings); hover/signature stay generated from the shared catalog row. The
 surface spelling remains `type_ref(T)` (not the Dec-48 turbofish
-`type_ref<T>()`) — the constructor-identity reclassification is ticket B4.
+`type_ref<T>()`); the constructor-identity reclassification landed as ticket B4
+(the B4 CURRENT block below reclassifies frozen nominal heads through
+`type_constructor(Head)`, reusing these A2 applied-type identities unchanged).
 Evidence: `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`
 (A2 addendum); e2e in `tools/shape-test/tests/comptime/frozen_type.rs`
 (per-form VM+JIT matrix + rejection matrix) and
@@ -320,6 +324,39 @@ Book status: B2-enabled behaviors are gate-runnable in ShapeTest
 (`tools/shape-test/tests/comptime/trait_evidence.rs`,
 `tests/lsp/typed_comptime.rs`, VM+JIT); the gate-runnable book example lands
 with F1 or earlier per spec §3.7.
+
+**CURRENT / VM+JIT - uniform nominal application (ticket B4, 2026-07-13).**
+`type_constructor(C)` yields a compiler-issued `TypeConstructorRef` — an opaque
+constructor descriptor (`constructor:<head_hex>`) distinct from a bare nominal
+leaf, minted ONLY for a head the freeze classifies `Nominal` (R5 non-nominal and
+R6 unfrozen-head are named rejections from the one freeze query, not name-string
+checks). `const_arg(N)` builds a checked const argument (`const:int:{value}`
+identity). `type_constructor(Head).apply(...)` transports variadic CHECKED
+`type_ref`/`const_arg` carriers (R4 untyped-argument-array is structurally
+impossible — the site-rewrite only lowers checked carriers), checks arity and
+type-vs-const kind against the head's parameter kinds read from the SINGLE
+`param_kinds_of` projection in `semantic_freeze.rs` (never a second table), then
+reproduces the A2 `applied:<head_hex><arg_hex,...>` descriptor byte-for-byte.
+The identity equality is asserted both directions:
+`identity(type_constructor(Option).apply(type_ref(int))) ==
+identity(type_ref(Option<int>))`. `nominal.refine(constructor)` returns
+`Some(applied)` iff the nominal is a genuine application of that constructor and
+round-trips through `applied.type_argument(I)` (which reflects the I-th argument
+back to its `TypeRef`, with a named out-of-range rejection), `None` otherwise.
+One model spans zero-arg nominals, builtins (`Option`/`Result`/`Array`/
+collections), user generics, and const-generic applications — no per-type
+reflection variant. A generic ENUM head whose parameter kinds are unrecoverable
+from the freeze is a named surface-and-stop, never a guessed kind. Rejection
+matrix (each a named diagnostic, VM+JIT + LSP twins): R6 unfrozen head, R5
+non-nominal head, wrong arity, wrong kind (`const_arg` into a Type slot), enum-
+head arity-unrecoverable, `type_argument` out of range, forged/mismatched
+carrier (schema-name forgery wall), and TypeConstructorRef/AppliedType/ParamKind
+lift-into-runtime. Evidence:
+`docs/cluster-audits/wave46-typed-comptime-first-tracers.md` (B4 addendum).
+Book status: B4-enabled behaviors are gate-runnable green on VM and JIT in
+ShapeTest (`tools/shape-test/tests/comptime/typed_constructor.rs`) and LSP
+(`tools/shape-test/tests/lsp/typed_comptime.rs`); book-chapter examples land in
+stage F1 per the program spec.
 
 **CURRENT / compiler - generated implicit capture rejection**
 
@@ -430,8 +467,8 @@ examples, rejection requirements, and implementation implications.
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted |
 | `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, and Erased payloads at catalog-pinned ordinals 0/1/9; the 7 remaining categories reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 addendum); remaining payloads TARGET (B2/B4-B7) |
 | `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
-| `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted |
-| `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted |
+| `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted; CURRENT / VM+JIT — B4 `type_constructor(C)` yields a compiler-issued constructor descriptor (`constructor:<head_hex>`, distinct from a bare nominal leaf), minted only for a frozen nominal head; R5 non-nominal / R6 unfrozen-head named rejections; parameter kinds projected from the single `param_kinds_of` freeze source, never a second table (wave46 B4 addendum) |
+| `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted; CURRENT / VM+JIT — B4 `.apply(...)` checks arity + type-vs-const kind then reproduces the A2 `applied:` descriptor byte-for-byte, so `identity(type_constructor(Option).apply(type_ref(int))) == identity(type_ref(Option<int>))` both directions; `const_arg(N)`, `nominal.refine(constructor)` round-trip, `applied.type_argument(I)` (wave46 B4 addendum) |
 | `NamePolicy<Domain, Namespace>` | comptime generation | Deterministic external identifier to hygienic symbol mapping | accepted |
 | `NominalShape<T>` | comptime | Exhaustive struct/enum/newtype/opaque semantic shape | accepted |
 | `StructDescriptor<T>` | comptime | Applied nominal struct representation | accepted |

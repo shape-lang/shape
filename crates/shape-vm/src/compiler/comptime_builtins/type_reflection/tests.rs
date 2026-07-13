@@ -437,7 +437,10 @@ fn leaf_hex(overlay: &FreezeOverlay, name: &str) -> String {
 fn tuple_descriptor_embeds_member_identity_hex_in_order() {
     let overlay = module_overlay(|_| {});
 
-    let pair = canon(&overlay, &TypeAnnotation::Tuple(vec![basic("int"), basic("string")]));
+    let pair = canon(
+        &overlay,
+        &TypeAnnotation::Tuple(vec![basic("int"), basic("string")]),
+    );
     assert_eq!(pair.category, FrozenTypeCategory::Tuple);
     assert_eq!(
         pair.descriptor,
@@ -461,7 +464,10 @@ fn tuple_descriptor_embeds_member_identity_hex_in_order() {
 
     // Primitive-synonym normalization is inherited from the freeze: the
     // spelling `[i64, str]` reaches the identical identity.
-    let synonyms = canon(&overlay, &TypeAnnotation::Tuple(vec![basic("i64"), basic("str")]));
+    let synonyms = canon(
+        &overlay,
+        &TypeAnnotation::Tuple(vec![basic("i64"), basic("str")]),
+    );
     assert_eq!(pair.identity, synonyms.identity);
 }
 
@@ -507,7 +513,11 @@ fn record_identity_is_field_name_sorted_and_optionality_significant() {
         &TypeAnnotation::Object(vec![record_field("x", true, basic("int"))]),
     );
     assert_ne!(required.identity, optional.identity);
-    assert!(optional.descriptor.contains("x?:"), "{}", optional.descriptor);
+    assert!(
+        optional.descriptor.contains("x?:"),
+        "{}",
+        optional.descriptor
+    );
 }
 
 #[test]
@@ -523,7 +533,10 @@ fn record_duplicate_field_names_are_rejected() {
     )
     .expect_err("duplicate record fields must not canonicalize");
     assert!(error.contains("duplicate field"), "{error}");
-    assert!(error.contains('x'), "must name the colliding field: {error}");
+    assert!(
+        error.contains('x'),
+        "must name the colliding field: {error}"
+    );
 }
 
 #[test]
@@ -750,7 +763,10 @@ fn erased_any_and_dyn_bound_sets_are_order_independent() {
     assert_eq!(a_b.descriptor, "erased:dyn Eq+Show");
 
     // Distinct bound sets stay distinct, and dyn is distinct from bare `any`.
-    let show_only = canon(&overlay, &TypeAnnotation::Dyn(vec![TypePath::simple("Show")]));
+    let show_only = canon(
+        &overlay,
+        &TypeAnnotation::Dyn(vec![TypePath::simple("Show")]),
+    );
     assert_ne!(a_b.identity, show_only.identity);
     assert_ne!(any.identity, show_only.identity);
 }
@@ -1013,7 +1029,10 @@ fn object_intersection_normalizes_to_the_directly_spelled_record() {
 fn dyn_bounds_resolve_against_frozen_trait_names() {
     let overlay = module_overlay(|compiler| add_trait(compiler, "Show"));
 
-    let show = canon(&overlay, &TypeAnnotation::Dyn(vec![TypePath::simple("Show")]));
+    let show = canon(
+        &overlay,
+        &TypeAnnotation::Dyn(vec![TypePath::simple("Show")]),
+    );
     assert_eq!(show.category, FrozenTypeCategory::Erased);
     assert_eq!(show.descriptor, "erased:dyn Show");
 
@@ -1443,13 +1462,15 @@ mod payload_query {
             let identity = overlay
                 .canonicalize_type(&annotation)
                 .expect("erased composite canonicalizes");
-            assert_eq!(overlay.category_of(identity), Ok(FrozenTypeCategory::Erased));
+            assert_eq!(
+                overlay.category_of(identity),
+                Ok(FrozenTypeCategory::Erased)
+            );
             let error = overlay
                 .payload_of(identity)
                 .expect_err("bounded erased must reject until B2");
             assert!(
-                error.contains("Erased bound-set payload")
-                    && error.contains("use type_category"),
+                error.contains("Erased bound-set payload") && error.contains("use type_category"),
                 "named bounded-erased diagnostic missing: {error}"
             );
         }
@@ -1476,7 +1497,10 @@ mod payload_query {
             .expect("coalescing union canonicalizes");
         match overlay.payload_of(any_identity) {
             Ok(FrozenPayloadDescriptor::Erased { bounds }) => {
-                assert!(bounds.is_empty(), "`any` keeps the complete empty bound set");
+                assert!(
+                    bounds.is_empty(),
+                    "`any` keeps the complete empty bound set"
+                );
             }
             other => panic!("`any` must keep its Erased payload, got {other:?}"),
         }
@@ -1602,7 +1626,10 @@ mod payload_query {
             .clone_field_kinded(0)
             .and_then(|slot| slot.as_i64())
             .expect("width __variant");
-        assert_eq!(arbitrary, 4, "Arbitrary is IntegerWidth declaration index 4");
+        assert_eq!(
+            arbitrary, 4,
+            "Arbitrary is IntegerWidth declaration index 4"
+        );
 
         // number → BinaryFloat(W64): FloatWidth schema, variant 1.
         let number_identity = overlay.identity_of("number").expect("number identity");
@@ -1813,4 +1840,518 @@ fn frozen_type_category_has_no_trait_variant() {
             .all(|category| category.variant_name() != "Trait"),
         "Dec 50 rule 5: traits are not FrozenType categories"
     );
+}
+
+// ============================================================================
+// ADR-009 B4 (Stage 2, Dec 54): uniform nominal application — constructor
+// descriptors + apply/refine/type_argument over the SAME frozen identities A2
+// mints. Identity-equality against the A2 applied spelling is the load-bearing
+// invariant; refine round-trips; the rejection matrix carries named
+// diagnostics.
+// ============================================================================
+mod b4 {
+    use super::*;
+    use crate::compiler::comptime_builtins::semantic_freeze::ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC;
+    use shape_ast::ast::TypeParam;
+    use shape_runtime::type_schema::EnumVariantInfo;
+
+    /// A user struct declaring an ordered mix of type and const generic
+    /// parameters, registered exactly as `predeclare_struct_schema` does.
+    fn add_mixed_generic_struct(compiler: &mut BytecodeCompiler, name: &str, params: &[TypeParam]) {
+        add_struct(compiler, name);
+        compiler.struct_generic_info.insert(
+            name.to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: params.to_vec(),
+                runtime_field_types: std::collections::HashMap::new(),
+            },
+        );
+    }
+
+    fn type_param(name: &str) -> TypeParam {
+        TypeParam::Type {
+            name: name.to_string(),
+            span: shape_ast::ast::Span::DUMMY,
+            doc_comment: None,
+            default_type: None,
+            trait_bounds: Vec::new(),
+        }
+    }
+
+    fn const_param(name: &str) -> TypeParam {
+        TypeParam::Const {
+            name: name.to_string(),
+            span: shape_ast::ast::Span::DUMMY,
+            doc_comment: None,
+            ty: basic("int"),
+            default: None,
+        }
+    }
+
+    /// Load-bearing invariant (both directions): a `Type`-argument application
+    /// through `canonical_apply` reproduces the EXACT descriptor and identity
+    /// of the A2 `type_ref(Head<Args>)` spelling — for builtins AND a user
+    /// generic. `apply == type_ref(Option<int>)` both ways.
+    #[test]
+    fn apply_type_argument_is_identity_equal_to_the_a2_applied_spelling() {
+        let overlay = module_overlay(|compiler| add_generic_struct(compiler, "Wrapper", &["T"]));
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+
+        // Arity-1 heads (builtins + a user generic).
+        for head in ["Option", "Array", "Future", "Set", "Wrapper"] {
+            let constructor = canonical_constructor(head, &overlay).expect("constructor mints");
+            let via_apply = canonical_apply(&constructor, &[AppliedArg::Type(int_id)], &overlay)
+                .expect("apply succeeds");
+            let via_a2 = canon(&overlay, &applied(head, vec![basic("int")]));
+            assert_eq!(
+                via_apply.descriptor, via_a2.descriptor,
+                "{head}: apply must reproduce the A2 applied descriptor"
+            );
+            assert_eq!(
+                via_apply.identity, via_a2.identity,
+                "{head}: identity(apply) == identity(type_ref(Head<int>))"
+            );
+            assert_eq!(via_apply.category, FrozenTypeCategory::Nominal);
+        }
+
+        // Arity-2 heads.
+        for head in ["Result", "HashMap"] {
+            let constructor = canonical_constructor(head, &overlay).expect("constructor mints");
+            let via_apply = canonical_apply(
+                &constructor,
+                &[AppliedArg::Type(int_id), AppliedArg::Type(string_id)],
+                &overlay,
+            )
+            .expect("apply succeeds");
+            let via_a2 = canon(
+                &overlay,
+                &applied(head, vec![basic("int"), basic("string")]),
+            );
+            assert_eq!(via_apply.descriptor, via_a2.descriptor, "{head}");
+            assert_eq!(via_apply.identity, via_a2.identity, "{head}");
+        }
+    }
+
+    /// refine(apply(...)) recovers the head identity and ordered argument
+    /// identities; type_argument reads them back by checked index.
+    #[test]
+    fn refine_round_trips_head_and_ordered_args() {
+        let overlay = module_overlay(|_| {});
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+        let constructor = canonical_constructor("Result", &overlay).expect("Result constructor");
+        let applied_type = canonical_apply(
+            &constructor,
+            &[AppliedArg::Type(int_id), AppliedArg::Type(string_id)],
+            &overlay,
+        )
+        .expect("apply succeeds");
+
+        let refined = canonical_refine(&applied_type.descriptor).expect("applied refines");
+        assert_eq!(refined.head_identity, constructor.head_identity);
+        assert_eq!(refined.arg_identities, vec![int_id, string_id]);
+        assert_eq!(type_argument(&refined, 0), Ok(int_id));
+        assert_eq!(type_argument(&refined, 1), Ok(string_id));
+        let error = type_argument(&refined, 2).expect_err("index 2 out of range");
+        assert!(
+            error.contains("out of range"),
+            "named out-of-range diag: {error}"
+        );
+        assert!(error.contains('2'));
+    }
+
+    /// refine over a bare-nominal / non-applied descriptor is `None` (round
+    /// trips only over genuine applications) — never an error, never partial.
+    #[test]
+    fn refine_returns_none_for_bare_nominal_and_non_applied() {
+        // A zero-generic struct registered as production does (empty
+        // `struct_generic_info`, so `param_kinds_of` answers Ok(empty) — a
+        // bare `add_struct` omits generic_info and would look like an enum
+        // head).
+        let overlay = module_overlay(|compiler| add_generic_struct(compiler, "User", &[]));
+        // Bare nominal leaf descriptor.
+        let user = canon(&overlay, &basic("User"));
+        assert_eq!(canonical_refine(&user.descriptor), None);
+        // Primitive leaf.
+        let int = canon(&overlay, &basic("int"));
+        assert_eq!(canonical_refine(&int.descriptor), None);
+        // A composite that is not an application (tuple).
+        let tuple = canon(
+            &overlay,
+            &TypeAnnotation::Tuple(vec![basic("int"), basic("string")]),
+        );
+        assert_eq!(canonical_refine(&tuple.descriptor), None);
+        // A zero-argument application is the bare nominal — refine is None.
+        let constructor = canonical_constructor("User", &overlay).expect("User constructor");
+        let zero = canonical_apply(&constructor, &[], &overlay).expect("zero-arg apply");
+        assert_eq!(
+            zero.identity, user.identity,
+            "zero-arg application IS the bare nominal"
+        );
+        assert_eq!(canonical_refine(&zero.descriptor), None);
+    }
+
+    /// The constructor descriptor is distinct from the bare nominal leaf so a
+    /// TypeConstructorRef is never conflated with a TypeRef.
+    #[test]
+    fn constructor_identity_is_distinct_from_bare_nominal() {
+        let overlay = module_overlay(|_| {});
+        let constructor = canonical_constructor("Option", &overlay).expect("Option constructor");
+        assert_eq!(
+            Some(constructor.head_identity),
+            overlay.identity_of("Option")
+        );
+        assert_ne!(constructor.identity, constructor.head_identity);
+        assert_eq!(
+            constructor.descriptor,
+            format!("constructor:{}", leaf_hex(&overlay, "Option"))
+        );
+    }
+
+    /// A const-generic application checks the const arg against the declared
+    /// Const position and round-trips through refine/type_argument. There is
+    /// no A2 spelling for const applications (the parser rejects them), so the
+    /// only contract is internal round-trip consistency.
+    #[test]
+    fn const_generic_application_checks_and_round_trips() {
+        let overlay = module_overlay(|compiler| {
+            add_mixed_generic_struct(compiler, "Matrix", &[type_param("T"), const_param("N")]);
+        });
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let constructor = canonical_constructor("Matrix", &overlay).expect("Matrix constructor");
+        let const_four = canonical_const_arg(4);
+        let applied_type = canonical_apply(
+            &constructor,
+            &[AppliedArg::Type(int_id), const_four],
+            &overlay,
+        )
+        .expect("mixed type+const apply succeeds");
+        assert_eq!(applied_type.category, FrozenTypeCategory::Nominal);
+
+        let refined = canonical_refine(&applied_type.descriptor).expect("applied refines");
+        assert_eq!(refined.head_identity, constructor.head_identity);
+        assert_eq!(refined.arg_identities, vec![int_id, const_four.identity()]);
+        assert_eq!(type_argument(&refined, 1), Ok(const_four.identity()));
+
+        // Distinct const values mint distinct applications.
+        let other = canonical_apply(
+            &constructor,
+            &[AppliedArg::Type(int_id), canonical_const_arg(5)],
+            &overlay,
+        )
+        .expect("apply succeeds");
+        assert_ne!(applied_type.identity, other.identity);
+    }
+
+    #[test]
+    fn constructor_rejects_non_nominal_head() {
+        let overlay = module_overlay(|_| {});
+        let error = canonical_constructor("int", &overlay)
+            .expect_err("a primitive is not a type constructor");
+        assert!(error.contains("int"), "names the head: {error}");
+        assert!(
+            error.contains("nominal"),
+            "reuses the non-Nominal wall: {error}"
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_unknown_head() {
+        let overlay = module_overlay(|_| {});
+        let error =
+            canonical_constructor("Nonexistent", &overlay).expect_err("unknown head rejects");
+        assert!(
+            error.contains("unknown semantic type identity"),
+            "unknown-identity family: {error}"
+        );
+        assert!(error.contains("Nonexistent"));
+    }
+
+    #[test]
+    fn apply_rejects_wrong_arity_with_named_counts() {
+        let overlay = module_overlay(|_| {});
+        let constructor = canonical_constructor("Option", &overlay).expect("Option constructor");
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let error = canonical_apply(
+            &constructor,
+            &[AppliedArg::Type(int_id), AppliedArg::Type(int_id)],
+            &overlay,
+        )
+        .expect_err("arity mismatch rejects");
+        assert!(
+            error.contains("expects 1 type argument(s), but 2 were provided"),
+            "named declared-vs-provided counts: {error}"
+        );
+        assert!(error.contains("Option"), "names the head: {error}");
+    }
+
+    #[test]
+    fn apply_rejects_wrong_kind_distinguishing_type_and_const() {
+        let overlay = module_overlay(|compiler| {
+            add_mixed_generic_struct(compiler, "Matrix", &[type_param("T"), const_param("N")]);
+        });
+        let int_id = overlay.identity_of("int").expect("int identity");
+
+        // A const argument supplied to a Type parameter (Option<T>).
+        let option = canonical_constructor("Option", &overlay).expect("Option constructor");
+        let error = canonical_apply(&option, &[canonical_const_arg(4)], &overlay)
+            .expect_err("const arg to type param rejects");
+        assert!(
+            error.contains("Type"),
+            "names the declared type kind: {error}"
+        );
+        assert!(
+            error.contains("Const"),
+            "names the supplied const kind: {error}"
+        );
+
+        // A type argument supplied to a Const parameter (Matrix<T, const N>).
+        let matrix = canonical_constructor("Matrix", &overlay).expect("Matrix constructor");
+        let error = canonical_apply(
+            &matrix,
+            &[AppliedArg::Type(int_id), AppliedArg::Type(int_id)],
+            &overlay,
+        )
+        .expect_err("type arg to const param rejects");
+        assert!(
+            error.contains("argument 1"),
+            "names the offending position: {error}"
+        );
+        assert!(error.contains("Const") && error.contains("Type"));
+    }
+
+    /// A generic enum head has no recoverable kinds — apply surfaces-and-stops
+    /// with the named diagnostic (never a guessed kind).
+    #[test]
+    fn apply_on_generic_enum_head_surfaces_and_stops() {
+        let overlay = module_overlay(|compiler| {
+            compiler
+                .type_tracker
+                .schema_registry_mut()
+                .register_enum_scoped(
+                    "Tree",
+                    vec![
+                        EnumVariantInfo::new("Leaf", 0, 0),
+                        EnumVariantInfo::new("Node", 1, 1),
+                    ],
+                );
+        });
+        let constructor = canonical_constructor("Tree", &overlay).expect("Tree constructor mints");
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let error = canonical_apply(&constructor, &[AppliedArg::Type(int_id)], &overlay)
+            .expect_err("enum head apply surfaces-and-stops");
+        assert_eq!(error, ENUM_HEAD_PARAM_KIND_UNRECOVERABLE_DIAGNOSTIC);
+    }
+
+    // ========================================================================
+    // S2 carrier layer: the opaque runtime carriers + orchestration that wire
+    // the S1 model into comptime execution. Every carrier is schema-name-
+    // checked on decode (forgery-blocking); every identity crosses as int
+    // halves; the applied identity is EQUAL to the A2 spelling.
+    // ========================================================================
+    mod carriers {
+        use super::*;
+        use shape_value::v2::typed_array::ELEM_TYPE_TYPED_OBJECT;
+
+        /// A carrier `HeapValue` as a decodable `KindedSlot`. Test-only: moves
+        /// the single owned share into the slot (the `forget` cancels the
+        /// `HeapValue` Drop so the slot owns exactly one share — balanced).
+        fn carrier_slot(hv: HeapValue) -> KindedSlot {
+            match hv {
+                HeapValue::TypedObject(ptr) => {
+                    let raw = ptr.0;
+                    std::mem::forget(ptr);
+                    KindedSlot::from_typed_object_raw(raw)
+                }
+                _ => panic!("carrier must be a typed object"),
+            }
+        }
+
+        /// A checked argument array (`TypedArray<*const TypedObjectStorage>`) of
+        /// carrier storages. Test-only: leaks the element shares for the
+        /// lifetime of the test (apply only borrows them).
+        fn args_array(carriers: Vec<HeapValue>) -> KindedSlot {
+            let array =
+                TypedArray::<*const TypedObjectStorage>::with_capacity(carriers.len() as u32);
+            unsafe {
+                stamp_elem_type(array as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+                for hv in carriers {
+                    match hv {
+                        HeapValue::TypedObject(ptr) => {
+                            let raw = ptr.0;
+                            std::mem::forget(ptr);
+                            TypedArray::push(array, raw);
+                        }
+                        _ => panic!("apply argument must be a typed object"),
+                    }
+                }
+            }
+            KindedSlot::new(
+                ValueSlot::from_raw(array as usize as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+            )
+        }
+
+        fn applied_identity_field(slot: &KindedSlot) -> FrozenTypeIdentity {
+            let (schema, storage) =
+                reserved_storage(slot, COMPTIME_APPLIED_TYPE_SCHEMA, "AppliedType").unwrap();
+            identity_halves_of(&schema, storage, "identity_high", "identity_low").unwrap()
+        }
+
+        /// The `TypeConstructorRef` carrier round-trips its head identity; a
+        /// foreign-schema carrier is a named forgery rejection.
+        #[test]
+        fn type_constructor_carrier_round_trips_and_forgery_rejects() {
+            let overlay = module_overlay(|_| {});
+            let head = overlay.identity_of("Option").expect("Option identity");
+            let carrier =
+                build_type_constructor_ref_heap_value(head, &overlay).expect("constructor carrier");
+            let slot = carrier_slot(carrier);
+            assert_eq!(type_constructor_head_from_ref(&slot).unwrap(), head);
+
+            // A TypeRef carrier is NOT a TypeConstructorRef — schema-name check
+            // blocks the forgery.
+            let type_ref = build_frozen_type_ref_heap_value(head, &overlay).expect("type_ref");
+            let forged = carrier_slot(type_ref);
+            let error = type_constructor_head_from_ref(&forged)
+                .expect_err("a TypeRef cannot pose as a TypeConstructorRef");
+            assert!(error.contains("TypeConstructorRef"), "{error}");
+        }
+
+        /// `build_type_constructor_ref_heap_value` rejects a non-nominal head
+        /// and an unknown/INVALID head (R5 / R6).
+        #[test]
+        fn type_constructor_carrier_rejects_non_nominal_and_unknown() {
+            let overlay = module_overlay(|_| {});
+            let int_id = overlay.identity_of("int").expect("int identity");
+            let error = build_type_constructor_ref_heap_value(int_id, &overlay)
+                .expect_err("primitive head rejects");
+            assert!(error.contains("nominal"), "{error}");
+
+            let error = build_type_constructor_ref_heap_value(FrozenTypeIdentity::INVALID, &overlay)
+                .expect_err("INVALID head rejects");
+            assert!(error.contains("unknown semantic type identity"), "{error}");
+        }
+
+        /// The load-bearing invariant through the CARRIER path: applying an int
+        /// TypeRef carrier to an Option constructor carrier yields an
+        /// AppliedType whose identity EQUALS the A2 `type_ref(Option<int>)`
+        /// spelling; refine recovers the head + args; type_argument re-issues
+        /// the int TypeRef.
+        #[test]
+        fn apply_over_carriers_is_identity_equal_to_a2_and_round_trips() {
+            let overlay = module_overlay(|_| {});
+            let int_id = overlay.identity_of("int").expect("int identity");
+            let head = overlay.identity_of("Option").expect("Option identity");
+            let expected = canon(&overlay, &applied("Option", vec![basic("int")]));
+
+            let constructor = carrier_slot(
+                build_type_constructor_ref_heap_value(head, &overlay).expect("constructor"),
+            );
+            let int_carrier =
+                build_frozen_type_ref_heap_value(int_id, &overlay).expect("int type_ref");
+            let args = args_array(vec![int_carrier]);
+
+            let applied_slot =
+                carrier_slot(apply_to_constructor(&constructor, &args, &overlay).expect("apply"));
+            assert_eq!(
+                applied_identity_field(&applied_slot),
+                expected.identity,
+                "identity(apply) == identity(type_ref(Option<int>))"
+            );
+
+            let decoded = decode_applied_type(&applied_slot).expect("decode applied");
+            assert_eq!(decoded.head_identity, head);
+            assert_eq!(decoded.arg_identities, vec![int_id]);
+
+            // refine recovers the application; the extracted argument re-issues
+            // the int TypeRef identity.
+            let refined = refine_application(&applied_slot, &constructor)
+                .expect("refine ok")
+                .expect("head matches");
+            assert_eq!(applied_identity_field(&carrier_slot(refined)), expected.identity);
+
+            let arg0 = carrier_slot(
+                applied_type_argument(&applied_slot, 0, &overlay).expect("type_argument(0)"),
+            );
+            assert_eq!(frozen_identity_from_ref(&arg0, "test").unwrap(), int_id);
+
+            // Out-of-range index is the named rejection.
+            let error = applied_type_argument(&applied_slot, 1, &overlay)
+                .expect_err("index 1 out of range");
+            assert!(error.contains("out of range"), "{error}");
+        }
+
+        /// refine returns None on a head mismatch and on a bare-nominal
+        /// (non-AppliedType) receiver — never an error, never partial (R7).
+        #[test]
+        fn refine_over_carriers_returns_none_on_mismatch_and_bare_nominal() {
+            let overlay = module_overlay(|_| {});
+            let int_id = overlay.identity_of("int").expect("int identity");
+            let option_head = overlay.identity_of("Option").expect("Option identity");
+            let result_head = overlay.identity_of("Result").expect("Result identity");
+
+            let option_ctor = carrier_slot(
+                build_type_constructor_ref_heap_value(option_head, &overlay).expect("Option ctor"),
+            );
+            let result_ctor = carrier_slot(
+                build_type_constructor_ref_heap_value(result_head, &overlay).expect("Result ctor"),
+            );
+            let int_carrier =
+                build_frozen_type_ref_heap_value(int_id, &overlay).expect("int type_ref");
+            let applied = carrier_slot(
+                apply_to_constructor(&option_ctor, &args_array(vec![int_carrier]), &overlay)
+                    .expect("apply"),
+            );
+
+            // Head mismatch → None.
+            assert!(
+                refine_application(&applied, &result_ctor)
+                    .expect("refine ok")
+                    .is_none()
+            );
+
+            // A bare-nominal TypeRef carrier (not an AppliedType) → None.
+            let bare = carrier_slot(
+                build_frozen_type_ref_heap_value(option_head, &overlay).expect("bare Option"),
+            );
+            assert!(
+                refine_application(&bare, &option_ctor)
+                    .expect("refine ok")
+                    .is_none()
+            );
+        }
+
+        /// A const-generic application through the carrier path: `const_arg`
+        /// supplies a `Const` argument to a `Matrix<T, const N>` head, and the
+        /// application round-trips through refine.
+        #[test]
+        fn const_generic_apply_over_carriers_round_trips() {
+            let overlay = module_overlay(|compiler| {
+                add_mixed_generic_struct(
+                    compiler,
+                    "Matrix",
+                    &[type_param("T"), const_param("N")],
+                );
+            });
+            let int_id = overlay.identity_of("int").expect("int identity");
+            let head = overlay.identity_of("Matrix").expect("Matrix identity");
+            let const_four_id = canonical_const_arg(4).identity();
+
+            let constructor = carrier_slot(
+                build_type_constructor_ref_heap_value(head, &overlay).expect("Matrix ctor"),
+            );
+            let int_carrier =
+                build_frozen_type_ref_heap_value(int_id, &overlay).expect("int type_ref");
+            let const_carrier = build_const_arg_ref_heap_value(4).expect("const_arg(4)");
+            let args = args_array(vec![int_carrier, const_carrier]);
+
+            let applied =
+                carrier_slot(apply_to_constructor(&constructor, &args, &overlay).expect("apply"));
+            let decoded = decode_applied_type(&applied).expect("decode");
+            assert_eq!(decoded.head_identity, head);
+            assert_eq!(decoded.arg_identities, vec![int_id, const_four_id]);
+        }
+    }
 }
