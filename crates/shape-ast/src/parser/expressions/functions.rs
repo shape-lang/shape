@@ -70,6 +70,8 @@ pub fn parse_pipe_lambda(pair: Pair<Rule>) -> Result<Expr> {
         params,
         return_type: None,
         body,
+        // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
+        generated_origin: None,
         span,
     })
 }
@@ -141,6 +143,8 @@ pub fn parse_arrow_function(pair: Pair<Rule>) -> Result<Expr> {
         params,
         return_type,
         body,
+        // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
+        generated_origin: None,
         span,
     })
 }
@@ -191,6 +195,8 @@ pub fn parse_regular_function_expr(pair: Pair<Rule>) -> Result<Expr> {
         params,
         return_type,
         body,
+        // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
+        generated_origin: None,
         span,
     })
 }

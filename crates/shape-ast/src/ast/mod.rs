@@ -16,6 +16,7 @@ pub mod modules;
 pub mod operators;
 pub mod patterns;
 pub mod program;
+pub mod provenance;
 pub mod queries;
 pub mod span;
 pub mod statements;
@@ -31,6 +32,9 @@ pub mod windows;
 
 // From span.rs
 pub use span::{Span, Spanned};
+
+// From provenance.rs (ADR-009 D2 / C1 slice 2)
+pub use provenance::GeneratedNodeOrigin;
 
 // From literals.rs
 pub use literals::{Duration, DurationUnit, InterpolationMode, Literal};

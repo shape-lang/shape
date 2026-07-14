@@ -3088,6 +3088,11 @@ impl BytecodeCompiler {
         &mut self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[shape_ast::ast::Statement],
+        // ADR-009 C1 (slice 2): node-borne generated-code provenance, stamped
+        // by `transform::generated_origin::stamp_generated_closures` at every
+        // point where comptime-produced AST enters the program. THE predicate
+        // of the Wave-46 capture gate.
+        generated_origin: Option<&shape_ast::ast::GeneratedNodeOrigin>,
         closure_span: Span,
     ) -> Result<()> {
         let closure_name = format!("__closure_{}", self.closure_counter);
@@ -3116,14 +3121,40 @@ impl BytecodeCompiler {
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
 
-        let generated_owner = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .map(|function| function.name.as_str())
-            // ADR-009 D1 (S2): generated-decl membership is the
-            // GeneratedSymbolTable's derived name view.
-            .filter(|name| self.generated_symbols.contains_name(name));
-        if let Some(owner) = generated_owner
+        // ADR-009 C1 (slice 2) — the Wave-46 gate, now TOTAL.
+        //
+        // The predicate WAS `generated_symbols.contains_name(current_function)`
+        // — a NAME view over the generated-symbol table. It fired only when the
+        // closure's immediately-enclosing compiled function was itself a
+        // registered generated DECL, and was therefore blind to:
+        //   (a) a closure nested inside a generated closure (the enclosing
+        //       function is `__closure_N`, which is not a decl name);
+        //   (b) a monomorphized generated body (mangled specialization name);
+        //   (c) a `replace body` expansion (compiles under the USER's name —
+        //       ungated entirely before this slice).
+        // The predicate is now the node's own provenance, stamped where the
+        // generated AST entered the program and forwarded, compile-enforced,
+        // through substitution / `original_body_rewrite` / the `__emit_extend`
+        // serde round-trip.
+        //
+        // Cross-check: on the one path where the old name view was known
+        // correct (a closure compiled DIRECTLY in a registered generated decl
+        // body), the node must be stamped. A dropped stamp is a bug, and it is
+        // loud rather than silent.
+        debug_assert!(
+            {
+                let enclosing_is_generated_decl = self
+                    .current_function
+                    .and_then(|idx| self.program.functions.get(idx))
+                    .is_some_and(|function| {
+                        self.generated_symbols.contains_name(function.name.as_str())
+                    });
+                !enclosing_is_generated_decl || generated_origin.is_some()
+            },
+            "generated decl body reached compile_expr_closure with an UNSTAMPED closure node — \
+             a generated-AST entry point is missing its stamp_generated_closures call"
+        );
+        if let Some(origin) = generated_origin
             && !captured_vars.is_empty()
         {
             let captures = captured_vars
@@ -3131,10 +3162,12 @@ impl BytecodeCompiler {
                 .map(|name| format!("'{name}'"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let owner = origin.owner_display();
             return Err(ShapeError::SemanticError {
                 message: format!(
                     "generated closure implicitly captures {captures}; generated captures must \
-                     be explicit (in generated function '{owner}')"
+                     be explicit (in generated function '{owner}', node {})",
+                    origin.render_path()
                 ),
                 location: Some(self.span_to_source_location(closure_span)),
             });
@@ -3522,7 +3555,10 @@ impl BytecodeCompiler {
         // is the emitted artifact built from it. `capture_plan.rs`'s
         // model-vs-emission tests assert the two agree by reading the
         // ARTIFACT, not this table.
-        let pack = self.build_capture_pack(func_idx as u16, &capture_plan);
+        // ADR-009 C1 (slice 2 / R3): the pack carries the closure's PROVENANCE,
+        // keyed by `func_idx` — never a `Span` (C1's rejected span-keyed side
+        // table), never a source name.
+        let pack = self.build_capture_pack(func_idx as u16, &capture_plan, generated_origin);
 
         // Record persistent witnesses for each classified capture so sibling
         // closures (whose classification runs after `compile_function` has
@@ -3613,8 +3649,14 @@ impl BytecodeCompiler {
                 return Err(ShapeError::SemanticError {
                     message: format!(
                         "[B0003] mutable binding '{}' cannot be captured by an escaping closure; \
-                         promote the source to `var` or restructure to keep the closure local",
-                        descriptor.name
+                         promote the source to `var` or restructure to keep the closure local{}",
+                        descriptor.name,
+                        // ADR-009 C1 (slice 2): empty for ordinary source (the
+                        // message is byte-identical); inside generated code the
+                        // error names the owning expansion + node path, because
+                        // the closure's span points at handler-emitted snippet
+                        // offsets that resolve nowhere in the user's file.
+                        pack.generated_note()
                     ),
                     location: None,
                 });

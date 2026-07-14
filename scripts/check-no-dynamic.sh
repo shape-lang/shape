@@ -72,6 +72,30 @@ if [[ -n "$capture_kind_offenders" ]]; then
   fail=1
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ADR-009 ticket C1 (slice 2) — K1b: ONE MINT FOR NODE-BORNE PROVENANCE.
+#
+# `GeneratedNodeOrigin` is the Wave-46 capture gate's predicate: a closure node
+# carrying one IS generated code. Its constructor may be called in EXACTLY ONE
+# compiler file — comptime_builtins/expansion_provenance.rs — where it is
+# projected from a REGISTERED `GeneratedOrigin` (whose `SymbolId` derive is
+# private to that module, ProofGap-style). Anywhere else, emit code could
+# fabricate a stamp from a name or a span and re-open the identity hole that got
+# C1 rejected (a span-keyed pack table + `DeclaredCapture { name: String }`).
+# The AST-side `impl` block in shape-ast is the definition, not a producer.
+node_origin_offenders=$(
+  rg --no-heading -l -P 'GeneratedNodeOrigin::new\b' \
+    crates/shape-vm/src crates/shape-runtime/src tools 2>/dev/null \
+    | grep -v 'expansion_provenance\.rs' || true
+)
+if [[ -n "$node_origin_offenders" ]]; then
+  echo "FAIL  ADR-009 C1 K1b: a SECOND GeneratedNodeOrigin mint exists."
+  echo "      Only crates/shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs"
+  echo "      may mint a node stamp (from a registered GeneratedOrigin). Offending files:"
+  while IFS= read -r f; do echo "        $f"; done <<< "$node_origin_offenders"
+  fail=1
+fi
+
 if (( fail )); then
   echo
   echo "Forbidden symbols regressed. See CLAUDE.md 'Forbidden Patterns' and the strict-typing plan."

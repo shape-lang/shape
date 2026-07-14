@@ -13,9 +13,11 @@
 // `augment_program_with_executed_extends`) is now the single authority; no
 // fallback/compat scan is retained.
 pub mod desugar;
+pub mod generated_origin;
 pub mod named_args_rebind;
 pub mod numeric_literal_adopt;
 
 pub use desugar::desugar_program;
+pub use generated_origin::stamp_generated_closures;
 pub use named_args_rebind::rebind_named_args;
 pub use numeric_literal_adopt::widen_numeric_literals;

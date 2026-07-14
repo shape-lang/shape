@@ -1052,8 +1052,14 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
             params,
             return_type,
             body,
+            generated_origin,
             span,
         } => Expr::FunctionExpr {
+            // ADR-009 C1 (slice 2): a monomorphized body is the SAME generated
+            // body — the stamp travels into every specialization, which is what
+            // makes the Wave-46 gate fire inside a mangled specialization name
+            // that `generated_symbols.contains_name` could never see.
+            generated_origin: generated_origin.clone(),
             // Closure params may have default-value exprs that reference
             // const generics; walk those but leave patterns/annotations alone.
             params: params
@@ -1962,8 +1968,12 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
             params,
             return_type,
             body,
+            generated_origin,
             span,
         } => Expr::FunctionExpr {
+            // ADR-009 C1 (slice 2): see the const-substitution arm — type
+            // substitution forwards the generated-node stamp unchanged.
+            generated_origin: generated_origin.clone(),
             params: params
                 .iter()
                 .map(|p| substitute_function_parameter(p, subs))
@@ -4109,6 +4119,7 @@ mod tests {
                 }),
                 Span::default(),
             )],
+            generated_origin: None,
             span: Span::default(),
         };
         let stmt = Statement::Expression(closure, Span::default());
@@ -4194,5 +4205,179 @@ mod tests {
             }
             other => panic!("expected `return 4 * 3`, got {:?}", other),
         }
+    }
+}
+
+/// ADR-009 C1 (slice 2) — the monomorphization leg of the node-borne
+/// generated-code provenance carrier.
+///
+/// The Wave-46 capture gate reads `Expr::FunctionExpr::generated_origin` off the
+/// node. A monomorphized generated body reaches emission through the rebuilds in
+/// this module, which name every field explicitly (no `..`), so a dropped stamp
+/// would be a compile error rather than a silently ungated closure. These tests
+/// pin the runtime half of that claim: the stamp comes out the other side of
+/// BOTH substitution passes (type and const), through `FunctionDef` and through
+/// nesting.
+#[cfg(test)]
+mod generated_origin_survives_substitution {
+    use super::*;
+    use shape_ast::ast::functions::FunctionParameter;
+    use shape_ast::ast::patterns::DestructurePattern;
+    use shape_ast::ast::span::Span;
+    use shape_ast::ast::types::TypeAnnotation;
+    use shape_ast::ast::{GeneratedNodeOrigin, Statement};
+
+    fn ident_param(name: &str, ty: TypeAnnotation) -> FunctionParameter {
+        FunctionParameter {
+            pattern: DestructurePattern::Identifier(name.into(), Span::default()),
+            is_const: false,
+            is_reference: false,
+            is_mut_reference: false,
+            is_out: false,
+            type_annotation: Some(ty),
+            default_value: None,
+        }
+    }
+
+    fn ref_t(name: &str) -> TypeAnnotation {
+        TypeAnnotation::Reference(TypePath::simple(name))
+    }
+
+    fn const_subs_int_0(v: i64) -> HashMap<String, ComptimeConstValue> {
+        let mut m: HashMap<String, ComptimeConstValue> = HashMap::new();
+        m.insert("__const_0".into(), ComptimeConstValue::Int(v));
+        m
+    }
+
+    /// K1b: the stamp comes from the ONE mint (expansion_provenance.rs), even in
+    /// tests — a second constructor call site is a build failure.
+    fn origin(path: &[&str]) -> GeneratedNodeOrigin {
+        crate::compiler::comptime_builtins::expansion_provenance::GeneratedOrigin::node_origin_for_tests(
+            path, "Job.read",
+        )
+    }
+
+    /// `|x| x * __const_0` stamped as a generated node, with a nested closure.
+    fn stamped_closure() -> Expr {
+        let inner = Expr::FunctionExpr {
+            params: vec![],
+            return_type: None,
+            body: vec![Statement::Return(
+                Some(Expr::Identifier("captured".into(), Span::default())),
+                Span::default(),
+            )],
+            generated_origin: Some(origin(&["extend:Job", "method:read", "closure:0", "closure:0"])),
+            span: Span::default(),
+        };
+        Expr::FunctionExpr {
+            params: vec![ident_param("x", ref_t("T"))],
+            return_type: None,
+            body: vec![
+                Statement::Expression(inner, Span::default()),
+                Statement::Return(
+                    Some(Expr::Identifier("__const_0".into(), Span::default())),
+                    Span::default(),
+                ),
+            ],
+            generated_origin: Some(origin(&["extend:Job", "method:read", "closure:0"])),
+            span: Span::default(),
+        }
+    }
+
+    fn origins_of(expr: &Expr) -> Vec<Option<Vec<String>>> {
+        let mut found = Vec::new();
+        if let Expr::FunctionExpr {
+            body,
+            generated_origin,
+            ..
+        } = expr
+        {
+            found.push(
+                generated_origin
+                    .as_ref()
+                    .map(|o| o.node_path().to_vec()),
+            );
+            for stmt in body {
+                if let Statement::Expression(inner, _) = stmt {
+                    found.extend(origins_of(inner));
+                }
+            }
+        }
+        found
+    }
+
+    fn expected() -> Vec<Option<Vec<String>>> {
+        vec![
+            Some(
+                ["extend:Job", "method:read", "closure:0"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            Some(
+                ["extend:Job", "method:read", "closure:0", "closure:0"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn type_substitution_forwards_the_stamp_including_nested_closures() {
+        let mut subs = HashMap::new();
+        subs.insert("T".to_string(), ConcreteType::I64);
+        let substituted = substitute_expr(&stamped_closure(), &subs);
+        assert_eq!(origins_of(&substituted), expected());
+    }
+
+    #[test]
+    fn const_substitution_forwards_the_stamp_including_nested_closures() {
+        let substituted = substitute_const_in_expr(&stamped_closure(), &const_subs_int_0(9));
+        assert_eq!(origins_of(&substituted), expected());
+    }
+
+    #[test]
+    fn substitute_function_def_forwards_the_stamp_into_the_specialization() {
+        let def = FunctionDef {
+            name: "generated_generic".to_string(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: vec![],
+            return_type: None,
+            body: vec![Statement::Expression(stamped_closure(), Span::default())],
+            annotations: vec![],
+            where_clause: None,
+            is_async: false,
+            is_comptime: false,
+        };
+        let mut subs = HashMap::new();
+        subs.insert("T".to_string(), ConcreteType::I64);
+        let specialized = substitute_function_def(&def, &subs);
+        let Statement::Expression(closure, _) = &specialized.body[0] else {
+            panic!("body shape changed");
+        };
+        assert_eq!(origins_of(closure), expected());
+    }
+
+    /// An ORDINARY source closure stays unstamped through substitution — the
+    /// gate must not start firing on user generics.
+    #[test]
+    fn unstamped_source_closure_stays_unstamped() {
+        let source_closure = Expr::FunctionExpr {
+            params: vec![ident_param("x", ref_t("T"))],
+            return_type: None,
+            body: vec![],
+            generated_origin: None,
+            span: Span::default(),
+        };
+        let mut subs = HashMap::new();
+        subs.insert("T".to_string(), ConcreteType::I64);
+        assert_eq!(
+            origins_of(&substitute_expr(&source_closure, &subs)),
+            vec![None]
+        );
     }
 }

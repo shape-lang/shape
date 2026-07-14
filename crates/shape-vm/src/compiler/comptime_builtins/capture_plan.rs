@@ -44,6 +44,7 @@
 //! monomorphized instantiation. Names survive only as diagnostic prose in
 //! [`CaptureBindingFacts::name`].
 
+use shape_ast::ast::GeneratedNodeOrigin;
 use shape_value::v2::closure_layout::CaptureKind;
 use shape_value::v2::concrete_type::ConcreteType;
 
@@ -195,6 +196,13 @@ pub(crate) struct CapturePack {
     /// Closure function index. Unique per compiled closure, including per
     /// monomorphized instantiation. NEVER a `Span`.
     pub(crate) closure: u16,
+    /// ADR-009 C1 (slice 2) / R3 — the closure's PROVENANCE, when it is a
+    /// generated node: the owning expansion's 128-bit fingerprint plus the
+    /// structured node path (`extend:Job/method:read/closure:0`). `None` for an
+    /// ordinary source closure. Read on the live path by
+    /// [`CapturePack::generated_note`], which attributes a capture diagnostic
+    /// raised inside generated code to the expansion that produced it.
+    pub(crate) origin: Option<GeneratedNodeOrigin>,
     pub(crate) descriptors: Vec<CaptureDescriptor>,
 }
 
@@ -206,6 +214,22 @@ impl CapturePack {
 
     pub(crate) fn len(&self) -> usize {
         self.descriptors.len()
+    }
+
+    /// Provenance tail for a capture diagnostic raised on THIS closure. Empty
+    /// for an ordinary source closure, so existing source-facing diagnostics are
+    /// byte-identical; inside a generated body the error names the owning
+    /// declaration and the structural node path instead of pointing at
+    /// handler-emitted snippet offsets.
+    pub(crate) fn generated_note(&self) -> String {
+        match &self.origin {
+            None => String::new(),
+            Some(origin) => format!(
+                " (in generated function '{}', node {})",
+                origin.owner_display(),
+                origin.render_path()
+            ),
+        }
     }
 }
 
@@ -353,6 +377,7 @@ impl BytecodeCompiler {
         &mut self,
         func_idx: u16,
         plan: &[(CaptureBindingFacts, CapturePlan)],
+        origin: Option<&GeneratedNodeOrigin>,
     ) -> CapturePack {
         let descriptors = plan
             .iter()
@@ -372,6 +397,7 @@ impl BytecodeCompiler {
             .collect();
         CapturePack {
             closure: func_idx,
+            origin: origin.cloned(),
             descriptors,
         }
     }

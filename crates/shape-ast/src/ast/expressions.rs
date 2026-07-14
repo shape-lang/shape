@@ -160,6 +160,21 @@ pub enum Expr {
         params: Vec<super::functions::FunctionParameter>,
         return_type: Option<TypeAnnotation>,
         body: Vec<super::statements::Statement>,
+        /// ADR-009 D2 / C1 (slice 2): node-borne generated-code provenance.
+        /// `Some` iff this closure node was produced by a comptime expansion
+        /// (stamped by `transform::generated_origin::stamp_generated_closures`
+        /// at every point where generated AST enters the program). `None` =
+        /// ordinary user source. This is the Wave-46 capture gate's predicate:
+        /// it replaces the name predicate
+        /// `generated_symbols.contains_name(current_function)`, which could not
+        /// see monomorphized bodies, `replace body` expansions, or nested
+        /// closures.
+        ///
+        /// `#[serde(default)]` so the `__emit_extend` payload round-trip is
+        /// backward-compatible; the field itself round-trips (see
+        /// `transform::generated_origin` tests).
+        #[serde(default)]
+        generated_origin: Option<super::provenance::GeneratedNodeOrigin>,
         span: Span,
     },
     /// Duration literal: 30d, 1h, 15m

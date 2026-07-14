@@ -77,6 +77,10 @@ impl TypeInferenceEngine {
                 params,
                 return_type,
                 body,
+                // ADR-009 C1 (slice 2): provenance is a COMPILER concern (the
+                // Wave-46 capture gate); type inference is provenance-blind —
+                // a generated closure is type-checked exactly like a source one.
+                generated_origin: _,
                 span: _span,
             } => self.check_function_expr_against(params, return_type.as_ref(), body, expected),
 

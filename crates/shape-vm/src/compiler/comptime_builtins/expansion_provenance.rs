@@ -600,6 +600,51 @@ pub(crate) struct GeneratedOrigin {
 }
 
 impl GeneratedOrigin {
+    /// ADR-009 C1 (slice 2) — THE mint for node-borne provenance.
+    ///
+    /// Projects this registered declaration origin into the AST-level stamp
+    /// (`shape_ast::ast::GeneratedNodeOrigin`) that
+    /// `transform::generated_origin::stamp_generated_closures` writes onto every
+    /// closure node of the generated body. shape-ast cannot depend on shape-vm,
+    /// so the CARRIER lives there and the MINT lives here — the identity is
+    /// still this module's: the stamp carries the owning `ExpansionIdentity`'s
+    /// 128-bit content fingerprint and the structured `GeneratedNodePath`,
+    /// never a name and never a `Span` (R1/R3).
+    ///
+    /// `owner_display` is diagnostic prose only (the "in generated function 'f'"
+    /// tail of the Wave-46 message); it is never compared and never a key.
+    ///
+    /// `scripts/check-no-dynamic.sh` pins `GeneratedNodeOrigin::new` to this
+    /// file, so no other compiler site can fabricate a stamp.
+    pub(crate) fn to_node_origin(&self, owner_display: &str) -> shape_ast::ast::GeneratedNodeOrigin {
+        let fingerprint = self.expansion.fingerprint();
+        shape_ast::ast::GeneratedNodeOrigin::new(
+            (fingerprint.high, fingerprint.low),
+            self.node_path.segments().to_vec(),
+            self.source_anchor.file_id(),
+            self.source_anchor.span(),
+            owner_display.to_string(),
+        )
+    }
+
+    /// Test-only node stamp. Tests that exercise a CARRIER (does substitution /
+    /// the `ctx.original` rewrite forward the stamp?) need a stamp without
+    /// standing up a whole expansion — but they must not become a second mint,
+    /// so they come through this file too (K1b, `scripts/check-no-dynamic.sh`).
+    #[cfg(test)]
+    pub(crate) fn node_origin_for_tests(
+        node_path: &[&str],
+        owner_display: &str,
+    ) -> shape_ast::ast::GeneratedNodeOrigin {
+        shape_ast::ast::GeneratedNodeOrigin::new(
+            (0x0BAD_F00D, 0x0DEF_ACED),
+            node_path.iter().map(|s| (*s).to_string()).collect(),
+            3,
+            Span { start: 5, end: 9 },
+            owner_display.to_string(),
+        )
+    }
+
     /// Human-readable provenance line for compile errors: generator,
     /// application, target, and the real source anchor. Diagnostics-grade
     /// LSDS threading (three related locations) is slice S4; the named

@@ -601,6 +601,8 @@ fn parse_block_entry(inner: Pair<Rule>) -> Result<BlockItem> {
                 params: func_def.params,
                 return_type: func_def.return_type,
                 body: func_def.body,
+                // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
+                generated_origin: None,
                 span,
             };
             Ok(BlockItem::VariableDecl(crate::ast::VariableDecl {
