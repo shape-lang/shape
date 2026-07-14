@@ -1812,11 +1812,11 @@ impl VirtualMachine {
         Ok(Some(result))
     }
 
-    /// Format every arg via `ValueFormatter::format_kinded` and
-    /// concatenate (no separator). Returns the rendered text wrapped in
-    /// a `String`-kinded `KindedSlot`. Used by `format(…)` (multi-arg
-    /// concat) and by `FormatValueWithMeta` (single-arg
-    /// `expr.to_string()` / interpolation).
+    /// Format every arg through the shared primitive interpolation policy,
+    /// using `ValueFormatter::format_kinded` for non-primitive values, and
+    /// concatenate without a separator. Returns the rendered text wrapped in
+    /// a `String`-kinded `KindedSlot`. Used by `format(…)` (multi-arg concat)
+    /// and by `FormatValueWithMeta` (single-arg interpolation).
     pub(crate) fn builtin_format(&mut self, args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
         let mut to_format: Vec<KindedSlot> = Vec::with_capacity(args.len());
         for a in args {
@@ -1831,7 +1831,14 @@ impl VirtualMachine {
             super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
         let mut out = String::new();
         for a in &to_format {
-            out.push_str(&formatter.format_kinded(a));
+            if let Some(value) = crate::interpolation_format::primitive_interpolation_value(a) {
+                out.push_str(&crate::interpolation_format::format_interpolation(
+                    value,
+                    crate::interpolation_format::InterpolationFormatPolicy::Default,
+                ));
+            } else {
+                out.push_str(&formatter.format_kinded(a));
+            }
         }
         Ok(KindedSlot::from_string_arc(std::sync::Arc::new(out)))
     }
@@ -1878,25 +1885,36 @@ impl VirtualMachine {
                 let v = &args[0];
                 // Coerce numeric kinds; non-numeric fall back to default
                 // formatting so the spec is a no-op rather than an error.
-                let f = match v.kind {
+                let value = match v.kind {
                     shape_value::NativeKind::Float64 | shape_value::NativeKind::NullableFloat64 => {
-                        Some(v.slot.as_f64())
+                        Some(crate::interpolation_format::InterpolationValue::Number(
+                            v.slot.as_f64(),
+                        ))
                     }
                     shape_value::NativeKind::Int64
                     | shape_value::NativeKind::Int32
                     | shape_value::NativeKind::Int16
                     | shape_value::NativeKind::Int8
-                    | shape_value::NativeKind::IntSize => Some(v.slot.as_i64() as f64),
+                    | shape_value::NativeKind::IntSize => Some(
+                        crate::interpolation_format::InterpolationValue::Int(v.slot.as_i64()),
+                    ),
                     shape_value::NativeKind::UInt64
                     | shape_value::NativeKind::UInt32
                     | shape_value::NativeKind::UInt16
                     | shape_value::NativeKind::UInt8
-                    | shape_value::NativeKind::UIntSize => Some(v.slot.as_u64() as f64),
+                    | shape_value::NativeKind::UIntSize => Some(
+                        crate::interpolation_format::InterpolationValue::UInt(v.slot.as_u64()),
+                    ),
                     _ => None,
                 };
-                let rendered = match (f, precision) {
-                    (Some(f), Some(p)) if p >= 0 => {
-                        format!("{:.*}", p as usize, f)
+                let rendered = match (value, precision) {
+                    (Some(value), Some(precision)) if precision >= 0 => {
+                        crate::interpolation_format::format_interpolation(
+                            value,
+                            crate::interpolation_format::InterpolationFormatPolicy::Fixed {
+                                precision: precision as usize,
+                            },
+                        )
                     }
                     _ => self
                         .builtin_format(&args[..1])?

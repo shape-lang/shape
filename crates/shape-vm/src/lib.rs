@@ -29,6 +29,7 @@ pub mod feature_matrix;
 pub mod feature_tests;
 pub mod feedback;
 pub mod hot_reload;
+pub mod interpolation_format;
 pub mod linker;
 pub mod megamorphic_cache;
 pub mod mir;

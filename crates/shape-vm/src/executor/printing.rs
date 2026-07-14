@@ -1369,20 +1369,10 @@ impl<'a> ValueFormatter<'a> {
 
 /// Format a number, removing unnecessary decimal places.
 fn format_number(n: f64) -> String {
-    if n.is_nan() {
-        "NaN".to_string()
-    } else if n.is_infinite() {
-        if n.is_sign_positive() {
-            "Infinity".to_string()
-        } else {
-            "-Infinity".to_string()
-        }
-    } else if n.fract() == 0.0 && n.abs() < 1e15 {
-        // Integer-like floats: always show .0 to distinguish from int.
-        format!("{}.0", n as i64)
-    } else {
-        n.to_string()
-    }
+    crate::interpolation_format::format_interpolation(
+        crate::interpolation_format::InterpolationValue::Number(n),
+        crate::interpolation_format::InterpolationFormatPolicy::Default,
+    )
 }
 
 /// Format a single float for inclusion in a typed-array element list.

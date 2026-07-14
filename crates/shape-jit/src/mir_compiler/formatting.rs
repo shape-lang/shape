@@ -6,7 +6,6 @@ use shape_vm::mir::types::{MirFormatSpec, Operand};
 use shape_vm::type_tracking::NativeKind;
 
 use super::MirToIR;
-use crate::ffi::{formatting, stack_kind_code};
 
 /// Return the whole-program JIT preflight blocker for a VM-owned format class.
 pub(super) fn preflight_blocker(spec: MirFormatSpec, span: Span) -> Option<String> {
@@ -36,9 +35,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         operand: &Operand,
         spec: MirFormatSpec,
     ) -> Result<Value, String> {
-        let (spec_code, precision) = match spec {
-            MirFormatSpec::Default => (formatting::FORMAT_DEFAULT, 0),
-            MirFormatSpec::Fixed { precision } => (formatting::FORMAT_FIXED, precision),
+        let precision = match spec {
+            MirFormatSpec::Default => None,
+            MirFormatSpec::Fixed { precision } => Some(precision),
             MirFormatSpec::Table => {
                 return Err(
                     "FormatValue: Table formatting is not implemented by the JIT; \
@@ -60,28 +59,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
              refusing before native execution"
                 .to_string()
         })?;
-        if !matches!(
-            source_kind,
-            NativeKind::Int64 | NativeKind::Bool | NativeKind::Float64 | NativeKind::String
-        ) {
+
+        let (formatter, expected_type) = match (precision, source_kind) {
+            (None, NativeKind::Int64) => (self.ffi.format_default_i64, types::I64),
+            (None, NativeKind::Bool) => (self.ffi.format_default_bool, types::I8),
+            (None, NativeKind::Float64) => (self.ffi.format_default_f64, types::F64),
+            (None, NativeKind::String) => (self.ffi.format_default_string, types::I64),
+            (Some(_), NativeKind::Int64) => (self.ffi.format_fixed_i64, types::I64),
+            (Some(_), NativeKind::Bool) => (self.ffi.format_fixed_bool, types::I8),
+            (Some(_), NativeKind::Float64) => (self.ffi.format_fixed_f64, types::F64),
+            (Some(_), NativeKind::String) => (self.ffi.format_fixed_string, types::I64),
+            (_, unsupported) => {
+                return Err(format!(
+                    "FormatValue: source kind {unsupported:?} has no typed JIT formatter; \
+                     refusing before native execution"
+                ));
+            }
+        };
+
+        let value = self.compile_operand(operand)?;
+        let actual_type = self.builder.func.dfg.value_type(value);
+        if actual_type != expected_type {
             return Err(format!(
-                "FormatValue: source kind {source_kind:?} has no typed JIT formatter; \
-                 refusing before native execution"
+                "FormatValue: proven source kind {source_kind:?} requires native \
+                 {expected_type:?}, but operand compiled as {actual_type:?}; refusing \
+                 before emitting a formatting call"
             ));
         }
 
-        let value = self.compile_operand(operand)?;
-        let bits = self.to_i64_bits(value);
-        let kind = self
-            .builder
-            .ins()
-            .iconst(types::I8, stack_kind_code::encode(source_kind) as i64);
-        let spec = self.builder.ins().iconst(types::I8, spec_code as i64);
-        let precision = self.builder.ins().iconst(types::I8, precision as i64);
-        let call = self
-            .builder
-            .ins()
-            .call(self.ffi.format_value, &[bits, kind, spec, precision]);
+        let call = match precision {
+            None => self.builder.ins().call(formatter, &[value]),
+            Some(precision) => {
+                let precision = self.builder.ins().iconst(types::I8, precision as i64);
+                self.builder.ins().call(formatter, &[value, precision])
+            }
+        };
         Ok(self.builder.inst_results(call)[0])
     }
 }

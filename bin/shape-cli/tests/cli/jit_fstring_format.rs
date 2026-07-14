@@ -53,6 +53,10 @@ fn tag_bool(value: bool) -> string { f"{value}" }
 fn tag_number(value: number) -> string { f"{value}" }
 fn tag_string(value: string) -> string { f"{value}" }
 
+print(f"{1}")
+print(f"{true}")
+print(f"{1.5}")
+print(f"{"direct"}")
 print(tag_int(7))
 print(tag_bool(true))
 print(tag_number(1.0))
@@ -70,8 +74,8 @@ print(f"{1.5:fixed(2)}")
     assert_eq!(jit.exit_code, Some(0), "JIT failed: {}", jit.stderr);
     assert_eq!(jit.stdout, vm.stdout, "VM/JIT f-string output divergence");
     assert_eq!(
-        vm.stdout.trim(),
-        "7\ntrue\n1.0\nshape\n7true\nvalue=7\n1.50"
+        vm.stdout,
+        "1\ntrue\n1.5\ndirect\n7\ntrue\n1.0\nshape\n7true\nvalue=7\n1.50\n"
     );
     assert!(
         fallback_lines(&jit.stderr).is_empty(),
@@ -105,11 +109,16 @@ fn table_spec_falls_back_before_vm_reports_its_explicit_rejection() {
 
 #[test]
 fn content_style_falls_back_before_native_execution() {
-    let source = r#"print(f"{1:bold}")"#;
+    let source = r#"
+print("style-prefix")
+print(f"{1:bold}")
+"#;
     let vm = run_source("vm", source);
     let jit = run_source("jit", source);
 
-    assert_eq!(jit.exit_code, vm.exit_code, "JIT must preserve VM behavior");
+    assert_eq!(vm.exit_code, Some(0), "VM failed: {}", vm.stderr);
+    assert_eq!(jit.exit_code, Some(0), "JIT failed: {}", jit.stderr);
+    assert_eq!(vm.stdout, "style-prefix\n\x1b[1m1\x1b[0m\n");
     assert_eq!(
         jit.stdout, vm.stdout,
         "styled content output must stay VM-owned"
@@ -119,6 +128,41 @@ fn content_style_falls_back_before_native_execution() {
     assert!(
         lines[0].contains("FormatValue ContentStyle"),
         "fallback must name the refused format class: {}",
+        lines[0]
+    );
+    assert_eq!(
+        jit.stdout.matches("style-prefix\n").count(),
+        1,
+        "preflight must prevent native prefix execution before the VM replay"
+    );
+}
+
+#[test]
+fn unsupported_source_kind_falls_back_before_any_native_side_effect() {
+    let source = r#"
+print("unsupported-prefix")
+let value: u64 = 65
+print(f"{value}")
+"#;
+    let vm = run_source("vm", source);
+    let jit = run_source("jit", source);
+
+    assert_eq!(vm.exit_code, Some(0), "VM failed: {}", vm.stderr);
+    assert_eq!(jit.exit_code, Some(0), "JIT failed: {}", jit.stderr);
+    assert_eq!(vm.stdout, "unsupported-prefix\n65\n");
+    assert_eq!(jit.stdout, vm.stdout, "fallback must replay only in the VM");
+    assert_eq!(
+        jit.stdout.matches("unsupported-prefix\n").count(),
+        1,
+        "native prefix executed before the whole-program VM fallback"
+    );
+
+    let lines = fallback_lines(&jit.stderr);
+    assert_eq!(lines.len(), 1, "expected one fallback: {}", jit.stderr);
+    assert!(
+        lines[0].contains("FormatValue: source kind UInt64")
+            && lines[0].contains("refusing before native execution"),
+        "fallback must name the pre-execution typed refusal: {}",
         lines[0]
     );
 }

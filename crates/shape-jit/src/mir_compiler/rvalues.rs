@@ -1928,7 +1928,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///   `compile_binop` compare against the literal `1i64` ⇔ `TAG_BOOL_TRUE`
     ///   encoding, so widening to I64 preserves truth semantics.
     /// - `I64` → passed through unchanged.
-    pub(super) fn to_i64_bits(&mut self, v: Value) -> Value {
+    fn to_i64_bits(&mut self, v: Value) -> Value {
         let ty = self.builder.func.dfg.value_type(v);
         if ty == types::I64 {
             v
