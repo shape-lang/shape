@@ -459,10 +459,14 @@ unsafe fn try_call_user_method(
     // W14.2-E-followup-jit-trait-method-arity-soundness fix (2026-05-19,
     // v0.3-gating SOUNDNESS BUG): the JIT-compiled UFCS callee was emitted
     // with the extended Cranelift signature
-    // `fn(ctx_ptr, capture_0..N, param_0..M) -> i32`
-    // (`compile_function_with_user_funcs` at `compiler/program.rs:258-265`,
-    // appended params per `effective_arity = captures_count + arity`). Its
-    // entry-block parameter init at `compiler/program.rs:496-528` reads
+    // `fn(ctx_ptr, param_0..param_{arity-1}) -> i32`
+    // (`compile_function_with_user_funcs` in `compiler/program.rs`, one
+    // appended I64 param per `Function.arity`). For a CLOSURE the leading
+    // `captures_count` of those params ARE the captures — `arity` already
+    // includes them, so `captures_count` is NOT an addend (adding it
+    // double-counted the captures and was the cause of the "no capturing
+    // closure reaches native JIT" defect; see the lockstep comments on both
+    // signature sites). Its entry-block parameter init reads
     // each MIR param slot from `entry_params[native_idx]` — the SYSTEM V
     // register/stack ABI, NOT `ctx.stack`. The prior `fn_ptr(ctx_mut)`
     // call transmuted the function pointer as `JittedStrategyFn` (a single-
@@ -508,9 +512,11 @@ unsafe fn try_call_user_method(
     // (`self`), followed by each user arg. Impl and extend method bodies
     // both compile with `self` as their first formal parameter (when
     // present); for n=0-arg methods the receiver is still the first param.
-    // Matches the JIT-compiled callee's `effective_arity = captures_count +
-    // arity` per `compile_function_with_user_funcs` (captures_count = 0 for
-    // non-closure method bodies).
+    // Matches the JIT-compiled callee's native ABI
+    // `fn(ctx, param_0..param_{arity-1})` per
+    // `compile_function_with_user_funcs`. Method bodies are not closures
+    // (`captures_count == 0`), so `arity` here is exactly `self` + user args
+    // and this receiver-plus-args construction is unchanged.
     let mut native_args: Vec<u64> = Vec::with_capacity(arg_pairs.len() + 1);
     native_args.push(receiver_bits);
     for &(bits, _kind) in arg_pairs {

@@ -264,12 +264,49 @@ impl JITCompiler {
             .get(&(func_idx as u16))
             .ok_or_else(|| format!("Function {} not pre-declared", name))?;
 
+        // PROOF GUARD (surface-and-stop, ADR-006 §2.7.5 pattern).
+        //
+        // The native callee signature below is `fn(ctx, param_0 ..
+        // param_{arity-1})`, which is sound ONLY because the producer
+        // guarantees `mir.param_slots == captures ++ user_params` and
+        // `Function.arity == param_slots.len()`. The body-binding loop and the
+        // stack-closure call site both rely on that 1:1 alignment. Rather than
+        // trust the invariant silently, check it: if a future producer-side
+        // change (e.g. a pass that stops prepending captures to the param list)
+        // breaks the alignment, we emit a signature that CANNOT match the call
+        // site — which surfaces as an opaque Cranelift verifier error inside
+        // some unrelated caller, exactly the failure mode this lane was created
+        // to fix. Bail the whole function to the interpreter instead, loudly.
+        if let Some(mir_data) = func.mir_data.as_ref() {
+            let param_slots = mir_data.mir.param_slots.len();
+            if param_slots != func.arity as usize {
+                return Err(format!(
+                    "SURFACE (ADR-006 §2.7.5): closure/function calling-convention \
+                     invariant broken for '{}': mir.param_slots.len()={} but \
+                     Function.arity={} (captures_count={}). The native callee ABI is \
+                     `fn(ctx, param_0..param_{{arity-1}})` where params \
+                     [0..captures_count) are the closure's leading captures, so \
+                     `arity` MUST equal `param_slots.len()` (= captures + user \
+                     params). Emitting a signature at the wrong arity would be \
+                     rejected by the Cranelift verifier inside the CALLER, so this \
+                     function whole-function-bails to the bytecode interpreter \
+                     instead. Do not paper over this by padding the call site with a \
+                     filler arg — that fabricates a capture value.",
+                    func.name, param_slots, func.arity, func.captures_count,
+                ));
+            }
+        }
+
         let mut sig = self.module.make_signature();
         // ctx_ptr
         sig.params.push(AbiParam::new(types::I64));
-        // Closures receive captures as leading native args, followed by user params.
-        let effective_arity = func.captures_count + func.arity;
-        for _ in 0..effective_arity {
+        // Native callee ABI: `fn(ctx_ptr, param_0 .. param_{arity-1}) -> i32`.
+        // For closures, params [0 .. captures_count) ARE the captures —
+        // `Function.arity` already includes them (see the matching comment on
+        // the Phase-2 pre-declaration in `compile_program_selective`; the two
+        // signatures MUST stay in lockstep or `define_function` rejects every
+        // closure body).
+        for _ in 0..func.arity {
             sig.params.push(AbiParam::new(types::I64));
         }
         sig.returns.push(AbiParam::new(types::I32));
@@ -797,9 +834,35 @@ impl JITCompiler {
             let mut user_sig = self.module.make_signature();
             // ctx_ptr
             user_sig.params.push(AbiParam::new(types::I64));
-            // Closures receive captures as leading native args, followed by user params.
-            let effective_arity = func.captures_count + func.arity;
-            for _ in 0..effective_arity {
+            // Native callee ABI: `fn(ctx_ptr, param_0 .. param_{arity-1}) -> i32`.
+            //
+            // For a CLOSURE, params [0 .. captures_count) ARE the captures:
+            // the bytecode compiler builds the closure's param list as
+            // `captures ++ user_params` (`crates/shape-vm/src/compiler/
+            // expressions/closures.rs:3267`) and then stores
+            // `arity = closure_def.params.len()` (`:3491`). So `Function.arity`
+            // ALREADY INCLUDES the leading capture params, and
+            // `Function.captures_count` (`:3501`) is a redundant SUB-COUNT of
+            // arity — not an addend. MIR agrees: `param_slots` is lowered from
+            // the same param list, so `mir.param_slots.len() == func.arity`
+            // (`crates/shape-vm/src/mir/lowering/mod.rs:826`), and the VM's
+            // closure calling convention places captures at the leading local
+            // slots with user args at `[bp + capture_count ..]`
+            // (`crates/shape-vm/src/executor/call_convention.rs:757`).
+            //
+            // Adding `captures_count` here counted the captures TWICE
+            // (`1 + 2*captures + params`), while the stack-closure
+            // direct-dispatch call site correctly pushes `ctx + captures +
+            // user args` = `1 + arity` (`mir_compiler/terminators.rs:1676`).
+            // Cranelift's verifier then rejected the ENCLOSING function
+            // ("mismatched argument count ... got 2, expected 3"), demoting it;
+            // `main` still held a relocation to it, so `finalize_definitions`
+            // could not resolve the symbol and the WHOLE PROGRAM deopted. Since
+            // only closures have `captures_count > 0`, that is precisely why no
+            // capturing closure of any kind reached native JIT. Keep this in
+            // lockstep with the definition-side signature in
+            // `compile_function_with_user_funcs`.
+            for _ in 0..func.arity {
                 user_sig.params.push(AbiParam::new(types::I64));
             }
             user_sig.returns.push(AbiParam::new(types::I32));
@@ -808,7 +871,8 @@ impl JITCompiler {
                 .declare_function(&func_name, Linkage::Local, &user_sig)
                 .map_err(|e| format!("Failed to pre-declare function {}: {}", func.name, e))?;
             user_func_ids.insert(idx as u16, func_id);
-            // Store user-visible arity (without captures) for CallValue arg count checks
+            // Native callee arity (captures INCLUDED for closures — see above).
+            // The user-visible arg count of a closure is `arity - captures_count`.
             user_func_arities.insert(idx as u16, func.arity);
         }
 

@@ -1,0 +1,9 @@
+// N5 — two captures PLUS a user param. Exercises the capture/param split in the
+// closure calling convention: native sig is (ctx, cap_a, cap_b, x).
+fn answer() -> int {
+    let a = 20
+    let b = 21
+    let f = |x: int| a + b + x
+    f(1)
+}
+print(answer())

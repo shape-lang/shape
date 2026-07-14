@@ -1,0 +1,7 @@
+// N3 — immutable capture of a function-local HEAP value (typed array).
+fn answer() -> int {
+    let a = [1, 2, 3]
+    let worker = || a[0] + a[1] + a[2]
+    worker()
+}
+print(answer())

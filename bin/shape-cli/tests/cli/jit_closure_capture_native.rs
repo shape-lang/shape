@@ -1,0 +1,189 @@
+//! Capturing-closure NATIVE-JIT matrix (jit/closure-capture-lowering).
+//!
+//! The negative-control twin of `jit_fallback_diagnostic_matrix.rs`: those
+//! fixtures assert that a known JIT-Err class DOES emit `[jit-fallback]` and
+//! deopt; these assert that a capturing closure does NOT — i.e. the enclosing
+//! function and the closure body both reach native code.
+//!
+//! ## Why this matrix exists
+//!
+//! Before this lane, NO capturing closure of any kind reached native JIT. The
+//! bytecode compiler builds a closure's param list as `captures ++ params`
+//! (`crates/shape-vm/src/compiler/expressions/closures.rs:3267`) and stores
+//! `arity = closure_def.params.len()` — so `Function.arity` ALREADY includes
+//! the leading capture params, and `Function.captures_count` is a redundant
+//! sub-count of it, not an addend. shape-jit declared and defined closure
+//! bodies with `captures_count + arity` native params, double-counting the
+//! captures. The call site (`mir_compiler/terminators.rs` stack-closure
+//! direct-dispatch fast path) correctly pushes `ctx + captures + user args`
+//! = `1 + arity` values, so Cranelift's verifier rejected the ENCLOSING
+//! function with `mismatched argument count ... got 2, expected 3`. The
+//! enclosing function was demoted, `main` still held a relocation to it, and
+//! `finalize_definitions` could not resolve the symbol -> WHOLE-PROGRAM deopt.
+//!
+//! The contract asserted here is therefore stronger than "VM == JIT": a
+//! deopting program trivially satisfies VM == JIT because both modes run the
+//! interpreter. `count_fallback_lines == 0` is what proves the JIT actually
+//! ran the code, and stdout equality is what proves it ran it CORRECTLY
+//! (a cell-identity mismatch between a natively-allocated capture cell and the
+//! one the closure body reads would produce a silent wrong answer with exit 0
+//! and no fallback line — see `crates/shape-jit/src/compiler/accessors.rs`).
+//!
+//! ## NOT covered here (measured, still deopting — separate gates)
+//!
+//! - `var` (Shared) capture of a function-local: `jit_alloc_shared_cell` has no
+//!   `NativeKind` companion (ADR-006 §2.7.8) and is a `todo!()`.
+//! - Capture of a MODULE-level binding: rejected by the W39 F1 module-binding
+//!   function-body SURFACE (module bindings are not MIR places). This is the
+//!   class `f1`/`f2`/`f3` in the fallback matrix already pin.
+
+use assert_cmd::Command;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+fn cli_process_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn shape_cmd() -> Command {
+    Command::new(assert_cmd::cargo::cargo_bin!("shape"))
+}
+
+fn closure_fixture_path(name: &str) -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir)
+        .parent()
+        .expect("bin parent")
+        .parent()
+        .expect("workspace root")
+        .join("tests")
+        .join("smokes-jit-closure")
+        .join(name)
+}
+
+struct CapturedRun {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_shape(mode: &str, fixture: &str) -> CapturedRun {
+    let path = closure_fixture_path(fixture);
+    let _guard = cli_process_lock()
+        .lock()
+        .expect("JIT closure-capture matrix process lock poisoned");
+    let assertion = shape_cmd()
+        .args(["run", "--mode", mode])
+        .arg(&path)
+        .timeout(std::time::Duration::from_secs(60))
+        .assert();
+    let output = assertion.get_output();
+    CapturedRun {
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+fn count_fallback_lines(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("[jit-fallback]"))
+        .count()
+}
+
+/// The whole contract for one capturing-closure lowering:
+///
+/// 1. VM mode exits 0 (the fixture is valid Shape).
+/// 2. JIT mode exits 0 — no abort, no SURFACE.
+/// 3. JIT stdout == VM stdout — the captured value is actually READ correctly.
+///    This is the assertion that catches a cell-identity mismatch, which is a
+///    silent wrong answer, not a crash.
+/// 4. JIT emits ZERO `[jit-fallback]` lines — the code ran NATIVELY rather
+///    than whole-program-deopting to the interpreter (which would make (3)
+///    vacuous).
+fn assert_reaches_native_jit(fixture: &str, expected_stdout_contains: &str) {
+    let vm = run_shape("vm", fixture);
+    let jit = run_shape("jit", fixture);
+
+    assert_eq!(
+        vm.exit_code,
+        Some(0),
+        "{fixture}: VM mode should exit 0; stderr={}",
+        vm.stderr
+    );
+    assert_eq!(
+        jit.exit_code,
+        Some(0),
+        "{fixture}: JIT mode should exit 0 (no abort, no SURFACE); stderr={}",
+        jit.stderr
+    );
+    assert!(
+        vm.stdout.contains(expected_stdout_contains),
+        "{fixture}: VM stdout should contain `{expected_stdout_contains}`; stdout={}",
+        vm.stdout
+    );
+    assert_eq!(
+        jit.stdout, vm.stdout,
+        "{fixture}: JIT stdout must equal VM stdout (a capture cell-identity \
+         mismatch is a SILENT wrong answer, not a crash); vm={:?} jit={:?} \
+         jit_stderr={}",
+        vm.stdout, jit.stdout, jit.stderr
+    );
+    assert_eq!(
+        count_fallback_lines(&jit.stderr),
+        0,
+        "{fixture}: a capturing closure must reach NATIVE JIT — zero \
+         [jit-fallback] lines. A fallback line means the program \
+         whole-program-deopted to the interpreter, which makes the stdout \
+         equality above vacuous. stderr={}",
+        jit.stderr
+    );
+    assert_eq!(
+        count_fallback_lines(&vm.stderr),
+        0,
+        "{fixture}: VM mode must not emit [jit-fallback]; stderr={}",
+        vm.stderr
+    );
+}
+
+/// N1 — immutable capture of a function-local scalar (`let value = 41`).
+/// This is the canonical reproducer for the capture double-count: the closure
+/// has `captures_count = 1`, `arity = 1`, so the old signature declared
+/// `1 + 1 + 1 = 3` native params while the call site pushed `1 + 1 = 2`.
+#[test]
+fn jit_fallback_absent_for_immutable_scalar_capture() {
+    assert_reaches_native_jit("n1-capture-imm-scalar.shape", "42");
+}
+
+/// N2 — immutable capture of a function-local HEAP value (string).
+#[test]
+fn jit_fallback_absent_for_immutable_string_capture() {
+    assert_reaches_native_jit("n2-capture-imm-string.shape", "shape");
+}
+
+/// N3 — immutable capture of a function-local HEAP value (typed array).
+#[test]
+fn jit_fallback_absent_for_immutable_array_capture() {
+    assert_reaches_native_jit("n3-capture-imm-array.shape", "6");
+}
+
+/// N4 — OwnedMutable capture (`let mut` moved into the closure and mutated).
+/// This one already reached native JIT before the lane (its closure is invoked
+/// through the value-call trampoline rather than the stack-closure direct
+/// dispatch, so it never exercised the mismatched signature). It is pinned here
+/// as the REGRESSION guard: narrowing the closure signature to `arity` must not
+/// break the lowering that was already green.
+#[test]
+fn jit_fallback_absent_for_owned_mutable_capture() {
+    assert_reaches_native_jit("n4-capture-owned-mut.shape", "42");
+}
+
+/// N5 — two captures PLUS a user param. Pins the capture/param SPLIT: the old
+/// double-count grew with the capture count (`got 4, expected 6` here), so a
+/// fix that merely subtracted a constant would pass N1 and fail N5.
+#[test]
+fn jit_fallback_absent_for_multi_capture_with_user_param() {
+    assert_reaches_native_jit("n5-capture-multi-plus-param.shape", "42");
+}

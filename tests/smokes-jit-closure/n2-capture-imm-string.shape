@@ -1,0 +1,7 @@
+// N2 — immutable capture of a function-local HEAP value (string).
+fn answer() -> string {
+    let name = "shape"
+    let worker = || name
+    worker()
+}
+print(answer())

@@ -1,0 +1,10 @@
+// N4 — OwnedMutable capture: `let mut` moved into the closure and mutated.
+// Per B0005 the outer scope cannot read `n` after the move, so the mutation is
+// observed through the closure's return value.
+fn answer() -> int {
+    let mut n = 0
+    let bump = || { n = n + 21; n }
+    bump()
+    bump()
+}
+print(answer())

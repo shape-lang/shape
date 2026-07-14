@@ -1,0 +1,10 @@
+// N1 — immutable capture of a function-local SCALAR.
+// The closure captures `value` (an `int`); the bytecode compiler prepends the
+// capture to the closure's params, so `Function.arity == captures + params`.
+// The enclosing `answer` must reach NATIVE JIT: zero `[jit-fallback]` lines.
+fn answer() -> int {
+    let value = 41
+    let worker = || value + 1
+    worker()
+}
+print(answer())
