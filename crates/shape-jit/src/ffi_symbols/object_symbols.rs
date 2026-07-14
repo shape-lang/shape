@@ -1026,14 +1026,20 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_shared_unlock_contended".to_string(), func_id);
     }
 
-    // Session 1 Commit 3: jit_alloc_shared_cell(initial_bits: u64) -> u64.
+    // jit_alloc_shared_cell(initial_bits: i64, kind_code: i8) -> i64.
     // Allocates a fresh `Arc<SharedCell>` seeded with `initial_bits` and
-    // returns the raw pointer bits of the sole strong share.
+    // the `NativeKind` companion `kind_code` decodes to, and returns the
+    // raw pointer bits of the sole strong share.
     // `MirToIR::initialize_shared_local_slots` calls this at function
-    // entry to materialise the cell that backs every SharedCow local.
+    // entry to materialise the cell that backs every SharedCow local, and
+    // sources `kind_code` from the producing site (ClosureLayout
+    // capture_types / inferred slot_kinds) per ADR-006 §2.7.8 / Q10 —
+    // never from the payload bits, never Bool-defaulted. Same
+    // NativeKind-as-i8 FFI encoding as `jit_v2_make_mutex`.
     {
         let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // initial_bits (ValueWord)
+        sig.params.push(AbiParam::new(types::I64)); // initial_bits
+        sig.params.push(AbiParam::new(types::I8)); // kind code (stack_kind_code)
         sig.returns.push(AbiParam::new(types::I64)); // *const SharedCell
         let func_id = module
             .declare_function("jit_alloc_shared_cell", Linkage::Import, &sig)

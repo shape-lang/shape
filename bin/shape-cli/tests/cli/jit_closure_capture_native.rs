@@ -31,8 +31,13 @@
 //!
 //! ## NOT covered here (measured, still deopting — separate gates)
 //!
-//! - `var` (Shared) capture of a function-local: `jit_alloc_shared_cell` has no
-//!   `NativeKind` companion (ADR-006 §2.7.8) and is a `todo!()`.
+//! - `var` (Shared) capture whose payload is a HEAP value (`var s = "a"`):
+//!   surfaces-and-stops at codegen (clean whole-function JIT bail, ADR-006
+//!   §2.7.8). The JIT's shared-cell store lowering writes raw bits with no
+//!   retain and no release-of-previous, so stamping a refcounted kind on the
+//!   cell would arm `SharedCell::drop` to retire a share the cell never owned.
+//!   The store path must be made refcount-correct first. Scalar `var` captures
+//!   (N6) ARE covered — their `Drop` arm is a no-op.
 //! - Capture of a MODULE-level binding: rejected by the W39 F1 module-binding
 //!   function-body SURFACE (module bindings are not MIR places). This is the
 //!   class `f1`/`f2`/`f3` in the fallback matrix already pin.
@@ -186,4 +191,22 @@ fn jit_fallback_absent_for_owned_mutable_capture() {
 #[test]
 fn jit_fallback_absent_for_multi_capture_with_user_param() {
     assert_reaches_native_jit("n5-capture-multi-plus-param.shape", "42");
+}
+
+/// N6 — Shared capture (`var` mutated inside a closure).
+///
+/// Before the `jit_alloc_shared_cell` NativeKind fix this ABORTED the process
+/// (exit 134, no output): the FFI carried only `initial_bits` with no source for
+/// the `SharedCell`'s `NativeKind` companion (ADR-006 §2.7.8 / Q10), so its body
+/// was an unconditional `todo!()` — and `extern "C"` cannot unwind, so the
+/// surface-and-stop became a non-unwinding panic instead of a clean JIT bail.
+///
+/// The fixture reads `total` from the OUTER scope after the closure runs, so a
+/// cell-identity mismatch (declaring frame allocates its own cell while the
+/// closure writes through a different one) prints 0 rather than 42 — a silent
+/// wrong answer with exit 0 and zero fallback lines. `assert_reaches_native_jit`
+/// asserts stdout equality precisely to catch that.
+#[test]
+fn jit_fallback_absent_for_shared_var_capture() {
+    assert_reaches_native_jit("n6-capture-shared-var.shape", "42");
 }

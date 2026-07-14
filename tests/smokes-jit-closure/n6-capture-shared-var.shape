@@ -1,0 +1,22 @@
+// N6 — Shared capture: a function-local `var` mutated from inside a closure.
+//
+// The bytecode compiler promotes `total` to an `Arc<SharedCell>` (opcodes
+// `AllocSharedLocal` / `LoadSharedLocal` / `StoreSharedLocal`), and the JIT
+// mirrors that with an eager cell allocation at function entry. Before the fix
+// this ABORTED the process (exit 134): `jit_alloc_shared_cell` had no
+// `NativeKind` companion parameter (ADR-006 §2.7.8 / Q10 cell parallel-kind
+// track) and was an unconditional `todo!()` — and because it is `extern "C"`
+// (nounwind), the honest surface-and-stop manifested as a non-unwinding panic
+// rather than a clean JIT bail.
+//
+// The mutation is observed through the OUTER scope's read of `total`, not the
+// closure's return value: that is what proves the cell the JIT allocates in the
+// declaring frame is the SAME cell the closure body writes through. A
+// cell-identity mismatch would print 0 with exit 0 and no fallback line.
+fn answer() -> int {
+  var total = 0
+  let bump = || { total = total + 42 }
+  bump()
+  total
+}
+print(answer())

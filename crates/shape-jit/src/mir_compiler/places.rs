@@ -1041,7 +1041,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // at Drop(slot)) guarantees the cell pointer is non-
                 // null and lives for at least the duration of any
                 // JIT'd read/write on the slot.
-                if self.shared_local_slots.contains(slot) {
+                if self.shared_local_slots.contains_key(slot) {
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let cell_ptr = self.builder.use_var(*var);
                     self.emit_shared_lock(cell_ptr);
@@ -1329,7 +1329,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // payload bits at
                 // `[cell_ptr + SHARED_CELL_VALUE_OFFSET]`, drop the
                 // guard.
-                if self.shared_local_slots.contains(slot) {
+                if self.shared_local_slots.contains_key(slot) {
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let var = *self
                         .locals
@@ -1486,7 +1486,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // pointer). `emit_drop` handles reclaim via
         // `jit_arc_shared_release`; this early-return preserves the
         // cell pointer until that release runs.
-        if matches!(place, Place::Local(_)) && self.shared_local_slots.contains(&slot) {
+        if matches!(place, Place::Local(_)) && self.shared_local_slots.contains_key(&slot) {
             return Ok(());
         }
         // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006 §2.7.13

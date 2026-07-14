@@ -557,7 +557,7 @@ impl JITCompiler {
                 // read_place / write_place route through the lock-gated
                 // pointer-deref lowering, and `emit_drop` on the slot
                 // emits `jit_arc_shared_release` to balance the share.
-                mir_compiler.initialize_shared_local_slots();
+                mir_compiler.initialize_shared_local_slots()?;
 
                 // Store function parameters (including captures) to MIR local variables.
                 // MIR param_slots includes capture slots followed by user param slots.

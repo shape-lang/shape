@@ -496,35 +496,59 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 ///   `jit_arc_shared_retain` and balanced by `release_typed_closure`
 ///   on closure drop.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn jit_alloc_shared_cell(_initial_bits: u64) -> u64 {
-    // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.8 / Q10):
-    // `SharedCell::new(value, kind)` requires the cell's
-    // `NativeKind` companion at construction (cell-storage parallel
-    // kind track per ADR-006 §2.7.8); the FFI signature here only
-    // carries `initial_bits`, with no source for the kind. Per
-    // §2.7.8 #4 the correct response is surface-and-stop, never a
-    // Bool-default fallback.
+pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8) -> u64 {
+    // ADR-006 §2.7.8 / Q10 (cell-storage parallel-kind track).
     //
-    // The strict-typing rebuild widens this entry to
-    // `jit_alloc_shared_cell(initial_bits: u64, kind: i32 /* NativeKind */)`
-    // with the kind sourced from the JIT-emitted `AllocSharedLocal`
-    // call signature per §2.7.5; the bytecode-side companion is
-    // already kinded (`shape-vm/src/executor/variables/mod.rs:1510`
-    // builds `SharedCell::new(value_bits, value_kind)`).
+    // `SharedCell::new(value, kind)` requires the cell's `NativeKind`
+    // companion at construction — `Drop for SharedCell` dispatches its
+    // Arc-retire matrix on that field, so a wrong kind is a memory bug,
+    // not a type-checking nicety. The kind is threaded from the
+    // JIT-emitted `AllocSharedLocal` call site
+    // (`MirToIR::initialize_shared_local_slots`), which sources it from
+    // the PRODUCER at compile time — the `ClosureLayout`'s
+    // `capture_types` (authoritative; the same source the closure BODY's
+    // `shared_capture_slots` uses, so both ends of the cell agree) or the
+    // slot's inferred `slot_kinds` entry. This mirrors the interpreter,
+    // which takes the kind off the §2.7.7 parallel-kind stack track in
+    // `op_alloc_shared_local`
+    // (`shape-vm/src/executor/variables/mod.rs`) — same producer, same
+    // kind. It is never fabricated from `initial_bits`.
     //
-    // Until the JIT lowering threads a kind through the call site
-    // (W11 / deeper Phase-2c), this entry-point fails loudly so
-    // callers reach this error at the JIT-emitted FFI boundary
-    // rather than silently allocating a kind-less cell.
-    todo!(
-        "phase-2c §2.7.8/Q10 / W10 jit-playbook §5: SharedCell kind \
-         companion — jit_alloc_shared_cell needs a NativeKind \
-         parameter per ADR-006 §2.7.8 (cell parallel-kind track). \
-         The bytecode-side AllocSharedLocal already threads \
-         value_kind (`shape-vm/src/executor/variables/mod.rs:1510`); \
-         the JIT lowering for the same opcode must thread the \
-         matching kind through the FFI signature per §2.7.5."
-    )
+    // The two cases where the honest kind cannot be honoured — no
+    // derivable NativeKind, and a refcounted payload kind (the JIT's cell
+    // store path takes no share, so a heap kind would arm `Drop` to
+    // retire a share the cell never owned) — surface-and-stop at CODEGEN
+    // as a whole-function JIT bail. They must never reach here: this fn
+    // is `extern "C"` and therefore nounwind, so a refusal in this body
+    // aborts the process instead of deopting. That was the pre-fix
+    // behaviour (an unconditional `todo!()`), and it is why the refusal
+    // now lives in `initialize_shared_local_slots`.
+    use crate::ffi::stack_kind_code;
+    use shape_value::v2::closure_layout::SharedCell;
+    use std::sync::Arc;
+
+    let kind = match stack_kind_code::decode(kind_code) {
+        Some(kind) => kind,
+        None => {
+            // Unreachable via the JIT emitter (the codegen gate proves a
+            // concrete kind before emitting the call). Reached only if a
+            // future caller passes SENTINEL/reserved. Bool-defaulting here
+            // is forbidden by §2.7.8 #4; abort is the honest outcome for a
+            // nounwind boundary that has lost its kind source.
+            panic!(
+                "jit_alloc_shared_cell: undecodable NativeKind code {kind_code} \
+                 (ADR-006 §2.7.8 / Q10). The cell's kind companion must come from \
+                 the producing site via `stack_kind_code::encode`; it is never \
+                 defaulted and never derived from the payload bits."
+            );
+        }
+    };
+    // The sole strong share is handed to the caller's slot; it is retired
+    // by exactly one `jit_arc_shared_release` at `emit_drop`. Additional
+    // shares (one per capturing closure) are minted by
+    // `jit_arc_shared_retain` and balanced by `release_typed_closure`.
+    let cell = Arc::new(SharedCell::new(initial_bits, kind));
+    Arc::into_raw(cell) as u64
 }
 
 /// Release exactly one strong share of an `Arc<SharedCell>` at

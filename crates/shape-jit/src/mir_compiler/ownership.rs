@@ -482,7 +482,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // hold a `*const SharedCell` Arc pointer; their lifecycle
             // is `jit_arc_shared_release` (not the generic
             // `jit_arc_release`) at `Drop`. Skip here.
-            if self.shared_local_slots.contains(slot_id) {
+            if self.shared_local_slots.contains_key(slot_id) {
                 return Ok(RefcountDisposition::SkipTypedCellCarrier);
             }
         }
@@ -795,7 +795,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if let Operand::Move(place) | Operand::MoveExplicit(place) | Operand::Copy(place) = operand
         {
             if let Place::Local(slot) = place {
-                if self.shared_local_slots.contains(slot) {
+                if self.shared_local_slots.contains_key(slot) {
                     // Bypass the lock-gated read in `read_place` and
                     // produce the raw pointer bits held in the slot's
                     // Cranelift variable.
@@ -1018,7 +1018,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // disposition's `SkipTypedCellCarrier` arm would otherwise
         // suppress this required release.
         if let Place::Local(slot_id) = place {
-            if self.shared_local_slots.contains(slot_id) {
+            if self.shared_local_slots.contains_key(slot_id) {
                 let var = *self
                     .locals
                     .get(slot_id)
