@@ -458,3 +458,68 @@ fn fallback_f6_struct_move_then_read_falls_through_to_vm() {
         vm.stderr
     );
 }
+
+// =========================================================================
+// ADR-009 C1 (#12) SLICE 0 — JIT-nativity preflight for the flagship path
+// =========================================================================
+
+/// ADR-009 C1 Slice 0 (blocking preflight, executed 2026-07-14).
+///
+/// The rework spec's R5 requires a JIT proof that CANNOT pass under a
+/// `[jit-fallback]` whole-program deopt (`count_fallback_lines(stderr) == 0`),
+/// on the FLAGSHIP path: an annotation-generated `extend Type { method ... }`
+/// whose method body holds a closure. The risk that motivated this preflight
+/// was `program_declares_user_trait_or_impl` (`crates/shape-jit/src/executor.rs:39-46`),
+/// a bare `Item::Trait | Item::Impl` match over `program.items` that
+/// whole-program-deopts the JIT.
+///
+/// This test RESOLVES that risk in the affirmative: a generated `extend` is
+/// `Item::Extend`, never `Item::Impl`, so the Wave-20A deopt does not fire, and
+/// the generated method + its closure execute as native JIT code (zero
+/// `[jit-fallback]` lines, JIT stdout == VM stdout).
+///
+/// It is the POSITIVE CONTROL for the Slice-4 JIT battery: the harness
+/// (`run_shape` + `count_fallback_lines` in this module) is the one Slice 4
+/// reuses. It is deliberately CAPTURE-FREE — see the Slice-0 report: a closure
+/// that captures ANYTHING (generated or ordinary source) still whole-program-
+/// deopts at HEAD (`f3-preflight-closure-capture.shape` above pins the same
+/// class), so the capturing half of R5 is blocked on a pre-existing shape-jit
+/// closure-capture lowering defect, not on anything C1 introduces.
+#[test]
+fn adr009_c1_generated_extend_method_closure_jits_natively() {
+    let vm = run_shape("vm", "c1-generated-extend-capture-free.shape");
+    let jit = run_shape("jit", "c1-generated-extend-capture-free.shape");
+
+    assert_eq!(
+        vm.exit_code,
+        Some(0),
+        "generated-extend fixture should exit 0 under VM; stderr={}",
+        vm.stderr
+    );
+    assert_eq!(
+        jit.exit_code,
+        Some(0),
+        "generated-extend fixture should exit 0 under JIT; stderr={}",
+        jit.stderr
+    );
+    assert!(
+        vm.stdout.contains("42"),
+        "VM stdout should contain 42; stdout={}",
+        vm.stdout
+    );
+    assert_eq!(
+        jit.stdout, vm.stdout,
+        "JIT stdout must equal VM stdout for the generated extend method"
+    );
+    // The load-bearing assertion: the annotation-generated `extend Type {{ method }}`
+    // does NOT trip the Wave-20A user-trait/impl whole-program deopt, and the
+    // closure inside the generated method body is compiled natively.
+    assert_eq!(
+        count_fallback_lines(&jit.stderr),
+        0,
+        "generated `extend` must NOT whole-program-deopt the JIT \
+         (program_declares_user_trait_or_impl must not fire on Item::Extend); \
+         stderr={}",
+        jit.stderr
+    );
+}
