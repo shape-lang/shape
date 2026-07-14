@@ -5,8 +5,8 @@
 
 use crate::annotation_discovery::AnnotationDiscovery;
 use crate::diagnostics::{
-    enrich_diagnostics_with_code_metadata, validate_annotations,
-    validate_async_join, validate_async_structured_concurrency, validate_color_rgb_range,
+    enrich_diagnostics_with_code_metadata, validate_annotations, validate_async_join,
+    validate_async_structured_concurrency, validate_color_rgb_range,
     validate_comptime_builtins_context, validate_comptime_overrides,
     validate_comptime_side_effects, validate_foreign_function_types,
     validate_interpolation_format_specs, validate_trait_bounds, validate_unused_imports,
@@ -99,6 +99,13 @@ pub fn analyze_program_semantics_for_document(
         combine_same_line_undefined_variable_diagnostics(program, text, &mut compile_diagnostics);
         diagnostics.extend(compile_diagnostics);
     }
+
+    // Compiler-issued generated-capture artifacts are the only authority for
+    // source availability. Unmapped artifacts get stable diagnostics rather
+    // than guessed hover/navigation locations.
+    diagnostics.extend(crate::generated_captures::capture_query_diagnostics(
+        &compiler, program, text,
+    ));
 
     dedupe_and_cap_diagnostics(&mut diagnostics);
     // W2.3 / 1.17 + 1.19 — backfill code_description (book URL) + tags

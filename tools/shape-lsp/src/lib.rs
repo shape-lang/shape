@@ -26,6 +26,7 @@ pub mod expansion_views;
 pub mod folding;
 pub mod foreign_lsp;
 pub mod formatting;
+pub mod generated_captures;
 pub mod generated_symbols;
 pub mod grammar_completion;
 pub mod hover;

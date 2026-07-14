@@ -90,6 +90,17 @@ fn get_hover_inner(
     // Get the word at the cursor position
     let word = get_word_at_position(text, position)?;
 
+    // Generated capture answers require a fresh, exact parse. A cached or
+    // resilient AST can carry stale offsets, so it must never fabricate a
+    // source map while the user is mid-edit.
+    let parse_src = parser_source(text);
+    if let Ok(program) = parse_program(parse_src.as_ref())
+        && let Some(hover) =
+            crate::generated_captures::generated_capture_hover(&program, text, position)
+    {
+        return Some(hover);
+    }
+
     // First, check if we're hovering on a property access (e.g., instr.symbol)
     if let Some(hover) = get_property_access_hover(text, &word, position) {
         return Some(hover);

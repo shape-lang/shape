@@ -32,22 +32,32 @@ pub fn get_definition(
     // Get the word at cursor
     let word = get_word_at_position(text, position)?;
 
-    // Parse the current file, falling back to cached program or resilient parser
-    let program = match parse_program(text) {
-        Ok(p) => p,
+    // Parse the current file, falling back to cached program or resilient
+    // parser. Generated capture navigation is enabled only for the exact
+    // parse; a fallback AST can carry stale offsets.
+    let (program, has_exact_source_ast) = match parse_program(text) {
+        Ok(p) => (p, true),
         Err(_) => {
             if let Some(cached) = cached_program {
-                cached.clone()
+                (cached.clone(), false)
             } else {
                 // Fall back to resilient parser — always succeeds with partial results
                 let partial = shape_ast::parser::resilient::parse_program_resilient(text);
                 if partial.items.is_empty() {
                     return None;
                 }
-                partial.into_program()
+                (partial.into_program(), false)
             }
         }
     };
+
+    if has_exact_source_ast
+        && let Some(offset) = position_to_offset(text, position)
+        && let Some(response) =
+            crate::generated_captures::generated_capture_definition(&program, text, offset, uri)
+    {
+        return Some(response);
+    }
 
     // ADR-009 D1 (S5): generated declarations are answered from the
     // compiler's SymbolId/provenance query surface FIRST (Decision 66) —
@@ -144,6 +154,18 @@ pub fn get_references_cross_file(
     module_cache: Option<&ModuleCache>,
     workspace_root: Option<&Path>,
 ) -> Option<Vec<Location>> {
+    // A generated capture is already resolved by compiler-issued structural
+    // identity. Return that closed graph directly: the generic cross-file
+    // path below is name-based and must not append same-spelling symbols from
+    // other files or owners.
+    if let Ok(program) = parse_program(text)
+        && let Some(offset) = position_to_offset(text, position)
+        && let Some(locations) =
+            crate::generated_captures::generated_capture_references(&program, text, offset, uri)
+    {
+        return Some(locations);
+    }
+
     // Local file references via ScopeTree (and text-search fallback).
     let mut locations =
         get_references_with_fallback(text, position, uri, cached_program).unwrap_or_default();
@@ -354,21 +376,28 @@ pub fn get_references_with_fallback(
     // Get the byte offset of the cursor
     let offset = position_to_offset(text, position)?;
 
-    // Parse, falling back to cached program or resilient parser
-    let program = match parse_program(text) {
-        Ok(p) => p,
+    // Parse, falling back to cached program or resilient parser. Generated
+    // capture references require the exact current-source AST.
+    let (program, has_exact_source_ast) = match parse_program(text) {
+        Ok(p) => (p, true),
         Err(_) => {
             if let Some(cached) = cached_program {
-                cached.clone()
+                (cached.clone(), false)
             } else {
                 let partial = shape_ast::parse_program_resilient(text);
                 if partial.items.is_empty() {
                     return None;
                 }
-                partial.into_program()
+                (partial.into_program(), false)
             }
         }
     };
+    if has_exact_source_ast
+        && let Some(locations) =
+            crate::generated_captures::generated_capture_references(&program, text, offset, uri)
+    {
+        return Some(locations);
+    }
     // ADR-009 D1 (S5): references on a generated declaration are answered
     // from the compiler's SymbolId/provenance query surface (Decision 66):
     // every AST call site + the application site. The scope/text providers
