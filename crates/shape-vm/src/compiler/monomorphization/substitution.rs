@@ -1053,6 +1053,7 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
             return_type,
             body,
             generated_origin,
+            captures,
             span,
         } => Expr::FunctionExpr {
             // ADR-009 C1 (slice 2): a monomorphized body is the SAME generated
@@ -1060,6 +1061,11 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
             // makes the Wave-46 gate fire inside a mangled specialization name
             // that `generated_symbols.contains_name` could never see.
             generated_origin: generated_origin.clone(),
+            // ADR-009 C1 (slice 3): the DECLARED capture clause travels into
+            // every specialization too. A declaration that survived the
+            // template but not the specialization would leave the specialized
+            // body driven by inference — R2's failure mode exactly.
+            captures: captures.clone(),
             // Closure params may have default-value exprs that reference
             // const generics; walk those but leave patterns/annotations alone.
             params: params
@@ -1969,11 +1975,16 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
             return_type,
             body,
             generated_origin,
+            captures,
             span,
         } => Expr::FunctionExpr {
             // ADR-009 C1 (slice 2): see the const-substitution arm — type
             // substitution forwards the generated-node stamp unchanged.
             generated_origin: generated_origin.clone(),
+            // ADR-009 C1 (slice 3): and so does the declared capture clause.
+            // Capture MODES are type-independent: `move hits` means the same
+            // thing in `Job<int>` and `Job<string>`.
+            captures: captures.clone(),
             params: params
                 .iter()
                 .map(|p| substitute_function_parameter(p, subs))
@@ -4120,6 +4131,7 @@ mod tests {
                 Span::default(),
             )],
             generated_origin: None,
+            captures: None,
             span: Span::default(),
         };
         let stmt = Statement::Expression(closure, Span::default());
@@ -4267,6 +4279,7 @@ mod generated_origin_survives_substitution {
                 Span::default(),
             )],
             generated_origin: Some(origin(&["extend:Job", "method:read", "closure:0", "closure:0"])),
+            captures: None,
             span: Span::default(),
         };
         Expr::FunctionExpr {
@@ -4280,6 +4293,7 @@ mod generated_origin_survives_substitution {
                 ),
             ],
             generated_origin: Some(origin(&["extend:Job", "method:read", "closure:0"])),
+            captures: None,
             span: Span::default(),
         }
     }
@@ -4371,6 +4385,7 @@ mod generated_origin_survives_substitution {
             return_type: None,
             body: vec![],
             generated_origin: None,
+            captures: None,
             span: Span::default(),
         };
         let mut subs = HashMap::new();

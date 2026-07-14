@@ -524,6 +524,7 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
             return_type,
             body,
             generated_origin,
+            captures,
             span,
         } => {
             // Closure parameters are real bindings inside the closure body.
@@ -538,6 +539,11 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
                 // rewrite, or the Wave-46 gate goes blind on exactly the path
                 // that was ungated before this slice.
                 generated_origin: generated_origin.clone(),
+                // ADR-009 C1 (slice 3): the `ctx.original` rewrite renames
+                // BINDINGS, never capture MODES — the declared clause passes
+                // through unchanged. (Its entry names are resolved to slots at
+                // the gate, after this rewrite has run.)
+                captures: captures.clone(),
                 params: params
                     .iter()
                     .map(|p| {

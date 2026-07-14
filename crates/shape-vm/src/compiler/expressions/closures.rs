@@ -3088,6 +3088,12 @@ impl BytecodeCompiler {
         &mut self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[shape_ast::ast::Statement],
+        // ADR-009 C1 (slice 3): the DECLARED capture clause
+        // (`|acc; move cfg, share total|`). When present it DRIVES emission —
+        // inference is not consulted for the kind, only for validating that
+        // the declared set is exactly the discovered set. Generated-code-only
+        // surface: a clause on an ordinary source closure is [C0903].
+        declared: Option<&shape_ast::ast::CaptureClause>,
         // ADR-009 C1 (slice 2): node-borne generated-code provenance, stamped
         // by `transform::generated_origin::stamp_generated_closures` at every
         // point where comptime-produced AST enters the program. THE predicate
@@ -3154,20 +3160,39 @@ impl BytecodeCompiler {
             "generated decl body reached compile_expr_closure with an UNSTAMPED closure node — \
              a generated-AST entry point is missing its stamp_generated_closures call"
         );
+        // ADR-009 C1 (slice 3), gate step 3a — the clause is a
+        // GENERATED-CODE-ONLY surface (posted rider 1). An ordinary source
+        // closure keeps inference; a clause there is a named rejection, not a
+        // silently-honoured declaration. Checked BEFORE the capture set is
+        // consulted, so `|x; move y|` with an empty capture set still rejects.
+        //
+        // This is a NAMED DIAGNOSTIC rather than a by-construction
+        // impossibility, and that is an honest finding, not a shortcut: a
+        // builder-only capture field cannot exist on main, because generated
+        // closures come out of the SAME parser as source closures. Grammar
+        // cannot see the difference; provenance can.
+        if declared.is_some() && generated_origin.is_none() {
+            return Err(ShapeError::SemanticError {
+                message: "[C0903] a capture clause is only valid in comptime-generated code; \
+                          ordinary source closures infer their captures — remove the `;` clause"
+                    .to_string(),
+                location: Some(self.span_to_source_location(closure_span)),
+            });
+        }
+
+        // Gate step 3b — the Wave-46 implicit-capture rejection: generated
+        // code with captures and NO clause. The message comes from the one
+        // producer in `capture_plan.rs`, shared with the used-but-undeclared
+        // half of the declared-clause set diff, so the two can never drift.
         if let Some(origin) = generated_origin
+            && declared.is_none()
             && !captured_vars.is_empty()
         {
-            let captures = captured_vars
-                .iter()
-                .map(|name| format!("'{name}'"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let owner = origin.owner_display();
+            let names: Vec<&str> = captured_vars.iter().map(|s| s.as_str()).collect();
             return Err(ShapeError::SemanticError {
-                message: format!(
-                    "generated closure implicitly captures {captures}; generated captures must \
-                     be explicit (in generated function '{owner}', node {})",
-                    origin.render_path()
+                message: crate::compiler::comptime_builtins::capture_plan::implicit_capture_message(
+                    &names,
+                    Some(origin),
                 ),
                 location: Some(self.span_to_source_location(closure_span)),
             });
@@ -3273,7 +3298,13 @@ impl BytecodeCompiler {
         // `capture_kinds[i]`, which lands in the emitted `ClosureLayout`.
         // Slice 3's declared capture clause enters at exactly one place: this
         // call. See `compiler/comptime_builtins/capture_plan.rs`.
-        let capture_plan = self.plan_captures(&captured_vars, &mutated_captures);
+        let capture_plan = self.plan_captures(
+            &captured_vars,
+            &mutated_captures,
+            declared,
+            generated_origin,
+            closure_span,
+        )?;
 
         // Build closure parameters: only immutable captures become leading params.
         // Mutable captures are accessed via LoadClosure/StoreClosure opcodes.
@@ -3477,8 +3508,8 @@ impl BytecodeCompiler {
         // cache key. Emission is unchanged.
         // C2 Bucket-3 carrier-stamp fix: record which captures are invoked
         // as callees in this closure body so `resolve_capture_concrete_type`
-        // (used by both `mint_closure_type_id` below and the kinds-aware
-        // re-intern further down) classifies an unannotated callable capture
+        // (used by the pack + the ONE `ClosureTypeId` producer below)
+        // classifies an unannotated callable capture
         // as `ConcreteType::Function` (→ `Ptr(HeapKind::Closure)`) rather
         // than the `Pointer(Void)` → `NativeView` "unknown" sentinel. Set
         // for the duration of this closure's capture-type resolution and
@@ -3488,7 +3519,24 @@ impl BytecodeCompiler {
             Self::collect_callee_identifier_names(body),
         );
 
-        let closure_type_id = self.mint_closure_type_id(&captured_vars);
+        // ADR-009 C1 (slice 1/2/3) — the capture pack, built BEFORE the id.
+        //
+        // The pack is the model; `program.closure_function_layouts[func_idx]`
+        // is the emitted artifact built from it, and the `ClosureTypeId` below
+        // is interned from the SAME `capture_type`s and the SAME kinds. Keyed
+        // by `func_idx` — structural identity, never a source name and never a
+        // `Span` (R1/R3). Slice 2 hung the closure's PROVENANCE off it; slice 3
+        // hangs the DECLARED mode off each descriptor.
+        let func_idx = self.program.functions.len();
+        let pack = self.build_capture_pack(func_idx as u16, &capture_plan, generated_origin);
+
+        // ADR-009 C1 (slice 3): ONE `ClosureTypeId` producer, shared with
+        // `mint_closure_type_id_peek`. It reads the PACK (declared or
+        // inferred), so the id the monomorphization cache is keyed on is the id
+        // the emitted closure carries — including when a declared `move` over a
+        // read-only `let mut` makes the layout OwnedMutable where inference
+        // would have said Immutable.
+        let closure_type_id = self.intern_closure_type_id_for_pack(&pack);
 
         // Phase F: mint a FunctionTypeId for the callable signature. This is
         // the `Function<A, R>` identity — the signature omits captures and
@@ -3505,7 +3553,6 @@ impl BytecodeCompiler {
         // (int) -> int>>` relies on for polymorphic dispatch.
         let function_type_id = self.mint_function_type_id_for_params(params);
 
-        let func_idx = self.program.functions.len();
         self.program.functions.push(Function {
             name: closure_name.clone(),
             arity: closure_def.params.len() as u16,
@@ -3524,7 +3571,10 @@ impl BytecodeCompiler {
             ref_mutates,
             // ADR-009 C1: a view on the plan — "this capture is not a leading
             // immutable param".
-            mutable_captures: capture_plan.iter().map(|(_, p)| p.needs_cell()).collect(),
+            mutable_captures: capture_plan
+                .iter()
+                .map(|planned| planned.plan.needs_cell())
+                .collect(),
             frame_descriptor: None,
             osr_entry_points: Vec::new(),
             mir_data: None,
@@ -3542,24 +3592,6 @@ impl BytecodeCompiler {
         self.function_type_ids
             .push((func_idx as u16, function_type_id));
 
-        // ADR-009 C1 (slice 1) — the capture pack.
-        //
-        // This is where the second producer used to live: a `capture_kinds`
-        // vector that re-derived the binding facts and short-circuited to
-        // `Immutable` whenever `mutable_flags[i]` was false. It is gone. The
-        // kinds now come from `capture_plan` (built ONCE, above) and land in
-        // a `CapturePack` keyed by `func_idx` — structural identity, never a
-        // source name and never a `Span` (R1/R3).
-        //
-        // The pack is the model; `program.closure_function_layouts[func_idx]`
-        // is the emitted artifact built from it. `capture_plan.rs`'s
-        // model-vs-emission tests assert the two agree by reading the
-        // ARTIFACT, not this table.
-        // ADR-009 C1 (slice 2 / R3): the pack carries the closure's PROVENANCE,
-        // keyed by `func_idx` — never a `Span` (C1's rejected span-keyed side
-        // table), never a source name.
-        let pack = self.build_capture_pack(func_idx as u16, &capture_plan, generated_origin);
-
         // Record persistent witnesses for each classified capture so sibling
         // closures (whose classification runs after `compile_function` has
         // re-pointed the type tracker at the nested function's slots)
@@ -3576,30 +3608,12 @@ impl BytecodeCompiler {
         self.closure_capture_names
             .push((func_idx as u16, captured_vars.clone()));
 
-        // If any capture is cell-backed, re-intern the closure_type_id under
-        // the kinds-aware registry key so two closures with identical capture
-        // types but different capture kinds get distinct `ClosureTypeId`s.
-        // When every capture is a snapshot param, the original types-only
-        // intern already returned the canonical id — skip.
-        if capture_plan.iter().any(|(_, p)| p.kind_is_cell_backed()) {
-            let capture_types: Vec<ConcreteType> = pack
-                .descriptors
-                .iter()
-                .map(|d| d.capture_type.clone())
-                .collect();
-            let kinds_id = self
-                .closure_registry
-                .intern_with_kinds(capture_types, pack.kinds());
-            // Overwrite the last-pushed `closure_type_ids` entry for this
-            // function with the kinds-aware id. The Immutable entry
-            // produced by `mint_closure_type_id` (which ignores kinds)
-            // remains in the registry for all-immutable closures.
-            if let Some(last) = self.closure_type_ids.last_mut() {
-                debug_assert_eq!(last.0, func_idx as u16);
-                last.1 = kinds_id;
-            }
-            let _ = closure_type_id; // the kinds-aware id supersedes it.
-        }
+        // ADR-009 C1 (slice 3): the kinds-aware re-intern that used to live
+        // here is gone. `intern_closure_type_id_for_plan` (above) already keyed
+        // the id on the plan's kinds when any capture is cell-backed, and the
+        // PEEK routes through the same producer — so the id pushed into
+        // `closure_type_ids` needs no correction, and there is no window in
+        // which a types-only id is the closure's identity.
 
         // ADR-009 C1: ONE artifact. `build_closure_function_layouts` reads the
         // pack (and nothing else) to stamp the emitted `ClosureLayout`. The
@@ -4167,14 +4181,6 @@ impl BytecodeCompiler {
     /// slot that the layout treats as heap-refcounted. This keeps semantics
     /// conservative (no missed Drop glue) while Phase B/C/D grow the
     /// resolution coverage.
-    pub(crate) fn mint_closure_type_id(&mut self, captured_vars: &[String]) -> ClosureTypeId {
-        let mut capture_types: Vec<ConcreteType> = Vec::with_capacity(captured_vars.len());
-        for name in captured_vars {
-            capture_types.push(self.resolve_capture_concrete_type(name));
-        }
-        self.closure_registry.intern(capture_types)
-    }
-
     /// Resolve a captured variable's `ConcreteType` for closure-layout kind
     /// tracking (ADR-006 §2.7.8 / Q10).
     ///
@@ -4349,6 +4355,12 @@ impl BytecodeCompiler {
         &mut self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[shape_ast::ast::Statement],
+        // ADR-009 C1 (slice 3): the closure literal's DECLARED capture clause.
+        // Without it the peeked id is keyed on inferred kinds while the emitted
+        // id is keyed on declared kinds, and the two disagree exactly on the
+        // flagship case — a `move` over a read-only `let mut` inside a generic
+        // generated method.
+        declared: Option<&shape_ast::ast::CaptureClause>,
     ) -> ClosureTypeId {
         // Run the same capture analysis as `compile_expr_closure`, but only
         // for the purpose of reading capture names off of the AST.
@@ -4368,7 +4380,7 @@ impl BytecodeCompiler {
         };
 
         let outer_vars = self.collect_outer_scope_vars();
-        let (mut captured_vars, _mutated) =
+        let (mut captured_vars, mutated_captures) =
             EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
         captured_vars.sort();
         let param_names: BTreeSet<String> =
@@ -4382,7 +4394,31 @@ impl BytecodeCompiler {
             &mut self.current_closure_callee_captures,
             Self::collect_callee_identifier_names(body),
         );
-        let id = self.mint_closure_type_id(&captured_vars);
+        // ADR-009 C1 (slice 3): the SAME selector, then the SAME id producer
+        // emission uses — `peeked_id == emitted_id` by construction.
+        //
+        // The peek runs during monomorphization RESOLUTION, before any
+        // diagnostic is raised. A clause that does not validate is not a
+        // decision to make here: emission will raise the rejection with a real
+        // location. The peek only needs a stable cache key until then, so an
+        // invalid clause falls back to the inferred plan — which is never
+        // observed, because that compile is about to fail.
+        let plan = self
+            .plan_captures(
+                &captured_vars,
+                &mutated_captures,
+                declared,
+                None,
+                Span::DUMMY,
+            )
+            .or_else(|_| {
+                self.plan_captures(&captured_vars, &mutated_captures, None, None, Span::DUMMY)
+            })
+            .unwrap_or_default();
+        // `func_idx` is irrelevant to the id (the registry interns on types +
+        // kinds), and this pack is never pushed — the peek does not emit.
+        let pack = self.build_capture_pack(u16::MAX, &plan, None);
+        let id = self.intern_closure_type_id_for_pack(&pack);
         self.current_closure_callee_captures = saved_callee_captures;
         id
     }

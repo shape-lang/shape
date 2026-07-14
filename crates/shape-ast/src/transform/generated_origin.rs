@@ -181,6 +181,11 @@ impl Stamper<'_> {
                 return_type: _,
                 body,
                 generated_origin,
+                // ADR-009 C1 (slice 3): the declared capture clause is written
+                // by the generator's source text and parsed like any other
+                // closure syntax. The stamper only attaches PROVENANCE — it
+                // never authors or rewrites a declaration.
+                captures: _,
                 span: _,
             } => {
                 let index = self.next_index;

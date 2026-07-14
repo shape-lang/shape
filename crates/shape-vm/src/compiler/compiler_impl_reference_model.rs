@@ -3038,6 +3038,25 @@ impl BytecodeCompiler {
                             && pack.len() == registry_layout.capture_types.len()
                         {
                             let kinds = pack.kinds();
+                            // ADR-009 C1 (slice 3) — the ruling, enforced at the
+                            // artifact boundary: for every DECLARED capture, the
+                            // kind about to be stamped into the emitted layout
+                            // must be the kind the declared word names. This is
+                            // the live, release-active read of
+                            // `CaptureDescriptor.declared`, and it is the check
+                            // that makes "the declaration drives emission"
+                            // mechanical rather than aspirational — a second
+                            // producer overwriting the plan between
+                            // `lower_declared` and here (C1's rejection finding
+                            // (1), verbatim) fails the compile.
+                            pack.declared_kinds_agree_with_emission(&kinds).map_err(
+                                |message| shape_ast::error::ShapeError::SemanticError {
+                                    message: format!(
+                                        "internal compiler error (ADR-009 C1): {message}"
+                                    ),
+                                    location: None,
+                                },
+                            )?;
                             let mut rebuilt = ClosureLayout::from_capture_types(
                                 &registry_layout.capture_types,
                                 &kinds,

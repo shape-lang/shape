@@ -2413,6 +2413,38 @@ impl BytecodeCompiler {
                                                 node_path: node_path.clone(),
                                                 source_anchor,
                                             };
+                                            // ADR-009 C1 (slice 3) — THE
+                                            // MONOMORPHIZATION HOLE.
+                                            //
+                                            // THIS is the copy that reaches
+                                            // `function_defs`, and `function_defs`
+                                            // is what the monomorphizer
+                                            // substitutes to build a GENERIC
+                                            // generated method's specialization.
+                                            // Slice 2 stamped `apply_comptime_extend`'s
+                                            // local copy, which is enough for a
+                                            // NON-generic method (that copy is
+                                            // handed straight to `compile_function`)
+                                            // but not for a generic one:
+                                            // `compile_function` returns early on a
+                                            // template, and the specialization is
+                                            // rebuilt from the unstamped registry
+                                            // entry. The reservation here is
+                                            // `Fresh`, so `apply_comptime_extend`
+                                            // gets `Reissued` and never re-registers
+                                            // its stamped copy — the stamp was lost
+                                            // exactly on the flagship's generic
+                                            // form, and an implicit capture inside
+                                            // `extend Job { method scale<T> }`
+                                            // compiled clean.
+                                            let owner = format!(
+                                                "{extend_type_str}.{}",
+                                                method.name
+                                            );
+                                            shape_ast::transform::stamp_generated_closures(
+                                                &mut func_def.body,
+                                                &origin.to_node_origin(&owner),
+                                            );
                                             match self.generated_symbols.reserve_generated_decl(
                                                 &func_def.name,
                                                 origin,

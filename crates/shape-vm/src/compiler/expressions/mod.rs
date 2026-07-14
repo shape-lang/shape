@@ -1778,9 +1778,16 @@ impl BytecodeCompiler {
                 params,
                 body,
                 generated_origin,
+                captures,
                 span,
                 ..
-            } => self.compile_expr_closure(params, body, generated_origin.as_ref(), *span),
+            } => self.compile_expr_closure(
+                params,
+                body,
+                captures.as_ref(),
+                generated_origin.as_ref(),
+                *span,
+            ),
 
             // Conditionals
             Expr::Conditional {

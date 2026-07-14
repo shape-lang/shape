@@ -77,6 +77,9 @@ pub fn parse_statement(pair: Pair<Rule>) -> Result<Statement> {
                 body: func_def.body,
                 // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
                 generated_origin: None,
+                // ADR-009 C1 (slice 3): a nested `fn` declaration has no
+                // capture clause — the surface is closure-literal-only.
+                captures: None,
                 span,
             };
             Ok(Statement::VariableDecl(

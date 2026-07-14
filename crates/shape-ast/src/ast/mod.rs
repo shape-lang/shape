@@ -4,6 +4,7 @@
 //! supporting all features from the language specification.
 
 // Declare submodules
+pub mod captures;
 pub mod data_refs;
 pub mod data_sources;
 pub mod docs;
@@ -35,6 +36,9 @@ pub use span::{Span, Spanned};
 
 // From provenance.rs (ADR-009 D2 / C1 slice 2)
 pub use provenance::GeneratedNodeOrigin;
+
+// From captures.rs (ADR-009 C1 slice 3) — the declared capture clause.
+pub use captures::{CaptureClause, CaptureEntry, CaptureMode};
 
 // From literals.rs
 pub use literals::{Duration, DurationUnit, InterpolationMode, Literal};

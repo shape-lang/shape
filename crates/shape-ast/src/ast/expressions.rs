@@ -175,6 +175,20 @@ pub enum Expr {
         /// `transform::generated_origin` tests).
         #[serde(default)]
         generated_origin: Option<super::provenance::GeneratedNodeOrigin>,
+        /// ADR-009 C1 (slice 3): the DECLARED capture clause —
+        /// `|acc, item; move cfg, share total| …`.
+        ///
+        /// THE canonical carrier (one carrier, two producers): producer #1 is
+        /// the parser; producer #2 will be C2's `CheckedBody` staging, which
+        /// populates this same field. `Some(clause)` DRIVES capture emission —
+        /// inference then only validates and errors on a mismatch. `None` means
+        /// "infer" (ordinary source) or, inside generated code with a non-empty
+        /// capture set, the Wave-46 implicit-capture rejection.
+        ///
+        /// A clause on an ORDINARY SOURCE closure is `[C0903]`: the surface is
+        /// generated-code-only.
+        #[serde(default)]
+        captures: Option<super::captures::CaptureClause>,
         span: Span,
     },
     /// Duration literal: 30d, 1h, 15m

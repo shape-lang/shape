@@ -1376,3 +1376,157 @@ fn test_top_level_union_and_bitwise_or_still_parse() {
     parse_items("type Mixed = A | B;").expect("top-level union type should parse");
     parse_items("let x = a | b;").expect("bitwise-or should parse");
 }
+
+// =========================================================================
+// ADR-009 C1 (slice 3) — the DECLARED CAPTURE CLAUSE.
+//
+// `|acc, item; move cfg, share total| ...` — a `;`-introduced tail inside the
+// parameter pipe. The clause is a GENERATED-CODE-ONLY surface: the grammar
+// accepts it wherever a closure is legal and the compiler rejects it in
+// ordinary source ([C0903]). Grammar cannot see the difference — generated
+// closures come out of this same parser — so the rejection is a named
+// diagnostic, not a syntactic impossibility.
+// =========================================================================
+
+/// Pull the sole closure's clause out of a program. Walks the parsed AST with
+/// serde rather than a hand-written matcher, so the test cannot go stale when
+/// the statement/item shape around the closure changes.
+fn sole_capture_clause(input: &str) -> Option<crate::ast::CaptureClause> {
+    let program = crate::parse_program(input).expect("fixture parses");
+    let json = serde_json::to_value(&program).expect("AST serializes");
+    fn find(v: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                if let Some(fe) = map.get("FunctionExpr") {
+                    if let Some(captures) = fe.get("captures") {
+                        out.push(captures.clone());
+                    }
+                }
+                for value in map.values() {
+                    find(value, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    find(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    find(&json, &mut found);
+    assert_eq!(found.len(), 1, "fixture must contain exactly one closure");
+    serde_json::from_value(found.remove(0)).expect("the carrier round-trips")
+}
+
+/// Does the pipe-lambda GRAMMAR accept this closure literal? Asserted at the
+/// pest rule directly: `parse_program`'s statement-level error recovery
+/// (`stmt_recovery`) swallows a malformed statement, so a program-level
+/// `is_err()` would be a vacuous test.
+fn pipe_lambda_parses(literal: &str) -> bool {
+    ShapeParser::parse(Rule::pipe_lambda, literal)
+        .map(|mut pairs| {
+            // The rule must consume the WHOLE literal — a partial match that
+            // stops at the offending token is not an accept.
+            pairs.next().is_some_and(|p| p.as_str() == literal)
+        })
+        .unwrap_or(false)
+}
+
+#[test]
+fn capture_clause_parses_move_and_share() {
+    let clause = sole_capture_clause(r#"let f = |acc, item; move cfg, share total| acc + item"#)
+        .expect("the clause is carried on the FunctionExpr");
+    assert_eq!(clause.len(), 2);
+    assert_eq!(clause.entries[0].mode, crate::ast::CaptureMode::Move);
+    assert_eq!(clause.entries[0].name, "cfg");
+    assert_eq!(clause.entries[1].mode, crate::ast::CaptureMode::Share);
+    assert_eq!(clause.entries[1].name, "total");
+}
+
+#[test]
+fn capture_clause_parses_with_no_params() {
+    let clause = sole_capture_clause(r#"let f = |; move handle| handle"#).expect("clause");
+    assert_eq!(clause.len(), 1);
+    assert_eq!(clause.entries[0].mode, crate::ast::CaptureMode::Move);
+    assert_eq!(clause.entries[0].name, "handle");
+}
+
+/// An EMPTY clause is meaningful: it DECLARES that the closure captures
+/// nothing. It is not the same as no clause at all (which means "infer", or —
+/// in generated code with captures — the Wave-46 rejection).
+#[test]
+fn empty_capture_clause_is_some_not_none() {
+    let clause = sole_capture_clause(r#"let f = |x;| x"#).expect("an empty clause still parses");
+    assert!(clause.is_empty());
+}
+
+#[test]
+fn no_clause_leaves_the_carrier_none() {
+    assert!(
+        sole_capture_clause(r#"let f = |x| x + 1"#).is_none(),
+        "a closure with no clause carries None — the compiler then infers"
+    );
+}
+
+/// The BORROW spellings parse. They never lower — the compiler rejects them
+/// with `[C0902] ReferenceEscapeIntoClosure` — but they are spellable so that
+/// the diagnostic can be a sentence about regions rather than a syntax error.
+#[test]
+fn capture_clause_parses_borrow_spellings() {
+    let clause = sole_capture_clause(r#"let f = |x; &a, &mut b| x"#).expect("clause");
+    assert_eq!(clause.entries[0].mode, crate::ast::CaptureMode::SharedBorrow);
+    assert_eq!(clause.entries[0].name, "a");
+    assert_eq!(
+        clause.entries[1].mode,
+        crate::ast::CaptureMode::ExclusiveBorrow
+    );
+    assert_eq!(clause.entries[1].name, "b");
+}
+
+/// THE STRING FORM IS UNSPELLABLE. `capture_entry = capture_mode ~ ident` — a
+/// capture is a binding REFERENCE, never a string. `scope.capture("x")` was the
+/// shape the design explicitly refused; the grammar makes it a parse error
+/// rather than a lint that could be relaxed later.
+#[test]
+fn string_form_capture_does_not_parse() {
+    assert!(
+        pipe_lambda_parses(r#"|x; move cfg| x"#),
+        "control: the identifier form DOES parse"
+    );
+    assert!(
+        !pipe_lambda_parses(r#"|x; move "cfg"| x"#),
+        "a string capture must not parse"
+    );
+    assert!(
+        !pipe_lambda_parses(r#"|x; capture("cfg")| x"#),
+        "the `capture(\"...\")` string form must not parse"
+    );
+}
+
+/// A mode is mandatory — a bare name in the clause does not parse, so a
+/// declaration can never be silently mode-less.
+#[test]
+fn capture_entry_without_a_mode_does_not_parse() {
+    assert!(!pipe_lambda_parses(r#"|x; cfg| x"#));
+}
+
+/// `share` — the word this ticket ADDS — is contextual, not reserved: it stays
+/// usable as an ordinary identifier everywhere outside a capture clause. Adding
+/// a reserved word for this surface would be a far larger language change than
+/// the feature warrants.
+///
+/// (`move` is NOT tested here: it was already a Shape keyword before this ticket
+/// — `ownership_modifier` at `shape.pest:818`, the `let move x = …` form — so
+/// `let move = 1` does not parse on main either. `capture_move_keyword` reuses
+/// the existing word rather than introducing a second one.)
+#[test]
+fn share_is_not_a_reserved_word() {
+    crate::parse_program(
+        r#"let share = 2
+let doubled = share + share
+"#,
+    )
+    .expect("`share` stays an ordinary identifier outside a capture clause");
+}

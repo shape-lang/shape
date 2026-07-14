@@ -994,8 +994,13 @@ pub fn resolve_call_site_type_args_with_closures(
     for (i, arg_expr) in args.iter().enumerate() {
         // Only closures contribute a ClosureSpec — everything else is already
         // represented in `type_args`.
-        let (cparams, cbody) = match arg_expr {
-            Expr::FunctionExpr { params, body, .. } => (params, body),
+        let (cparams, cbody, cdeclared) = match arg_expr {
+            Expr::FunctionExpr {
+                params,
+                body,
+                captures,
+                ..
+            } => (params, body, captures.as_ref()),
             _ => continue,
         };
 
@@ -1020,7 +1025,7 @@ pub fn resolve_call_site_type_args_with_closures(
         // Mint a ClosureTypeId for the literal. Uses the captures-only
         // signature (Phase A semantics) so two structurally identical closure
         // literals with identical captures share one id.
-        let closure_type_id = compiler.mint_closure_type_id_peek(cparams, cbody);
+        let closure_type_id = compiler.mint_closure_type_id_peek(cparams, cbody, cdeclared);
         // Phase C §3.4 — structural CSE. The body hash distinguishes two
         // closures with identical capture signatures (and hence identical
         // ClosureTypeIds) but different bodies. Without this, `|x| x + 1`
