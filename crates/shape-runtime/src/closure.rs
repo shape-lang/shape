@@ -6,6 +6,9 @@ use std::sync::Arc;
 use shape_ast::ast::{FunctionDef, VarKind};
 use shape_value::KindedSlot;
 
+mod capture_analysis;
+pub use capture_analysis::{CaptureAnalysis, callable_binding_span};
+
 /// A closure captures a function definition along with its environment
 #[derive(Debug, Clone)]
 pub struct Closure {
@@ -147,6 +150,10 @@ pub struct EnvironmentAnalyzer {
     captured_vars: HashMap<String, usize>, // usize is the scope level where var is defined
     /// Captured variables that are assigned to (mutated) inside the closure
     mutated_captures: HashSet<String>,
+    /// Exact AST use sites for captured variables. Populated by the same
+    /// lexical resolution that populates `captured_vars`; consumers never
+    /// rediscover these sites by spelling or source-text scans.
+    captured_use_spans: HashMap<String, Vec<shape_ast::ast::Span>>,
     /// The scope level at which the current function was entered.
     /// Variables defined at or above this level are local to the function
     /// and should NOT be captured. Only variables below this level (in the
@@ -160,6 +167,7 @@ impl Default for EnvironmentAnalyzer {
             scope_stack: vec![HashMap::new()],
             captured_vars: HashMap::new(),
             mutated_captures: HashSet::new(),
+            captured_use_spans: HashMap::new(),
             function_scope_level: 1,
         }
     }
@@ -171,6 +179,7 @@ impl EnvironmentAnalyzer {
             scope_stack: vec![HashMap::new()], // Start with root scope
             captured_vars: HashMap::new(),
             mutated_captures: HashSet::new(),
+            captured_use_spans: HashMap::new(),
             function_scope_level: 1, // Default: function scope is level 1 (after outer scope at 0)
         }
     }
@@ -198,17 +207,7 @@ impl EnvironmentAnalyzer {
     /// need capturing. Variables in the same function but in an outer block scope
     /// (e.g., defined before an if/while/for block) are just local variables.
     pub fn check_variable_reference(&mut self, name: &str) {
-        // Search from current scope upwards
-        for (level, scope) in self.scope_stack.iter().enumerate().rev() {
-            if scope.contains_key(name) {
-                // Variable is defined at this scope level.
-                // Only capture if it's from outside the function boundary.
-                if level < self.function_scope_level {
-                    self.captured_vars.insert(name.to_string(), level);
-                }
-                return;
-            }
-        }
+        self.check_variable_reference_at(name, None);
     }
 
     /// Mark a captured variable as mutated (assigned to inside the closure).
@@ -237,32 +236,9 @@ impl EnvironmentAnalyzer {
 
     /// Analyze a function to determine which variables it captures
     pub fn analyze_function(function: &FunctionDef, outer_scope_vars: &[String]) -> Vec<String> {
-        let mut analyzer = Self::new();
-
-        // Add outer scope variables (scope level 0)
-        for var in outer_scope_vars {
-            analyzer.define_variable(var);
-        }
-
-        // Enter function scope (scope level 1)
-        analyzer.enter_scope();
-        // Mark this as the function boundary — variables at this level or deeper
-        // are local to the function and should NOT be captured
-        analyzer.function_scope_level = analyzer.scope_stack.len() - 1;
-
-        // Add function parameters to the scope
-        for param in &function.params {
-            for name in param.get_identifiers() {
-                analyzer.define_variable(&name);
-            }
-        }
-
-        // Analyze function body
-        for stmt in &function.body {
-            analyzer.analyze_statement(stmt);
-        }
-
-        analyzer.get_captured_vars()
+        Self::analyze_function_captures(function, outer_scope_vars)
+            .captured_vars()
+            .to_vec()
     }
 
     /// Analyze a function to determine which variables it captures and which are mutated.
@@ -271,33 +247,7 @@ impl EnvironmentAnalyzer {
         function: &FunctionDef,
         outer_scope_vars: &[String],
     ) -> (Vec<String>, HashSet<String>) {
-        let mut analyzer = Self::new();
-
-        // Add outer scope variables (scope level 0)
-        for var in outer_scope_vars {
-            analyzer.define_variable(var);
-        }
-
-        // Enter function scope (scope level 1)
-        analyzer.enter_scope();
-        analyzer.function_scope_level = analyzer.scope_stack.len() - 1;
-
-        // Add function parameters to the scope
-        for param in &function.params {
-            for name in param.get_identifiers() {
-                analyzer.define_variable(&name);
-            }
-        }
-
-        // Analyze function body
-        for stmt in &function.body {
-            analyzer.analyze_statement(stmt);
-        }
-
-        (
-            analyzer.get_captured_vars(),
-            analyzer.get_mutated_captures(),
-        )
+        Self::analyze_function_captures(function, outer_scope_vars).into_legacy_parts()
     }
 
     /// Analyze a statement for variable references and definitions
@@ -330,16 +280,11 @@ impl EnvironmentAnalyzer {
             }
             Statement::Assignment(assign, _) => {
                 self.analyze_expr(&assign.value);
-                if let Some(name) = assign.pattern.as_identifier() {
+                for (name, span) in assign.pattern.get_bindings() {
                     // Assignment to a captured variable — mark it as mutated
-                    self.mark_capture_mutated(name);
-                    self.check_variable_reference(name);
-                } else {
-                    // Check all variables referenced by the pattern
-                    for name in assign.pattern.get_identifiers() {
-                        self.mark_capture_mutated(&name);
-                        self.check_variable_reference(&name);
-                    }
+                    // and retain the exact pattern-binder use site.
+                    self.mark_capture_mutated(&name);
+                    self.check_variable_reference_at(&name, Some(span));
                 }
             }
             Statement::If(if_stmt, _) => {
@@ -446,8 +391,8 @@ impl EnvironmentAnalyzer {
         use shape_ast::ast::Expr;
 
         match expr {
-            Expr::Identifier(name, _) => {
-                self.check_variable_reference(name);
+            Expr::Identifier(name, span) => {
+                self.check_variable_reference_at(name, Some(*span));
             }
             Expr::Literal(..)
             | Expr::DataRef(..)
@@ -478,18 +423,29 @@ impl EnvironmentAnalyzer {
             Expr::UnaryOp { operand, .. } => {
                 self.analyze_expr(operand);
             }
-            Expr::FunctionCall { name, args, .. } => {
+            Expr::FunctionCall {
+                name, args, span, ..
+            } => {
                 // The function name might be a captured variable (e.g., a function
                 // parameter holding a callable value like in `fn compose(f, g) { |x| f(g(x)) }`).
-                self.check_variable_reference(name);
+                self.check_variable_reference_at(
+                    name,
+                    capture_analysis::callable_binding_span(name, *span),
+                );
                 for arg in args {
                     self.analyze_expr(arg);
                 }
             }
             Expr::QualifiedFunctionCall {
-                namespace, args, ..
+                namespace,
+                args,
+                span,
+                ..
             } => {
-                self.check_variable_reference(namespace);
+                self.check_variable_reference_at(
+                    namespace,
+                    capture_analysis::callable_binding_span(namespace, *span),
+                );
                 for arg in args {
                     self.analyze_expr(arg);
                 }
@@ -597,14 +553,9 @@ impl EnvironmentAnalyzer {
                         }
                         shape_ast::ast::BlockItem::Assignment(assign) => {
                             self.analyze_expr(&assign.value);
-                            if let Some(name) = assign.pattern.as_identifier() {
-                                self.mark_capture_mutated(name);
-                                self.check_variable_reference(name);
-                            } else {
-                                for name in assign.pattern.get_identifiers() {
-                                    self.mark_capture_mutated(&name);
-                                    self.check_variable_reference(&name);
-                                }
+                            for (name, span) in assign.pattern.get_bindings() {
+                                self.mark_capture_mutated(&name);
+                                self.check_variable_reference_at(&name, Some(span));
                             }
                         }
                         shape_ast::ast::BlockItem::Statement(stmt) => {
@@ -627,8 +578,20 @@ impl EnvironmentAnalyzer {
                 params,
                 return_type: _,
                 body,
+                captures,
                 ..
             } => {
+                // An explicit nested capture declaration is the outer
+                // function's structural use of that binding. Body references
+                // belong to the nested function's descriptor and must not be
+                // attributed to both capture layers.
+                if let Some(clause) = captures {
+                    for entry in &clause.entries {
+                        self.check_variable_reference_at(&entry.name, Some(entry.span));
+                    }
+                }
+                let outer_use_spans = self.captured_use_spans.clone();
+
                 // Enter nested function scope — save/restore function boundary
                 let saved_function_scope_level = self.function_scope_level;
                 self.enter_scope();
@@ -654,6 +617,9 @@ impl EnvironmentAnalyzer {
                     .retain(|_, level| *level < saved_function_scope_level);
                 self.mutated_captures
                     .retain(|name| self.captured_vars.contains_key(name));
+                self.captured_use_spans
+                    .retain(|name, _| self.captured_vars.contains_key(name));
+                self.captured_use_spans = outer_use_spans;
             }
             Expr::Duration(..) => {
                 // Duration literals have no variables to analyze
