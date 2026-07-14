@@ -1,6 +1,6 @@
 # v2 Closure Specialization: Zero-Cost Closures via Per-Closure Monomorphization
 
-**Status**: LANDED (§14 H6 at 100%) — §14.7 residual producers tracked for V3.
+**Status**: LANDED at the BYTECODE/MIR tier (§14 H6 at 100%) — §14.7 residual producers tracked for V3. The **Cranelift/native tier is PARTIAL**: see "Native-JIT reachability" below before trusting the 100% figure.
 **Prerequisite**: `docs/v2-monomorphization-design.md` Phase 1 (ConcreteType) and Phase 2.1 (type-only monomorphization)
 **Composes with**: `docs/enhanced-escape-analysis-v2.md` Phases 5.A–C (interprocedural ownership, landed)
 **Goal**: Closures compile to zero-atomic-op, zero-heap-allocation hot paths when they do not escape their defining scope. Escaping closures fall back to a uniform heap-allocated `TypedClosure<ClosureTypeId>` representation — no `Arc<dyn Fn>`, no NaN-boxing, no type erasure.
@@ -11,6 +11,35 @@
 **Alignment: 100% (landed; §14.7 residual `HeapValue::Closure` producers deferred to V3)**
 
 Closure specialization is live. §14 H6 verification reached 100% in the course of V1–V6 work: non-escaping closures go through the typed stack-allocated path; escaping closures use `TypedClosure<ClosureTypeId>` with typed capture slots; no `Arc<dyn Fn>` and no NaN-boxing sit on the call path.
+
+## Native-JIT reachability (added 2026-07-14, lane `jit/closure-capture-lowering`)
+
+The "100%" above was measured at the **bytecode/MIR** tier and does NOT mean a
+capturing closure reached **native Cranelift code**. Until 2026-07-14 it did
+not: *no capturing closure of any kind reached native JIT*. shape-jit declared
+closure bodies with `captures_count + arity` native params, but the bytecode
+compiler already folds the captures INTO `Function.arity` (closure params are
+`captures ++ user_params`), so the captures were counted twice. The call site
+pushed the correct `1 + arity` values, Cranelift's verifier rejected the
+ENCLOSING function, that function was demoted, and — because `main` still held
+a relocation to it — the WHOLE PROGRAM deopted to the interpreter. Every such
+program still printed the right answer, which is why this stayed invisible: it
+was a silent performance cliff, not a wrong result.
+
+Current, **measured** native-JIT reachability per capture lowering
+(`tests/smokes-jit-closure/` + `bin/shape-cli/tests/cli/jit_closure_capture_native.rs`,
+each asserted on exit code + stdout equality + **zero** `[jit-fallback]` lines):
+
+| Capture lowering | Native JIT? |
+|---|---|
+| Immutable capture of a local scalar (`let x = 41`) | YES (fixed 2026-07-14) |
+| Immutable capture of a local heap value (`string`, `Array<int>`) | YES (fixed 2026-07-14) |
+| OwnedMutable capture (`let mut n`, mutated in the closure) | YES (was already native) |
+| **Shared capture** (`var n`, mutated in the closure) | **NO — process ABORT.** `jit_alloc_shared_cell` (`crates/shape-jit/src/ffi/object/closure.rs`) is a `todo!()`: the FFI carries no `NativeKind` companion for the cell, and ADR-006 §2.7.8 forbids defaulting it. Because the fn is `extern "C"` (nounwind) the refusal surfaces as SIGABRT rather than a clean deopt. |
+| **Capture of a module-level binding** | **NO — whole-program deopt.** Rejected by the W39 F1 module-binding function-body SURFACE: module bindings are not MIR places, so the JIT body lowering has no compile-time side table for that storage. This is the class pinned by `tests/smokes-fallback/f1`–`f3`. |
+
+Do not re-assert "closure specialization is 100% landed" without qualifying the
+tier. The two NO rows above are the honest remaining gaps.
 
 **V3-deferred residual** (per §14.7 and `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope):
 
