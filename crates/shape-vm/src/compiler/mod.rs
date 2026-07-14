@@ -65,7 +65,8 @@ pub(crate) mod comptime_builtins;
 // and to list them for workspace symbols. Consumed via
 // `BytecodeCompiler::generated_symbol_query()`.
 pub use comptime_builtins::expansion_provenance::{
-    GeneratedNodePath, GeneratedSymbolProvenance, GeneratedSymbolTable, SourceAnchor, SymbolId,
+    GeneratedNodePath, GeneratedSymbolProvenance, GeneratedSymbolTable, HygienicRole,
+    HygienicSymbol, SourceAnchor, SymbolId,
 };
 pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_diagnostics;
@@ -87,6 +88,7 @@ mod module_local_expr_calls;
 mod module_local_expr_helpers;
 mod module_local_expr_scopes;
 pub(crate) mod monomorphization;
+mod original_body_rewrite;
 pub(crate) mod patterns;
 pub(crate) mod post_inference_verify;
 mod statements;
@@ -664,6 +666,14 @@ pub struct BytecodeCompiler {
 
     /// Local variable mappings (name -> index)
     pub(crate) locals: Vec<HashMap<String, u16>>,
+
+    /// ADR-009 E3 (S1, U10): monotonic nonce feeding the hygienic-symbol mint
+    /// for generated locals (`declare_hygienic_local`). Each mint is
+    /// globally distinct within a compilation unit, so two applications of one
+    /// annotation mint distinct non-forgeable tokens. Never a schema identity
+    /// — it only disambiguates a `HygienicSymbol`, which is what keys the
+    /// scope name table (via its unspellable descriptor), not the nonce.
+    pub(crate) hygienic_local_nonce: u64,
 
     /// ModuleBinding variable mappings (name -> index)
     pub(crate) module_bindings: HashMap<String, u16>,
@@ -1699,11 +1709,6 @@ pub struct BytecodeCompiler {
     /// When set, compiled blobs are stored after finalization and looked up
     /// by content hash to avoid redundant work across compilations.
     pub(crate) blob_cache: Option<BlobCache>,
-
-    /// Temporary function name aliases for comptime replace body.
-    /// Maps alias (e.g., `__original__`) to actual function name (e.g., `__original__myFunc`).
-    /// Set before compiling a replacement body and cleared after.
-    pub(crate) function_aliases: HashMap<String, String>,
 
     /// Parameters of the function currently being compiled.
     /// Used by match exhaustiveness checking to fall back to type annotations

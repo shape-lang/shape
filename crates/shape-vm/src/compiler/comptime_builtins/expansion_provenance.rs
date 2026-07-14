@@ -350,6 +350,173 @@ impl SymbolId {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// ADR-009 ticket E3 (slice S1, legacy class U10) — hygienic generated LOCALS.
+//
+// The compiler formerly named its generated locals / parameters / module
+// bindings with synthetic, user-GUESSABLE spellings (`argN`, `__ann_args`,
+// `__target_arg__`, …). A user local/argument spelled identically captured or
+// shadowed the generated slot. Per Decision 68 + the E3 rejection matrix, a
+// generated symbol's ROLE is bound by the compiler-issued token, never by a
+// spelling: [`HygienicSymbol`] is the token, and its [`HygienicSymbol::
+// unspellable_descriptor`] rendering (SOH-prefixed, the established reserved-
+// name convention — `trait_evidence.rs`) can never be spelled in a Shape
+// identifier, so a user reference to the former spelling resolves to a
+// DIFFERENT string (unresolved), never the generated slot.
+// ─────────────────────────────────────────────────────────────────────────
+
+const HYGIENIC_SYMBOL_DOMAIN: &str = "adr009:u10:hygienic-symbol";
+
+/// The ROLE a hygienic generated local / parameter / module binding plays,
+/// bound by POSITION/TYPE — never by a user-guessable spelling. Each variant
+/// replaces one former synthetic spelling; the discriminant (plus the
+/// forwarder-param index) is the ONLY input to the identity besides the
+/// compiler-issued nonce, so roles can never be confused and the same role in
+/// two applications is disambiguated by the nonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HygienicRole {
+    /// A comptime builtin-forwarder positional parameter (former `arg{N}`),
+    /// disambiguated by its index so a forwarder's params never collide.
+    ComptimeForwarderParam(u32),
+    /// The comptime handler's target module binding (former `__target_arg__`).
+    ComptimeTargetBinding,
+    /// The comptime handler's compile-context module binding (former
+    /// `__ctx_arg__`).
+    ComptimeCtxBinding,
+    /// The annotation before/after args local (former `__ann_args`).
+    AnnotationArgs,
+    /// The annotation before/after ctx local (former `__ann_ctx`).
+    AnnotationCtx,
+    /// The annotation-on-await subject local (former `__ann_subject`).
+    AnnotationSubject,
+    /// The annotation before/after result local (former `__ann_result`).
+    AnnotationResult,
+    /// The annotation before-handler result local (former
+    /// `__ann_before_result`).
+    AnnotationBeforeResult,
+    // ── slice S2 (U10) — hygienic generated FUNCTION / HANDLER / WRAPPER
+    // registry names. Each variant replaces one former synthetic function
+    // spelling that entered a function table by name; the wrapper's ROLE is
+    // now bound by the compiler-issued token, and its unspellable rendering
+    // keeps a user function of the former spelling from colliding with — or
+    // being resolved to — the generated wrapper.
+    /// The `comptime { }` mini-program entry wrapper (former
+    /// `__comptime_block__`). Program-isolated: minted once per mini-program.
+    ComptimeBlockWrapper,
+    /// The annotation-`comptime`-handler mini-program entry wrapper (former
+    /// `__comptime_handler_fn__`). Program-isolated: minted once per
+    /// mini-program.
+    ComptimeHandlerWrapper,
+    /// A specialized annotation before/after runtime handler registered in the
+    /// outer function table (former `__ann_{name}_{before|after}_wrapper_{n}`).
+    /// Disambiguated by the compiler nonce so before/after and every
+    /// application register distinct slots (a name collision would make
+    /// `find_function` return the wrong index).
+    SpecializedAnnotationHandler,
+    /// The foreign-function annotation wrapper slot name (former
+    /// `{name}___ann_wrapper`). Cosmetic slot label — referenced by index —
+    /// but must not be a user-spellable function name.
+    ForeignAnnotationWrapper,
+    // ── slice S3 (U11) — hygienic generated FUNCTION identity for the
+    // pre-annotation body a `replace body` directive shadows. Replaces the
+    // deleted `__original__{fn}` shadow spelling + the
+    // `function_aliases["__original__"]` name-encoded alias: the shadow's
+    // registry name is now the compiler-issued unspellable token, reachable
+    // ONLY through the typed `ctx.original` capability. The nonce is derived
+    // from the target function's name so re-registration is idempotent (one
+    // shadow per annotated function, `register_function` dedups by name).
+    /// The `replace body` pre-annotation body shadow (former `__original__{fn}`).
+    OriginalBodyShadow,
+    // ── slice S4 (U11) — hygienic generated FUNCTION identities for the
+    // before/after runtime-hook wrapper CHAIN. Each replaces one former
+    // user-spellable `{name}___…` chain name that entered the function table by
+    // a guessable spelling; the wrapper's ROLE is now bound by the
+    // compiler-issued token, and its unspellable rendering keeps a user
+    // function of the former spelling (`compute___impl`, `compute___b`) from
+    // colliding with — or being resolved to — the generated wrapper. The nonce
+    // is a stable digest of the annotated function's name (+ the annotation
+    // name for the intermediate wrapper) so re-registration is idempotent.
+    /// The before/after wrapped original body (former `{name}___impl`).
+    AnnotationHookImplBody,
+    /// An intermediate before/after chain wrapper (former `{name}___{annotation}`).
+    AnnotationHookWrapper,
+}
+
+impl HygienicRole {
+    /// Canonical descriptor digested into the hygienic identity — a stable
+    /// role tag, never rendered source text.
+    fn canonical_descriptor(&self) -> String {
+        match self {
+            Self::ComptimeForwarderParam(index) => {
+                format!("role:comptime-forwarder-param:{index}")
+            }
+            Self::ComptimeTargetBinding => "role:comptime-target-binding".to_string(),
+            Self::ComptimeCtxBinding => "role:comptime-ctx-binding".to_string(),
+            Self::AnnotationArgs => "role:annotation-args".to_string(),
+            Self::AnnotationCtx => "role:annotation-ctx".to_string(),
+            Self::AnnotationSubject => "role:annotation-subject".to_string(),
+            Self::AnnotationResult => "role:annotation-result".to_string(),
+            Self::AnnotationBeforeResult => "role:annotation-before-result".to_string(),
+            Self::ComptimeBlockWrapper => "role:comptime-block-wrapper".to_string(),
+            Self::ComptimeHandlerWrapper => "role:comptime-handler-wrapper".to_string(),
+            Self::SpecializedAnnotationHandler => {
+                "role:specialized-annotation-handler".to_string()
+            }
+            Self::ForeignAnnotationWrapper => "role:foreign-annotation-wrapper".to_string(),
+            Self::OriginalBodyShadow => "role:original-body-shadow".to_string(),
+            Self::AnnotationHookImplBody => "role:annotation-hook-impl-body".to_string(),
+            Self::AnnotationHookWrapper => "role:annotation-hook-wrapper".to_string(),
+        }
+    }
+}
+
+/// Opaque compiler-issued identity of one generated local / parameter /
+/// module binding (U10). Content-derived: 128 bits of SHA-256 over the role
+/// descriptor plus the compiler-issued nonce — never a raw name string and
+/// never a counter that participates in schema identity (the nonce
+/// disambiguates within one compilation only, and never enters a symbol-table
+/// key on its own; the identity does). The fields are private to this module
+/// (the ProofGap pattern): emit code cannot fabricate a `HygienicSymbol`
+/// without going through [`Self::mint`], which requires a role and a nonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HygienicSymbol {
+    high: i64,
+    low: i64,
+}
+
+impl HygienicSymbol {
+    /// Mint a fresh hygienic identity for `role`, disambiguated by the
+    /// compiler-issued `nonce`. Two mints with the SAME role+nonce agree (a
+    /// parameter declaration and its reference within one generated wrapper);
+    /// two mints with DIFFERENT nonces are distinct (two applications of one
+    /// annotation mint distinct tokens).
+    pub(crate) fn mint(role: HygienicRole, nonce: u64) -> Self {
+        let nonce_descriptor = nonce.to_string();
+        let hash = CanonicalHash::over_framed(
+            HYGIENIC_SYMBOL_DOMAIN,
+            [role.canonical_descriptor().as_str(), nonce_descriptor.as_str()],
+        );
+        Self {
+            high: hash.high,
+            low: hash.low,
+        }
+    }
+
+    /// The UNSPELLABLE rendering used where a hygienic identity must flow
+    /// through a by-name resolver — the comptime mini-program's parameter
+    /// names / module bindings, and the scope name-table key of a hygienic
+    /// local. SOH-prefixed (`\u{1}`), matching the established reserved-name
+    /// convention (`trait_evidence.rs`), so it can never be spelled in a
+    /// Shape identifier: a user reference to the former spelling
+    /// (`__target_arg__`) is a DIFFERENT, resolvable-to-nothing string.
+    pub(crate) fn unspellable_descriptor(&self) -> String {
+        format!(
+            "\u{1}hygienic:{:016x}{:016x}",
+            self.high as u64, self.low as u64
+        )
+    }
+}
+
 /// Structured path from a generated declaration's root to one generated
 /// node. Non-empty by construction: a path always starts at a declaration
 /// root segment.
@@ -1192,6 +1359,102 @@ mod tests {
             err.contains("type:app.main:Point") && err.contains("type:app.main:Vec2"),
             "row-2 error must carry BOTH expansions' provenance: {err}"
         );
+    }
+
+    // U10 (slice S1): the hygienic-symbol mint is deterministic for one
+    // role+nonce, distinct across nonces (two applications of one annotation
+    // mint distinct tokens), distinct across roles, and renders an
+    // UNSPELLABLE descriptor (SOH-prefixed) that can never be an ordinary
+    // Shape identifier — so a user reference to the former synthetic spelling
+    // resolves to a DIFFERENT string, never the generated slot.
+    #[test]
+    fn hygienic_symbol_mint_is_deterministic_distinct_and_unspellable() {
+        // Determinism: same role + same nonce agree (a parameter declaration
+        // and its reference within one generated wrapper must render equal).
+        let a = HygienicSymbol::mint(HygienicRole::AnnotationArgs, 7);
+        let b = HygienicSymbol::mint(HygienicRole::AnnotationArgs, 7);
+        assert_eq!(a, b, "same role+nonce mints one identity");
+        assert_eq!(a.unspellable_descriptor(), b.unspellable_descriptor());
+
+        // Distinct across nonces: two applications of one annotation.
+        let c = HygienicSymbol::mint(HygienicRole::AnnotationArgs, 8);
+        assert_ne!(a, c, "distinct nonces mint distinct tokens");
+        assert_ne!(a.unspellable_descriptor(), c.unspellable_descriptor());
+
+        // Distinct across roles at one nonce (role bound by position/type).
+        let ctx = HygienicSymbol::mint(HygienicRole::AnnotationCtx, 7);
+        assert_ne!(a, ctx, "distinct roles mint distinct tokens");
+
+        // Distinct across forwarder-param indices.
+        let p0 = HygienicSymbol::mint(HygienicRole::ComptimeForwarderParam(0), 0);
+        let p1 = HygienicSymbol::mint(HygienicRole::ComptimeForwarderParam(1), 0);
+        assert_ne!(p0, p1, "forwarder params are indexed distinctly");
+
+        // Unspellable: the SOH (\u{1}) prefix is rejected by the identifier
+        // grammar, so the descriptor is not a user-addressable spelling. The
+        // former synthetic spelling is a plain identifier and can never equal
+        // this rendering.
+        let desc = a.unspellable_descriptor();
+        assert!(desc.starts_with('\u{1}'), "descriptor must be SOH-prefixed: {desc:?}");
+        assert_ne!(desc, "__ann_args", "unspellable descriptor never equals the former spelling");
+        assert!(
+            !desc.chars().next().unwrap().is_alphabetic(),
+            "descriptor cannot start like a Shape identifier"
+        );
+    }
+
+    // U10 (slice S2): the four hygienic FUNCTION / HANDLER / WRAPPER roles
+    // mint distinct, unspellable identities. Each replaces one former
+    // synthetic function spelling that entered a function table by name; the
+    // unspellable rendering guarantees a user function of the former spelling
+    // can neither collide with nor be resolved to the generated wrapper.
+    #[test]
+    fn hygienic_function_roles_mint_distinct_unspellable_identities() {
+        let block = HygienicSymbol::mint(HygienicRole::ComptimeBlockWrapper, 0);
+        let handler = HygienicSymbol::mint(HygienicRole::ComptimeHandlerWrapper, 0);
+        let specialized = HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 0);
+        let foreign = HygienicSymbol::mint(HygienicRole::ForeignAnnotationWrapper, 0);
+
+        // The four roles are pairwise distinct at one nonce (role bound by
+        // position/type, not spelling).
+        let ids = [block, handler, specialized, foreign];
+        for (i, a) in ids.iter().enumerate() {
+            for b in ids.iter().skip(i + 1) {
+                assert_ne!(a, b, "distinct function roles mint distinct tokens");
+            }
+        }
+
+        // Program-isolated wrappers mint deterministically at a fixed nonce
+        // (one wrapper per mini-program; reproducible output).
+        assert_eq!(
+            block,
+            HygienicSymbol::mint(HygienicRole::ComptimeBlockWrapper, 0),
+            "same role+nonce agree — decl and reference of the mini-program \
+             wrapper must render equal"
+        );
+
+        // Outer-registry wrappers are disambiguated by the compiler nonce so
+        // before/after and every application register distinct slots.
+        let specialized_next =
+            HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 1);
+        assert_ne!(
+            specialized, specialized_next,
+            "distinct nonces mint distinct specialized-handler slots"
+        );
+
+        // Every rendering is UNSPELLABLE (SOH-prefixed) and never equals the
+        // former synthetic spelling — rejection row 2 (no magic spelling in a
+        // symbol table) proven at the identity layer.
+        for (id, former) in [
+            (block, "__comptime_block__"),
+            (handler, "__comptime_handler_fn__"),
+            (specialized, "__ann_logged_before_wrapper_0"),
+            (foreign, "work___ann_wrapper"),
+        ] {
+            let desc = id.unspellable_descriptor();
+            assert!(desc.starts_with('\u{1}'), "descriptor must be SOH-prefixed: {desc:?}");
+            assert_ne!(desc, former, "unspellable descriptor never equals the former spelling");
+        }
     }
 
     // Unknown-identity lookups are named errors, never silent absences.

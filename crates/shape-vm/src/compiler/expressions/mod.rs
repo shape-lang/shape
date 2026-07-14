@@ -5,7 +5,9 @@
 use shape_ast::ast::{Expr, Span};
 use shape_ast::error::{Result, ShapeError};
 
-use super::{BorrowMode, BytecodeCompiler, ExprReferenceResult, ExprResultMode};
+use super::{
+    BorrowMode, BytecodeCompiler, ExprReferenceResult, ExprResultMode, HygienicRole,
+};
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_runtime::type_schema::FieldType;
@@ -962,9 +964,9 @@ impl BytecodeCompiler {
         {
             if compiled.before_handler.is_some() || compiled.after_handler.is_some() {
                 self.push_scope();
-                let args_local = self.declare_local("__ann_args")?;
-                let ctx_local = self.declare_local("__ann_ctx")?;
-                let result_local = self.declare_local("__ann_result")?;
+                let args_local = self.declare_hygienic_local(HygienicRole::AnnotationArgs)?;
+                let ctx_local = self.declare_hygienic_local(HygienicRole::AnnotationCtx)?;
+                let result_local = self.declare_hygienic_local(HygienicRole::AnnotationResult)?;
 
                 // Build args array for expression annotations.
                 self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
@@ -1031,7 +1033,8 @@ impl BytecodeCompiler {
                     ));
                     self.record_blob_call(before_id);
 
-                    let before_result_local = self.declare_local("__ann_before_result")?;
+                    let before_result_local =
+                        self.declare_hygienic_local(HygienicRole::AnnotationBeforeResult)?;
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
                         Some(Operand::Local(before_result_local)),
@@ -1146,10 +1149,10 @@ impl BytecodeCompiler {
         {
             if compiled.before_handler.is_some() || compiled.after_handler.is_some() {
                 self.push_scope();
-                let args_local = self.declare_local("__ann_args")?;
-                let ctx_local = self.declare_local("__ann_ctx")?;
-                let subject_local = self.declare_local("__ann_subject")?;
-                let result_local = self.declare_local("__ann_result")?;
+                let args_local = self.declare_hygienic_local(HygienicRole::AnnotationArgs)?;
+                let ctx_local = self.declare_hygienic_local(HygienicRole::AnnotationCtx)?;
+                let subject_local = self.declare_hygienic_local(HygienicRole::AnnotationSubject)?;
+                let result_local = self.declare_hygienic_local(HygienicRole::AnnotationResult)?;
 
                 // W17.2-C §4.D.5 migration: empty-fields case uses typed variant.
                 let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
@@ -1220,7 +1223,8 @@ impl BytecodeCompiler {
                     ));
                     self.record_blob_call(before_id);
 
-                    let before_result_local = self.declare_local("__ann_before_result")?;
+                    let before_result_local =
+                        self.declare_hygienic_local(HygienicRole::AnnotationBeforeResult)?;
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
                         Some(Operand::Local(before_result_local)),

@@ -7,16 +7,40 @@ use shape_ast::ast::{
     TypeAnnotation,
 };
 use shape_ast::error::{Result, ShapeError};
+use shape_runtime::annotation_context::TargetOwner;
+use shape_runtime::comptime_reflection::NominalShape;
 use shape_runtime::type_schema::FieldType;
 use shape_value::KindedSlot;
 use std::collections::{HashMap, HashSet};
 
-use super::BytecodeCompiler;
+use super::{BytecodeCompiler, HygienicRole};
+use super::comptime_builtins::FrozenTypeIdentity;
 use super::comptime_builtins::expansion_provenance::{
     ApplicationClaim, ApplicationId, CanonicalHash, ComptimeStage, DeclarationDiscoveryFixedPoint,
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
     GeneratorRef, SymbolReservation, TargetIdentity,
 };
+
+/// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
+/// body` replacement reaches through `ctx.original`. It replaces the deleted
+/// name-encoded `__original__` alias: the pre-annotation body is compiled into
+/// a compiler-issued HYGIENIC shadow function (`shadow_name`, an unspellable
+/// [`super::HygienicSymbol`] descriptor — no magic spelling enters the symbol
+/// table, rejection-matrix row 2), and `ctx.original` is a typed
+/// [`FrozenTypeIdentity`] callable (B6) minted through the single semantic
+/// freeze handle (row 3). `ctx.original(args)` in the replacement body is
+/// rewritten to a direct typed `FunctionCall` to `shadow_name`
+/// (`original_body_rewrite`), so the pre-annotation call is fully typed
+/// everywhere downstream.
+#[derive(Debug, Clone)]
+pub(crate) struct OriginalCapability {
+    /// Unspellable registry name of the shadow function holding the
+    /// pre-annotation body.
+    pub(crate) shadow_name: String,
+    /// The shadow's frozen callable signature identity — the typed
+    /// `FrozenCallable` (B6) `ctx.original` denotes.
+    pub(crate) callable: FrozenTypeIdentity,
+}
 
 /// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
 /// (`materialize_computed_comptime_extends`) from the root program and the
@@ -966,7 +990,7 @@ impl BytecodeCompiler {
             .cloned()
             .unwrap_or_default();
 
-        let execution = self.execute_comptime_annotation_handler(
+        let mut execution = self.execute_comptime_annotation_handler(
             annotation,
             handler,
             target_value,
@@ -975,6 +999,20 @@ impl BytecodeCompiler {
             // Function target: no representation authority (Dec 56).
             None,
         )?;
+
+        // ADR-009 E3 (S4, U11): resolve the `extend <target>` OWNER placeholder
+        // against the handler's POSITION-0 target binding — replacing the deleted
+        // magic `TypeName == "target"` literal substitution. A function target is
+        // not a decomposable nominal type (`Opaque`); an `extend Widget { … }`
+        // that names an explicit type (the v1 function-target extend surface)
+        // does not match the position-0 binding and resolves nominally
+        // untouched. The executed discovery pre-pass resolves identically.
+        let owner = TargetOwner::new(target_name.clone(), NominalShape::Opaque);
+        Self::resolve_extend_owner_placeholder(
+            &mut execution.directives,
+            &owner,
+            handler.params.first().map(|p| p.name.as_str()),
+        );
 
         self.process_comptime_directives_for_function(
             execution.directives,
@@ -1679,21 +1717,65 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-009 E3 (S4, U11): resolve the `extend <target>` OWNER placeholder in
+    /// a batch of handler-emitted comptime directives, in place.
+    ///
+    /// This replaces the deleted magic `TypeName == "target"` literal
+    /// substitution. An `extend` directive whose head names the handler's
+    /// POSITION-0 target binding (`target_binding` — the handler's first
+    /// parameter, bound by POSITION, never by a fixed `"target"` spelling) is
+    /// resolved to `owner` (the annotated nominal type, [`TargetOwner::name`]).
+    /// Any OTHER head — including a user type literally named `target` when the
+    /// handler's first parameter is spelled differently — is left untouched and
+    /// resolves NOMINALLY through the ordinary type-name table. No `"target"`
+    /// string enters a symbol table by magic; only free `extend`
+    /// (`ComptimeDirective::Extend`) directives are placeholder-bearing (the
+    /// computed-snippet `ExtendItems` form already carries the real interpolated
+    /// name, e.g. `extend {target.name} { … }`).
+    ///
+    /// Both the executed declaration-discovery pre-pass and the authoritative
+    /// pass-2 compile call this with the SAME handler (hence the same
+    /// position-0 binding) and the same owner, so both phases produce the
+    /// identical resolved `extend` and reserve ONE expansion identity per
+    /// generated method.
+    pub(super) fn resolve_extend_owner_placeholder(
+        directives: &mut [super::comptime_builtins::ComptimeDirective],
+        owner: &TargetOwner,
+        target_binding: Option<&str>,
+    ) {
+        let Some(binding) = target_binding else {
+            return;
+        };
+        for directive in directives.iter_mut() {
+            let super::comptime_builtins::ComptimeDirective::Extend(extend) = directive else {
+                continue;
+            };
+            let head = match &extend.type_name {
+                shape_ast::ast::TypeName::Simple(name) => name,
+                shape_ast::ast::TypeName::Generic { name, .. } => name,
+            };
+            if head == binding {
+                match &mut extend.type_name {
+                    shape_ast::ast::TypeName::Simple(name) => *name = owner.name().into(),
+                    shape_ast::ast::TypeName::Generic { name, .. } => *name = owner.name().into(),
+                }
+            }
+        }
+    }
+
     pub(super) fn apply_comptime_extend(
         &mut self,
         mut extend: shape_ast::ast::ExtendStatement,
         target_name: &str,
         site: &ExpansionSite,
     ) -> Result<()> {
-        match &mut extend.type_name {
-            shape_ast::ast::TypeName::Simple(name) if name == "target" => {
-                *name = target_name.into();
-            }
-            shape_ast::ast::TypeName::Generic { name, .. } if name == "target" => {
-                *name = target_name.into();
-            }
-            _ => {}
-        }
+        // ADR-009 E3 (S4, U11): the `extend <target>` OWNER placeholder is
+        // resolved upstream, at the handler-execution site, by
+        // `resolve_extend_owner_placeholder` (position-0 binding against the
+        // typed `TargetOwner`). The deleted magic `TypeName == "target"` literal
+        // substitution formerly lived HERE; `extend.type_name` now already
+        // carries the resolved nominal owner name (or a real user type name that
+        // resolves nominally).
 
         // ADR-009 D1 (S2), rejection row 1: a generated declaration must
         // anchor at a real application span — refused HERE, before any
@@ -1850,6 +1932,17 @@ impl BytecodeCompiler {
                 match self {
                     DiscoveryTarget::Struct(sd) => &sd.annotations,
                     DiscoveryTarget::Function(fd) => &fd.annotations,
+                }
+            }
+            /// ADR-009 B5 declaration shape of the target this handler extends.
+            /// A struct target is a product `NominalShape::Struct`; a function
+            /// target is not a decomposable nominal type (`Opaque`), and an
+            /// `extend <target>` against a function target has no nominal owner
+            /// to substitute anyway.
+            fn nominal_shape(&self) -> NominalShape {
+                match self {
+                    DiscoveryTarget::Struct(_) => NominalShape::Struct,
+                    DiscoveryTarget::Function(_) => NominalShape::Opaque,
                 }
             }
         }
@@ -2082,7 +2175,7 @@ impl BytecodeCompiler {
                                 access_identity,
                             );
                         super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
-                        let execution = match execution_result {
+                        let mut execution = match execution_result {
                             Ok(execution) => execution,
                             Err(e) => {
                                 // A genuine user `error()` call in the handler is a
@@ -2109,6 +2202,23 @@ impl BytecodeCompiler {
                             }
                         };
 
+                        // ADR-009 E3 (S4, U11): resolve the `extend <target>`
+                        // OWNER placeholder against the handler's POSITION-0
+                        // target binding and the TYPED owner descriptor —
+                        // replacing the deleted magic `TypeName == "target"`
+                        // literal substitution. Bound by position (the handler's
+                        // first parameter), not a fixed `"target"` spelling.
+                        // Pass-2 (`process_comptime_directives`) resolves
+                        // identically (same handler, same owner), so both phases
+                        // reserve one expansion identity per generated method.
+                        let owner =
+                            TargetOwner::new(disc_target.name(), disc_target.nominal_shape());
+                        Self::resolve_extend_owner_placeholder(
+                            &mut execution.directives,
+                            &owner,
+                            handler.params.first().map(|p| p.name.as_str()),
+                        );
+
                         for directive in execution.directives {
                             // ADR-009 E3 (slice S1): the executed pre-pass is
                             // now the SINGLE authority for BOTH generated
@@ -2130,29 +2240,16 @@ impl BytecodeCompiler {
                                 super::comptime_builtins::ComptimeDirective::ExtendItems {
                                     items,
                                 } => items,
-                                super::comptime_builtins::ComptimeDirective::Extend(mut extend) => {
-                                    // `extend target { … }` substitutes the target's
-                                    // own name — matching pass-2's
-                                    // `apply_comptime_extend` (target_name = the
-                                    // struct or function name) so both phases produce
-                                    // the identical `Item::Extend` and reserve one
-                                    // identity. (A function target has no type to
-                                    // extend; `extend Number { … }` names the type
-                                    // explicitly, so no substitution fires.)
-                                    let target_name = disc_target.name().to_string();
-                                    match &mut extend.type_name {
-                                        shape_ast::ast::TypeName::Simple(name)
-                                            if name == "target" =>
-                                        {
-                                            *name = target_name.clone().into();
-                                        }
-                                        shape_ast::ast::TypeName::Generic { name, .. }
-                                            if name == "target" =>
-                                        {
-                                            *name = target_name.clone().into();
-                                        }
-                                        _ => {}
-                                    }
+                                super::comptime_builtins::ComptimeDirective::Extend(extend) => {
+                                    // ADR-009 E3 (S4, U11): the `extend <target>`
+                                    // OWNER placeholder was already resolved above
+                                    // by `resolve_extend_owner_placeholder`
+                                    // (position-0 binding against the typed
+                                    // `TargetOwner`) — matching pass-2 exactly, so
+                                    // both phases produce the identical
+                                    // `Item::Extend` and reserve one identity. The
+                                    // deleted magic `TypeName == "target"` literal
+                                    // substitution formerly lived here.
                                     vec![Item::Extend(
                                         extend,
                                         expansion_site.application_span(),
@@ -2862,6 +2959,87 @@ impl BytecodeCompiler {
         Ok(removed)
     }
 
+    /// ADR-009 E3 (S3, U11): the unspellable HYGIENIC registry name of the
+    /// `replace body` shadow that holds `func_name`'s pre-annotation body. The
+    /// nonce is a stable digest of `func_name`, so the shadow re-registers
+    /// idempotently (one shadow per annotated function — `register_function`
+    /// dedups by name) instead of minting a fresh orphan on every recompile.
+    fn original_body_shadow_name(&self, func_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        func_name.hash(&mut hasher);
+        self.mint_hygienic_fn_name_stable(HygienicRole::OriginalBodyShadow, hasher.finish())
+    }
+
+    /// ADR-009 E3 (S4, U11): the unspellable HYGIENIC registry name of the
+    /// before/after wrapped ORIGINAL body of `func_name` (former
+    /// `{func_name}___impl`). The nonce is a stable digest of `func_name`, so
+    /// the body re-registers idempotently (one impl body per annotated function
+    /// — `register_function` dedups by name) instead of minting a fresh orphan
+    /// on recompile. Unspellable, so a user function literally named
+    /// `{func_name}___impl` neither collides with nor resolves to this slot
+    /// (rejection-matrix rows 1/2).
+    fn annotation_hook_impl_name(&self, func_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        func_name.hash(&mut hasher);
+        self.mint_hygienic_fn_name_stable(HygienicRole::AnnotationHookImplBody, hasher.finish())
+    }
+
+    /// ADR-009 E3 (S4, U11): the unspellable HYGIENIC registry name of an
+    /// intermediate before/after chain wrapper (former
+    /// `{func_name}___{ann_name}`). The nonce is a stable digest of BOTH the
+    /// annotated function name and the wrapping annotation name, so a function
+    /// carrying several annotations gets one distinct, idempotent wrapper per
+    /// annotation. Unspellable (rejection-matrix rows 1/2).
+    fn annotation_hook_wrapper_name(&self, func_name: &str, ann_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        func_name.hash(&mut hasher);
+        ann_name.hash(&mut hasher);
+        self.mint_hygienic_fn_name_stable(HygienicRole::AnnotationHookWrapper, hasher.finish())
+    }
+
+    /// ADR-009 E3 (S3, U11): build the typed `ctx.original` capability. The
+    /// pre-annotation body's signature IS the annotated function's signature
+    /// (the shadow clones params + return), so its `FrozenCallable` (B6)
+    /// identity is canonicalized through THE single per-compilation-unit
+    /// semantic-freeze handle. Reaching this without an installed freeze is the
+    /// named `NO_FREEZE_HANDLE_DIAGNOSTIC` compile error (rejection-matrix
+    /// row 3); a parameter with no resolvable type / an unfreezable return type
+    /// surfaces the canonicalizer's named error (no partial descriptor, no
+    /// string/Any capability surface).
+    pub(super) fn build_original_capability(
+        &self,
+        func_def: &FunctionDef,
+        shadow_name: String,
+    ) -> Result<OriginalCapability> {
+        let overlay = self.comptime_freeze_overlay()?;
+        let mut params = Vec::with_capacity(func_def.params.len());
+        for p in &func_def.params {
+            let Some(ty) = p.type_annotation.clone() else {
+                return Err(Self::directive_error(format!(
+                    "`ctx.original` capability requires a typed parameter, but parameter '{}' of '{}' has no type annotation",
+                    p.simple_name().unwrap_or("<pattern>"),
+                    func_def.name
+                )));
+            };
+            params.push(shape_ast::ast::FunctionParam {
+                name: p.simple_name().map(str::to_string),
+                optional: p.default_value.is_some(),
+                type_annotation: ty,
+            });
+        }
+        let returns = Box::new(func_def.return_type.clone().unwrap_or(TypeAnnotation::Void));
+        let callable = overlay
+            .canonicalize_type(&TypeAnnotation::Function { params, returns })
+            .map_err(Self::directive_error)?;
+        Ok(OriginalCapability {
+            shadow_name,
+            callable,
+        })
+    }
+
     pub(super) fn process_comptime_directives_for_function(
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
@@ -2938,10 +3116,15 @@ impl BytecodeCompiler {
                     }
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceBody { body } => {
-                    // Create a shadow function from the original body so the
-                    // replacement can call __original__ to invoke the original
-                    // implementation.
-                    let shadow_name = format!("__original__{}", func_def.name);
+                    // ADR-009 E3 (S3, U11): the pre-annotation body becomes a
+                    // compiler-issued HYGIENIC shadow function, reachable ONLY
+                    // through the typed `ctx.original` capability. The shadow's
+                    // registry name is the unspellable `HygienicSymbol`
+                    // descriptor (no magic `__original__{fn}` spelling enters
+                    // the function table, rejection-matrix row 2); the nonce is
+                    // derived from the annotated function's name so the shadow
+                    // re-registers idempotently across recompiles.
+                    let shadow_name = self.original_body_shadow_name(&func_def.name);
                     let shadow_def = FunctionDef {
                         name: shadow_name.clone(),
                         name_span: func_def.name_span,
@@ -2959,13 +3142,12 @@ impl BytecodeCompiler {
                     self.register_function(&shadow_def)?;
                     self.compile_function_body(&shadow_def)?;
 
-                    // Phase 3e: copy the original's inferred return type
-                    // onto the shadow so call sites of `__original__` see
-                    // the same return-type info. Without this, the
-                    // numeric-typed call path treats the shadow's return
-                    // as Unknown and `__original__() + 1` falls into
-                    // trait dispatch. U4-5b: copied STRUCTURALLY as a
-                    // `ConcreteType`.
+                    // Phase 3e: copy the original's inferred return type onto
+                    // the shadow so the pre-annotation call sees the same
+                    // return-type info. Without this, the numeric-typed call
+                    // path treats the shadow's return as Unknown and
+                    // `ctx.original() + 1` falls into trait dispatch. U4-5b:
+                    // copied STRUCTURALLY as a `ConcreteType`.
                     if let Some(rt) = self
                         .type_tracker
                         .get_function_return_concrete_type(&func_def.name)
@@ -2975,22 +3157,36 @@ impl BytecodeCompiler {
                             .register_function_return_concrete_type(&shadow_name, rt);
                     }
 
-                    // Register alias so __original__ resolves to the shadow function.
-                    self.function_aliases
-                        .insert("__original__".to_string(), shadow_name);
-
-                    // §4.5.5: `__original__` is a direct typed call to the
-                    // shadow function, which carries the original's EXACT
-                    // signature (params + return type cloned above). Forwarding
-                    // is written `__original__(a, b, ...)` with the real
-                    // parameter names and is type-checked like any other call.
-                    // The previous convention injected a hidden
-                    // `let args = [param1, ...]` binding and expected
-                    // `__original__(args)` — that passed one array where N
-                    // scalars are declared, silently reinterpreting an array
-                    // pointer as an int (audit garbage / arity error). No
-                    // hidden binding is injected into user scope anymore.
-                    func_def.body = body;
+                    // Build the typed `ctx.original` capability (B6
+                    // FrozenCallable via the single freeze handle — row 3
+                    // NO_FREEZE_HANDLE_DIAGNOSTIC otherwise), then rewrite every
+                    // `ctx.original(args)` in the replacement into a direct
+                    // typed `FunctionCall` to the hygienic shadow. The rewrite
+                    // runs BEFORE the swapped body reaches MIR lowering / the
+                    // MIR-derived type-inference pass, so the pre-annotation
+                    // call is fully typed everywhere downstream (the shadow
+                    // carries the original's EXACT signature). No hidden
+                    // binding is injected into user scope, and no name-encoded
+                    // alias resolves the call — the role is bound by the
+                    // `.original` capability member, not a global spelling.
+                    let capability =
+                        self.build_original_capability(func_def, shadow_name)?;
+                    // Seed the receiver-scope with every identifier the target's
+                    // parameters bind — including destructuring params (`fn f({x,
+                    // y}: P)`), whose binders `simple_name()` would drop. Body-local
+                    // bindings are added lexically inside the rewrite itself.
+                    let mut bound_receivers: std::collections::HashSet<String> = func_def
+                        .params
+                        .iter()
+                        .flat_map(|p| p.get_identifiers())
+                        .collect();
+                    bound_receivers.insert("self".to_string());
+                    func_def.body =
+                        super::original_body_rewrite::rewrite_original_calls_in_statements(
+                            &body,
+                            &bound_receivers,
+                            &capability.shadow_name,
+                        );
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
                     return Err(Self::directive_error(
@@ -3132,8 +3328,9 @@ impl BytecodeCompiler {
         func_def: &FunctionDef,
         annotations: Vec<crate::bytecode::CompiledAnnotation>,
     ) -> Result<()> {
-        // Step 1: Compile the raw function body as {name}___impl
-        let impl_name = format!("{}___impl", func_def.name);
+        // Step 1: Compile the raw function body as a hygienic impl-body slot
+        // (former user-spellable `{name}___impl`, ADR-009 E3 S4/U11).
+        let impl_name = self.annotation_hook_impl_name(&func_def.name);
         let impl_def = FunctionDef {
             name: impl_name.clone(),
             name_span: func_def.name_span,
@@ -3169,8 +3366,9 @@ impl BytecodeCompiler {
                 // The outermost annotation gets the original function name
                 func_def.name.clone()
             } else {
-                // Intermediate wrappers get unique names
-                format!("{}___{}", func_def.name, ann.name)
+                // Intermediate wrappers get unspellable hygienic names (former
+                // user-spellable `{name}___{annotation}`, ADR-009 E3 S4/U11).
+                self.annotation_hook_wrapper_name(&func_def.name, &ann.name)
             };
 
             // Find the annotation arg expressions from the original function def
@@ -3240,8 +3438,9 @@ impl BytecodeCompiler {
             })?;
         let ann_arg_exprs = ann.args.clone();
 
-        // Step 1: Compile original body as {name}___impl
-        let impl_name = format!("{}___impl", func_def.name);
+        // Step 1: Compile original body into a hygienic impl-body slot (former
+        // user-spellable `{name}___impl`, ADR-009 E3 S4/U11).
+        let impl_name = self.annotation_hook_impl_name(&func_def.name);
         let impl_def = FunctionDef {
             name: impl_name.clone(),
             name_span: func_def.name_span,
@@ -3401,36 +3600,10 @@ impl BytecodeCompiler {
         }
     }
 
-    fn specialized_annotation_handler_name(
-        annotation_name: &str,
-        wrapper_func_idx: usize,
-        handler_type: shape_ast::ast::AnnotationHandlerType,
-    ) -> String {
-        let sanitized: String = annotation_name
-            .chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() || ch == '_' {
-                    ch
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let suffix = match handler_type {
-            shape_ast::ast::AnnotationHandlerType::Before => "before",
-            shape_ast::ast::AnnotationHandlerType::After => "after",
-            _ => "handler",
-        };
-        format!(
-            "__ann_{}_{}_wrapper_{}",
-            sanitized, suffix, wrapper_func_idx
-        )
-    }
-
     fn compile_specialized_annotation_handler(
         &mut self,
         func_def: &FunctionDef,
-        wrapper_func_idx: usize,
+        _wrapper_func_idx: usize,
         compiled_ann: &crate::bytecode::CompiledAnnotation,
         handler: &shape_ast::ast::AnnotationHandler,
         ann_arg_exprs: &[shape_ast::ast::Expr],
@@ -3481,11 +3654,15 @@ impl BytecodeCompiler {
             ));
         }
 
-        let func_name = Self::specialized_annotation_handler_name(
-            &compiled_ann.name,
-            wrapper_func_idx,
-            handler.handler_type.clone(),
-        );
+        // ADR-009 E3 (S2, U10): the specialized runtime handler is a HYGIENIC
+        // generated function whose role is bound by its compiler-issued token
+        // — never the former `__ann_{name}_{before|after}_wrapper_{n}`
+        // spelling. The name enters the outer function table only to bridge
+        // `register_function` -> `find_function` -> the handler INDEX stored on
+        // the CompiledAnnotation; it is never resolved by users. The compiler
+        // nonce disambiguates before/after and every application so distinct
+        // handlers never share a slot name.
+        let func_name = self.mint_hygienic_fn_name(HygienicRole::SpecializedAnnotationHandler);
         let declaring_module_path = compiled_ann
             .name
             .rsplit_once("::")
@@ -3646,9 +3823,10 @@ impl BytecodeCompiler {
         // Push fields in schema order: target, state, event_log.
         // §4.1.5: `ctx.target` is a typed function value statically bound to
         // the annotated function's ORIGINAL implementation (the same referent
-        // as `__original__`). A runtime `before`/`after` hook reads it as an
-        // ordinary typed field and may call it or pass it on (WF-2C's `@remote`
-        // hard-depends on exactly this — no stringly `ctx["__impl"]` lookup).
+        // the `replace body` capability reaches through `ctx.original`). A
+        // runtime `before`/`after` hook reads it as an ordinary typed field and
+        // may call it or pass it on (WF-2C's `@remote` hard-depends on exactly
+        // this — no stringly `ctx["__impl"]` lookup).
         let impl_ref_const = self
             .program
             .add_constant(Constant::Function(impl_idx as u16));
@@ -4227,6 +4405,60 @@ type Probe { id: int }
             "Dec 52 violated: handler side effect observed: {diagnostics:?}"
         );
     }
+
+    fn single_function(source: &str) -> shape_ast::ast::FunctionDef {
+        parse(source)
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Function(f, _) => Some(f),
+                _ => None,
+            })
+            .expect("single function")
+    }
+
+    /// Rejection-matrix row 3 (ADR-009 E3 S3, U11): building the typed
+    /// `ctx.original` capability without an installed semantic-freeze handle is
+    /// the named compile error. The capability's `FrozenCallable` (B6) is
+    /// minted through THE single freeze handle — never a fabricated / partial /
+    /// string descriptor.
+    #[test]
+    fn ctx_original_capability_without_freeze_handle_is_the_named_row3_compile_error() {
+        let func_def = single_function("fn add_ten(x: int) -> int { return x + 10 }");
+        let compiler = BytecodeCompiler::new();
+        let error = compiler
+            .build_original_capability(&func_def, "\u{1}shadow".to_string())
+            .expect_err("pre-barrier capability build must be a compile error");
+        assert!(
+            error.to_string().contains("no semantic freeze handle"),
+            "row-3 named diagnostic missing: {error}"
+        );
+    }
+
+    /// Positive twin: with the freeze installed, the capability carries a real
+    /// typed `FrozenCallable` identity (not `INVALID`) — proving `ctx.original`
+    /// is a typed callable minted through the freeze, not a string/Any surface.
+    #[test]
+    fn ctx_original_capability_with_freeze_is_a_typed_frozen_callable() {
+        use crate::compiler::comptime_builtins::FrozenTypeIdentity;
+        let func_def = single_function("fn add_ten(x: int) -> int { return x + 10 }");
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .register_function(&func_def)
+            .expect("signature registers");
+        compiler
+            .install_semantic_freeze()
+            .expect("registration-complete state freezes");
+        let capability = compiler
+            .build_original_capability(&func_def, "\u{1}shadow".to_string())
+            .expect("post-barrier capability builds");
+        assert_eq!(capability.shadow_name, "\u{1}shadow");
+        assert_ne!(
+            capability.callable,
+            FrozenTypeIdentity::INVALID,
+            "ctx.original must be a real typed FrozenCallable identity"
+        );
+    }
 }
 
 // ADR-009 ticket D1 (slice S2) — provenance stamping on the existing
@@ -4480,6 +4712,118 @@ type B { id: int }
     }
 }
 
+// ADR-009 E3 (slice S4, legacy class U11) — the typed target-OWNER descriptor
+// resolution that replaces the deleted magic `TypeName == "target"` literal
+// substitution. `extend <target>` is resolved against the handler's POSITION-0
+// binding (never a fixed `"target"` spelling) and the typed `TargetOwner`
+// (name + `NominalShape`), so a user type literally named `target` resolves
+// NOMINALLY when the handler's first parameter is spelled differently.
+#[cfg(test)]
+mod s4_target_owner_tests {
+    use super::BytecodeCompiler;
+    use crate::compiler::comptime_builtins::ComptimeDirective;
+    use shape_ast::ast::TypeName;
+    use shape_runtime::annotation_context::TargetOwner;
+    use shape_runtime::comptime_reflection::NominalShape;
+
+    fn extend_directive(source: &str) -> ComptimeDirective {
+        let program = shape_ast::parse_program(source).expect("test program parses");
+        let extend = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Extend(extend, _) => Some(extend.clone()),
+                _ => None,
+            })
+            .expect("program contains an extend item");
+        ComptimeDirective::Extend(extend)
+    }
+
+    fn extend_head(directive: &ComptimeDirective) -> &str {
+        let ComptimeDirective::Extend(extend) = directive else {
+            panic!("expected an Extend directive");
+        };
+        match &extend.type_name {
+            TypeName::Simple(name) => name.as_str(),
+            TypeName::Generic { name, .. } => name.as_str(),
+        }
+    }
+
+    /// Position-bound substitution: when the `extend` head names the handler's
+    /// POSITION-0 target binding, it resolves to the typed owner's nominal name.
+    #[test]
+    fn extend_head_matching_position0_binding_resolves_to_owner() {
+        let mut directives = vec![extend_directive(
+            "extend target { method m() -> int { 1 } }",
+        )];
+        let owner = TargetOwner::new("Alpha", NominalShape::Struct);
+        BytecodeCompiler::resolve_extend_owner_placeholder(
+            &mut directives,
+            &owner,
+            Some("target"),
+        );
+        assert_eq!(
+            extend_head(&directives[0]),
+            "Alpha",
+            "an `extend <target>` head matching the position-0 binding resolves to the owner"
+        );
+    }
+
+    /// Rejection-matrix row 2/3 — NO MAGIC `"target"` SPELLING. When the
+    /// handler's position-0 target parameter is spelled DIFFERENTLY (`t`), a
+    /// user type literally named `target` is left untouched by the resolver and
+    /// resolves NOMINALLY through the ordinary type-name table. The deleted
+    /// literal `TypeName == "target"` match would have hijacked it.
+    #[test]
+    fn literal_target_type_is_nominal_when_binding_differs() {
+        let mut directives = vec![extend_directive(
+            "extend target { method m() -> int { 1 } }",
+        )];
+        let owner = TargetOwner::new("Alpha", NominalShape::Struct);
+        BytecodeCompiler::resolve_extend_owner_placeholder(&mut directives, &owner, Some("t"));
+        assert_eq!(
+            extend_head(&directives[0]),
+            "target",
+            "a real `target` type resolves nominally when the target binding is spelled `t`"
+        );
+    }
+
+    /// The position-0 binding itself is what resolves — an `extend <t>` head
+    /// binds to the owner when the handler names its target parameter `t`.
+    #[test]
+    fn extend_head_binds_by_position_not_by_the_word_target() {
+        let mut directives = vec![extend_directive("extend t { method m() -> int { 1 } }")];
+        let owner = TargetOwner::new("Beta", NominalShape::Struct);
+        BytecodeCompiler::resolve_extend_owner_placeholder(&mut directives, &owner, Some("t"));
+        assert_eq!(
+            extend_head(&directives[0]),
+            "Beta",
+            "the placeholder is bound by POSITION (the handler's first param), not the literal `target`"
+        );
+    }
+
+    /// A `None` binding (no positional target — e.g. a bare `comptime {}` block)
+    /// leaves every `extend` head untouched.
+    #[test]
+    fn no_binding_leaves_extend_head_untouched() {
+        let mut directives = vec![extend_directive(
+            "extend target { method m() -> int { 1 } }",
+        )];
+        let owner = TargetOwner::new("Alpha", NominalShape::Struct);
+        BytecodeCompiler::resolve_extend_owner_placeholder(&mut directives, &owner, None);
+        assert_eq!(extend_head(&directives[0]), "target");
+    }
+
+    /// The owner is a TYPED descriptor (canonical nominal name + declaration
+    /// shape, ADR-009 B5), never a `TypeName` string.
+    #[test]
+    fn target_owner_is_a_typed_nominal_descriptor() {
+        let owner = TargetOwner::new("Widget", NominalShape::Struct);
+        assert_eq!(owner.name(), "Widget");
+        assert_eq!(owner.shape(), NominalShape::Struct);
+    }
+}
+
 // ADR-009 ticket D1 (slice S3) — real source anchors on generated
 // declarations.
 //
@@ -4697,11 +5041,24 @@ let out = work(2)
 "#;
         let compiler = compiled_with_source(source);
         let handler_line = line_of(source, "before(args, ctx)");
+        // ADR-009 E3 (S2, U10): the specialized handler is registered under a
+        // HYGIENIC (unspellable, SOH-prefixed) name — role bound by identity,
+        // not spelling. Find it by that hygienic marker + its handler-line
+        // anchor, never by a `*_wrapper` substring (which no longer exists).
         let (name, wrapper) = compiler
             .function_defs
             .iter()
-            .find(|(name, _)| name.contains("before_wrapper"))
-            .expect("before-handler wrapper is registered");
+            .find(|(name, wrapper)| {
+                name.starts_with('\u{1}') && resolved_line(&compiler, wrapper.name_span) == handler_line
+            })
+            .expect("before-handler wrapper is registered under a hygienic name");
+        assert!(
+            !compiler
+                .function_defs
+                .keys()
+                .any(|name| name.contains("_wrapper")),
+            "rejection row 2: no `*_wrapper` synthetic spelling may enter the function table"
+        );
         assert_eq!(
             resolved_line(&compiler, wrapper.name_span),
             handler_line,

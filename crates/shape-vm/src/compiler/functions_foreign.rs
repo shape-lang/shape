@@ -4,7 +4,7 @@ use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use shape_ast::ast::FunctionDef;
 use shape_ast::error::{Result, ShapeError};
 
-use super::BytecodeCompiler;
+use super::{BytecodeCompiler, HygienicRole};
 
 /// Display a type annotation using C-ABI convention (Vec instead of Array).
 fn cabi_type_display(ann: &shape_ast::ast::TypeAnnotation) -> String {
@@ -360,8 +360,15 @@ impl BytecodeCompiler {
                 .filter(|(i, _)| !out_param_indices.contains(i))
                 .flat_map(|(_, p)| p.get_identifiers())
                 .collect();
+            // ADR-009 E3 (S2, U10): HYGIENIC generated wrapper slot label —
+            // role bound by the compiler-issued token, never the former
+            // `{name}___ann_wrapper` spelling. The slot is referenced by INDEX
+            // (`wrapper_func_idx`); the name is cosmetic, but an unspellable
+            // rendering keeps a user function of the former spelling from
+            // colliding with the generated slot in the function table.
+            let wrapper_name = self.mint_hygienic_fn_name(HygienicRole::ForeignAnnotationWrapper);
             self.program.functions.push(crate::bytecode::Function {
-                name: format!("{}___ann_wrapper", def.name),
+                name: wrapper_name,
                 arity: caller_visible_arity,
                 param_names: wrapper_param_names,
                 locals_count: 0,

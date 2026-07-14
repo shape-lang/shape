@@ -4481,7 +4481,7 @@ impl BytecodeCompiler {
                             .identity_of(&target_name)
                             .map(|identity| (identity.high, identity.low))
                     };
-                    let execution = self.execute_comptime_annotation_handler(
+                    let mut execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
                         target_value,
@@ -4489,6 +4489,24 @@ impl BytecodeCompiler {
                         &[],
                         access_identity,
                     )?;
+
+                    // ADR-009 E3 (S4, U11): resolve the `extend <target>` OWNER
+                    // placeholder against the handler's POSITION-0 target binding
+                    // and the TYPED owner descriptor (a struct type target is a
+                    // product `NominalShape::Struct`) — replacing the deleted
+                    // magic `TypeName == "target"` literal substitution. The
+                    // executed discovery pre-pass resolves identically (same
+                    // handler, same owner), so both phases reserve one identity
+                    // per generated method.
+                    let owner = shape_runtime::annotation_context::TargetOwner::new(
+                        target_name.clone(),
+                        shape_runtime::comptime_reflection::NominalShape::Struct,
+                    );
+                    Self::resolve_extend_owner_placeholder(
+                        &mut execution.directives,
+                        &owner,
+                        handler.params.first().map(|p| p.name.as_str()),
+                    );
 
                     if self
                         .process_comptime_directives(
@@ -8502,15 +8520,31 @@ mod tests {
         );
 
         let bytecode = bytecode.unwrap();
-        // Should have the original function (wrapper) and the impl
-        let has_impl = bytecode
-            .functions
-            .iter()
-            .any(|f| f.name == "compute___impl");
-        assert!(has_impl, "Should generate compute___impl function");
-
+        // The outermost wrapper keeps the original function name.
         let has_wrapper = bytecode.functions.iter().any(|f| f.name == "compute");
         assert!(has_wrapper, "Should keep compute as wrapper");
+
+        // ADR-009 E3 (S4, U11) rejection-matrix row 2 — NO LEAKED SPELLING. The
+        // wrapped original body's registry name is now an UNSPELLABLE hygienic
+        // token, not the former user-spellable `compute___impl`. A user function
+        // of the former spelling can neither collide with nor resolve to it.
+        let has_spellable_impl = bytecode
+            .functions
+            .iter()
+            .any(|f| f.name == "compute___impl" || f.name.ends_with("___impl"));
+        assert!(
+            !has_spellable_impl,
+            "The impl body must NOT enter the function table under a user-spellable name"
+        );
+        // The impl body is present under a hygienic (SOH-prefixed) name.
+        let has_hygienic_impl = bytecode
+            .functions
+            .iter()
+            .any(|f| f.name.starts_with('\u{1}'));
+        assert!(
+            has_hygienic_impl,
+            "Should generate the wrapped impl body under a hygienic name"
+        );
     }
 
     #[test]
@@ -8569,21 +8603,31 @@ mod tests {
         );
         let bytecode = bytecode.unwrap();
 
-        // Should have: compute (outermost wrapper), compute___impl (body), compute___second (intermediate)
-        let has_impl = bytecode
-            .functions
-            .iter()
-            .any(|f| f.name == "compute___impl");
-        assert!(has_impl, "Should generate compute___impl function");
+        // Should have: compute (outermost wrapper) plus a hygienic impl body and
+        // a hygienic intermediate wrapper. ADR-009 E3 (S4, U11): the chain's
+        // intermediate names are UNSPELLABLE hygienic tokens (former
+        // user-spellable `compute___impl` / `compute___second`).
         let has_wrapper = bytecode.functions.iter().any(|f| f.name == "compute");
         assert!(has_wrapper, "Should keep compute as outermost wrapper");
-        let has_intermediate = bytecode
+
+        // Rejection-matrix row 2 — no user-spellable chain name leaks.
+        let has_spellable_chain = bytecode
             .functions
             .iter()
-            .any(|f| f.name == "compute___second");
+            .any(|f| f.name.ends_with("___impl") || f.name == "compute___second");
         assert!(
-            has_intermediate,
-            "Should generate compute___second intermediate wrapper"
+            !has_spellable_chain,
+            "Chain wrappers must NOT enter the function table under user-spellable names"
+        );
+        // Two hygienic slots: the wrapped impl body + the intermediate wrapper.
+        let hygienic_count = bytecode
+            .functions
+            .iter()
+            .filter(|f| f.name.starts_with('\u{1}'))
+            .count();
+        assert!(
+            hygienic_count >= 2,
+            "Should generate hygienic impl body + intermediate wrapper (got {hygienic_count})"
         );
     }
 
