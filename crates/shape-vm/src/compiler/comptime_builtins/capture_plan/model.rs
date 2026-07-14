@@ -50,11 +50,11 @@ pub(crate) struct CaptureBindingFacts {
 }
 
 impl CaptureBindingFacts {
-    fn is_local(&self) -> bool {
+    pub(super) fn is_local(&self) -> bool {
         matches!(self.target, Some(CaptureTarget::Local(_)))
     }
 
-    fn is_module_binding(&self) -> bool {
+    pub(super) fn is_module_binding(&self) -> bool {
         matches!(self.target, Some(CaptureTarget::ModuleBinding(_)))
     }
 }
@@ -111,7 +111,6 @@ impl CapturePlan {
     pub(crate) fn needs_cell(&self) -> bool {
         self.access.needs_cell()
     }
-
 }
 
 /// One capture's full record on the compile path.
