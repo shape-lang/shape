@@ -71,6 +71,107 @@ pub const COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA: &str = "\u{1}comptime:Typ
 /// descriptors (spec §3.1).
 pub const COMPTIME_APPLIED_TYPE_SCHEMA: &str = "\u{1}comptime:AppliedType";
 
+/// ADR-009 B6 (Stage 2, Dec 63) — unspellable schema identity for the
+/// `FrozenCallable` payload of `FrozenType::Callable` (the fully-inferred
+/// callable signature descriptor). Carries the ordered `params` array (each a
+/// [`COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA`] object) plus the return type's
+/// frozen identity halves. Identities + typed descriptor data only — no
+/// descriptor strings, no rendered type names (spec §3.1). The SOH prefix keeps
+/// it unspellable so source can never forge a signature. NOT the legacy E5
+/// `__ComptimeParamDescriptor` path.
+pub const COMPTIME_FROZEN_CALLABLE_SCHEMA: &str = "\u{1}comptime:FrozenCallable";
+
+/// ADR-009 B6 (Stage 2, Dec 63) — unspellable schema identity for one
+/// signature-indexed positional `ParamDescriptor` in a [`FrozenCallable`].
+/// Carries the parameter type's frozen identity halves, the `optional` flag,
+/// and the `PassingMode` enum carrier (`Move` / `SharedBorrow` /
+/// `ExclusiveBorrow`, derived from the parameter's borrow annotation). Parameter
+/// NAMES are identity-insignificant and stay a freeze fact (hygienic
+/// `param(#name)` resolution re-reads them from the freeze), never a runtime
+/// string field. DISTINCT from the legacy `__ComptimeParamDescriptor` (a
+/// string-typed E5 path — do NOT reuse).
+pub const COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:ParamDescriptor";
+
+/// ADR-009 B7 (Stage 2, Dec 50/94) — unspellable schema identities for the four
+/// composite `FrozenType` payloads and their element rows. Each carries only
+/// typed descriptor data: catalog-ordinal variant ids on the wrapping enum plus
+/// 128-bit child identity halves and typed nested objects — never a rendered
+/// type-name string, never a string `.kind` field (Dec 50/94 required
+/// rejection). The SOH prefix keeps every carrier unspellable so source can
+/// never forge a composite descriptor.
+///
+/// `FrozenTuple` carries the ordered `elements` array (each a
+/// [`COMPTIME_TUPLE_ELEMENT_SCHEMA`] object: positional index + element type
+/// identity halves). `FrozenRecord` carries the normalized `fields` array (each
+/// a [`COMPTIME_RECORD_FIELD_SCHEMA`] object: owner-bound hygienic member
+/// identity halves + field type identity halves + `optional`). `FrozenReference`
+/// carries the `mutable` flag + the referent type identity halves.
+/// `FrozenUnion` carries the set `members` array (each a
+/// [`COMPTIME_UNION_MEMBER_SCHEMA`] object: member type identity halves).
+pub const COMPTIME_FROZEN_TUPLE_SCHEMA: &str = "\u{1}comptime:FrozenTuple";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. One positional tuple element.
+pub const COMPTIME_TUPLE_ELEMENT_SCHEMA: &str = "\u{1}comptime:TupleElement";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. The normalized structural record.
+pub const COMPTIME_FROZEN_RECORD_SCHEMA: &str = "\u{1}comptime:FrozenRecord";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. One normalized record field —
+/// owner-bound member identity (never a source-name string, Dec 57).
+pub const COMPTIME_RECORD_FIELD_SCHEMA: &str = "\u{1}comptime:RecordField";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. A reference type (`&T` / `&mut T`).
+pub const COMPTIME_FROZEN_REFERENCE_SCHEMA: &str = "\u{1}comptime:FrozenReference";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. The normalized (deduped, byte-sorted)
+/// union.
+pub const COMPTIME_FROZEN_UNION_SCHEMA: &str = "\u{1}comptime:FrozenUnion";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. One union member type identity.
+pub const COMPTIME_UNION_MEMBER_SCHEMA: &str = "\u{1}comptime:UnionMember";
+/// ADR-009 B7 Slice 2 (Stage 2, Dec 50/94) — the `FrozenType::Parameter`
+/// payload carrier (`TypeParamDescriptor<T>`): the type parameter's stable
+/// base-fn-scoped frozen identity halves + a bound-set array. The bounds
+/// element mirrors [`COMPTIME_FROZEN_ERASED_SCHEMA`] exactly — trait-reference
+/// bound descriptors are ticket B2 territory, so the element is uninhabited
+/// and the array is provably empty today (the honest "bounds where
+/// representable" form, never an inference hole). The SOH prefix keeps it
+/// unspellable so source can never forge a parameter descriptor.
+pub const COMPTIME_FROZEN_PARAMETER_SCHEMA: &str = "\u{1}comptime:FrozenParameter";
+
+/// ADR-009 B5 (Stage 2, Dec 55-59) — unspellable schema identities for the
+/// nominal-shape descriptor family carried by `FrozenType::Nominal`. Each is a
+/// typed descriptor carrier (owner-bound member identities, never source-name
+/// strings — Dec 57); the SOH prefix keeps them unspellable so source can never
+/// forge a shape. `FrozenNominal` carries the sealed `NominalShape` enum
+/// (`shape`); the four shape variants carry the row structs below. NOT the
+/// legacy E5 `__ComptimeFieldDescriptor` name-keyed path (do NOT reuse).
+pub const COMPTIME_FROZEN_NOMINAL_SCHEMA: &str = "\u{1}comptime:FrozenNominal";
+/// See [`COMPTIME_FROZEN_NOMINAL_SCHEMA`].
+pub const COMPTIME_STRUCT_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:StructDescriptor";
+/// See [`COMPTIME_FROZEN_NOMINAL_SCHEMA`].
+pub const COMPTIME_ENUM_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:EnumDescriptor";
+/// See [`COMPTIME_FROZEN_NOMINAL_SCHEMA`].
+pub const COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:NewtypeDescriptor";
+/// See [`COMPTIME_FROZEN_NOMINAL_SCHEMA`].
+pub const COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:OpaqueTypeDescriptor";
+/// See [`COMPTIME_FROZEN_NOMINAL_SCHEMA`]. One record field — owner-bound
+/// member identity (`#f`), value-type frozen identity, initialization
+/// disposition (Dec 57/59).
+pub const COMPTIME_FIELD_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:FieldDescriptor";
+/// See [`COMPTIME_FROZEN_NOMINAL_SCHEMA`]. One enum variant — owner-bound
+/// member identity + payload arity.
+pub const COMPTIME_VARIANT_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:VariantDescriptor";
+/// See [`COMPTIME_FROZEN_NOMINAL_SCHEMA`]. One declaration-interface associated
+/// constant — owner-bound member identity + value-type frozen identity (Dec 58).
+pub const COMPTIME_ASSOCIATED_CONST_DESCRIPTOR_SCHEMA: &str =
+    "\u{1}comptime:AssociatedConstDescriptor";
+
+/// ADR-009 B5 (Stage 2, Dec 56): the `RepresentationAccess<T>` authority
+/// capability. Complete nominal-shape reflection (`reflect_repr`) requires a
+/// compiler-issued value of this schema, bound to the exact type identity `T`
+/// it authorizes. The SOH-prefixed name cannot be spelled in Shape source, so
+/// user code can never construct a lookalike capability; the schema-name-checked
+/// decode in shape-vm's `comptime_builtins/type_reflection.rs` therefore blocks
+/// forged authority structurally (the TraitRef/ImplRef precedent). Only the
+/// compiler mints one — delivered to a declaration-attached annotation expand
+/// hook as author consent (Dec 56).
+pub const COMPTIME_REPRESENTATION_ACCESS_SCHEMA: &str = "\u{1}comptime:RepresentationAccess";
+
 // =========================================================================
 // Field index constants
 // =========================================================================
@@ -467,6 +568,279 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .array_field("arg_identities", FieldType::I64)
         .register(registry);
 
+    // -- ADR-009 B6 (Stage 2, Dec 63): callable signature descriptors ---------
+    //
+    // `PassingMode` is the sealed shared-catalog mode axis (`Move` |
+    // `SharedBorrow` | `ExclusiveBorrow`) derived at freeze time from a
+    // parameter's borrow annotation. Registered as a spellable enum (the
+    // `FrozenTypeCategory` / `ParamKind` precedent) so LSP completes its
+    // variants; walled by its own `runtime_lift_rejection` arm registered in
+    // the SAME commit. Generated from the shared runtime catalog
+    // (`PassingMode::ALL`); no second hand-written mode list.
+    let _passing_mode = registry.register_enum_scoped(
+        crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME,
+        crate::comptime_reflection::PassingMode::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, mode)| EnumVariantInfo::new(mode.variant_name(), id as u16, 0))
+            .collect(),
+    );
+
+    // `ParamDescriptor`: one signature-indexed positional parameter. Type
+    // identity halves + the optional flag + the `PassingMode` enum carrier.
+    // Registered before `FrozenCallable`, which references it as its array
+    // element. No string type-name / kind field (Dec 50/94 required rejection);
+    // parameter names stay a freeze fact, never a runtime string.
+    let _comptime_frozen_param_descriptor =
+        TypeSchemaBuilder::new(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA)
+            .int_field("type_identity_high")
+            .int_field("type_identity_low")
+            .bool_field("optional")
+            .object_field("mode", crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME)
+            .register(registry);
+
+    // `FrozenCallable`: the fully-inferred callable signature. Ordered `params`
+    // array (each a `ParamDescriptor` object) + the return type's frozen
+    // identity halves. Unlike `FrozenErased.bounds` (an uninhabited/empty set,
+    // whitelisted `FieldType::Any`), the params element is inhabited, so it is
+    // the TYPED `ParamDescriptor` object element — no `FieldType::Any`, no
+    // post-inference whitelist entry needed.
+    let _comptime_frozen_callable = TypeSchemaBuilder::new(COMPTIME_FROZEN_CALLABLE_SCHEMA)
+        .array_field(
+            "params",
+            FieldType::Object(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA.to_string()),
+        )
+        .int_field("returns_identity_high")
+        .int_field("returns_identity_low")
+        .register(registry);
+
+    // -- ADR-009 B5 (Stage 2, Dec 55-59): nominal-shape descriptors -----------
+    //
+    // `NominalShape` is the sealed shared-catalog declaration-shape axis
+    // (`Struct` | `Enum` | `Newtype` | `Opaque`) that `FrozenNominal.shape()`
+    // projects. Registered as a spellable enum (the `PassingMode` precedent) so
+    // LSP completes its variants; walled by its own `runtime_lift_rejection`
+    // arm registered in the SAME commit. Each shape variant carries its typed
+    // row-struct descriptor (payload arity 1). Generated from the shared runtime
+    // catalog (`NominalShape::ALL`); no second hand-written shape list. The
+    // variant→descriptor payload mapping is applied by the mini-VM injected
+    // model (`frozen_type_payload_model_items`); here the value-carrier enum
+    // records the arity so `__payload_0` is a stored slot.
+    let _nominal_shape = registry.register_enum_scoped(
+        crate::comptime_reflection::NOMINAL_SHAPE_SCHEMA_NAME,
+        crate::comptime_reflection::NominalShape::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, shape)| EnumVariantInfo::new(shape.variant_name(), id as u16, 1))
+            .collect(),
+    );
+
+    // `FieldInitialization`: the sealed Dec 59 disposition (`Required` |
+    // `Defaulted`). Spellable enum, walled by its own lift arm.
+    let _field_initialization = registry.register_enum_scoped(
+        crate::comptime_reflection::FIELD_INITIALIZATION_SCHEMA_NAME,
+        crate::comptime_reflection::FieldInitialization::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(id, init)| EnumVariantInfo::new(init.variant_name(), id as u16, 0))
+            .collect(),
+    );
+
+    // `FieldDescriptor`: one record field — owner identity halves + owner-bound
+    // member identity (`#f`, Dec 57: NEVER a source-name string) + value-type
+    // frozen identity halves + the `FieldInitialization` enum carrier.
+    // Registered before `StructDescriptor`, which references it as its array
+    // element.
+    let _comptime_field_descriptor = TypeSchemaBuilder::new(COMPTIME_FIELD_DESCRIPTOR_SCHEMA)
+        .int_field("owner_identity_high")
+        .int_field("owner_identity_low")
+        .int_field("member_high")
+        .int_field("member_low")
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .object_field(
+            "initialization",
+            crate::comptime_reflection::FIELD_INITIALIZATION_SCHEMA_NAME,
+        )
+        .register(registry);
+
+    // `VariantDescriptor`: one enum variant — owner identity halves +
+    // owner-bound member identity + payload arity.
+    let _comptime_variant_descriptor = TypeSchemaBuilder::new(COMPTIME_VARIANT_DESCRIPTOR_SCHEMA)
+        .int_field("owner_identity_high")
+        .int_field("owner_identity_low")
+        .int_field("member_high")
+        .int_field("member_low")
+        .int_field("payload_arity")
+        .register(registry);
+
+    // `AssociatedConstDescriptor`: one declaration-interface associated
+    // constant (Dec 58) — owner identity halves + owner-bound member identity +
+    // value-type frozen identity halves. No runtime slot (a const member is not
+    // a field, Dec 58).
+    let _comptime_associated_const_descriptor =
+        TypeSchemaBuilder::new(COMPTIME_ASSOCIATED_CONST_DESCRIPTOR_SCHEMA)
+            .int_field("owner_identity_high")
+            .int_field("owner_identity_low")
+            .int_field("member_high")
+            .int_field("member_low")
+            .int_field("type_identity_high")
+            .int_field("type_identity_low")
+            .register(registry);
+
+    // `StructDescriptor`: owner identity halves + the runtime field count + the
+    // ordered `fields` array (each a `FieldDescriptor` object — a TYPED element,
+    // no `FieldType::Any`, so no post-inference whitelist entry needed).
+    let _comptime_struct_descriptor = TypeSchemaBuilder::new(COMPTIME_STRUCT_DESCRIPTOR_SCHEMA)
+        .int_field("owner_identity_high")
+        .int_field("owner_identity_low")
+        .int_field("field_count")
+        .array_field(
+            "fields",
+            FieldType::Object(COMPTIME_FIELD_DESCRIPTOR_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // `EnumDescriptor`: owner identity halves + the variant count + the ordered
+    // `variants` array (each a `VariantDescriptor` object).
+    let _comptime_enum_descriptor = TypeSchemaBuilder::new(COMPTIME_ENUM_DESCRIPTOR_SCHEMA)
+        .int_field("owner_identity_high")
+        .int_field("owner_identity_low")
+        .int_field("variant_count")
+        .array_field(
+            "variants",
+            FieldType::Object(COMPTIME_VARIANT_DESCRIPTOR_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // `NewtypeDescriptor`: owner identity halves + the single inner type's
+    // frozen identity halves (the wrapped `U`).
+    let _comptime_newtype_descriptor = TypeSchemaBuilder::new(COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA)
+        .int_field("owner_identity_high")
+        .int_field("owner_identity_low")
+        .int_field("inner_identity_high")
+        .int_field("inner_identity_low")
+        .register(registry);
+
+    // `OpaqueTypeDescriptor`: owner identity halves only — a semantically
+    // non-decomposable nominal exposes its identity, never a representation.
+    let _comptime_opaque_type_descriptor =
+        TypeSchemaBuilder::new(COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA)
+            .int_field("owner_identity_high")
+            .int_field("owner_identity_low")
+            .register(registry);
+
+    // `FrozenNominal`: the payload of `FrozenType::Nominal` — the sealed
+    // `NominalShape` enum carrier only (`.shape()` projects it). Field/variant
+    // arrays live inside the shape descriptors above, never a partial
+    // representation on the wrapper itself (Dec 56).
+    let _comptime_frozen_nominal = TypeSchemaBuilder::new(COMPTIME_FROZEN_NOMINAL_SCHEMA)
+        .object_field(
+            "shape",
+            crate::comptime_reflection::NOMINAL_SHAPE_SCHEMA_NAME,
+        )
+        .register(registry);
+
+    // ADR-009 B5 (Stage 2, Dec 56): `RepresentationAccess<T>` — the authority
+    // capability gating `reflect_repr`. Identity halves only — the exact frozen
+    // TYPE identity `T` this capability authorizes complete-shape reflection
+    // over. No name/kind text: authority is tied to a compiler-issued identity,
+    // never a source spelling. The SOH-prefixed name blocks a forged lookalike
+    // structurally (the TypeConstructorRef/TraitRef precedent). Its lift wall
+    // arm is registered in the SAME commit (`comptime_reflection.rs`).
+    let _comptime_representation_access =
+        TypeSchemaBuilder::new(COMPTIME_REPRESENTATION_ACCESS_SCHEMA)
+            .int_field("identity_high")
+            .int_field("identity_low")
+            .register(registry);
+
+    // -- ADR-009 B7 (Stage 2, Dec 50/94): composite payload descriptors -------
+    //
+    // The four composite `FrozenType` payloads and their typed element rows.
+    // Element schemas register BEFORE the array-holding wrappers that reference
+    // them. Every field is a typed identity half or a bool — no string type-name
+    // / kind field (Dec 50/94 required rejection). Each carrier is walled by its
+    // own `runtime_lift_rejection` arm registered in the SAME commit.
+
+    // `TupleElement`: one positional element — the position index + the element
+    // type's frozen identity halves.
+    let _comptime_tuple_element = TypeSchemaBuilder::new(COMPTIME_TUPLE_ELEMENT_SCHEMA)
+        .int_field("index")
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .register(registry);
+
+    // `FrozenTuple`: the ordered `elements` array (each a `TupleElement` object —
+    // a TYPED element, so no `FieldType::Any`, no post-inference whitelist).
+    let _comptime_frozen_tuple = TypeSchemaBuilder::new(COMPTIME_FROZEN_TUPLE_SCHEMA)
+        .array_field(
+            "elements",
+            FieldType::Object(COMPTIME_TUPLE_ELEMENT_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // `RecordField`: one normalized record field — owner-bound hygienic member
+    // identity halves (`#f`, Dec 57: NEVER a source-name string), the field
+    // type's frozen identity halves, and the `optional` flag.
+    let _comptime_record_field = TypeSchemaBuilder::new(COMPTIME_RECORD_FIELD_SCHEMA)
+        .int_field("member_high")
+        .int_field("member_low")
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .bool_field("optional")
+        .register(registry);
+
+    // `FrozenRecord`: the normalized structural record — the `fields` array
+    // (byte-sorted by member, each a `RecordField` object).
+    let _comptime_frozen_record = TypeSchemaBuilder::new(COMPTIME_FROZEN_RECORD_SCHEMA)
+        .array_field(
+            "fields",
+            FieldType::Object(COMPTIME_RECORD_FIELD_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // `FrozenReference`: the `mutable` flag (`&T` vs `&mut T`) + the referent
+    // type's frozen identity halves.
+    let _comptime_frozen_reference = TypeSchemaBuilder::new(COMPTIME_FROZEN_REFERENCE_SCHEMA)
+        .bool_field("mutable")
+        .int_field("referent_identity_high")
+        .int_field("referent_identity_low")
+        .register(registry);
+
+    // `UnionMember`: one union member — its frozen identity halves.
+    let _comptime_union_member = TypeSchemaBuilder::new(COMPTIME_UNION_MEMBER_SCHEMA)
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .register(registry);
+
+    // `FrozenUnion`: the set `members` array (deduped, byte-sorted, each a
+    // `UnionMember` object — a singleton union coalesces to its member upstream,
+    // so a `FrozenUnion` always carries ≥2 members).
+    let _comptime_frozen_union = TypeSchemaBuilder::new(COMPTIME_FROZEN_UNION_SCHEMA)
+        .array_field(
+            "members",
+            FieldType::Object(COMPTIME_UNION_MEMBER_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // -- ADR-009 B7 Slice 2 (Stage 2, Dec 50/94): the Parameter payload --------
+    //
+    // `FrozenParameter`: the payload of `FrozenType::Parameter` — the type
+    // parameter's stable base-fn-scoped frozen identity halves + the bound-set
+    // array. Bounds mirror `FrozenErased.bounds` exactly: trait-reference bound
+    // descriptors are ticket B2 territory (the element is uninhabited), so the
+    // array is provably empty today — the honest "bounds where representable"
+    // form, never an inference hole. The element `FieldType` is informational
+    // (heap_mask + the parallel field-kind track drive reads), matching the
+    // `FrozenErased.bounds` / `__ComptimeFieldDescriptor.annotations` precedent.
+    // Walled by its own `runtime_lift_rejection` arm registered in the SAME
+    // commit. No string type-name / kind field (Dec 50/94 required rejection).
+    let _comptime_frozen_parameter = TypeSchemaBuilder::new(COMPTIME_FROZEN_PARAMETER_SCHEMA)
+        .int_field("identity_high")
+        .int_field("identity_low")
+        .array_field("bounds", FieldType::Any)
+        .register(registry);
+
     let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")
         .string_field("kind")
         .string_field("name")
@@ -636,6 +1010,74 @@ mod tests {
             .unwrap();
         assert!(param_kind.variant_id("Type").is_some());
         assert!(param_kind.variant_id("Const").is_some());
+
+        // ADR-009 B6 (Stage 2, Dec 63): the callable signature descriptor
+        // carriers + the PassingMode mode axis.
+        assert!(registry.has_type(COMPTIME_FROZEN_CALLABLE_SCHEMA));
+        assert!(registry.has_type(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME));
+
+        let callable = registry.get(COMPTIME_FROZEN_CALLABLE_SCHEMA).unwrap();
+        assert_eq!(callable.field_count(), 3);
+        assert!(callable.get_field("params").is_some());
+        assert!(callable.get_field("returns_identity_high").is_some());
+        assert!(callable.get_field("returns_identity_low").is_some());
+
+        let param_descriptor = registry.get(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA).unwrap();
+        assert_eq!(param_descriptor.field_count(), 4);
+        assert!(param_descriptor.get_field("type_identity_high").is_some());
+        assert!(param_descriptor.get_field("type_identity_low").is_some());
+        assert!(param_descriptor.get_field("optional").is_some());
+        assert!(param_descriptor.get_field("mode").is_some());
+
+        // PassingMode is a three-variant enum (the ADR mode axis).
+        let passing_mode = registry
+            .get(crate::comptime_reflection::PASSING_MODE_SCHEMA_NAME)
+            .unwrap();
+        assert!(passing_mode.variant_id("Move").is_some());
+        assert!(passing_mode.variant_id("SharedBorrow").is_some());
+        assert!(passing_mode.variant_id("ExclusiveBorrow").is_some());
+
+        // ADR-009 B5 (Stage 2, Dec 55-59): the nominal-shape descriptor family
+        // + the NominalShape declaration-shape axis + FieldInitialization.
+        assert!(registry.has_type(COMPTIME_FROZEN_NOMINAL_SCHEMA));
+        assert!(registry.has_type(COMPTIME_STRUCT_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(COMPTIME_ENUM_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(COMPTIME_FIELD_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(COMPTIME_VARIANT_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(COMPTIME_ASSOCIATED_CONST_DESCRIPTOR_SCHEMA));
+        assert!(registry.has_type(crate::comptime_reflection::NOMINAL_SHAPE_SCHEMA_NAME));
+        assert!(registry.has_type(crate::comptime_reflection::FIELD_INITIALIZATION_SCHEMA_NAME));
+
+        // NominalShape is a four-variant enum (the sealed declaration shapes).
+        let nominal_shape = registry
+            .get(crate::comptime_reflection::NOMINAL_SHAPE_SCHEMA_NAME)
+            .unwrap();
+        for variant in ["Struct", "Enum", "Newtype", "Opaque"] {
+            assert!(nominal_shape.variant_id(variant).is_some(), "{variant}");
+        }
+        let frozen_nominal = registry.get(COMPTIME_FROZEN_NOMINAL_SCHEMA).unwrap();
+        assert_eq!(frozen_nominal.field_count(), 1);
+        assert!(frozen_nominal.get_field("shape").is_some());
+        let struct_descriptor = registry.get(COMPTIME_STRUCT_DESCRIPTOR_SCHEMA).unwrap();
+        assert!(struct_descriptor.get_field("fields").is_some());
+        assert!(struct_descriptor.get_field("field_count").is_some());
+        let field_descriptor = registry.get(COMPTIME_FIELD_DESCRIPTOR_SCHEMA).unwrap();
+        assert!(field_descriptor.get_field("member_high").is_some());
+        assert!(field_descriptor.get_field("initialization").is_some());
+        // Dec 57 rejection: no source-name string field on the field descriptor.
+        assert!(field_descriptor.get_field("name").is_none());
+
+        // ADR-009 B5 (Stage 2, Dec 56): the RepresentationAccess authority
+        // capability — identity halves only, no name/kind text.
+        let representation_access = registry.get(COMPTIME_REPRESENTATION_ACCESS_SCHEMA).unwrap();
+        assert_eq!(representation_access.field_count(), 2);
+        assert!(representation_access.get_field("identity_high").is_some());
+        assert!(representation_access.get_field("identity_low").is_some());
+        assert!(representation_access.get_field("name").is_none());
+        assert!(representation_access.get_field("kind").is_none());
 
         // Check field counts
         let any_error = registry.get_by_id(ids.any_error).unwrap();

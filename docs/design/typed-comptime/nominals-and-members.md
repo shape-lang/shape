@@ -2,6 +2,24 @@
 
 [Back to the typed comptime overview](../typed-comptime.md) | [Previous: Values, Types, And Evidence](values-types-and-evidence.md) | [Next: Annotations And Hooks](annotations-and-hooks.md)
 
+> **Implementation status (ADR009-B5, Dec 55-58): CURRENT / VM+JIT+LSP.**
+> The sealed `NominalShape` (`Struct`/`Enum`/`Newtype`/`Opaque`),
+> `FieldDescriptor<Owner, #f, T>` / `VariantDescriptor` /
+> `AssociatedConstDescriptor` / `FieldInitialization`, generic substitution
+> before descriptor issuance (Dec 55 R10), derive-style field/variant
+> iteration, and the authority-gated `reflect_repr` + `RepresentationAccess<T>`
+> (Dec 56) are implemented and proven on VM, JIT, and the LSP (hover renders
+> the descriptor types + owner; the reflection vocabularies complete through
+> the one shared `reflection_enum_variant_names` catalog). The hard member-
+> selection rejection matrix R1-R11 fires named diagnostics. See the design-
+> index rows in [../typed-comptime.md](../typed-comptime.md) for the per-
+> structure CURRENT labels + evidence. Two forms remain CURRENT-vs-TARGET,
+> logged in [../../defections.md](../../defections.md): `#name` explicit member
+> selection (grammar-blocked B7 — the descriptor TYPE carries the hygienic
+> member position `#f`, but no `record.field(#name)` call spelling exists), and
+> the public-vs-complete field-set distinction (field-visibility syntax pending
+> — S3 delivers the authority gate, not a filtered partial view).
+
 ## Decision 55: Nominal Declaration Shapes
 
 Accepted: an applied nominal type has one of four sealed semantic declaration

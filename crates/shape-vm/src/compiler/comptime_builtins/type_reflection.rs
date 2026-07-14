@@ -3,11 +3,13 @@ use crate::compiler::comptime_target;
 use sha2::{Digest, Sha256};
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 pub(crate) use shape_runtime::comptime_reflection::FrozenTypeCategory;
-use shape_runtime::comptime_reflection::{FloatWidth, FrozenPrimitive, IntegerWidth, ParamKind};
+use shape_runtime::comptime_reflection::{
+    FloatWidth, FrozenPrimitive, IntegerWidth, ParamKind, PassingMode,
+};
 use shape_runtime::type_schema::TypeSchema;
 use shape_runtime::type_schema::builtin_schemas::{
     COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
-    COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_REF_SCHEMA, COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
 };
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr, TypedObjectStorage};
@@ -64,6 +66,19 @@ const PRIMITIVE_SYNONYM_FAMILIES: &[(&[&str], FrozenPrimitive)] = &[
     (&["null"], FrozenPrimitive::Null),
     (&["undefined"], FrozenPrimitive::Undefined),
 ];
+
+/// ADR-009 B6 R2 (Dec 63): a callable's parameters are heterogeneous
+/// signature-indexed descriptors, not a homogeneous top-typed collection.
+/// Modeling a signature parameter with the compiler-internal `Any` top type
+/// (bare `Any` or `Array<Any>`) erases the per-position type — the named
+/// rejection, in the same Any-erasure family as the B3
+/// `WITNESS_ERASED_TO_ANY_DIAGNOSTIC` (lowercase `any` stays the enabled Erased
+/// leaf; only capital `Any` is refused).
+pub(crate) const CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC: &str =
+    "a callable's parameters are heterogeneous signature-indexed descriptors, not a \
+     homogeneous Any collection: a parameter cannot be typed with the compiler-internal \
+     Any top type (use a concrete per-position type; lowercase `any` is the enabled \
+     Erased leaf)";
 
 /// Stable semantic identity carried by an opaque comptime `TypeRef`.
 ///
@@ -130,7 +145,12 @@ impl FrozenTypeIdentity {
 #[derive(Debug)]
 pub(crate) struct FrozenTypeIndex {
     pub(crate) struct_defs: HashMap<String, Vec<(String, TypeAnnotation)>>,
-    pub(crate) enum_defs: HashMap<String, Vec<String>>,
+    /// Named freeze input 3 (enriched, ADR-009 B5): ordered enum variants per
+    /// user enum name — the variant NAME (source of the owner-bound hygienic
+    /// member identity, Dec 57) plus the variant's payload ARITY (Unit=0,
+    /// Tuple(n)/Struct(n)=n). The single enum freeze projection; full per-variant
+    /// payload field TYPES are a later B5 slice (documented in defections.md).
+    pub(crate) enum_defs: HashMap<String, Vec<FrozenEnumVariantDef>>,
     pub(crate) alias_defs: HashMap<String, TypeAnnotation>,
     /// ADR-009 A2 (slice S5): frozen trait names (named freeze input 5,
     /// `BytecodeCompiler::known_traits`). `dyn` bounds and trait
@@ -147,6 +167,14 @@ pub(crate) struct FrozenTypeIndex {
     /// and a named surface-and-stop under the B4 `param_kinds_of` query
     /// (no guessing).
     pub(crate) struct_generic_param_kinds: HashMap<String, Vec<ParamKind>>,
+    /// ADR-009 B5 (S2, Dec 55 R10): the declared ordered generic parameter
+    /// NAMES per user STRUCT name — the NAME projection of the SAME freeze
+    /// input 1 (`struct_generic_info.type_params`) whose KIND projection is
+    /// [`Self::struct_generic_param_kinds`] (two projections of one fact, not a
+    /// second fact). Read ONLY by [`Self::substituted_applied_nominal`] to bind
+    /// each declared parameter to its applied argument identity before
+    /// re-canonicalizing the struct's field annotations.
+    pub(crate) struct_generic_param_names: HashMap<String, Vec<String>>,
     pub(crate) frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
     pub(crate) frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
     /// ADR-009 B1 S2: exact width/domain payload per Primitive identity,
@@ -160,6 +188,49 @@ pub(crate) struct FrozenTypeIndex {
     /// Identity-keyed so alias heads inherit their target's kinds transparently
     /// (Dec 53).
     pub(crate) generic_param_kinds: HashMap<FrozenTypeIdentity, Vec<ParamKind>>,
+    /// ADR-009 B6 (Dec 63): the ordered structural descriptor per base-interned
+    /// `Callable` identity (a module-level alias whose target is a callable
+    /// type, e.g. `type Handler = (int) -> bool`). Populated by the alias
+    /// fixpoint in the SAME rebuild that interns the identity (one source, no
+    /// second derivation), so `payload_for_identity` answers the complete
+    /// `FrozenCallable` — never a partial descriptor. Symmetric with
+    /// [`Self::frozen_primitive_payloads`].
+    pub(crate) frozen_callable_descriptors:
+        HashMap<FrozenTypeIdentity, payloads::CallableDescriptor>,
+    /// ADR-009 B5 (Dec 55): the sealed nominal declaration-shape descriptor per
+    /// RESOLVED nominal identity (user struct / enum), reconstructed from the
+    /// enriched struct/enum freeze inputs 1+3 in the SAME rebuild that interns
+    /// the identity (one source, no second derivation). `payload_for_identity`
+    /// answers the complete `FrozenNominal` from here; an un-applied generic
+    /// head or an unsubstituted applied form has NO entry and is a named
+    /// rejection. Symmetric with [`Self::frozen_callable_descriptors`].
+    pub(crate) frozen_nominal_descriptors:
+        HashMap<FrozenTypeIdentity, payloads::NominalDescriptor>,
+    /// ADR-009 B7 (Dec 50/94): the composite structural descriptors per
+    /// BASE-interned composite identity — an alias whose target is a composite
+    /// (`type Pair = [int, string]`, `type Ref = &User`, `type Id = int |
+    /// string`, `type Row = {x: int}`). Populated by the alias fixpoint in the
+    /// SAME rebuild that interns the identity (one source, no second
+    /// derivation), so `payload_for_identity` answers the complete composite
+    /// payload — never a partial descriptor. Symmetric with
+    /// [`Self::frozen_callable_descriptors`].
+    pub(crate) frozen_tuple_descriptors: HashMap<FrozenTypeIdentity, payloads::TupleDescriptor>,
+    /// See [`Self::frozen_tuple_descriptors`].
+    pub(crate) frozen_record_descriptors: HashMap<FrozenTypeIdentity, payloads::RecordDescriptor>,
+    /// See [`Self::frozen_tuple_descriptors`].
+    pub(crate) frozen_reference_descriptors:
+        HashMap<FrozenTypeIdentity, payloads::ReferenceDescriptor>,
+    /// See [`Self::frozen_tuple_descriptors`].
+    pub(crate) frozen_union_descriptors: HashMap<FrozenTypeIdentity, payloads::UnionDescriptor>,
+}
+
+/// ADR-009 B5 (Dec 57) — one enum variant freeze projection: the source-level
+/// variant NAME (hashed into the owner-bound hygienic member identity, never
+/// exposed as a selectable string) and the variant's payload ARITY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrozenEnumVariantDef {
+    pub(crate) name: String,
+    pub(crate) payload_arity: u16,
 }
 
 impl FrozenTypeIndex {
@@ -213,8 +284,154 @@ impl FrozenTypeIndex {
                     Err(payloads::bounded_erased_payload_rejection())
                 }
             }
+            // ADR-009 B6: a base-interned callable alias answers its complete
+            // signature descriptor from the structural map populated in the
+            // same rebuild — never a partial descriptor. Interning without the
+            // structure is an internal-invariant violation.
+            FrozenTypeCategory::Callable => self
+                .frozen_callable_descriptors
+                .get(&identity)
+                .cloned()
+                .map(FrozenPayloadDescriptor::Callable)
+                .ok_or_else(|| {
+                    "internal invariant: a Callable identity was frozen without its \
+                     FrozenCallable structural descriptor"
+                        .to_string()
+                }),
+            // ADR-009 B5: a RESOLVED nominal (user struct/enum) answers its
+            // complete declaration-shape descriptor from the map populated in
+            // the same rebuild. A frozen NOMINAL identity WITHOUT a descriptor
+            // is either an un-applied generic constructor head (it has declared
+            // param kinds — B4 `TypeConstructorRef` territory) or an
+            // unsubstituted APPLIED form (generic substitution pending) — each a
+            // distinct named rejection, never a partial descriptor.
+            FrozenTypeCategory::Nominal => {
+                if let Some(descriptor) = self.frozen_nominal_descriptors.get(&identity) {
+                    Ok(FrozenPayloadDescriptor::Nominal(descriptor.clone()))
+                } else if self.generic_param_kinds.contains_key(&identity) {
+                    Err(payloads::unapplied_generic_head_rejection())
+                } else {
+                    Err(payloads::applied_nominal_pending_rejection())
+                }
+            }
+            // ADR-009 B7: a base-interned composite alias answers its complete
+            // structural descriptor from the per-category map populated in the
+            // same rebuild — never a partial descriptor. Interning a composite
+            // identity without its descriptor is an internal-invariant violation.
+            FrozenTypeCategory::Tuple => self
+                .frozen_tuple_descriptors
+                .get(&identity)
+                .cloned()
+                .map(FrozenPayloadDescriptor::Tuple)
+                .ok_or_else(|| composite_without_descriptor_invariant("Tuple")),
+            FrozenTypeCategory::Record => self
+                .frozen_record_descriptors
+                .get(&identity)
+                .cloned()
+                .map(FrozenPayloadDescriptor::Record)
+                .ok_or_else(|| composite_without_descriptor_invariant("Record")),
+            FrozenTypeCategory::Reference => self
+                .frozen_reference_descriptors
+                .get(&identity)
+                .copied()
+                .map(FrozenPayloadDescriptor::Reference)
+                .ok_or_else(|| composite_without_descriptor_invariant("Reference")),
+            FrozenTypeCategory::Union => self
+                .frozen_union_descriptors
+                .get(&identity)
+                .cloned()
+                .map(FrozenPayloadDescriptor::Union)
+                .ok_or_else(|| composite_without_descriptor_invariant("Union")),
+            // Only `Parameter` (a scoped overlay identity — never base-interned)
+            // and `Existential` (its witness payload lands with B3-S3) remain
+            // the named per-category rejections at the base index.
             pending => Err(payloads::pending_payload_rejection(pending)),
         }
+    }
+
+    /// ADR-009 B5 (S2, Dec 55 R10): generic substitution PRECEDES descriptor
+    /// issuance. For an APPLIED user-struct form (`Page<User>`, decomposed by
+    /// [`canonical_refine`] into the head identity + ordered argument
+    /// identities), bind each declared struct type parameter to its applied
+    /// argument identity and re-canonicalize the struct's field annotations
+    /// through the ONE canonicalizer — so a field spelled `Array<T>` freezes as
+    /// `Array<User>`, never the un-substituted `T`. The classification is the
+    /// SAME field-count rule the base rebuild uses (0 → Opaque, 1 → Newtype,
+    /// ≥2 → Struct), so an applied form and a hypothetical monomorphized
+    /// declaration would agree.
+    ///
+    /// Returns `None` (→ the caller's named applied-substitution-pending
+    /// rejection) when the head is not a resolved user struct with frozen
+    /// parameter names, the arity does not match, or any substituted field type
+    /// fails to canonicalize — never a partial descriptor (R8).
+    pub(super) fn substituted_applied_nominal(
+        &self,
+        head: FrozenTypeIdentity,
+        args: &[FrozenTypeIdentity],
+    ) -> Option<payloads::NominalDescriptor> {
+        // Reverse the head identity to the user-struct name (the freeze keys
+        // struct definitions by name; only a user struct carries field
+        // annotations to substitute — a builtin/enum head has no `struct_defs`
+        // entry and returns `None` here, staying the pending rejection).
+        let name = self
+            .struct_defs
+            .keys()
+            .find(|name| self.frozen_type_ids.get(*name) == Some(&head))?
+            .clone();
+        let param_names = self.struct_generic_param_names.get(&name)?;
+        if param_names.len() != args.len() || args.is_empty() {
+            return None;
+        }
+        let fields = self.struct_defs.get(&name)?;
+
+        // The substitution scope: a declared parameter resolves to its applied
+        // argument identity (with the argument's frozen category); every other
+        // leaf resolves through the base freeze exactly as the un-applied
+        // rebuild does. One canonicalizer, one leaf-resolution surface.
+        let substitution: HashMap<&str, FrozenTypeIdentity> = param_names
+            .iter()
+            .map(String::as_str)
+            .zip(args.iter().copied())
+            .collect();
+        let resolve = |leaf: &str| {
+            if let Some(&arg) = substitution.get(leaf) {
+                let category = self.frozen_type_categories.get(&arg).copied()?;
+                return Some((arg, category));
+            }
+            let identity = self.frozen_type_ids.get(leaf).copied()?;
+            let category = self.frozen_type_categories.get(&identity).copied()?;
+            Some((identity, category))
+        };
+        let is_trait = |leaf: &str| self.trait_names.contains(leaf);
+        let applied_arity =
+            |identity: FrozenTypeIdentity| self.generic_param_kinds.get(&identity).map(Vec::len);
+        let scope = LeafScope {
+            resolve: &resolve,
+            is_trait: &is_trait,
+            applied_arity: &applied_arity,
+        };
+
+        let mut field_descriptors = Vec::with_capacity(fields.len());
+        for (field_name, annotation) in fields {
+            let canonical = canonicalize_with(annotation, &scope).ok()?;
+            field_descriptors.push(payloads::NominalFieldDescriptor {
+                member: member_identity(&name, field_name),
+                type_identity: canonical.identity,
+                initialization: shape_runtime::comptime_reflection::FieldInitialization::Required,
+            });
+        }
+
+        Some(match field_descriptors.as_slice() {
+            [] => payloads::NominalDescriptor::Opaque { owner: head },
+            [single] => payloads::NominalDescriptor::Newtype {
+                owner: head,
+                inner: single.type_identity,
+            },
+            _ => payloads::NominalDescriptor::Struct {
+                owner: head,
+                fields: field_descriptors,
+            },
+        })
     }
 
     pub(super) fn rebuild_frozen_type_index(&mut self) {
@@ -222,6 +439,19 @@ impl FrozenTypeIndex {
         let mut categories = HashMap::new();
         let mut primitive_payloads = HashMap::new();
         let mut param_kinds: HashMap<FrozenTypeIdentity, Vec<ParamKind>> = HashMap::new();
+        let mut callable_descriptors: HashMap<FrozenTypeIdentity, payloads::CallableDescriptor> =
+            HashMap::new();
+        // ADR-009 B7: per-category descriptor maps for BASE-interned composite
+        // aliases, threaded in the alias fixpoint below (write-once, same round
+        // as the identity intern).
+        let mut tuple_descriptors: HashMap<FrozenTypeIdentity, payloads::TupleDescriptor> =
+            HashMap::new();
+        let mut record_descriptors: HashMap<FrozenTypeIdentity, payloads::RecordDescriptor> =
+            HashMap::new();
+        let mut reference_descriptors: HashMap<FrozenTypeIdentity, payloads::ReferenceDescriptor> =
+            HashMap::new();
+        let mut union_descriptors: HashMap<FrozenTypeIdentity, payloads::UnionDescriptor> =
+            HashMap::new();
 
         for (names, primitive) in PRIMITIVE_SYNONYM_FAMILIES {
             let identity = intern_synonyms(
@@ -356,6 +586,37 @@ impl FrozenTypeIndex {
                         "canonical type identity collision across semantic categories"
                     );
                 }
+                // ADR-009 B6: preserve a callable alias's structural descriptor
+                // in the same rebuild that interns its identity (write-once —
+                // composite identities never re-hash across rounds).
+                if let Some(descriptor) = canonical.callable.clone() {
+                    callable_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
+                // ADR-009 B7: same write-once discipline for the four composite
+                // structural descriptors, so a base-interned composite alias
+                // answers its complete payload from `payload_for_identity`.
+                if let Some(descriptor) = canonical.tuple.clone() {
+                    tuple_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
+                if let Some(descriptor) = canonical.record.clone() {
+                    record_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
+                if let Some(descriptor) = canonical.reference {
+                    reference_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
+                if let Some(descriptor) = canonical.union.clone() {
+                    union_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
                 changed |=
                     ids.insert((*alias).clone(), canonical.identity) != Some(canonical.identity);
             }
@@ -364,11 +625,128 @@ impl FrozenTypeIndex {
             }
         }
 
+        // ADR-009 B5 (Dec 55/57): reconstruct the sealed nominal declaration
+        // shape per RESOLVED user nominal from the enriched struct/enum freeze
+        // inputs 1+3 — the SAME rebuild that interned the identity (one source,
+        // no second derivation). Runs AFTER the alias fixpoint so struct field
+        // types resolve against the fully-interned base (leaf/applied/composite
+        // members). A struct whose field type cannot canonicalize is SKIPPED (no
+        // partial descriptor, R8) — reflecting it stays an applied/pending
+        // rejection rather than issuing a half-populated shape.
+        let mut nominal_descriptors: HashMap<FrozenTypeIdentity, payloads::NominalDescriptor> =
+            HashMap::new();
+        {
+            let resolve = |name: &str| {
+                let identity = ids.get(name).copied()?;
+                let category = categories.get(&identity).copied()?;
+                Some((identity, category))
+            };
+            let is_trait = |name: &str| self.trait_names.contains(name);
+            let applied_arity =
+                |identity: FrozenTypeIdentity| param_kinds.get(&identity).map(Vec::len);
+            let scope = LeafScope {
+                resolve: &resolve,
+                is_trait: &is_trait,
+                applied_arity: &applied_arity,
+            };
+
+            for (name, fields) in &self.struct_defs {
+                let Some(owner) = ids.get(name).copied() else {
+                    continue;
+                };
+                let mut field_descriptors = Vec::with_capacity(fields.len());
+                let mut all_resolved = true;
+                for (field_name, annotation) in fields {
+                    let Ok(canonical) = canonicalize_with(annotation, &scope) else {
+                        all_resolved = false;
+                        break;
+                    };
+                    field_descriptors.push(payloads::NominalFieldDescriptor {
+                        member: member_identity(name, field_name),
+                        type_identity: canonical.identity,
+                        // ADR-009 B5 S1: the struct freeze input does not carry
+                        // per-field default flags, so every field is `Required`
+                        // today (Dec 59 total records — a default is
+                        // construction policy only). `Defaulted` population is a
+                        // later slice (documented in defections.md).
+                        initialization:
+                            shape_runtime::comptime_reflection::FieldInitialization::Required,
+                    });
+                }
+                if !all_resolved {
+                    continue;
+                }
+                // Field-count classification (S1 CURRENT, absent dedicated
+                // newtype/opaque syntax — documented in defections.md): 0 fields
+                // is a non-decomposable Opaque, exactly 1 field is a Newtype
+                // wrapper over its inner type, ≥2 fields is a Struct.
+                let descriptor = match field_descriptors.as_slice() {
+                    [] => payloads::NominalDescriptor::Opaque { owner },
+                    [single] => payloads::NominalDescriptor::Newtype {
+                        owner,
+                        inner: single.type_identity,
+                    },
+                    _ => payloads::NominalDescriptor::Struct {
+                        owner,
+                        fields: field_descriptors,
+                    },
+                };
+                nominal_descriptors.insert(owner, descriptor);
+            }
+
+            for (name, variants) in &self.enum_defs {
+                let Some(owner) = ids.get(name).copied() else {
+                    continue;
+                };
+                let variant_descriptors = variants
+                    .iter()
+                    .map(|variant| payloads::NominalVariantDescriptor {
+                        member: member_identity(name, &variant.name),
+                        payload_arity: variant.payload_arity,
+                    })
+                    .collect();
+                nominal_descriptors.insert(
+                    owner,
+                    payloads::NominalDescriptor::Enum {
+                        owner,
+                        variants: variant_descriptors,
+                    },
+                );
+            }
+        }
+
         self.frozen_type_ids = ids;
         self.frozen_type_categories = categories;
         self.frozen_primitive_payloads = primitive_payloads;
         self.generic_param_kinds = param_kinds;
+        self.frozen_callable_descriptors = callable_descriptors;
+        self.frozen_nominal_descriptors = nominal_descriptors;
+        self.frozen_tuple_descriptors = tuple_descriptors;
+        self.frozen_record_descriptors = record_descriptors;
+        self.frozen_reference_descriptors = reference_descriptors;
+        self.frozen_union_descriptors = union_descriptors;
     }
+}
+
+/// ADR-009 B5 (Dec 57): the owner-bound HYGIENIC member identity for a nominal
+/// member (struct field / enum variant / associated const). A stable opaque
+/// 128-bit identity minted from `member:{owner}:{member}` — NEVER the source
+/// name string (a source spelling is not a member identity, R1/R3). Distinct
+/// from the value-type identity space (the `member:` descriptor prefix).
+fn member_identity(owner_name: &str, member_name: &str) -> FrozenTypeIdentity {
+    FrozenTypeIdentity::from_canonical_descriptor(&format!("member:{owner_name}:{member_name}"))
+}
+
+/// ADR-009 B7: the internal-invariant message when a base-interned composite
+/// identity carries its category but not its structural descriptor. The alias
+/// fixpoint threads the descriptor in the SAME round it interns the identity
+/// (write-once), so this is unreachable in practice — a named invariant, never a
+/// partial descriptor.
+fn composite_without_descriptor_invariant(category: &str) -> String {
+    format!(
+        "internal invariant: a {category} identity was frozen without its structural \
+         composite descriptor"
+    )
 }
 
 fn intern_identity(
@@ -423,6 +801,35 @@ pub(super) struct CanonicalType {
     pub(super) descriptor: String,
     pub(super) category: FrozenTypeCategory,
     pub(super) identity: FrozenTypeIdentity,
+    /// ADR-009 B6 (Dec 63): the ordered structural descriptor for a `Callable`
+    /// form (ordered params with name/type-identity/optionality/passing-mode +
+    /// return identity). `None` for every non-callable category. The one-way
+    /// SHA-256 identity drops names and passing modes by design; this preserved
+    /// structure is what the freeze's widened composite memo carries so
+    /// `payload_of` can reconstruct a `FrozenCallable` WITHOUT inverting the
+    /// hash. Identity-insignificant: two callables that produce the same
+    /// canonical descriptor share one identity regardless of their AST param
+    /// names.
+    pub(super) callable: Option<payloads::CallableDescriptor>,
+    /// ADR-009 B7 (Dec 50/94): the ordered element identities for a `Tuple`
+    /// form. `None` for every non-tuple category. Threaded through the freeze's
+    /// widened composite memo (and the base per-category map) exactly like
+    /// `callable`, so `payload_of` reconstructs a `FrozenTuple` WITHOUT
+    /// inverting the one-way identity hash.
+    pub(super) tuple: Option<payloads::TupleDescriptor>,
+    /// ADR-009 B7: the normalized structural fields for a `Record` form
+    /// (owner-bound member identity + value-type identity + optionality). `None`
+    /// for every non-record category. The hygienic member identity is minted
+    /// from the record's own identity, so it is stable and source-name-free
+    /// (Dec 57).
+    pub(super) record: Option<payloads::RecordDescriptor>,
+    /// ADR-009 B7: the mutability + referent identity for a `Reference` form.
+    /// `None` for every non-reference category.
+    pub(super) reference: Option<payloads::ReferenceDescriptor>,
+    /// ADR-009 B7: the deduped byte-sorted member identities for a `Union`
+    /// form. `None` for every non-union category (and for a singleton union,
+    /// which coalesces to its member — no `Union` descriptor exists).
+    pub(super) union: Option<payloads::UnionDescriptor>,
 }
 
 /// The 32-lowercase-hex embedding form of a frozen identity. Every composite
@@ -573,46 +980,110 @@ fn canonicalize_resolved(
         }
         TypeAnnotation::Generic { name, args } => canonical_applied(name.as_str(), args, scope),
         TypeAnnotation::Tuple(items) => {
+            // ADR-009 B7: the ordered element identities are threaded on the
+            // canonical (mirroring `callable`) so `payload_of` reconstructs the
+            // `FrozenTuple` without inverting the one-way identity hash. Position
+            // IS the tuple index — no separate index fact.
             let mut embedded = Vec::with_capacity(items.len());
+            let mut elements = Vec::with_capacity(items.len());
             for item in items {
-                embedded.push(identity_hex(canonicalize_resolved(item, scope)?.identity));
+                let member = canonicalize_resolved(item, scope)?;
+                embedded.push(identity_hex(member.identity));
+                elements.push(member.identity);
             }
-            Ok(composite(
+            let mut canonical = composite(
                 format!("tuple:[{}]", embedded.join(",")),
                 FrozenTypeCategory::Tuple,
-            ))
+            );
+            canonical.tuple = Some(payloads::TupleDescriptor { elements });
+            Ok(canonical)
         }
         TypeAnnotation::Object(fields) => canonical_record(fields, scope),
         TypeAnnotation::Function { params, returns } => {
+            // The canonical descriptor embeds each parameter's FULL annotation
+            // identity (the `reference:&h` wrapper included, so a borrowed
+            // parameter is identity-distinct from a by-value one) plus `?` —
+            // names never appear (identity-insignificant). The B6 structural
+            // descriptor is a PARALLEL derivation off the same walk: it factors
+            // the ADR mode axis out of the borrow wrapper (`PassingMode`) and
+            // records the parameter's VALUE-type identity (the referent when
+            // borrowed), so `reflect()` can surface a `ParamDescriptor<Sig, I,
+            // T, Mode>` without inverting the one-way identity hash.
             let mut embedded = Vec::with_capacity(params.len());
+            let mut descriptors = Vec::with_capacity(params.len());
             for param in params {
+                // ADR-009 B6 R2 (Dec 63): a callable's parameters are
+                // heterogeneous signature-indexed descriptors, never a
+                // homogeneous top-typed collection. A parameter spelled with the
+                // compiler-internal `Any` top type (bare `Any` or `Array<Any>`)
+                // erases the per-position type and is the named rejection —
+                // parallel to the B3 witness-erasure posture (capital `Any`
+                // refused; lowercase `any` is the enabled Erased leaf, reached
+                // through `canonicalize_resolved` below untouched).
+                if super::existential::annotation_erases_witness_to_any(&param.type_annotation) {
+                    return Err(CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC.to_string());
+                }
                 let member = canonicalize_resolved(&param.type_annotation, scope)?;
                 embedded.push(format!(
                     "{}{}",
                     identity_hex(member.identity),
                     if param.optional { "?" } else { "" }
                 ));
+                // Passing mode is NOT part of the identity string — it is
+                // derived from the outermost borrow of the parameter annotation
+                // (ADR mode axis). The parameter's VALUE type is the referent
+                // when borrowed; otherwise the whole annotation identity.
+                let (mode, value_identity) = match &param.type_annotation {
+                    TypeAnnotation::Borrow { mutable, inner } => {
+                        let referent = canonicalize_resolved(inner, scope)?;
+                        let mode = if *mutable {
+                            PassingMode::ExclusiveBorrow
+                        } else {
+                            PassingMode::SharedBorrow
+                        };
+                        (mode, referent.identity)
+                    }
+                    _ => (PassingMode::Move, member.identity),
+                };
+                descriptors.push(payloads::ParamDescriptor {
+                    name: param.name.clone(),
+                    type_identity: value_identity,
+                    optional: param.optional,
+                    mode,
+                });
             }
             let returns = canonicalize_resolved(returns, scope)?;
-            Ok(composite(
+            let mut canonical = composite(
                 format!(
                     "callable:({})->{}",
                     embedded.join(","),
                     identity_hex(returns.identity)
                 ),
                 FrozenTypeCategory::Callable,
-            ))
+            );
+            canonical.callable = Some(payloads::CallableDescriptor {
+                params: descriptors,
+                returns: returns.identity,
+            });
+            Ok(canonical)
         }
         TypeAnnotation::Borrow { mutable, inner } => {
             let member = canonicalize_resolved(inner, scope)?;
-            Ok(composite(
+            let mut canonical = composite(
                 format!(
                     "reference:&{}{}",
                     if *mutable { "mut " } else { "" },
                     identity_hex(member.identity)
                 ),
                 FrozenTypeCategory::Reference,
-            ))
+            );
+            // ADR-009 B7: mutability + referent identity threaded on the
+            // canonical so `payload_of` reconstructs the `FrozenReference`.
+            canonical.reference = Some(payloads::ReferenceDescriptor {
+                mutable: *mutable,
+                referent: member.identity,
+            });
+            Ok(canonical)
         }
         TypeAnnotation::Union(items) => {
             // Union membership is an associative set (descriptor grammar
@@ -643,10 +1114,26 @@ fn canonicalize_resolved(
                 // member (int | i64 == int); no singleton union descriptor.
                 return Ok(members.into_iter().next().expect("non-empty union"));
             }
-            Ok(composite(
+            // ADR-009 B7: the deduped, byte-sorted member identities threaded on
+            // the canonical (in the SAME order the descriptor fixes) so
+            // `payload_of` reconstructs the `FrozenUnion` without inverting the
+            // one-way identity hash. Reconstructed from the sorted+deduped hex
+            // embeddings, not the raw member list, so the payload member order
+            // matches the identity's descriptor exactly.
+            let union_members = embedded
+                .iter()
+                .map(|hex| {
+                    identity_from_hex(hex).expect("union member hex is a well-formed identity")
+                })
+                .collect();
+            let mut canonical = composite(
                 format!("union:({})", embedded.join("|")),
                 FrozenTypeCategory::Union,
-            ))
+            );
+            canonical.union = Some(payloads::UnionDescriptor {
+                members: union_members,
+            });
+            Ok(canonical)
         }
         TypeAnnotation::Intersection(items) => {
             // Dec 50/94 rule 3, one classification rule (S5 R8): an
@@ -799,6 +1286,11 @@ fn composite(descriptor: String, category: FrozenTypeCategory) -> CanonicalType 
         descriptor,
         category,
         identity,
+        callable: None,
+        tuple: None,
+        record: None,
+        reference: None,
+        union: None,
     }
 }
 
@@ -813,6 +1305,11 @@ fn canonical_leaf(name: &str, scope: &LeafScope<'_>) -> Result<CanonicalType, St
         descriptor: identity_hex(identity),
         category,
         identity,
+        callable: None,
+        tuple: None,
+        record: None,
+        reference: None,
+        union: None,
     })
 }
 
@@ -820,14 +1317,15 @@ fn canonical_record(
     fields: &[ObjectTypeField],
     scope: &LeafScope<'_>,
 ) -> Result<CanonicalType, String> {
-    let mut entries = Vec::with_capacity(fields.len());
+    // ADR-009 B7: retain each field's name/optionality/VALUE-type identity so
+    // the normalized `FrozenRecord` reconstructs without inverting the identity
+    // hash. `entry.0` is the field NAME — identity-insignificant, hashed into a
+    // hygienic member identity below, never surfaced as a runtime string
+    // (Dec 57).
+    let mut entries: Vec<(&str, bool, FrozenTypeIdentity)> = Vec::with_capacity(fields.len());
     for field in fields {
         let member = canonicalize_resolved(&field.type_annotation, scope)?;
-        entries.push((
-            field.name.as_str(),
-            field.optional,
-            identity_hex(member.identity),
-        ));
+        entries.push((field.name.as_str(), field.optional, member.identity));
     }
     // Field-name byte sort: record identity is declaration-order independent.
     entries.sort_by(|left, right| left.0.cmp(right.0));
@@ -841,11 +1339,48 @@ fn canonical_record(
     }
     let rendered: Vec<String> = entries
         .iter()
-        .map(|(name, optional, hex)| format!("{name}{}:{hex}", if *optional { "?" } else { "" }))
+        .map(|(name, optional, identity)| {
+            format!(
+                "{name}{}:{}",
+                if *optional { "?" } else { "" },
+                identity_hex(*identity)
+            )
+        })
         .collect();
-    Ok(composite(
+    let mut canonical = composite(
         format!("record:{{{}}}", rendered.join(",")),
         FrozenTypeCategory::Record,
+    );
+    // The hygienic member identity is minted from the record's OWN frozen
+    // identity + the field name (`member:record:{record_hex}:{name}`) — a stable
+    // opaque identity, never the source-name string (Dec 57). Two records with
+    // the same normalized shape mint the same identity AND the same member
+    // identities, so the payload is a pure function of the frozen identity.
+    let record_identity = canonical.identity;
+    let record_fields = entries
+        .iter()
+        .map(|(name, optional, type_identity)| payloads::RecordFieldDescriptor {
+            member: record_member_identity(record_identity, name),
+            type_identity: *type_identity,
+            optional: *optional,
+        })
+        .collect();
+    canonical.record = Some(payloads::RecordDescriptor {
+        fields: record_fields,
+    });
+    Ok(canonical)
+}
+
+/// ADR-009 B7 (Dec 57): the owner-bound HYGIENIC member identity for one
+/// structural-record field. A stable opaque 128-bit identity minted from
+/// `member:record:{record_hex}:{name}` — the record's own frozen identity is the
+/// owner (a structural record has no nominal owner name), NEVER the source-name
+/// string. Distinct from the value-type identity space (the `member:` prefix
+/// family, sibling of [`member_identity`]).
+fn record_member_identity(record: FrozenTypeIdentity, field_name: &str) -> FrozenTypeIdentity {
+    FrozenTypeIdentity::from_canonical_descriptor(&format!(
+        "member:record:{}:{field_name}",
+        identity_hex(record)
     ))
 }
 
@@ -1065,6 +1600,11 @@ pub(super) fn canonical_apply(
             descriptor: identity_hex(constructor.head_identity),
             category: FrozenTypeCategory::Nominal,
             identity: constructor.head_identity,
+            callable: None,
+            tuple: None,
+            record: None,
+            reference: None,
+            union: None,
         });
     }
     let embedded: Vec<String> = args
@@ -1263,6 +1803,87 @@ pub(crate) fn build_const_arg_ref_heap_value(value: i64) -> Result<HeapValue, St
             ("identity_low", KindedSlot::from_int(identity.low)),
         ],
     ))
+}
+
+/// ADR-009 B5 (Dec 56): mint a `RepresentationAccess<T>` authority carrier for
+/// a frozen type identity. The identity is re-validated through the freeze (an
+/// unknown/INVALID identity cannot mint authority) so a malformed identity never
+/// yields a usable capability. Only the two identity halves are stored — the
+/// authority IS the identity binding, no name/kind text (Dec 56). Called ONLY by
+/// the compiler-injected mint intrinsic in an annotation expand-hook scope.
+pub(crate) fn build_representation_access_heap_value(
+    identity: FrozenTypeIdentity,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    typed_slot_into_heap_value(build_representation_access_slot(identity, freeze)?)
+}
+
+/// The `KindedSlot` form of [`build_representation_access_heap_value`], for the
+/// annotation expand-hook delivery path (`functions_annotations.rs`), which
+/// binds the minted authority as a comptime module binding rather than an
+/// intrinsic return value.
+pub(crate) fn build_representation_access_slot(
+    identity: FrozenTypeIdentity,
+    freeze: &FreezeOverlay,
+) -> Result<KindedSlot, String> {
+    if identity == FrozenTypeIdentity::INVALID {
+        return Err("RepresentationAccess cannot be minted for an unknown semantic type identity"
+            .to_string());
+    }
+    // Re-validate the identity is one the freeze actually issued: `category_of`
+    // errors on an identity the freeze never minted, so a fabricated identity
+    // cannot become authority.
+    let _category = freeze.category_of(identity)?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
+        &[
+            ("identity_high", KindedSlot::from_int(identity.high)),
+            ("identity_low", KindedSlot::from_int(identity.low)),
+        ],
+    ))
+}
+
+/// Read the frozen type identity a `RepresentationAccess` carrier authorizes
+/// (schema-name-checked). A slot that is not a genuine compiler-issued
+/// `RepresentationAccess` — a bare int/bool, a `FrozenType`, an arbitrary object
+/// — is the named R6 authority rejection.
+fn representation_access_identity_from_ref(slot: &KindedSlot) -> Result<FrozenTypeIdentity, String> {
+    let (schema, storage) = reserved_storage(
+        slot,
+        COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
+        "RepresentationAccess",
+    )
+    .map_err(|_| {
+        "representation reflection requires explicit RepresentationAccess<T> authority: \
+         reflect_repr's second argument must be the compiler-issued RepresentationAccess<T> \
+         delivered to a declaration-attached annotation expand hook (author consent, Dec 56) — \
+         an ordinary value cannot authorize it"
+            .to_string()
+    })?;
+    identity_halves_of(&schema, storage, "identity_high", "identity_low")
+}
+
+/// ADR-009 B5 (Dec 56): `reflect_repr(TypeRef<T>, RepresentationAccess<T>)`. The
+/// authority must be bound to the SAME frozen identity being reflected — a
+/// capability minted for one type cannot decompose another (authority is not
+/// ambient). Only then does the SAME payload builder as `reflect` answer the
+/// complete `FrozenType` sum.
+pub(crate) fn frozen_type_from_repr_ref(
+    type_slot: &KindedSlot,
+    access_slot: &KindedSlot,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    let identity = frozen_identity_from_ref(type_slot, "reflect_repr")?;
+    let authorized = representation_access_identity_from_ref(access_slot)?;
+    if authorized != identity {
+        return Err(
+            "RepresentationAccess<T> authorizes complete reflection over T only: this authority \
+             is bound to a different type identity than the one being reflected — a capability \
+             minted for one type cannot decompose another (Dec 56)"
+                .to_string(),
+        );
+    }
+    payloads::build_frozen_type_heap_value(identity, freeze)
 }
 
 /// Read one opaque argument's identity from a borrowed typed-object storage

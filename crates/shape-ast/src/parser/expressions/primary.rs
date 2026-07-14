@@ -339,6 +339,23 @@ fn parse_primary_expr_inner(pair: Pair<Rule>) -> Result<Expr> {
         Rule::qualified_function_call_expr => parse_qualified_function_call_expr(pair),
         Rule::enum_constructor_expr => parse_enum_constructor_expr(pair),
         Rule::ident => Ok(Expr::Identifier(pair.as_str().to_string(), span)),
+        // ADR-009 B5/B6 (#9/#10 residual): the hygienic member/parameter
+        // SELECTION token `#name` is a TARGET surface the grammar does not yet
+        // carry a general `#ident` token for. The `hash_member_selector`
+        // production parses it ONLY so this arm can emit a NAMED grammar-pending
+        // rejection (the sanctioned tracer pattern, cf. the const-generic
+        // `type_ref` reject) instead of a cryptic generic parse error — never a
+        // silent gap. The CURRENT vehicles stay positional `param(i)` selection
+        // (B6) and ordered `fields` / `variants` iteration (B5). See
+        // docs/defections.md.
+        Rule::hash_member_selector => Err(ShapeError::ParseError {
+            message: "hygienic member/parameter selection tokens (#name) are not yet a spellable \
+                      surface (grammar-pending): select a callable parameter positionally with \
+                      param(i), and read a nominal's members by iterating its fields / variants \
+                      — see docs/defections.md (ADR-009 B6 residual)"
+                .to_string(),
+            location: Some(pair_loc),
+        }),
         Rule::expression => parse_expression(pair),
         Rule::temporal_nav => super::temporal::parse_temporal_nav(pair),
         Rule::timeframe_expr => super::temporal::parse_timeframe_expr(pair),

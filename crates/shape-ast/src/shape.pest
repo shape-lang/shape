@@ -1208,9 +1208,21 @@ primary_expr = {
     | temporal_nav
     | type_ref_call   // type_ref(TYPE) checked type-argument position (ADR-009 A2) — before ident
     | struct_literal  // Struct literal: TypeName { field: value, ... } — before ident
+    | hash_member_selector // #name hygienic-selection token — parsed ONLY to name-reject (ADR-009 B5/B6)
     | ident
     | timeframe_expr
 }
+
+// ADR-009 B5/B6/B7: the hygienic member/parameter SELECTION token `#name`
+// (`callable.param(#p)`, `record.field(#f)`, `constant(#c)`) is a TARGET
+// surface the grammar does not yet carry a general `#ident` token for. This
+// production parses the spelling ONLY so the parser can emit a NAMED
+// grammar-pending rejection (the sanctioned tracer pattern, cf.
+// `type_ref_const_generic_reject`) instead of a cryptic generic parse error —
+// never a silent gap. It produces no AST node. The `#` is unambiguous in
+// expression position (the `f#"..."` formatted prefix begins with `f`, and the
+// `\#` escape lives inside string bodies), so no valid form regresses.
+hash_member_selector = { "#" ~ ident }
 
 // Await expression: await expr | await @annotation expr | await join kind { branches }
 await_expr = {

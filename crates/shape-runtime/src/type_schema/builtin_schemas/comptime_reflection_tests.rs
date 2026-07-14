@@ -115,22 +115,34 @@ fn frozen_type_schema_has_exactly_the_ordinal_pinned_enabled_variants() {
         .iter()
         .map(|variant| (variant.name.as_str(), variant.id, variant.payload_fields))
         .collect();
+    // ADR-009 B6: Callable is an enabled payload variant (catalog ordinal 6).
+    // ADR-009 B5: Nominal is an enabled payload variant (catalog ordinal 3).
+    // Ordinals are the catalog declaration positions, never densely renumbered.
     assert_eq!(
         actual,
-        [("Primitive", 0, 1), ("Never", 1, 1), ("Erased", 9, 1)]
+        [
+            ("Primitive", 0, 1),
+            ("Never", 1, 1),
+            ("Erased", 9, 1),
+            ("Callable", 6, 1),
+            ("Nominal", 3, 1),
+            // ADR-009 B7: the four composite payloads at their catalog ordinals
+            // (Tuple=4, Record=5, Reference=7, Union=8) — declaration order
+            // follows the enabled-catalog append order, ids stay ordinal-pinned.
+            ("Tuple", 4, 1),
+            ("Record", 5, 1),
+            ("Reference", 7, 1),
+            ("Union", 8, 1),
+            // ADR-009 B7 Slice 2: Parameter at catalog ordinal 2, completing the
+            // ten-category catalog.
+            ("Parameter", 2, 1),
+        ]
     );
     assert_eq!(info.variant_id("Unknown"), None);
     assert_eq!(info.variant_id("Any"), None);
-    // Non-enabled categories are NOT declared as stub variants.
-    for pending in [
-        "Parameter",
-        "Nominal",
-        "Tuple",
-        "Record",
-        "Callable",
-        "Reference",
-        "Union",
-    ] {
+    // ADR-009 B7 Slice 2: Parameter is now enabled; only Existential (B3-S3)
+    // stays non-enabled and must NOT be declared as a stub variant.
+    for pending in ["Existential"] {
         assert_eq!(
             info.variant_id(pending),
             None,
@@ -285,4 +297,78 @@ fn frozen_type_category_schema_matches_the_runtime_catalog() {
         .collect();
     assert_eq!(actual, expected);
     assert_eq!(categories.variant_id("Unknown"), None);
+}
+
+/// ADR-009 B5 (Dec 55-59): the nominal-shape descriptor family round-trips —
+/// `FrozenNominal` carries only the sealed `NominalShape` enum; the shape
+/// descriptors carry owner + owner-bound member identities (no source-name
+/// string field, Dec 57 R1); `NominalShape` / `FieldInitialization` are the
+/// sealed catalog enums with the exact catalog variants.
+#[test]
+fn nominal_shape_descriptor_schemas_round_trip_typed_and_name_free() {
+    let mut registry = TypeSchemaRegistry::new();
+    register_builtin_schemas(&mut registry);
+
+    // FrozenNominal is the sealed-shape wrapper only.
+    let frozen_nominal = registry.get(COMPTIME_FROZEN_NOMINAL_SCHEMA).unwrap();
+    let fields: Vec<_> = frozen_nominal
+        .fields
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(fields, ["shape"]);
+
+    // No shape descriptor exposes a source-name / kind string field (Dec 57).
+    for schema_name in [
+        COMPTIME_STRUCT_DESCRIPTOR_SCHEMA,
+        COMPTIME_ENUM_DESCRIPTOR_SCHEMA,
+        COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA,
+        COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA,
+        COMPTIME_FIELD_DESCRIPTOR_SCHEMA,
+        COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
+        COMPTIME_ASSOCIATED_CONST_DESCRIPTOR_SCHEMA,
+    ] {
+        let schema = registry
+            .get(schema_name)
+            .unwrap_or_else(|| panic!("{schema_name} registered"));
+        for field in &schema.fields {
+            assert!(
+                !matches!(field.name.as_str(), "name" | "kind" | "source" | "type"),
+                "{schema_name} must not carry a name/kind/source string field, got {}",
+                field.name
+            );
+        }
+    }
+
+    // NominalShape is the exact sealed declaration-shape catalog.
+    let nominal_shape = registry
+        .get(crate::comptime_reflection::NOMINAL_SHAPE_SCHEMA_NAME)
+        .and_then(|schema| schema.get_enum_info())
+        .unwrap();
+    let actual: Vec<_> = nominal_shape
+        .variants
+        .iter()
+        .map(|variant| (variant.name.as_str(), variant.id, variant.payload_fields))
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            ("Struct", 0, 1),
+            ("Enum", 1, 1),
+            ("Newtype", 2, 1),
+            ("Opaque", 3, 1)
+        ]
+    );
+
+    // FieldInitialization is the exact sealed Dec 59 disposition.
+    let field_init = registry
+        .get(crate::comptime_reflection::FIELD_INITIALIZATION_SCHEMA_NAME)
+        .and_then(|schema| schema.get_enum_info())
+        .unwrap();
+    let init_names: Vec<_> = field_init
+        .variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect();
+    assert_eq!(init_names, ["Required", "Defaulted"]);
 }

@@ -49,7 +49,7 @@ use crate::bytecode::{
     Operand, Program as ContentAddressedProgram,
 };
 use crate::type_tracking::{NativeKind, TypeTracker, VariableTypeInfo};
-use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
+use shape_ast::ast::{FunctionDef, Item, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
     InferenceFacts, Type, TypeAnalysisMode, TypeErrorWithLocation, analyze_program_full,
@@ -1867,6 +1867,18 @@ pub struct BytecodeCompiler {
     /// membership is the table's derived `contains_name` view.
     pub(crate) generated_symbols: comptime_builtins::expansion_provenance::GeneratedSymbolTable,
 
+    /// ADR-009 E3 (slice S1) — the generated analysis items materialized by
+    /// the executed declaration-discovery pre-pass
+    /// (`materialize_computed_comptime_extends`) for this compilation unit.
+    /// This is the SINGLE authority for generated `extend`/free-function
+    /// items: the former non-evaluating static AST scan (deleted
+    /// `shape_ast::transform::comptime_extends`) is gone. Populated once by
+    /// the reference-model driver immediately after the executed pre-pass and
+    /// read back by `generated_analysis_items()` so static consumers (LSP
+    /// inference helpers, the `expand-comptime` CLI report) augment from the
+    /// executed authority instead of a parallel scan.
+    pub(crate) generated_analysis_items: Vec<shape_ast::ast::Item>,
+
     /// ADR-009 A3 (review round 1) — names of call-site specializations
     /// (`__w24_method_*`, `__w27_implicit_*`) whose body compile FAILED after
     /// registration. `register_function` runs before `compile_function` (the
@@ -1931,6 +1943,53 @@ pub fn infer_reference_model(
     let (inferred_ref_params, inferred_ref_mutates, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     (inferred_ref_params, inferred_ref_mutates)
+}
+
+/// ADR-009 E3 (slice S1): materialize the generated analysis items
+/// (`Item::Extend` / generated free `Item::Function`) for `program` through
+/// the SINGLE executed declaration-discovery authority
+/// (`materialize_computed_comptime_extends`, reached via `compile_in_place`).
+/// This replaces the deleted non-evaluating static AST scan
+/// (`shape_ast::transform::comptime_extends`): static consumers that need
+/// generated declarations visible to inference/reporting (the LSP inference
+/// helpers, the `expand-comptime` CLI) obtain them here, from the executed
+/// result, never from a parallel scan.
+///
+/// A structural fast path returns no items for programs that cannot generate
+/// (no annotation applications and no `comptime` blocks), avoiding a compile
+/// for the common case. The compile runs in RecoverAll modes and tolerates
+/// errors — the executed authority still records every declaration reserved
+/// before a failure.
+pub fn executed_generated_items(program: &Program) -> Vec<Item> {
+    let may_generate = program.items.iter().any(|item| match item {
+        Item::Comptime(..) => true,
+        Item::Function(def, _) => !def.annotations.is_empty(),
+        Item::ForeignFunction(def, _) => !def.annotations.is_empty(),
+        Item::StructType(def, _) => !def.annotations.is_empty(),
+        Item::Enum(def, _) => !def.annotations.is_empty(),
+        Item::Trait(def, _) => !def.annotations.is_empty(),
+        Item::Module(def, _) => !def.annotations.is_empty(),
+        _ => false,
+    });
+    if !may_generate {
+        return Vec::new();
+    }
+    let mut compiler = BytecodeCompiler::new();
+    compiler.set_type_diagnostic_mode(TypeDiagnosticMode::RecoverAll);
+    compiler.set_compile_diagnostic_mode(CompileDiagnosticMode::RecoverAll);
+    let _ = compiler.compile_in_place(program);
+    compiler.generated_analysis_items().to_vec()
+}
+
+/// ADR-009 E3 (slice S1): return a clone of `program` with the executed
+/// authority's generated items appended — the direct replacement for the
+/// deleted `shape_ast::transform::augment_program_with_generated_extends`,
+/// but sourced from the executed declaration-discovery pre-pass instead of a
+/// parallel non-evaluating scan.
+pub fn augment_program_with_executed_extends(program: &Program) -> Program {
+    let mut augmented = program.clone();
+    augmented.items.extend(executed_generated_items(program));
+    augmented
 }
 
 /// Infer effective parameter pass modes (`ByValue` / `ByRefShared` / `ByRefExclusive`)

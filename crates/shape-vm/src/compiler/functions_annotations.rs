@@ -302,6 +302,8 @@ impl BytecodeCompiler {
                             ctx_file,
                             trait_impls.clone(),
                             freeze,
+                            // Function-target handler: no representation authority.
+                            None,
                         );
                     super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
 
@@ -970,6 +972,8 @@ impl BytecodeCompiler {
             target_value,
             annotation_def_param_names,
             &const_bindings,
+            // Function target: no representation authority (Dec 56).
+            None,
         )?;
 
         self.process_comptime_directives_for_function(
@@ -1002,6 +1006,11 @@ impl BytecodeCompiler {
         target_value: KindedSlot,
         annotation_def_param_names: &[String],
         const_bindings: &[(String, KindedSlot)],
+        // ADR-009 B5 (Dec 56): the annotated type's frozen identity halves for
+        // declaration-attached TYPE-target handlers; `None` for function /
+        // module / expression targets (which receive no representation
+        // authority). The mint call is injected into the handler mini-VM.
+        access_identity: Option<(i64, i64)>,
     ) -> Result<super::comptime::ComptimeExecutionResult> {
         let handler_span = handler.span;
         let extensions: Vec<_> = self
@@ -1065,6 +1074,9 @@ impl BytecodeCompiler {
             &ctx_file,
             trait_impls,
             freeze,
+            // ADR-009 B5 (Dec 56): forward the caller-supplied type identity
+            // (Some for a declaration-attached type-target hook; None otherwise).
+            access_identity,
         )
         .map_err(|e| self.build_comptime_failure(&e, handler_span, &context))?;
         // §4.4: re-emit any `warning()` output anchored at this handler site.
@@ -1542,6 +1554,16 @@ impl BytecodeCompiler {
         &self.generated_symbols
     }
 
+    /// ADR-009 E3 (slice S1): the generated analysis items (`Item::Extend` /
+    /// `Item::Function`) materialized by the executed declaration-discovery
+    /// pre-pass for this compilation unit. Empty until `compile_in_place`
+    /// runs. This is the executed authority that replaced the deleted
+    /// non-evaluating static AST scan; static consumers augment their program
+    /// view from this slice.
+    pub fn generated_analysis_items(&self) -> &[shape_ast::ast::Item] {
+        &self.generated_analysis_items
+    }
+
     /// ADR-009 D1 (S2): build the [`ExpansionSite`] for one comptime
     /// annotation-handler application. Called by BOTH phases of the existing
     /// extend/materialization path — the speculative pre-pass
@@ -1804,6 +1826,34 @@ impl BytecodeCompiler {
     ) -> Result<Vec<shape_ast::ast::Item>> {
         use shape_ast::ast::Item;
 
+        // ADR-009 E3 (S1 parity): declaration-PRODUCING comptime attaches to two
+        // target kinds — struct/type definitions and annotated functions. A
+        // function-target annotation whose comptime handler emits
+        // `extend Type { … }` must enter the SAME declaration-discovery fixed
+        // point as a type-target one (Decision 67), so both flow through ONE
+        // worklist, ONE run-once memo, and ONE recording path — never a parallel
+        // scan. Only the target-object construction and the Dec-56 representation
+        // authority differ per kind; everything downstream (claim, execute,
+        // directive recording) is shared inline below.
+        enum DiscoveryTarget {
+            Struct(shape_ast::ast::types::StructTypeDef),
+            Function(FunctionDef),
+        }
+        impl DiscoveryTarget {
+            fn name(&self) -> &str {
+                match self {
+                    DiscoveryTarget::Struct(sd) => &sd.name,
+                    DiscoveryTarget::Function(fd) => &fd.name,
+                }
+            }
+            fn annotations(&self) -> &[shape_ast::ast::functions::Annotation] {
+                match self {
+                    DiscoveryTarget::Struct(sd) => &sd.annotations,
+                    DiscoveryTarget::Function(fd) => &fd.annotations,
+                }
+            }
+        }
+
         // annotation bare-name -> (comptime handlers, annotation-def param names)
         let handler_map = self.collect_comptime_annotation_handlers(program);
         if handler_map.is_empty() {
@@ -1840,16 +1890,26 @@ impl BytecodeCompiler {
             .unwrap_or("")
             .to_string();
 
-        // Snapshot the struct definitions so we can borrow `self` mutably
-        // while running the mini-VM.
-        let struct_defs: Vec<shape_ast::ast::types::StructTypeDef> = program
+        // Snapshot the discovery targets (struct/type defs + annotated
+        // functions) so we can borrow `self` mutably while running the mini-VM.
+        // Function targets carry no representation authority (Dec 56); per the
+        // v1 directive surface they never emit a new annotated type, so they are
+        // a flat one-round seed — the additions-only re-scan below still keeps
+        // multi-level discovery total for any generated annotated struct.
+        let mut discovery_seed: Vec<DiscoveryTarget> = program
             .items
             .iter()
             .filter_map(|item| match item {
-                Item::StructType(sd, _) => Some(sd.clone()),
+                Item::StructType(sd, _) => Some(DiscoveryTarget::Struct(sd.clone())),
                 _ => None,
             })
             .collect();
+        discovery_seed.extend(program.items.iter().filter_map(|item| match item {
+            Item::Function(fd, _) if !fd.annotations.is_empty() => {
+                Some(DiscoveryTarget::Function(fd.clone()))
+            }
+            _ => None,
+        }));
 
         let mut generated: Vec<Item> = Vec::new();
 
@@ -1867,7 +1927,7 @@ impl BytecodeCompiler {
         // annotated type — so real programs converge in one round; the worklist
         // machinery makes multi-level discovery total and its rejections named.
         let mut discovery = DeclarationDiscoveryFixedPoint::new();
-        let mut worklist: Vec<shape_ast::ast::types::StructTypeDef> = struct_defs;
+        let mut worklist: Vec<DiscoveryTarget> = discovery_seed;
         // Generated annotated type → the application whose expansion produced
         // it (the output-triggers edge source for cycle detection).
         let mut type_producer: HashMap<String, ExpansionIdentity> = HashMap::new();
@@ -1879,52 +1939,69 @@ impl BytecodeCompiler {
                 .map_err(|message| self.build_discovery_failure(message, None))?;
             let round_defs = std::mem::take(&mut worklist);
             // Frontier state for the monotone-convergence (oscillation) guard:
-            // the sorted set of type names discovered/pending this round.
-            let mut frontier: Vec<String> = round_defs.iter().map(|d| d.name.clone()).collect();
+            // the sorted set of target names discovered/pending this round.
+            let mut frontier: Vec<String> =
+                round_defs.iter().map(|d| d.name().to_string()).collect();
             frontier.sort();
             discovery
                 .observe_round_state(&frontier)
                 .map_err(|message| self.build_discovery_failure(message, None))?;
             // Types generated this round, re-scanned next round (additions-only;
             // discovered headers stay immutable through discovery).
-            let mut newly_generated_types: Vec<shape_ast::ast::types::StructTypeDef> = Vec::new();
+            let mut newly_generated_types: Vec<DiscoveryTarget> = Vec::new();
 
-            for struct_def in &round_defs {
-                for ann in &struct_def.annotations {
+            for disc_target in &round_defs {
+                for ann in disc_target.annotations() {
                     let Some(entry) = handler_map.get(ann.name.as_str()) else {
                         continue;
                     };
                     for handler in &entry.handlers {
-                        let fields: Vec<(
-                            String,
-                            Option<TypeAnnotation>,
-                            Vec<shape_ast::ast::functions::Annotation>,
-                        )> = struct_def
-                            .fields
-                            .iter()
-                            .map(|f| {
+                        // Per-kind target construction. A TYPE target builds the
+                        // field-carrying `ComptimeTarget` and (Dec 56) names the
+                        // annotated type for representation-authority minting; a
+                        // FUNCTION target builds from the signature and receives no
+                        // authority (`access_type_name = None`). Everything below
+                        // is shared.
+                        let (target, access_type_name): (_, Option<String>) = match disc_target {
+                            DiscoveryTarget::Struct(struct_def) => {
+                                let fields: Vec<(
+                                    String,
+                                    Option<TypeAnnotation>,
+                                    Vec<shape_ast::ast::functions::Annotation>,
+                                )> = struct_def
+                                    .fields
+                                    .iter()
+                                    .map(|f| {
+                                        (
+                                            f.name.clone(),
+                                            Some(f.type_annotation.clone()),
+                                            f.annotations.clone(),
+                                        )
+                                    })
+                                    .collect();
                                 (
-                                    f.name.clone(),
-                                    Some(f.type_annotation.clone()),
-                                    f.annotations.clone(),
+                                    super::comptime_target::ComptimeTarget::from_type(
+                                        &struct_def.name,
+                                        &fields,
+                                    ),
+                                    Some(struct_def.name.clone()),
                                 )
-                            })
-                            .collect();
-
-                        let target = super::comptime_target::ComptimeTarget::from_type(
-                            &struct_def.name,
-                            &fields,
-                        );
+                            }
+                            DiscoveryTarget::Function(func_def) => (
+                                super::comptime_target::ComptimeTarget::from_function(func_def),
+                                None,
+                            ),
+                        };
                         // ADR-009 D1 (S2): the pre-pass builds the SAME expansion
                         // site pass-2 will build for this application (same ann
                         // node, same handler AST, same ComptimeTarget inputs), so
                         // both phases reserve one identity per generated decl.
                         let expansion_site = self.annotation_expansion_site(ann, handler, &target);
                         // ADR-009 D2 (Decision 67): output-triggers edge for cycle
-                        // detection — if this struct was itself generated by an
+                        // detection — if this target was itself generated by an
                         // earlier expansion, record the producing application →
                         // this application edge (DISCOVERY_CYCLE on a closing edge).
-                        if let Some(producer) = type_producer.get(&struct_def.name) {
+                        if let Some(producer) = type_producer.get(disc_target.name()) {
                             discovery
                                 .record_trigger(producer, expansion_site.identity())
                                 .map_err(|message| {
@@ -1974,6 +2051,17 @@ impl BytecodeCompiler {
                         // is acquired before the output-suppression toggle so
                         // the error path cannot leak suppression state.
                         let freeze = self.comptime_freeze_overlay()?;
+                        // ADR-009 B5 (Dec 56): a declaration-attached TYPE-target
+                        // hook mints a `RepresentationAccess<T>` authority bound to
+                        // the annotated type's frozen identity and delivers it as
+                        // the handler's third positional `access` parameter (author
+                        // consent). A type whose identity the freeze never issued
+                        // mints no authority (`None`). FUNCTION targets
+                        // (`access_type_name = None`) receive no authority.
+                        let access_identity = access_type_name
+                            .as_deref()
+                            .and_then(|name| freeze.identity_of(name))
+                            .map(|identity| (identity.high, identity.low));
                         let prev_suppressed =
                             super::comptime_builtins::set_comptime_output_suppressed(true);
                         let execution_result =
@@ -1991,6 +2079,7 @@ impl BytecodeCompiler {
                                 &ctx_file,
                                 trait_impls.clone(),
                                 freeze,
+                                access_identity,
                             );
                         super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
                         let execution = match execution_result {
@@ -2011,7 +2100,8 @@ impl BytecodeCompiler {
                                 if e.to_string().contains("[comptime error]") {
                                     let context = format!(
                                         "the @{} annotation on {}",
-                                        ann.name, struct_def.name
+                                        ann.name,
+                                        disc_target.name()
                                     );
                                     return Err(self.build_comptime_failure(&e, ann.span, &context));
                                 }
@@ -2020,10 +2110,55 @@ impl BytecodeCompiler {
                         };
 
                         for directive in execution.directives {
-                            let super::comptime_builtins::ComptimeDirective::ExtendItems { items } =
-                                directive
-                            else {
-                                continue;
+                            // ADR-009 E3 (slice S1): the executed pre-pass is
+                            // now the SINGLE authority for BOTH generated
+                            // directive shapes — the computed
+                            // `extend (expr)` snippet (`ExtendItems`) AND the
+                            // direct `extend target { method }` handler form
+                            // (`Extend`). The deleted non-evaluating static AST
+                            // scan formerly carried the direct form into the
+                            // analysis program; here the direct extend is
+                            // target-substituted and normalized to the same
+                            // `Item::Extend` the `ExtendItems` path emits, so a
+                            // single item-processing loop reserves method
+                            // signatures and returns the block for the
+                            // analyzer. Pass-2's `apply_comptime_extend`
+                            // re-issues the identical reservation (same
+                            // `annotation_expansion_site`) and compiles the
+                            // bodies.
+                            let items: Vec<Item> = match directive {
+                                super::comptime_builtins::ComptimeDirective::ExtendItems {
+                                    items,
+                                } => items,
+                                super::comptime_builtins::ComptimeDirective::Extend(mut extend) => {
+                                    // `extend target { … }` substitutes the target's
+                                    // own name — matching pass-2's
+                                    // `apply_comptime_extend` (target_name = the
+                                    // struct or function name) so both phases produce
+                                    // the identical `Item::Extend` and reserve one
+                                    // identity. (A function target has no type to
+                                    // extend; `extend Number { … }` names the type
+                                    // explicitly, so no substitution fires.)
+                                    let target_name = disc_target.name().to_string();
+                                    match &mut extend.type_name {
+                                        shape_ast::ast::TypeName::Simple(name)
+                                            if name == "target" =>
+                                        {
+                                            *name = target_name.clone().into();
+                                        }
+                                        shape_ast::ast::TypeName::Generic { name, .. }
+                                            if name == "target" =>
+                                        {
+                                            *name = target_name.clone().into();
+                                        }
+                                        _ => {}
+                                    }
+                                    vec![Item::Extend(
+                                        extend,
+                                        expansion_site.application_span(),
+                                    )]
+                                }
+                                _ => continue,
                             };
                             // ADR-009 D1 (S2), rejection row 1: generated decls
                             // must anchor at the real application span; the
@@ -2235,7 +2370,7 @@ impl BytecodeCompiler {
                                                 sd.name.clone(),
                                                 expansion_site.identity().clone(),
                                             );
-                                            newly_generated_types.push(sd);
+                                            newly_generated_types.push(DiscoveryTarget::Struct(sd));
                                         }
                                     }
                                     _ => {}
@@ -4925,6 +5060,122 @@ type Point { id: int }
             3,
             "the three provenance notes must survive the full pipeline: {:?}",
             provenance_error.notes
+        );
+    }
+}
+
+// ADR-009 E3 (slice S1) — FUNCTION-target discovery parity. A
+// `targets: [function]` annotation whose comptime handler emits
+// `extend ExplicitType { … }` must enter the SAME executed declaration-
+// discovery fixed point (`materialize_computed_comptime_extends`) as a
+// type-target one, so the generated method is recorded in the executed
+// authority (`generated_analysis_items`, read by the LSP + analyzer + every
+// user body) — never via a parallel non-evaluating AST scan. The type-target
+// path already discovered; this closes the function-target gap.
+#[cfg(test)]
+mod e3_function_target_discovery_tests {
+    use crate::compiler::executed_generated_items;
+
+    fn parse(source: &str) -> shape_ast::ast::Program {
+        shape_ast::parse_program(source).expect("test program parses")
+    }
+
+    /// The generated method names an executed-discovery `extend` block records
+    /// for `type_name` (across all generated extend items).
+    fn discovered_extend_methods(
+        items: &[shape_ast::ast::Item],
+        type_name: &str,
+    ) -> Vec<String> {
+        let mut methods = Vec::new();
+        for item in items {
+            if let shape_ast::ast::Item::Extend(extend, _) = item {
+                let name = match &extend.type_name {
+                    shape_ast::ast::TypeName::Simple(n) => n.to_string(),
+                    shape_ast::ast::TypeName::Generic { name, .. } => name.to_string(),
+                };
+                if name == type_name {
+                    methods.extend(extend.methods.iter().map(|m| m.name.clone()));
+                }
+            }
+        }
+        methods
+    }
+
+    /// The parity gap: a `targets: [function]` handler that `extend`s an
+    /// explicit (builtin) type records the generated method in the executed
+    /// discovery output — exactly the `extend Number { method doubled }` shape
+    /// the LSP extraction test exercises, proven here at the compiler tier.
+    #[test]
+    fn function_target_extend_explicit_type_enters_discovery() {
+        let program = parse(
+            r#"
+annotation add_number_method() {
+    targets: [function]
+    comptime post(target, ctx) {
+        extend Number {
+            method doubled() { self * 2.0 }
+        }
+    }
+}
+@add_number_method()
+fn marker() { 0 }
+"#,
+        );
+        let methods = discovered_extend_methods(&executed_generated_items(&program), "Number");
+        assert!(
+            methods.iter().any(|m| m == "doubled"),
+            "function-target `extend Number` must be recorded in executed discovery; got {methods:?}"
+        );
+    }
+
+    /// A function-target handler that `extend`s a USER type is discovered the
+    /// same way (the explicit-type case is not builtin-specific).
+    #[test]
+    fn function_target_extend_user_type_enters_discovery() {
+        let program = parse(
+            r#"
+type Widget { id: int }
+annotation add_label() {
+    targets: [function]
+    comptime post(target, ctx) {
+        extend Widget {
+            method label() -> string { f"widget-{self.id}" }
+        }
+    }
+}
+@add_label()
+fn register() -> int { 0 }
+"#,
+        );
+        let methods = discovered_extend_methods(&executed_generated_items(&program), "Widget");
+        assert!(
+            methods.iter().any(|m| m == "label"),
+            "function-target `extend Widget` must be recorded in executed discovery; got {methods:?}"
+        );
+    }
+
+    /// The annotation DEFINITION alone (never applied to a function) generates
+    /// nothing — the discovery pass runs only applied handlers (the run-once
+    /// memo claims one application per site), so no speculative pollution.
+    #[test]
+    fn unapplied_function_target_annotation_generates_nothing() {
+        let program = parse(
+            r#"
+annotation add_number_method() {
+    targets: [function]
+    comptime post(target, ctx) {
+        extend Number {
+            method doubled() { self * 2.0 }
+        }
+    }
+}
+fn marker() { 0 }
+"#,
+        );
+        let methods = discovered_extend_methods(&executed_generated_items(&program), "Number");
+        assert!(
+            methods.is_empty(),
+            "an unapplied function-target annotation must not generate discovery items; got {methods:?}"
         );
     }
 }

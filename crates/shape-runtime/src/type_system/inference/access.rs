@@ -972,6 +972,73 @@ impl TypeInferenceEngine {
                     crate::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME.to_string(),
                 ))
             }
+            // ADR-009 B5 (Stage 2, Dec 56) — `reflect_repr(TypeRef<T>,
+            // RepresentationAccess<T>) -> FrozenType<T>`. The SECOND argument
+            // must be a compiler-issued `RepresentationAccess` authority: any
+            // argument whose resolved type is concretely NOT the opaque
+            // RepresentationAccess schema (a bare int/bool, a FrozenType, an
+            // arbitrary object) is the NAMED R6 authority rejection — never a
+            // decay to a generic arity/constraint error, and never a partial
+            // reflection. Only a still-unresolved authority argument falls
+            // through to the standard schema constraint push. The first
+            // argument mirrors `reflect`'s TypeRef form.
+            "reflect_repr" => {
+                let type_ref_schema =
+                    crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA;
+                let access_schema =
+                    crate::type_schema::builtin_schemas::COMPTIME_REPRESENTATION_ACCESS_SCHEMA;
+                if arg_types.len() != 2 {
+                    return Err(TypeError::ConstraintViolation(
+                        "reflect_repr expects exactly two arguments: a TypeRef from type_ref and a \
+                         compiler-issued RepresentationAccess<T> authority"
+                            .to_string(),
+                    ));
+                }
+                let resolved_type_ref =
+                    self.solver.unifier().apply_substitutions(&arg_types[0]);
+                match resolved_type_ref.to_annotation() {
+                    Some(TypeAnnotation::Basic(name)) if name == type_ref_schema => {}
+                    Some(_) => {
+                        return Err(TypeError::ConstraintViolation(
+                            "reflect_repr expects a TypeRef value (create one with type_ref(T)); \
+                             strings and other values cannot be reflected"
+                                .to_string(),
+                        ));
+                    }
+                    None => {
+                        self.push_constraint_with_origin(
+                            arg_types[0].clone(),
+                            Type::Concrete(TypeAnnotation::Basic(type_ref_schema.to_string())),
+                            call_span,
+                        );
+                    }
+                }
+                let resolved_access = self.solver.unifier().apply_substitutions(&arg_types[1]);
+                match resolved_access.to_annotation() {
+                    Some(TypeAnnotation::Basic(name)) if name == access_schema => {}
+                    Some(_) => {
+                        return Err(TypeError::ConstraintViolation(
+                            "representation reflection requires explicit RepresentationAccess<T> \
+                             authority: reflect_repr exposes a type's complete representation and \
+                             is never ambient — its second argument must be the compiler-issued \
+                             RepresentationAccess<T> delivered to a declaration-attached annotation \
+                             expand hook (author consent, Dec 56); an ordinary value cannot \
+                             authorize it"
+                                .to_string(),
+                        ));
+                    }
+                    None => {
+                        self.push_constraint_with_origin(
+                            arg_types[1].clone(),
+                            Type::Concrete(TypeAnnotation::Basic(access_schema.to_string())),
+                            call_span,
+                        );
+                    }
+                }
+                Type::Concrete(TypeAnnotation::Basic(
+                    crate::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME.to_string(),
+                ))
+            }
             // ADR-009 B2 (slice S4): `trait_ref(Tr)` types as the opaque
             // TraitRef carrier — a DISTINCT identity kind from TypeRef (a
             // trait is not a value type, Dec 49). Argument is the same
@@ -1155,6 +1222,21 @@ impl TypeInferenceEngine {
         {
             return Err(TypeError::ConstraintViolation(
                 "reflect expects exactly one TypeRef argument".to_string(),
+            ));
+        }
+        // ADR-009 B5 (Dec 56) — reflect_repr's arity rejection fires EARLY
+        // (before the generic callee-scheme arity check can produce an unnamed
+        // diagnostic first), mirroring the reflect arg-form block above.
+        // Authority-form rejections (int / bool / FrozenType) need the inferred
+        // argument type and live in `infer_comptime_builtin_call`.
+        if name == "reflect_repr"
+            && crate::builtin_metadata::is_comptime_builtin_function(name)
+            && args.len() != 2
+        {
+            return Err(TypeError::ConstraintViolation(
+                "reflect_repr expects exactly two arguments: a TypeRef from type_ref and a \
+                 compiler-issued RepresentationAccess<T> authority"
+                    .to_string(),
             ));
         }
         // ADR-009 B2 (slice S4): `trait_ref` mirrors `type_ref`'s

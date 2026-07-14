@@ -1048,6 +1048,40 @@ fn test_comptime_builtin_hover_reflect_uses_shared_catalog() {
     }
 }
 
+/// ADR-009 B7 (Slice 3, catalog-completeness): the reflect hover lists EXACTLY
+/// the enabled payload categories from the shared catalog and NO non-enabled
+/// category. With B7 completing the ten-category catalog (Dec 50/94),
+/// `Existential` is the sole non-enabled category — it must NOT appear in the
+/// enabled-payload enumeration the hover renders. Catalog-derived on both
+/// sides (enabled loop asserted in
+/// `test_comptime_builtin_hover_reflect_uses_shared_catalog`), so this is the
+/// closed-set proof, not a hand-written exclusion.
+#[test]
+fn test_comptime_builtin_hover_reflect_excludes_non_enabled_categories() {
+    use shape_runtime::comptime_reflection::{
+        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FrozenTypeCategory,
+    };
+    let hover = get_comptime_builtin_hover("reflect").expect("Should get hover for reflect");
+    let HoverContents::Markup(markup) = hover.contents else {
+        panic!("reflect hover must be markup");
+    };
+    // The enabled-payload enumeration is delimited by backticks
+    // (`` `Existential` ``); assert the delimited token is absent so a bare
+    // substring in prose can't mask a leaked non-enabled category.
+    for category in FrozenTypeCategory::ALL {
+        if FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&category) {
+            continue;
+        }
+        let delimited = format!("`{}`", category.variant_name());
+        assert!(
+            !markup.value.contains(&delimited),
+            "reflect hover must NOT enumerate non-enabled category `{}`, got: {}",
+            category.variant_name(),
+            markup.value
+        );
+    }
+}
+
 /// ADR-009 ticket B2 (S6): the `trait_ref` hover must be driven verbatim by
 /// the shared reflection-catalog row
 /// (`shape_runtime::comptime_reflection::TRAIT_REF_BUILTIN_ROW`) — the same

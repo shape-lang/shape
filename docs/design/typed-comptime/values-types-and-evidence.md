@@ -236,8 +236,11 @@ runtime. The VM/JIT dual-run in the evidence proves the *enclosing* program
 lowers and runs identically under both the interpreter and the JIT tier — i.e.
 the feature is JIT-tier-clean at the comptime→runtime boundary; it is NOT a
 claim that the JIT iterates the existential collection. Families beyond B1
-(`FieldDescriptor` / `record.fields`,
-variants, params) land with B5-B7. LSP hover and inlay over a `some`-bound
+(`FieldDescriptor` / `record.fields`, variants, params) landed with B5–B7:
+nominal fields/variants/consts with B5 (`FrozenNominal`), the four composite
+payloads + the `Parameter` payload (`TypeParamDescriptor`) with B7 — the
+`FrozenType<T>` payload catalog is now the complete ten-category set (Dec 50/94),
+with only the `Existential` witness payload (B3-S3) still reflect-rejecting. LSP hover and inlay over a `some`-bound
 witness binding render the opened descriptor (`FrozenType<T>`), the comptime
 stage, and the escape rule — driven by the SAME shared query surface the
 compiler's canonicalizer consumes (`open_comptime_some_descriptor`), not a

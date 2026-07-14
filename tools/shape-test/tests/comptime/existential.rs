@@ -55,6 +55,7 @@ let out = comptime {
       FrozenType::Primitive(p) => "P"
       FrozenType::Never(n) => "N"
       FrozenType::Erased(e) => "E"
+      FrozenType::Callable(c) => "C"
     }
   }
   acc
@@ -111,24 +112,26 @@ print(out)
     .expect_run_err_contains("hidden witness cannot escape");
 }
 
-/// Rejection-matrix row 4 (not-yet-enabled descriptor family): building the
+/// Rejection-matrix row 4 (not-yet-fully-landed descriptor family): building the
 /// existential `some` collection from a `reflect()` of a family whose payload
-/// descriptor has NOT landed (a Nominal user struct — only Primitive / Never /
-/// Erased are enabled at B1) surfaces the SAME named per-category R1 rejection
-/// inside the iteration substrate that `reflect()` gives standalone — never a
-/// partial descriptor, never a silent skip.
+/// descriptor has NOT (fully) landed surfaces the SAME named rejection inside
+/// the iteration substrate that `reflect()` gives standalone — never a partial
+/// descriptor, never a silent skip. ADR-009 B7 enabled the composite families
+/// (Tuple/Record/Reference/Union) and B7 Slice 2 enabled `Parameter`, so the
+/// still-pending reflect() family reached here is a BOUNDED erased type
+/// (`dyn Trait`): the Erased category is enabled but its bound-set payload
+/// elements land with ticket B2 (the named bounded-erased rejection).
 #[test]
 fn comptime_for_some_over_not_yet_enabled_family_is_named_per_category_rejection() {
     ShapeTest::new(
         r#"
-type Widget { x: int }
-
+trait Speak { fn speak(self) -> string; }
 let out = comptime {
-  let coll: Array<exists<T> FrozenType<T>> = [
-    reflect(type_ref(Widget)),
+  let coll: Array<exists<W> FrozenType<W>> = [
+    reflect(type_ref(dyn Speak)),
   ]
   let mut acc = ""
-  comptime for some<T> ft in coll {
+  comptime for some<W> ft in coll {
     acc = acc + "seen"
   }
   acc
@@ -136,7 +139,7 @@ let out = comptime {
 print(out)
 "#,
     )
-    .expect_run_err_contains("the Nominal payload descriptor has not landed");
+    .expect_run_err_contains("the Erased bound-set payload");
 }
 
 // Rejection-matrix rows 1 (witness erased to compiler-internal `Any`), 3

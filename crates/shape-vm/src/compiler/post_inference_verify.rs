@@ -357,6 +357,43 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
                  comptime-mode-only registration + runtime_lift_rejection \
                  wall keep it out of runtime code",
     },
+    // ADR-009 B7 Slice 2 — `FrozenParameter` bound-set carrier. Same
+    // disposition as `FrozenErased` above: the unspellable (SOH-prefixed,
+    // unforgeable) comptime-only `FrozenType::Parameter` payload schema's
+    // `bounds` array is reachable today ONLY as the empty set (trait-reference
+    // bound descriptors land with ticket B2, whose element is the SAME
+    // TraitRef descriptor that `FrozenErased.bounds` retypes to). The
+    // descriptor is lift-walled out of runtime code by
+    // `comptime_reflection::runtime_lift_rejection`. Removal happens by
+    // retyping the element at B2, not by stripping this row.
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_PARAMETER_SCHEMA,
+        ),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "ADR-009 B7 Slice 2 comptime-only FrozenParameter descriptor; \
+                 bound set empty-only until B2 (elements retype to TraitRef at \
+                 B2); unspellable name + runtime_lift_rejection wall keep it \
+                 out of runtime code",
+    },
+    // ADR-009 B7 Slice 2 — the SPELLABLE `FrozenParameter` payload-model struct
+    // the comptime mini-VM injects. Its `bounds` element type is `never`
+    // (uninhabited until B2), which maps through the intermediate-tier Any arm
+    // of `type_annotation_to_field_type`. Same disposition and close-out path
+    // as the unspellable row above; the name is pinned to
+    // `comptime_reflection::frozen_type_enabled_payload_type_name(Parameter)`
+    // by unit test, and `runtime_lift_rejection` walls the spellable name out
+    // of runtime code in the same commit.
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("FrozenParameter"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "ADR-009 B7 Slice 2 comptime-injected FrozenParameter payload \
+                 model; bounds element type is `never` (empty-only until B2); \
+                 comptime-mode-only registration + runtime_lift_rejection \
+                 wall keep it out of runtime code",
+    },
     // ----- TRANSITIONAL row (§4.D.3 + §4.D.5 + §4.D.10-emission)
     //       NARROWED at W17.2-C close (post-W17.2-B PROPAGATE landings)
     //

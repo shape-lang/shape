@@ -2452,6 +2452,12 @@ let x = 1
             comptime_labels.iter().any(|l| l == "reflect"),
             "comptime completions must offer reflect, got: {comptime_labels:?}"
         );
+        // ADR-009 B5 (Dec 56): the authority-gated `reflect_repr` is catalog-
+        // driven exactly like `reflect` — offered by the comptime set.
+        assert!(
+            comptime_labels.iter().any(|l| l == "reflect_repr"),
+            "comptime completions must offer reflect_repr, got: {comptime_labels:?}"
+        );
         assert!(comptime_labels.iter().any(|l| l == "type_ref"));
         assert!(comptime_labels.iter().any(|l| l == "type_category"));
 
@@ -2462,6 +2468,10 @@ let x = 1
         assert!(
             !runtime_labels.iter().any(|l| l == "reflect"),
             "runtime completions must NOT offer the comptime-only reflect"
+        );
+        assert!(
+            !runtime_labels.iter().any(|l| l == "reflect_repr"),
+            "runtime completions must NOT offer the comptime-only reflect_repr"
         );
     }
 
@@ -2484,8 +2494,13 @@ let x = 1
             "FrozenType completion must be exactly the catalog-enabled payload variants"
         );
         assert!(!labels.iter().any(|l| l == "Unknown"));
-        assert!(!labels.iter().any(|l| l == "Nominal"));
-        assert!(!labels.iter().any(|l| l == "Parameter"));
+        // ADR-009 B7 Slice 2: the composite payloads (Tuple/Record/Reference/
+        // Union) AND `Parameter` are enabled and complete (the full Dec 50/94
+        // catalog); only `Existential` stays non-enabled and must NOT appear.
+        assert!(labels.iter().any(|l| l == "Tuple"));
+        assert!(labels.iter().any(|l| l == "Union"));
+        assert!(labels.iter().any(|l| l == "Parameter"));
+        assert!(!labels.iter().any(|l| l == "Existential"));
     }
 
     /// The `FrozenPrimitive` sub-algebra completes its full sealed catalog
@@ -2533,6 +2548,133 @@ let x = 1
             .map(|c| c.label)
             .collect();
         assert_eq!(labels, ["SignedInteger"]);
+    }
+
+    /// ADR-009 B6: the `PassingMode` sealed sub-algebra (the ADR mode axis)
+    /// completes from the SAME shared catalog as every other reflection enum —
+    /// exactly `Move` / `SharedBorrow` / `ExclusiveBorrow`, no Unknown arm, no
+    /// hand-written variant list in the LSP.
+    #[test]
+    fn test_passing_mode_variant_completion_is_catalog_sourced() {
+        let labels: Vec<_> = enum_variant_completions("PassingMode", "", None)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        let expected: Vec<String> = shape_runtime::comptime_reflection::PassingMode::ALL
+            .into_iter()
+            .map(|m| m.variant_name().to_string())
+            .collect();
+        assert_eq!(labels, expected);
+        assert!(!labels.iter().any(|l| l == "Unknown"));
+    }
+
+    /// ADR-009 B6: `FrozenCallable` and `ParamDescriptor` are payload STRUCTS,
+    /// not enums (like `FrozenNever` / `FrozenErased`). The shared catalog
+    /// returns `None` for them, so enum-variant completion falls through
+    /// cleanly — no fabricated variants, no Unknown arm, no crash — and (with
+    /// no program-derived enum of that name) yields nothing.
+    #[test]
+    fn test_frozen_callable_and_param_descriptor_have_no_enum_variant_completions() {
+        assert!(
+            enum_variant_completions("FrozenCallable", "", None).is_empty(),
+            "FrozenCallable is a struct payload — no enum-variant completion"
+        );
+        assert!(
+            enum_variant_completions("ParamDescriptor", "", None).is_empty(),
+            "ParamDescriptor is a struct payload — no enum-variant completion"
+        );
+    }
+
+    /// ADR-009 B5 (S4): the nominal member descriptors — `FieldDescriptor`,
+    /// `VariantDescriptor`, `AssociatedConstDescriptor`, `FrozenNominal` — are
+    /// payload STRUCTS, not enums (like `FrozenCallable` / `ParamDescriptor`).
+    /// The shared `reflection_enum_variant_names` catalog returns `None` for
+    /// them, so enum-variant completion falls through cleanly (no fabricated
+    /// variants, no `.field(0)`-style ordinal member list, no Unknown arm) —
+    /// the sealed `NominalShape` / `FieldInitialization` axes are the ONLY
+    /// variant-completing B5 vocabularies, driven from the same one catalog.
+    #[test]
+    fn test_nominal_member_descriptor_structs_have_no_enum_variant_completions() {
+        for struct_name in [
+            "FieldDescriptor",
+            "VariantDescriptor",
+            "AssociatedConstDescriptor",
+            "FrozenNominal",
+            // ADR-009 B7 Slice 2: the Parameter payload is a struct (identity
+            // halves + bounds), not an enum — no variant completion.
+            "FrozenParameter",
+        ] {
+            assert!(
+                enum_variant_completions(struct_name, "", None).is_empty(),
+                "{struct_name} is a struct payload — no enum-variant completion"
+            );
+            // The shared catalog is the single source: a struct name has no arm.
+            assert!(
+                shape_runtime::comptime_reflection::reflection_enum_variant_names(struct_name)
+                    .is_none(),
+                "{struct_name} must have no reflection_enum_variant_names arm"
+            );
+        }
+    }
+
+    /// ADR-009 B7 Slice 3 (LSP catalog-completeness): EVERY enabled payload
+    /// descriptor TYPE name that is a struct (the whole enabled catalog except
+    /// `FrozenPrimitive`, which is the one enum sub-algebra) surfaces through
+    /// the ONE shared catalog with NO fabricated enum-variant completion — a
+    /// struct payload has no `::` variants. The list is DERIVED from the shared
+    /// catalog (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES` +
+    /// `frozen_type_enabled_payload_type_name`), so when a later ticket enables
+    /// another category the assertion auto-covers its new descriptor type name
+    /// — no hand-written per-name LSP row (spec §4.1). This is the completeness
+    /// lock for the five B7 payload structs
+    /// (`FrozenTuple`/`FrozenRecord`/`FrozenReference`/`FrozenUnion`/`FrozenParameter`).
+    #[test]
+    fn test_enabled_payload_struct_type_names_have_no_fabricated_variant_completions() {
+        use shape_runtime::comptime_reflection::{
+            FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FrozenTypeCategory,
+            frozen_type_enabled_payload_type_name, reflection_enum_variant_names,
+        };
+        // `FrozenPrimitive` is the sole enabled payload TYPE that is itself an
+        // enum (the sealed width/domain sub-algebra); every other enabled
+        // payload descriptor is a struct.
+        let primitive_type_name =
+            frozen_type_enabled_payload_type_name(FrozenTypeCategory::Primitive);
+        for category in FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES {
+            let type_name = frozen_type_enabled_payload_type_name(category)
+                .expect("an enabled category has a payload descriptor type name");
+            if Some(type_name) == primitive_type_name {
+                continue;
+            }
+            assert!(
+                enum_variant_completions(type_name, "", None).is_empty(),
+                "{type_name} is a struct payload — no enum-variant completion"
+            );
+            assert!(
+                reflection_enum_variant_names(type_name).is_none(),
+                "{type_name} must have no reflection_enum_variant_names arm"
+            );
+        }
+    }
+
+    /// ADR-009 B7 Slice 3 (LSP catalog-completeness): the B7 composite/parameter
+    /// ELEMENT descriptor structs — `TupleElement`, `RecordField`,
+    /// `UnionMember`, `TypeParamDescriptor` — are payload STRUCTS threaded
+    /// inside their parent payload's array (no `::` variants), exactly like
+    /// B5's `FieldDescriptor` family. The shared catalog returns `None` for
+    /// each, so completion falls through cleanly with no fabricated variants.
+    #[test]
+    fn test_b7_element_descriptor_structs_have_no_enum_variant_completions() {
+        for struct_name in ["TupleElement", "RecordField", "UnionMember", "TypeParamDescriptor"] {
+            assert!(
+                enum_variant_completions(struct_name, "", None).is_empty(),
+                "{struct_name} is an element struct payload — no enum-variant completion"
+            );
+            assert!(
+                shape_runtime::comptime_reflection::reflection_enum_variant_names(struct_name)
+                    .is_none(),
+                "{struct_name} must have no reflection_enum_variant_names arm"
+            );
+        }
     }
 
     /// Non-catalog enum names still resolve through the program-derived

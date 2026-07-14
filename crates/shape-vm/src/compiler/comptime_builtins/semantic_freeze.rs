@@ -110,7 +110,7 @@
 //! identity matrix in `type_reflection/tests.rs` are the ongoing tripwires.
 
 use super::type_reflection::{
-    FrozenTypeCategory, FrozenTypeIdentity, FrozenTypeIndex, canonicalize_type_annotation,
+    FrozenTypeCategory, FrozenTypeIdentity, FrozenTypeIndex, canonicalize_type_annotation, payloads,
 };
 use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::{TypeAnnotation, TypeParam};
@@ -419,9 +419,16 @@ impl SemanticFreeze {
             alias_defs: HashMap::new(),
             trait_names: compiler.known_traits.clone(),
             struct_generic_param_kinds: HashMap::new(),
+            struct_generic_param_names: HashMap::new(),
             frozen_type_ids: HashMap::new(),
             frozen_type_categories: HashMap::new(),
             frozen_primitive_payloads: HashMap::new(),
+            frozen_callable_descriptors: HashMap::new(),
+            frozen_nominal_descriptors: HashMap::new(),
+            frozen_tuple_descriptors: HashMap::new(),
+            frozen_record_descriptors: HashMap::new(),
+            frozen_reference_descriptors: HashMap::new(),
+            frozen_union_descriptors: HashMap::new(),
             generic_param_kinds: HashMap::new(),
         };
 
@@ -435,6 +442,16 @@ impl SemanticFreeze {
             index.struct_generic_param_kinds.insert(
                 name.clone(),
                 info.type_params.iter().map(param_kind_of).collect(),
+            );
+            // ADR-009 B5 (S2): the NAME projection of the same freeze input,
+            // consumed by the applied-substitution path (bind param name →
+            // applied argument identity before re-canonicalizing field types).
+            index.struct_generic_param_names.insert(
+                name.clone(),
+                info.type_params
+                    .iter()
+                    .map(|param| param.name().to_string())
+                    .collect(),
             );
         }
 
@@ -503,12 +520,22 @@ impl SemanticFreeze {
             let Some(enum_info) = schema.get_enum_info() else {
                 continue;
             };
+            // ADR-009 B5 (Dec 57): the enriched enum freeze projection carries
+            // the variant NAME (hashed into the owner-bound hygienic member
+            // identity) AND its payload ARITY (`payload_fields`), the source of
+            // `VariantDescriptor`. Full per-variant payload field TYPES are a
+            // later B5 slice.
             index.enum_defs.insert(
                 type_name,
                 enum_info
                     .variants
                     .iter()
-                    .map(|variant| variant.name.clone())
+                    .map(|variant| {
+                        super::type_reflection::FrozenEnumVariantDef {
+                            name: variant.name.clone(),
+                            payload_arity: variant.payload_fields,
+                        }
+                    })
                     .collect(),
             );
         }
@@ -833,7 +860,61 @@ pub(crate) struct FreezeOverlay {
     /// Site-interned composite identities (S2). Interior-mutable because the
     /// overlay is shared as `Arc<FreezeOverlay>` between the rewrite and the
     /// intrinsics; populated ONLY by [`FreezeOverlay::canonicalize_type`].
-    composites: Mutex<HashMap<FrozenTypeIdentity, FrozenTypeCategory>>,
+    ///
+    /// ADR-009 B6 (Dec 63): the value is WIDENED from a bare category to
+    /// [`CompositeMemoEntry`] so a `Callable` composite carries its ordered
+    /// structural descriptor (param name/type-identity/optionality/passing-mode
+    /// + return). The one-way SHA-256 identity drops names and modes by design;
+    /// widening the memo value (rather than a parallel identity-keyed
+    /// side-table) is the load-bearing B6 change — a second table would drift
+    /// from this one. See `docs/defections.md` for the rejected side-table
+    /// alternative.
+    composites: Mutex<HashMap<FrozenTypeIdentity, CompositeMemoEntry>>,
+}
+
+/// ADR-009 B6 (Dec 63): the widened value of the site-interned composite memo.
+/// Every composite carries its exhaustive semantic [`FrozenTypeCategory`]; a
+/// `Callable` composite ALSO carries its ordered structural descriptor
+/// (`callable`) so [`FreezeOverlay::payload_of`] can reconstruct a
+/// `FrozenCallable` without inverting the identity hash. `callable` is `Some`
+/// iff `category == Callable`.
+///
+/// ADR-009 B5 (Dec 55): an APPLIED nominal composite (`applied:h<…>`) ALSO
+/// carries its refined head + ordered argument identities (`applied_nominal`)
+/// so [`FreezeOverlay::payload_of`] can substitute the head's declared type
+/// parameters before issuing descriptors — WITHOUT re-parsing the one-way
+/// identity hash. Same widening discipline as `callable` (a widened memo value,
+/// never a parallel identity-keyed side-table). `applied_nominal` is `Some` iff
+/// the descriptor decomposes as a genuine `applied:` form.
+///
+/// ADR-009 B7 (Dec 50/94): a `Tuple` / `Record` / `Reference` / `Union`
+/// composite ALSO carries its structural descriptor (`tuple` / `record` /
+/// `reference` / `union`) so [`FreezeOverlay::payload_of`] reconstructs the
+/// composite payload without inverting the identity hash — the same widening
+/// discipline as `callable` (a widened memo value, never a parallel
+/// identity-keyed side-table). Each is `Some` iff `category` is the matching
+/// composite category.
+#[derive(Debug, Clone)]
+struct CompositeMemoEntry {
+    category: FrozenTypeCategory,
+    callable: Option<payloads::CallableDescriptor>,
+    applied_nominal: Option<super::type_reflection::RefinedApplication>,
+    tuple: Option<payloads::TupleDescriptor>,
+    record: Option<payloads::RecordDescriptor>,
+    reference: Option<payloads::ReferenceDescriptor>,
+    union: Option<payloads::UnionDescriptor>,
+}
+
+/// ADR-009 B7: the internal-invariant message when a site-interned composite
+/// memo entry carries its category but not its structural descriptor. The
+/// canonicalizer threads the descriptor onto the same `CompositeMemoEntry` it
+/// categorizes, so this is unreachable in practice — a named invariant, never a
+/// partial descriptor.
+fn composite_memo_invariant(category: &str) -> String {
+    format!(
+        "internal invariant: a {category} composite was memoized without its structural \
+         descriptor"
+    )
 }
 
 impl FreezeOverlay {
@@ -879,16 +960,38 @@ impl FreezeOverlay {
         annotation: &TypeAnnotation,
     ) -> std::result::Result<FrozenTypeIdentity, String> {
         let canonical = canonicalize_type_annotation(annotation, self)?;
+        let entry = CompositeMemoEntry {
+            category: canonical.category,
+            // ADR-009 B6: preserve the callable's ordered structural descriptor
+            // (name/type-identity/optionality/passing-mode + return) so
+            // `payload_of` reconstructs the `FrozenCallable` without inverting
+            // the identity hash.
+            callable: canonical.callable.clone(),
+            // ADR-009 B5 (Dec 55): preserve the refined head + argument
+            // identities of a genuine `applied:` form so `payload_of` can
+            // substitute the head's declared parameters before issuing
+            // descriptors. `None` for every non-applied descriptor (refine
+            // round-trips only over genuine applications).
+            applied_nominal: super::type_reflection::canonical_refine(&canonical.descriptor),
+            // ADR-009 B7: preserve the four composite structural descriptors so
+            // `payload_of` reconstructs the composite payload without inverting
+            // the identity hash. Each is `Some` iff the canonical is that
+            // composite category (canonicalizer invariant).
+            tuple: canonical.tuple.clone(),
+            record: canonical.record.clone(),
+            reference: canonical.reference,
+            union: canonical.union.clone(),
+        };
         let mut composites = self
             .composites
             .lock()
             .expect("freeze-overlay composite memo lock poisoned");
-        if let Some(previous) = composites.insert(canonical.identity, canonical.category) {
+        if let Some(previous) = composites.insert(canonical.identity, entry) {
             // Same collision discipline as `intern_identity`: one identity,
             // one category — a cross-category descriptor collision is an
             // internal-invariant violation, never silent.
             assert_eq!(
-                previous, canonical.category,
+                previous.category, canonical.category,
                 "canonical type identity collision across semantic categories"
             );
         }
@@ -928,7 +1031,7 @@ impl FreezeOverlay {
             .lock()
             .expect("freeze-overlay composite memo lock poisoned")
             .get(&identity)
-            .copied()
+            .map(|entry| entry.category)
         {
             return Ok(category);
         }
@@ -937,9 +1040,12 @@ impl FreezeOverlay {
 
     /// Shared query API (ADR-009 B1 S2): the payload half resolves the SAME
     /// three layers as [`FreezeOverlay::category_of`] — one query, three
-    /// layers (spec §4.1). Overlay-scoped generic parameters classify as
-    /// [`FrozenTypeCategory::Parameter`], whose payload ticket has not
-    /// landed — the named R1 per-category rejection. Site-interned
+    /// layers (spec §4.1). Overlay-scoped generic parameters (and opened
+    /// existential witnesses) classify as [`FrozenTypeCategory::Parameter`] and,
+    /// since ADR-009 B7 Slice 2, answer a COMPLETE `TypeParamDescriptor` off
+    /// their stable base-fn-scoped `parameter:{owner}:{name}` identity (the
+    /// public A3 path, Dec 50/94) — never an inference hole, never a partial
+    /// descriptor. Site-interned
     /// composites (A2) answer by their memoized structural category: a
     /// base-frozen identity (union coalescing memoizes leaf members, e.g.
     /// `int | i64` → the `int` leaf) answers its complete payload from the
@@ -953,24 +1059,37 @@ impl FreezeOverlay {
         identity: FrozenTypeIdentity,
     ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
     {
-        use super::type_reflection::payloads;
         if self.witnesses.values().any(|&witness| witness == identity)
             || self
                 .parameters
                 .values()
                 .any(|&parameter| parameter == identity)
         {
-            return Err(payloads::pending_payload_rejection(
-                FrozenTypeCategory::Parameter,
+            // ADR-009 B7 Slice 2 (Dec 50/94): a scoped generic parameter (or an
+            // opened existential witness — a fresh opaque parameter-like type)
+            // answers a COMPLETE `TypeParamDescriptor`. Its `identity` is the
+            // queried `parameter:{owner}:{name}` identity itself — stable and
+            // base-fn-scoped under monomorphization (Decision 52), NEVER an
+            // inference hole. The declared bound set is provably empty today
+            // (`FrozenParameterBound` is uninhabited until ticket B2 lands the
+            // trait-reference descriptors) — the honest "bounds where
+            // representable" form, mirroring `FrozenErased`, never a partial
+            // descriptor.
+            return Ok(payloads::FrozenPayloadDescriptor::Parameter(
+                payloads::TypeParamDescriptor {
+                    identity,
+                    bounds: Vec::new(),
+                },
             ));
         }
-        let composite_category = self
+        let composite_entry = self
             .composites
             .lock()
             .expect("freeze-overlay composite memo lock poisoned")
             .get(&identity)
-            .copied();
-        if let Some(category) = composite_category {
+            .cloned();
+        if let Some(entry) = composite_entry {
+            let category = entry.category;
             // A memoized identity the base ALSO froze (union coalescing onto
             // a base leaf, or a spelled composite that an alias fixpoint
             // interned into the base) answers from the base index — same
@@ -990,13 +1109,60 @@ impl FreezeOverlay {
                 // bound sets — non-empty by construction (`canonical_erased_bounds`
                 // rejects the empty set); unrepresentable until B2.
                 FrozenTypeCategory::Erased => Err(payloads::bounded_erased_payload_rejection()),
+                // ADR-009 B6 (Dec 63): a site-interned callable answers its
+                // complete signature descriptor from the widened memo — never a
+                // partial descriptor. The entry carries the structure iff the
+                // category is Callable (canonicalizer invariant).
+                FrozenTypeCategory::Callable => entry
+                    .callable
+                    .map(payloads::FrozenPayloadDescriptor::Callable)
+                    .ok_or_else(|| {
+                        "internal invariant: a Callable composite was memoized without its \
+                         FrozenCallable structural descriptor"
+                            .to_string()
+                    }),
+                // ADR-009 B5 (Dec 55, S2): a site-interned Nominal composite is
+                // an APPLIED generic form (`applied:h<…>`) not interned into the
+                // base (a base user struct/enum is answered by the base arm
+                // above). Generic substitution PRECEDES descriptor issuance: the
+                // refined head + argument identities bind the head's declared
+                // parameters, and the field annotations re-canonicalize through
+                // the ONE canonicalizer under that binding. A head with no
+                // frozen struct field annotations to substitute (a builtin/enum
+                // applied form) has nothing to substitute into and stays the
+                // named applied-substitution-pending rejection — never a
+                // descriptor off the un-substituted form.
+                FrozenTypeCategory::Nominal => entry
+                    .applied_nominal
+                    .as_ref()
+                    .and_then(|applied| {
+                        self.base
+                            .index()
+                            .substituted_applied_nominal(applied.head_identity, &applied.arg_identities)
+                    })
+                    .map(payloads::FrozenPayloadDescriptor::Nominal)
+                    .ok_or_else(payloads::applied_nominal_pending_rejection),
+                // ADR-009 B7 (Dec 50/94): a site-interned composite answers its
+                // complete structural descriptor from the widened memo — never a
+                // partial descriptor. The entry carries the descriptor iff the
+                // category matches (canonicalizer invariant).
+                FrozenTypeCategory::Tuple => entry
+                    .tuple
+                    .map(payloads::FrozenPayloadDescriptor::Tuple)
+                    .ok_or_else(|| composite_memo_invariant("Tuple")),
+                FrozenTypeCategory::Record => entry
+                    .record
+                    .map(payloads::FrozenPayloadDescriptor::Record)
+                    .ok_or_else(|| composite_memo_invariant("Record")),
+                FrozenTypeCategory::Reference => entry
+                    .reference
+                    .map(payloads::FrozenPayloadDescriptor::Reference)
+                    .ok_or_else(|| composite_memo_invariant("Reference")),
+                FrozenTypeCategory::Union => entry
+                    .union
+                    .map(payloads::FrozenPayloadDescriptor::Union)
+                    .ok_or_else(|| composite_memo_invariant("Union")),
                 pending @ (FrozenTypeCategory::Parameter
-                | FrozenTypeCategory::Nominal
-                | FrozenTypeCategory::Tuple
-                | FrozenTypeCategory::Record
-                | FrozenTypeCategory::Callable
-                | FrozenTypeCategory::Reference
-                | FrozenTypeCategory::Union
                 // ADR-009 B3 (S2): a site-interned existential descriptor
                 // package. Its iteration payload (the opened witness element
                 // descriptors) lands with slice S3 — until then it is the
@@ -1501,12 +1667,15 @@ mod tests {
     /// ADR-009 B1 S2: `payload_of` grows the ONE query API beside
     /// `identity_of`/`category_of` — base half on `SemanticFreeze`, overlay
     /// half on `FreezeOverlay`. Enabled categories return complete typed
-    /// payloads; a scoped Parameter identity is the named R1 rejection
-    /// (its payload ticket has not landed); nominal defers to the base and
-    /// rejects the same way. Never a partial descriptor.
+    /// payloads; ADR-009 B7 Slice 2 makes a scoped Parameter identity answer a
+    /// complete `TypeParamDescriptor` off its stable base-fn-scoped identity
+    /// (never an inference hole, provably-empty bounds); nominal defers to the
+    /// base. Never a partial descriptor.
     #[test]
     fn payload_query_grows_the_shared_query_api() {
-        use super::super::type_reflection::payloads::FrozenPayloadDescriptor;
+        use super::super::type_reflection::payloads::{
+            FrozenPayloadDescriptor, TypeParamDescriptor,
+        };
         use shape_runtime::comptime_reflection::{FrozenPrimitive, IntegerWidth};
 
         let compiler = compiler_with_module_scope_types();
@@ -1526,23 +1695,28 @@ mod tests {
             freeze.payload_of(int_identity)
         );
 
-        // Overlay half: a scoped Parameter identity is the named R1
-        // per-category rejection.
+        // Overlay half (B7 Slice 2): a scoped Parameter identity answers a
+        // complete `TypeParamDescriptor` — the queried identity itself, with a
+        // provably-empty bound set (never a partial descriptor).
         let t = overlay.identity_of("T").expect("T identity");
-        let error = overlay.payload_of(t).expect_err("Parameter must reject");
-        assert!(
-            error.contains("the Parameter payload descriptor has not landed")
-                && error.contains("use type_category"),
-            "R1 Parameter diagnostic missing: {error}"
+        assert_eq!(
+            overlay.payload_of(t),
+            Ok(FrozenPayloadDescriptor::Parameter(TypeParamDescriptor {
+                identity: t,
+                bounds: Vec::new(),
+            })),
+            "a scoped Parameter identity must answer its own stable identity"
         );
 
-        // Base half: Nominal rejects with its own named diagnostic.
+        // Base half: ADR-009 B5 — a base user nominal answers a positive
+        // sealed shape descriptor (a multi-field struct is `Struct`).
         let point = freeze.identity_of("Point").expect("Point identity");
-        let error = freeze.payload_of(point).expect_err("Nominal must reject");
-        assert!(
-            error.contains("the Nominal payload descriptor has not landed"),
-            "R1 Nominal diagnostic missing: {error}"
-        );
+        match freeze.payload_of(point).expect("Nominal must answer a shape") {
+            FrozenPayloadDescriptor::Nominal(
+                super::super::type_reflection::payloads::NominalDescriptor::Struct { owner, .. },
+            ) => assert_eq!(owner, point),
+            other => panic!("multi-field Point must be Struct, got {other:?}"),
+        }
     }
 
     /// Rejection-matrix row 4 (Dec 52): freezing partial semantic state is a

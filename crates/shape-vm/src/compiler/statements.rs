@@ -4470,12 +4470,24 @@ impl BytecodeCompiler {
                     let target_value = target.to_nanboxed()?;
                     let target_name = struct_def.name.clone();
                     let handler_span = handler.span;
+                    // ADR-009 B5 (Dec 56): declaration-attached type-target hook
+                    // — deliver a `RepresentationAccess<T>` authority bound to
+                    // this type's frozen identity as the handler's third
+                    // positional `access` parameter (author consent). A type the
+                    // freeze never issued mints no authority.
+                    let access_identity = {
+                        let freeze = self.comptime_freeze_overlay()?;
+                        freeze
+                            .identity_of(&target_name)
+                            .map(|identity| (identity.high, identity.low))
+                    };
                     let execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
                         target_value,
                         &compiled.param_names,
                         &[],
+                        access_identity,
                     )?;
 
                     if self
@@ -5729,6 +5741,8 @@ impl BytecodeCompiler {
                         target_value,
                         &compiled.param_names,
                         &[],
+                        // Module target: no representation authority (Dec 56).
+                        None,
                     )?;
                     if self
                         .process_comptime_directives_for_module(

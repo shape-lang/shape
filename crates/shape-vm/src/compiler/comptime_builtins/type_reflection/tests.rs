@@ -28,6 +28,33 @@ fn add_struct(compiler: &mut BytecodeCompiler, name: &str) {
         .insert(name.to_string(), (Vec::new(), shape_ast::ast::Span::DUMMY));
 }
 
+/// ADR-009 B5: register a user struct WITH ordered typed fields (the exact
+/// two stores the freeze reads: `struct_types` field order +
+/// `struct_generic_info.runtime_field_types` annotations).
+fn add_struct_with_fields(
+    compiler: &mut BytecodeCompiler,
+    name: &str,
+    fields: &[(&str, TypeAnnotation)],
+) {
+    compiler.struct_types.insert(
+        name.to_string(),
+        (
+            fields.iter().map(|(f, _)| (*f).to_string()).collect(),
+            shape_ast::ast::Span::DUMMY,
+        ),
+    );
+    compiler.struct_generic_info.insert(
+        name.to_string(),
+        crate::compiler::StructGenericInfo {
+            type_params: Vec::new(),
+            runtime_field_types: fields
+                .iter()
+                .map(|(f, ty)| ((*f).to_string(), ty.clone()))
+                .collect(),
+        },
+    );
+}
+
 /// ADR-009 A2 (S5): trait names are a named semantic-freeze input — this is
 /// the exact store (`known_traits`) the production predeclare pass writes.
 fn add_trait(compiler: &mut BytecodeCompiler, name: &str) {
@@ -433,6 +460,89 @@ fn leaf_hex(overlay: &FreezeOverlay, name: &str) -> String {
     )
 }
 
+/// ADR-009 B5 (S2): register a GENERIC user struct WITH ordered typed fields
+/// whose annotations may reference the declared type parameters (the exact two
+/// stores the freeze reads for the applied-substitution path — `struct_types`
+/// field order + `struct_generic_info.{type_params, runtime_field_types}`).
+fn add_generic_struct_with_fields(
+    compiler: &mut BytecodeCompiler,
+    name: &str,
+    params: &[&str],
+    fields: &[(&str, TypeAnnotation)],
+) {
+    compiler.struct_types.insert(
+        name.to_string(),
+        (
+            fields.iter().map(|(f, _)| (*f).to_string()).collect(),
+            shape_ast::ast::Span::DUMMY,
+        ),
+    );
+    compiler.struct_generic_info.insert(
+        name.to_string(),
+        crate::compiler::StructGenericInfo {
+            type_params: params
+                .iter()
+                .map(|param| shape_ast::ast::TypeParam::Type {
+                    name: (*param).to_string(),
+                    span: shape_ast::ast::Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                })
+                .collect(),
+            runtime_field_types: fields
+                .iter()
+                .map(|(f, ty)| ((*f).to_string(), ty.clone()))
+                .collect(),
+        },
+    );
+}
+
+/// ADR-009 B5 (S2, Dec 55 R10): reflecting an APPLIED user struct substitutes
+/// its declared type parameters with the applied arguments BEFORE issuing the
+/// field descriptors — the substituted field VALUE-type identity is the applied
+/// type's identity, never the un-substituted parameter. `Page<User>` field
+/// `items: Array<T>` becomes `Array<User>`; `total: int` is unchanged.
+#[test]
+fn applied_user_struct_substitutes_field_types_before_issuance() {
+    use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
+    let overlay = module_overlay(|compiler| {
+        add_struct_with_fields(compiler, "User", &[("id", basic("int"))]);
+        add_generic_struct_with_fields(
+            compiler,
+            "Page",
+            &["T"],
+            &[
+                ("items", applied("Array", vec![basic("T")])),
+                ("total", basic("int")),
+            ],
+        );
+    });
+    // Applied Page<User> canonicalizes + site-interns in the overlay memo (the
+    // same interning `type_ref(Page<User>)` performs), so the overlay's payload
+    // query answers the SUBSTITUTED shape.
+    let applied_id = overlay
+        .canonicalize_type(&applied("Page", vec![basic("User")]))
+        .expect("Page<User> canonicalizes");
+    let expected_items = canon(&overlay, &applied("Array", vec![basic("User")])).identity;
+    let int_id = overlay.identity_of("int").expect("int frozen");
+
+    let payload = overlay
+        .payload_of(applied_id)
+        .expect("an applied user struct must substitute + issue its Struct shape");
+    let FrozenPayloadDescriptor::Nominal(NominalDescriptor::Struct { fields, .. }) = payload else {
+        panic!("Page<User> is a 2-field struct shape, got {payload:?}");
+    };
+    assert!(
+        fields.iter().any(|f| f.type_identity == expected_items),
+        "the items field type must be the SUBSTITUTED Array<User> identity, not Array<T>"
+    );
+    assert!(
+        fields.iter().any(|f| f.type_identity == int_id),
+        "the total:int field must remain int under substitution"
+    );
+}
+
 #[test]
 fn tuple_descriptor_embeds_member_identity_hex_in_order() {
     let overlay = module_overlay(|_| {});
@@ -575,6 +685,93 @@ fn callable_descriptor_is_positional_and_return_significant() {
         &callable(vec![basic("int"), basic("string")], basic("int")),
     );
     assert_ne!(int_string_to_bool.identity, int_string_to_int.identity);
+}
+
+/// ADR-009 B6: the callable's PRESERVED structural descriptor (the widened
+/// composite memo input) records ordered per-position params with their
+/// passing mode and name, WITHOUT those facts leaking into the identity hash.
+/// Names are identity-insignificant; passing mode is derived from the borrow
+/// wrapper and is NOT part of the descriptor string.
+#[test]
+fn callable_structural_descriptor_records_modes_and_names_off_the_identity() {
+    // `PassingMode` is in scope via `use super::*`.
+    let overlay = module_overlay(|_| {});
+
+    let borrow = |mutable: bool, inner: &str| TypeAnnotation::Borrow {
+        mutable,
+        inner: Box::new(basic(inner)),
+    };
+    let named = |name: &str, annotation: TypeAnnotation| FunctionParam {
+        name: Some(name.to_string()),
+        optional: false,
+        type_annotation: annotation,
+    };
+    // fn(a: int, b: &string, c: &mut int) -> bool
+    let sig = TypeAnnotation::Function {
+        params: vec![
+            named("a", basic("int")),
+            named("b", borrow(false, "string")),
+            named("c", borrow(true, "int")),
+        ],
+        returns: Box::new(basic("bool")),
+    };
+    let canonical = canon(&overlay, &sig);
+    let descriptor = canonical
+        .callable
+        .as_ref()
+        .expect("callable canonicalization preserves a structural descriptor");
+    assert_eq!(descriptor.params.len(), 3);
+    assert_eq!(descriptor.params[0].mode, PassingMode::Move);
+    assert_eq!(descriptor.params[1].mode, PassingMode::SharedBorrow);
+    assert_eq!(descriptor.params[2].mode, PassingMode::ExclusiveBorrow);
+    assert_eq!(descriptor.params[0].name.as_deref(), Some("a"));
+    // The borrow param's VALUE-type identity is the referent (int / string),
+    // NOT the reference wrapper.
+    assert_eq!(descriptor.params[1].type_identity, overlay.identity_of("string").unwrap());
+    assert_eq!(descriptor.params[2].type_identity, overlay.identity_of("int").unwrap());
+    assert_eq!(descriptor.returns, overlay.identity_of("bool").unwrap());
+
+    // Renaming every parameter is identity-neutral (names insignificant) and
+    // the mode axis does not perturb the identity beyond the borrow wrapper the
+    // grammar already embeds.
+    let renamed = TypeAnnotation::Function {
+        params: vec![
+            named("x", basic("int")),
+            named("y", borrow(false, "string")),
+            named("z", borrow(true, "int")),
+        ],
+        returns: Box::new(basic("bool")),
+    };
+    assert_eq!(canon(&overlay, &renamed).identity, canonical.identity);
+}
+
+/// ADR-009 B6 R2 (Dec 63): a callable parameter modeled with the
+/// compiler-internal `Any` top type (bare or `Array<Any>`) is the named
+/// Any-erasure rejection; lowercase `any` (the enabled Erased leaf) is not.
+#[test]
+fn r2_callable_param_erased_to_any_is_the_named_rejection() {
+    // `CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC` is in scope via `use super::*`.
+    let overlay = module_overlay(|_| {});
+
+    // fn(Array<Any>) -> bool — the homogeneous top-typed param modeling.
+    let array_any = canonicalize_type_annotation(
+        &callable(vec![applied("Array", vec![basic("Any")])], basic("bool")),
+        &overlay,
+    )
+    .expect_err("a callable parameter typed Array<Any> must reject");
+    assert_eq!(array_any, CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC);
+
+    // Bare `Any` parameter — same rejection.
+    let bare_any = canonicalize_type_annotation(
+        &callable(vec![basic("Any")], basic("bool")),
+        &overlay,
+    )
+    .expect_err("a callable parameter typed Any must reject");
+    assert_eq!(bare_any, CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC);
+
+    // Lowercase `any` is the enabled Erased leaf — a callable param typed `any`
+    // canonicalizes (NOT the R2 rejection).
+    canon(&overlay, &callable(vec![basic("any")], basic("bool")));
 }
 
 #[test]
@@ -1371,12 +1568,13 @@ mod payload_query {
         }
     }
 
-    /// Rejection-matrix row R1: each of the 7 non-enabled categories has ONE
+    /// Rejection-matrix row R1: each remaining non-enabled category has ONE
     /// named per-category diagnostic — naming the category, stating the
     /// payload descriptor has not landed, and pointing at `type_category` —
     /// never a partial descriptor. Parameter is asserted end-to-end through
-    /// a scoped overlay identity (`parameter:{owner}:{name}`), Nominal
-    /// end-to-end through a frozen struct.
+    /// a scoped overlay identity (`parameter:{owner}:{name}`). (ADR-009 B5:
+    /// Nominal is now ENABLED — a base user struct answers a positive
+    /// `FrozenNominal` descriptor; see `base_frozen_nominal_answers_its_shape`.)
     #[test]
     fn non_enabled_categories_reject_with_named_per_category_diagnostics() {
         for category in FrozenTypeCategory::ALL {
@@ -1395,23 +1593,123 @@ mod payload_query {
             );
         }
 
-        // Parameter — through a scoped overlay identity.
-        let overlay = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
-        let t = overlay.identity_of("T").expect("T identity");
-        assert_eq!(
-            overlay.payload_of(t),
-            Err(pending_payload_rejection(FrozenTypeCategory::Parameter))
+        // ADR-009 B7 Slice 2: Parameter is now ENABLED — Existential is the
+        // SOLE remaining R1 rejection. A scoped overlay Parameter identity
+        // answers a complete `TypeParamDescriptor` (see
+        // `scoped_parameter_answers_its_stable_identity_payload`), never an R1
+        // rejection.
+        assert!(
+            !FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&FrozenTypeCategory::Existential),
+            "Existential must stay the sole non-enabled category"
         );
+        assert!(
+            FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&FrozenTypeCategory::Parameter),
+            "Parameter must now be enabled (B7 Slice 2)"
+        );
+    }
 
-        // Nominal — through the base freeze.
+    /// ADR-009 B7 Slice 2 (Dec 50/94): a scoped generic-parameter overlay
+    /// identity answers a COMPLETE `TypeParamDescriptor` off the SAME stable
+    /// `parameter:{owner}:{name}` identity it interns — with a provably-empty
+    /// bound set (`FrozenParameterBound` is uninhabited until B2), never an
+    /// inference hole and never a partial descriptor. Identity STABILITY across
+    /// two same-owner overlays and DISTINCTNESS across owners are proven at the
+    /// payload level (mirroring `parameter_identity_is_scoped_by_owning_function`
+    /// at the identity level).
+    #[test]
+    fn scoped_parameter_answers_its_stable_identity_payload() {
+        use super::payloads::{FrozenPayloadDescriptor, TypeParamDescriptor};
+
+        let map_a = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
+        let map_b = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
+        let filter = FreezeOverlay::new(freeze_of(|_| {}), "filter", &["T".to_string()]);
+
+        let map_t = map_a.identity_of("T").expect("map T identity");
+        let expected = Ok(FrozenPayloadDescriptor::Parameter(TypeParamDescriptor {
+            identity: map_t,
+            bounds: Vec::new(),
+        }));
+        assert_eq!(map_a.payload_of(map_t), expected);
+        // Same owner ⇒ same payload identity (stable across overlays, the unit
+        // mirror of the per-instantiation e2e in frozen_type.rs).
+        assert_eq!(map_b.payload_of(map_t), expected);
+
+        // Distinct owner ⇒ distinct identity ⇒ distinct payload.
+        let filter_t = filter.identity_of("T").expect("filter T identity");
+        assert_ne!(filter_t, map_t, "distinct owners mint distinct identities");
+        assert_eq!(
+            filter.payload_of(filter_t),
+            Ok(FrozenPayloadDescriptor::Parameter(TypeParamDescriptor {
+                identity: filter_t,
+                bounds: Vec::new(),
+            }))
+        );
+    }
+
+    /// ADR-009 B5 (Dec 55): a base-frozen user nominal answers its complete
+    /// sealed `FrozenNominal` declaration-shape descriptor — a zero-field
+    /// struct is the non-decomposable `Opaque` shape (the S1 field-count
+    /// classification), never a partial descriptor and never an R1 rejection.
+    #[test]
+    fn base_frozen_nominal_answers_its_shape() {
+        use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
         let freeze = freeze_of(|compiler| add_struct(compiler, "Alpha"));
         let alpha = freeze.identity_of("Alpha").expect("Alpha identity");
-        let error = freeze.payload_of(alpha).expect_err("Nominal must reject");
-        assert!(
-            error.contains("the Nominal payload descriptor has not landed")
-                && error.contains("use type_category"),
-            "R1 Nominal diagnostic missing: {error}"
-        );
+        match freeze.payload_of(alpha).expect("Nominal must answer a shape") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Opaque { owner }) => {
+                assert_eq!(owner, alpha, "the shape owner is the reflected identity");
+            }
+            other => panic!("a zero-field struct must be Opaque, got {other:?}"),
+        }
+    }
+
+    /// ADR-009 B5 (Dec 55/57): a multi-field struct is `Struct` with owner-bound
+    /// member identities (never source-name strings) and each field's
+    /// canonicalized VALUE-type identity — a single-field struct is `Newtype`
+    /// whose inner identity IS the wrapped field's frozen identity.
+    #[test]
+    fn nominal_shape_classification_and_member_identities() {
+        use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
+
+        // Multi-field → Struct with two field descriptors carrying int / string.
+        let freeze = freeze_of(|compiler| {
+            add_struct_with_fields(
+                compiler,
+                "Point",
+                &[("x", basic("int")), ("y", basic("string"))],
+            )
+        });
+        let point = freeze.identity_of("Point").expect("Point identity");
+        let int_id = freeze.identity_of("int").expect("int identity");
+        let string_id = freeze.identity_of("string").expect("string identity");
+        match freeze.payload_of(point).expect("Point answers a shape") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Struct { owner, fields }) => {
+                assert_eq!(owner, point);
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].type_identity, int_id);
+                assert_eq!(fields[1].type_identity, string_id);
+                // Member identities are owner-bound + distinct — NEVER equal to
+                // any type identity (Dec 57: a member token is a distinct
+                // identity kind from the field's value type).
+                assert_ne!(fields[0].member, fields[1].member);
+                assert_ne!(fields[0].member, int_id);
+            }
+            other => panic!("a two-field struct must be Struct, got {other:?}"),
+        }
+
+        // Single-field → Newtype whose inner identity is the wrapped field type.
+        let freeze = freeze_of(|compiler| {
+            add_struct_with_fields(compiler, "UserId", &[("value", basic("int"))])
+        });
+        let user_id = freeze.identity_of("UserId").expect("UserId identity");
+        let int_id = freeze.identity_of("int").expect("int identity");
+        match freeze.payload_of(user_id).expect("UserId answers a shape") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Newtype { owner, inner }) => {
+                assert_eq!(owner, user_id);
+                assert_eq!(inner, int_id, "the newtype inner is the wrapped field type");
+            }
+            other => panic!("a single-field struct must be Newtype, got {other:?}"),
+        }
     }
 
     /// The unknown-identity freeze-boundary rejection is unchanged by the
@@ -1427,54 +1725,98 @@ mod payload_query {
 
     // ── A2×B1 seam: payload query over the site-interned composites layer ─
 
-    /// A2×B1 seam: `payload_of` resolves the site-interned composites layer
-    /// symmetrically with `category_of` (one query, three layers — spec
-    /// §4.1). Every pending composite category answers its NAMED R1
-    /// per-category rejection — never the wrong-family unknown-identity
-    /// diagnostic (the identity IS known: the same overlay minted it).
+    /// ADR-009 B7 (Dec 50/94): `payload_of` answers the site-interned composites
+    /// layer with COMPLETE structural descriptors — the same identity the
+    /// overlay minted one call earlier, reconstructed from the widened memo
+    /// without inverting the one-way hash. Tuple carries ordered element
+    /// identities; Record carries hygienic member + value-type identities +
+    /// optionality; Reference carries mutability + referent; Union carries the
+    /// deduped member identities. (Formerly the composite R1 rejections.)
     #[test]
-    fn site_interned_pending_composites_reject_with_named_per_category_diagnostics() {
+    fn site_interned_composites_answer_full_structural_payloads() {
+        use super::payloads::{
+            FrozenPayloadDescriptor, ReferenceDescriptor, RecordDescriptor, TupleDescriptor,
+            UnionDescriptor,
+        };
         let overlay = module_overlay(|compiler| add_struct(compiler, "User"));
-        let forms: Vec<(TypeAnnotation, FrozenTypeCategory)> = vec![
-            (
-                TypeAnnotation::Tuple(vec![basic("int"), basic("string")]),
-                FrozenTypeCategory::Tuple,
-            ),
-            (
-                TypeAnnotation::Object(vec![record_field("x", false, basic("int"))]),
-                FrozenTypeCategory::Record,
-            ),
-            (
-                callable(vec![basic("int")], basic("bool")),
-                FrozenTypeCategory::Callable,
-            ),
-            (
-                TypeAnnotation::Borrow {
-                    mutable: false,
-                    inner: Box::new(basic("User")),
-                },
-                FrozenTypeCategory::Reference,
-            ),
-            (
-                TypeAnnotation::Union(vec![basic("int"), basic("string")]),
-                FrozenTypeCategory::Union,
-            ),
-            (
-                applied("Option", vec![basic("int")]),
-                FrozenTypeCategory::Nominal,
-            ),
-        ];
-        for (annotation, category) in forms {
-            let identity = overlay
-                .canonicalize_type(&annotation)
-                .expect("composite type expression canonicalizes");
-            assert_eq!(overlay.category_of(identity), Ok(category));
-            assert_eq!(
-                overlay.payload_of(identity),
-                Err(pending_payload_rejection(category)),
-                "payload_of must answer the composites layer for {category:?}"
-            );
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+        let user_id = overlay.identity_of("User").expect("User identity");
+
+        // Tuple: ordered element identities (position IS the index).
+        let tuple_id = overlay
+            .canonicalize_type(&TypeAnnotation::Tuple(vec![basic("int"), basic("string")]))
+            .expect("tuple canonicalizes");
+        assert_eq!(
+            overlay.payload_of(tuple_id),
+            Ok(FrozenPayloadDescriptor::Tuple(TupleDescriptor {
+                elements: vec![int_id, string_id],
+            }))
+        );
+
+        // Record: one field carrying int; the hygienic member identity is
+        // owner-bound + distinct from the value-type identity (Dec 57).
+        let record_id = overlay
+            .canonicalize_type(&TypeAnnotation::Object(vec![record_field(
+                "x",
+                false,
+                basic("int"),
+            )]))
+            .expect("record canonicalizes");
+        match overlay.payload_of(record_id) {
+            Ok(FrozenPayloadDescriptor::Record(RecordDescriptor { fields })) => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].type_identity, int_id);
+                assert!(!fields[0].optional);
+                assert_ne!(fields[0].member, int_id, "member is not the value type");
+            }
+            other => panic!("record must answer a Record payload, got {other:?}"),
         }
+
+        // Reference: shared borrow of a user nominal.
+        let reference_id = overlay
+            .canonicalize_type(&TypeAnnotation::Borrow {
+                mutable: false,
+                inner: Box::new(basic("User")),
+            })
+            .expect("reference canonicalizes");
+        assert_eq!(
+            overlay.payload_of(reference_id),
+            Ok(FrozenPayloadDescriptor::Reference(ReferenceDescriptor {
+                mutable: false,
+                referent: user_id,
+            }))
+        );
+
+        // Union: two deduped members (byte-sorted by identity hex).
+        let union_id = overlay
+            .canonicalize_type(&TypeAnnotation::Union(vec![basic("int"), basic("string")]))
+            .expect("union canonicalizes");
+        match overlay.payload_of(union_id) {
+            Ok(FrozenPayloadDescriptor::Union(UnionDescriptor { members })) => {
+                assert_eq!(members.len(), 2);
+                assert!(members.contains(&int_id));
+                assert!(members.contains(&string_id));
+            }
+            other => panic!("union must answer a Union payload, got {other:?}"),
+        }
+
+        // ADR-009 B5: a site-interned APPLIED nominal (`Option<int>`) is a
+        // Nominal composite not interned into the base — reflecting it needs
+        // generic substitution (a later slice), the distinct named
+        // applied-substitution-pending rejection (not the "payload descriptor
+        // has not landed" family).
+        let applied_identity = overlay
+            .canonicalize_type(&applied("Option", vec![basic("int")]))
+            .expect("applied nominal canonicalizes");
+        assert_eq!(overlay.category_of(applied_identity), Ok(FrozenTypeCategory::Nominal));
+        let error = overlay
+            .payload_of(applied_identity)
+            .expect_err("applied nominal must reject");
+        assert!(
+            error.contains("requires generic substitution"),
+            "applied-nominal pending diagnostic missing: {error}"
+        );
     }
 
     /// A2×B1 seam, Erased disposition: a site-interned `dyn` /
@@ -1576,6 +1918,283 @@ mod payload_query {
             freeze.payload_of(any),
             Ok(FrozenPayloadDescriptor::Erased { .. })
         ));
+    }
+
+    // ── ADR-009 B6: callable signature descriptor payload ────────────────
+
+    /// A `FunctionParam` with an explicit name/optionality/annotation.
+    fn param(name: Option<&str>, optional: bool, annotation: TypeAnnotation) -> FunctionParam {
+        FunctionParam {
+            name: name.map(str::to_string),
+            optional,
+            type_annotation: annotation,
+        }
+    }
+
+    fn function(params: Vec<FunctionParam>, returns: TypeAnnotation) -> TypeAnnotation {
+        TypeAnnotation::Function {
+            params,
+            returns: Box::new(returns),
+        }
+    }
+
+    /// B6 core: a site-interned callable answers a COMPLETE `FrozenCallable`
+    /// payload from the widened composite memo — ordered params with stable
+    /// type identities, optionality flags, and passing modes derived from the
+    /// borrow annotation, plus the return identity. Reconstructed WITHOUT
+    /// inverting the one-way SHA-256 identity (which drops names + modes).
+    #[test]
+    fn site_interned_callable_answers_full_payload() {
+        use super::payloads::{CallableDescriptor, ParamDescriptor};
+        use shape_runtime::comptime_reflection::PassingMode;
+
+        let overlay = module_overlay(|_| {});
+        // (count: int, label?: string, &mut int, &string) -> bool
+        let annotation = function(
+            vec![
+                param(Some("count"), false, basic("int")),
+                param(Some("label"), true, basic("string")),
+                param(
+                    None,
+                    false,
+                    TypeAnnotation::Borrow {
+                        mutable: true,
+                        inner: Box::new(basic("int")),
+                    },
+                ),
+                param(
+                    None,
+                    false,
+                    TypeAnnotation::Borrow {
+                        mutable: false,
+                        inner: Box::new(basic("string")),
+                    },
+                ),
+            ],
+            basic("bool"),
+        );
+        let identity = overlay
+            .canonicalize_type(&annotation)
+            .expect("callable canonicalizes");
+        assert_eq!(
+            overlay.category_of(identity),
+            Ok(FrozenTypeCategory::Callable)
+        );
+
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+        let bool_id = overlay.identity_of("bool").expect("bool identity");
+        let expected = CallableDescriptor {
+            params: vec![
+                ParamDescriptor {
+                    name: Some("count".to_string()),
+                    type_identity: int_id,
+                    optional: false,
+                    mode: PassingMode::Move,
+                },
+                ParamDescriptor {
+                    name: Some("label".to_string()),
+                    type_identity: string_id,
+                    optional: true,
+                    mode: PassingMode::Move,
+                },
+                ParamDescriptor {
+                    name: None,
+                    // Borrowed parameter: mode carries the borrow, type is the referent.
+                    type_identity: int_id,
+                    optional: false,
+                    mode: PassingMode::ExclusiveBorrow,
+                },
+                ParamDescriptor {
+                    name: None,
+                    type_identity: string_id,
+                    optional: false,
+                    mode: PassingMode::SharedBorrow,
+                },
+            ],
+            returns: bool_id,
+        };
+        assert_eq!(
+            overlay.payload_of(identity),
+            Ok(FrozenPayloadDescriptor::Callable(expected))
+        );
+    }
+
+    /// A module-level alias whose target is a callable type (`type Handler =
+    /// (int) -> bool`) interns a Callable identity into the BASE index; its
+    /// full signature descriptor is preserved in the same rebuild, so the base
+    /// `payload_of` answers a complete `FrozenCallable` — never a partial
+    /// descriptor (symmetric with the overlay memo).
+    #[test]
+    fn base_interned_callable_alias_answers_full_payload() {
+        let handler = callable(vec![basic("int")], basic("bool"));
+        let freeze = freeze_of(|compiler| {
+            compiler
+                .type_aliases
+                .insert("Handler".to_string(), format!("{handler:?}"));
+            compiler
+                .type_inference
+                .env
+                .define_type_alias("Handler", &handler, None);
+        });
+        let identity = freeze
+            .identity_of("Handler")
+            .expect("alias fixpoint interns the callable target");
+        assert_eq!(freeze.category_of(identity), Ok(FrozenTypeCategory::Callable));
+        let FrozenPayloadDescriptor::Callable(descriptor) =
+            freeze.payload_of(identity).expect("callable payload")
+        else {
+            panic!("expected a Callable payload");
+        };
+        assert_eq!(descriptor.params.len(), 1);
+        assert_eq!(
+            descriptor.params[0].type_identity,
+            freeze.identity_of("int").expect("int identity")
+        );
+        assert_eq!(
+            descriptor.returns,
+            freeze.identity_of("bool").expect("bool identity")
+        );
+    }
+
+    /// Parameter NAMES are identity-insignificant (grammar §Callable), yet the
+    /// preserved structure keeps them for hygienic `param(#name)` resolution.
+    #[test]
+    fn callable_identity_is_name_insignificant_but_structure_keeps_names() {
+        let overlay = module_overlay(|_| {});
+        let named = function(vec![param(Some("a"), false, basic("int"))], basic("bool"));
+        let anon = function(vec![param(None, false, basic("int"))], basic("bool"));
+
+        assert_eq!(
+            canon(&overlay, &named).identity,
+            canon(&overlay, &anon).identity,
+            "param names must not affect the canonical identity"
+        );
+
+        let identity = overlay.canonicalize_type(&named).expect("callable canonicalizes");
+        let FrozenPayloadDescriptor::Callable(descriptor) =
+            overlay.payload_of(identity).expect("callable payload")
+        else {
+            panic!("expected a Callable payload");
+        };
+        assert_eq!(descriptor.params[0].name.as_deref(), Some("a"));
+    }
+
+    /// Positional parameter identity is stable and order-significant: the
+    /// descriptor lists params in signature order and reordering re-hashes.
+    #[test]
+    fn callable_param_positions_are_stable_and_order_significant() {
+        let overlay = module_overlay(|_| {});
+        let annotation = callable(vec![basic("int"), basic("string")], basic("bool"));
+        let identity = overlay.canonicalize_type(&annotation).expect("canonicalizes");
+        let FrozenPayloadDescriptor::Callable(descriptor) =
+            overlay.payload_of(identity).expect("callable payload")
+        else {
+            panic!("expected a Callable payload");
+        };
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+        assert_eq!(descriptor.params.len(), 2);
+        assert_eq!(descriptor.params[0].type_identity, int_id);
+        assert_eq!(descriptor.params[1].type_identity, string_id);
+
+        let flipped = callable(vec![basic("string"), basic("int")], basic("bool"));
+        assert_ne!(
+            canon(&overlay, &annotation).identity,
+            canon(&overlay, &flipped).identity
+        );
+    }
+
+    /// R3 (Dec 52 — ordering): descriptor issuance for an UNRESOLVED signature
+    /// is rejected by the ONE freeze-boundary predicate
+    /// (`annotation_has_unresolved_inference_variable`) BEFORE any descriptor
+    /// is formed and interned — a hole at ANY depth (param, return, nested)
+    /// fires the named Dec-52 diagnostic, and nothing is memoized.
+    #[test]
+    fn callable_with_unresolved_inference_variable_rejects_before_issuance() {
+        let overlay = module_overlay(|_| {});
+        let holed_param = function(
+            vec![param(
+                None,
+                false,
+                tyvar_to_annotation(&TypeVar("P".to_string())),
+            )],
+            basic("bool"),
+        );
+        let holed_return = function(
+            vec![param(None, false, basic("int"))],
+            tyvar_to_annotation(&TypeVar("R".to_string())),
+        );
+        let holed_nested = callable(
+            vec![TypeAnnotation::Tuple(vec![
+                basic("int"),
+                tyvar_to_annotation(&TypeVar("N".to_string())),
+            ])],
+            basic("bool"),
+        );
+        for annotation in [holed_param, holed_return, holed_nested] {
+            let error = canonicalize_type_annotation(&annotation, &overlay)
+                .expect_err("unresolved signature must reject issuance");
+            assert!(
+                error.contains("unresolved inference variable"),
+                "Dec 52 freeze-boundary diagnostic missing: {error}"
+            );
+            // The rejection fires BEFORE any descriptor forms — no FrozenCallable
+            // is issued, and nothing is interned into the composite memo.
+            assert!(
+                overlay.canonicalize_type(&annotation).is_err(),
+                "an unresolved signature must never mint an identity"
+            );
+        }
+    }
+
+    /// The heap-value builder lowers a callable to a schema-correct nested
+    /// descriptor: `FrozenType{__variant: 6, __payload_0: FrozenCallable{params:
+    /// [ParamDescriptor…], returns_identity_high/low}}` — ordinal-pinned variant
+    /// id (6, never dense), typed nested objects, no rendered type-name strings.
+    #[test]
+    fn builder_produces_schema_correct_callable_descriptor() {
+        let overlay = module_overlay(|_| {});
+        let annotation = callable(vec![basic("int")], basic("bool"));
+        let identity = overlay.canonicalize_type(&annotation).expect("canonicalizes");
+
+        let frozen = payloads::build_frozen_type_heap_value(identity, &overlay)
+            .expect("callable payload builds");
+        let frozen_storage = storage_of(&frozen);
+        assert_eq!(schema_name_of(frozen_storage), COMPTIME_FROZEN_TYPE_SCHEMA);
+        let (variant, payload) = variant_and_payload(frozen_storage);
+        assert_eq!(
+            variant,
+            i64::from(FrozenTypeCategory::Callable.catalog_ordinal()),
+            "Callable is catalog ordinal 6, never dense"
+        );
+
+        let callable_storage = payload
+            .as_typed_object_storage()
+            .expect("payload must be a typed object");
+        assert_eq!(
+            schema_name_of(callable_storage),
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_CALLABLE_SCHEMA
+        );
+        // params (field 0) is a TypedArray; returns halves (fields 1,2) match bool.
+        let params = callable_storage
+            .clone_field_kinded(0)
+            .expect("params must be readable");
+        assert_eq!(
+            params.kind(),
+            NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)
+        );
+        let bool_id = overlay.identity_of("bool").expect("bool identity");
+        let returns_high = callable_storage
+            .clone_field_kinded(1)
+            .and_then(|slot| slot.as_i64())
+            .expect("returns_identity_high");
+        let returns_low = callable_storage
+            .clone_field_kinded(2)
+            .and_then(|slot| slot.as_i64())
+            .expect("returns_identity_low");
+        assert_eq!(returns_high, bool_id.high);
+        assert_eq!(returns_low, bool_id.low);
     }
 
     // ── heap-value builders ──────────────────────────────────────────────
@@ -1731,19 +2350,46 @@ mod payload_query {
         );
     }
 
-    /// The builder inherits the R1 rejection: a scoped Parameter identity
-    /// (and every other non-enabled category) is a named compile-time
-    /// rejection at the builder too — never a partial descriptor.
+    /// ADR-009 B7 Slice 2: the builder lowers a scoped Parameter identity to a
+    /// complete `FrozenParameter` heap value — catalog ordinal 2, carrying the
+    /// parameter's identity halves + a provably-empty (typed-array) bound set,
+    /// never a partial descriptor and never an R1 rejection.
     #[test]
-    fn builder_rejects_non_enabled_categories_with_the_named_diagnostic() {
+    fn builder_lowers_scoped_parameter_to_the_frozen_parameter_payload() {
+        use shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_PARAMETER_SCHEMA;
+
         let overlay = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
         let t = overlay.identity_of("T").expect("T identity");
-        let error = payloads::build_frozen_type_heap_value(t, &overlay)
-            .map(|_| ())
-            .expect_err("Parameter must reject at the builder");
+        let frozen = payloads::build_frozen_type_heap_value(t, &overlay)
+            .expect("Parameter payload builds");
+        let frozen_storage = storage_of(&frozen);
+        let (variant, payload) = variant_and_payload(frozen_storage);
+        assert_eq!(variant, 2, "Parameter is catalog ordinal 2");
+        let parameter_storage = payload
+            .as_typed_object_storage()
+            .expect("payload must be a typed object");
         assert_eq!(
-            error,
-            pending_payload_rejection(FrozenTypeCategory::Parameter)
+            schema_name_of(parameter_storage),
+            COMPTIME_FROZEN_PARAMETER_SCHEMA
+        );
+        // identity_high/low carry the queried parameter identity; the bound set
+        // is the empty typed array (the only reachable form until B2).
+        assert_eq!(
+            parameter_storage.clone_field_kinded(0).map(|s| s.as_i64()),
+            Some(Some(t.high)),
+            "identity_high must be the parameter's own frozen identity high half"
+        );
+        assert_eq!(
+            parameter_storage.clone_field_kinded(1).map(|s| s.as_i64()),
+            Some(Some(t.low)),
+            "identity_low must be the parameter's own frozen identity low half"
+        );
+        let bounds = parameter_storage
+            .clone_field_kinded(2)
+            .expect("bounds must be readable");
+        assert_eq!(
+            bounds.kind(),
+            NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)
         );
     }
 }
@@ -2266,6 +2912,85 @@ mod b4 {
 
             let error = build_type_constructor_ref_heap_value(FrozenTypeIdentity::INVALID, &overlay)
                 .expect_err("INVALID head rejects");
+            assert!(error.contains("unknown semantic type identity"), "{error}");
+        }
+
+        /// ADR-009 B5 (Dec 56): the `RepresentationAccess` authority carrier
+        /// round-trips, and `reflect_repr` over a matching (TypeRef, authority)
+        /// pair answers the complete Nominal payload. A non-authority slot in the
+        /// authority position is the named R6 rejection.
+        #[test]
+        fn representation_access_carrier_gates_reflect_repr() {
+            use super::super::payloads::FrozenPayloadDescriptor;
+            let overlay = module_overlay(|compiler| {
+                add_generic_struct_with_fields(
+                    compiler,
+                    "User",
+                    &[],
+                    &[("id", basic("int")), ("name", basic("string"))],
+                );
+            });
+            let user_id = overlay.identity_of("User").expect("User identity");
+
+            let type_ref =
+                carrier_slot(build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"));
+            let access = carrier_slot(
+                build_representation_access_heap_value(user_id, &overlay).expect("access"),
+            );
+
+            // Matching authority → complete Nominal payload.
+            let frozen = frozen_type_from_repr_ref(&type_ref, &access, &overlay)
+                .expect("authorized reflect_repr");
+            let payload = overlay
+                .payload_of(user_id)
+                .expect("nominal payload for the frozen struct");
+            assert!(matches!(payload, FrozenPayloadDescriptor::Nominal(_)));
+            drop(frozen);
+
+            // A TypeRef in the authority position is NOT a RepresentationAccess:
+            // schema-name check → named R6 rejection, never usable authority.
+            let type_ref2 =
+                carrier_slot(build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"));
+            let forged = carrier_slot(
+                build_frozen_type_ref_heap_value(user_id, &overlay).expect("forged authority"),
+            );
+            let error = frozen_type_from_repr_ref(&type_ref2, &forged, &overlay)
+                .expect_err("a TypeRef cannot authorize representation reflection");
+            assert!(
+                error.contains("requires explicit RepresentationAccess<T> authority"),
+                "{error}"
+            );
+        }
+
+        /// ADR-009 B5 (Dec 56): authority is not ambient — a capability minted
+        /// for one type cannot decompose another. `reflect_repr(type_ref(Other),
+        /// access_for_User)` is the named cross-type rejection.
+        #[test]
+        fn representation_access_is_bound_to_its_own_type() {
+            let overlay = module_overlay(|compiler| {
+                add_generic_struct_with_fields(compiler, "User", &[], &[("id", basic("int"))]);
+                add_generic_struct_with_fields(compiler, "Other", &[], &[("x", basic("int"))]);
+            });
+            let user_id = overlay.identity_of("User").expect("User identity");
+            let other_id = overlay.identity_of("Other").expect("Other identity");
+
+            let other_ref =
+                carrier_slot(build_frozen_type_ref_heap_value(other_id, &overlay).expect("type_ref"));
+            let user_access = carrier_slot(
+                build_representation_access_heap_value(user_id, &overlay).expect("access"),
+            );
+            let error = frozen_type_from_repr_ref(&other_ref, &user_access, &overlay)
+                .expect_err("a User authority cannot reflect Other");
+            assert!(error.contains("bound to a different type identity"), "{error}");
+        }
+
+        /// ADR-009 B5 (Dec 56): the mint re-validates the identity through the
+        /// freeze — an unknown/INVALID identity cannot become authority.
+        #[test]
+        fn representation_access_mint_rejects_unknown_identity() {
+            let overlay = module_overlay(|_| {});
+            let error = build_representation_access_heap_value(FrozenTypeIdentity::INVALID, &overlay)
+                .expect_err("INVALID identity mints no authority");
             assert!(error.contains("unknown semantic type identity"), "{error}");
         }
 

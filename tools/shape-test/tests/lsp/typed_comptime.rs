@@ -67,6 +67,16 @@ fn typed_reflection_offers_signature_help() {
         .expect_signature_help();
 }
 
+/// ADR-009 B6: `reflect(` — the builtin whose return sum includes
+/// `FrozenType::Callable(FrozenCallable)` — offers signature help, driven from
+/// the shared catalog-owned reflection builtin row (not a hand-written table).
+#[test]
+fn reflect_builtin_offers_signature_help() {
+    ShapeTest::new("let payload = comptime { reflect( ) }\n")
+        .at(pos(0, 34))
+        .expect_signature_help();
+}
+
 // =====================================================================
 // ADR-009 A2 (S6): completion inside the `type_ref(` TYPE position.
 // The argument of type_ref is checked type syntax, so completion routes
@@ -223,15 +233,93 @@ fn reflect_hover_notes_the_enabled_payload_stage() {
         .expect_hover_contains("named compile-time rejection");
 }
 
+/// ADR-009 B5: the reflect hover enumerates the enabled payload variants from
+/// the shared reflection catalog — `Nominal` now appears (no hand-written LSP
+/// list; the row description embeds `FROZEN_TYPE_ENABLED_PAYLOADS_DOC`).
+#[test]
+fn reflect_hover_lists_nominal_as_an_enabled_payload() {
+    ShapeTest::new("let reflected = comptime { reflect(type_ref(int)) }\n")
+        .at(pos(0, 29))
+        .expect_hover_contains("Nominal");
+}
+
+/// ADR-009 B7 (Slice 3): the reflect hover enumerates the four composite
+/// payloads AND `Parameter` from the SAME shared reflection catalog — the row
+/// description embeds `FROZEN_TYPE_ENABLED_PAYLOADS_DOC`, so completing the
+/// ten-category catalog (Dec 50/94) auto-surfaces every enabled payload in the
+/// hover with no hand-written LSP list. `Existential` (the sole non-enabled
+/// witness payload) is NOT listed.
+#[test]
+fn reflect_hover_lists_the_b7_composite_and_parameter_payloads() {
+    for payload in ["Tuple", "Record", "Reference", "Union", "Parameter"] {
+        ShapeTest::new("let reflected = comptime { reflect(type_ref(int)) }\n")
+            .at(pos(0, 29))
+            .expect_hover_contains(payload);
+    }
+}
+
 #[test]
 fn frozen_type_completion_is_closed_to_enabled_payload_variants() {
+    // ADR-009 B6/B5/B7: `Callable`, `Nominal`, the four composites, and (B7
+    // Slice 2) `Parameter` joined the enabled payload catalog, so `FrozenType::`
+    // completion now offers them — auto-derived from the shared reflection
+    // catalog (no hand-written variant list in the LSP). Only `Existential`
+    // stays non-enabled, and `Unknown` is not a catalog category.
     ShapeTest::new("let payload = comptime { FrozenType:: }\n")
         .at(pos(0, 37))
         .expect_completion("Primitive")
         .expect_completion("Never")
         .expect_completion("Erased")
+        .expect_completion("Callable")
+        .expect_completion("Nominal")
+        .expect_completion("Tuple")
+        .expect_completion("Record")
+        .expect_completion("Reference")
+        .expect_completion("Union")
+        .expect_completion("Parameter")
         .expect_no_completion("Unknown")
-        .expect_no_completion("Nominal");
+        .expect_no_completion("Existential");
+}
+
+#[test]
+fn nominal_shape_completion_is_closed_to_the_declaration_shape_axis() {
+    // ADR-009 B5: the sealed `NominalShape` declaration-shape axis completes
+    // through the same catalog-keyed lookup — the exhaustive
+    // Struct / Enum / Newtype / Opaque set, no Unknown arm.
+    ShapeTest::new("let s = comptime { NominalShape:: }\n")
+        .at(pos(0, 33))
+        .expect_completion("Struct")
+        .expect_completion("Enum")
+        .expect_completion("Newtype")
+        .expect_completion("Opaque")
+        .expect_no_completion("Unknown");
+}
+
+#[test]
+fn field_initialization_completion_is_closed_to_the_member_disposition_axis() {
+    // ADR-009 B5 (S2, Dec 59): the sealed `FieldInitialization` member
+    // disposition (a `FieldDescriptor`'s Required / Defaulted axis) completes
+    // through the SAME catalog-keyed lookup as every other reflection vocabulary
+    // — the S2 member-descriptor surface is LSP-visible via the shared query
+    // surface, no hand-written variant list.
+    ShapeTest::new("let d = comptime { FieldInitialization:: }\n")
+        .at(pos(0, 40))
+        .expect_completion("Required")
+        .expect_completion("Defaulted")
+        .expect_no_completion("Unknown");
+}
+
+#[test]
+fn passing_mode_completion_is_closed_to_the_adr_mode_axis() {
+    // ADR-009 B6: the `PassingMode` sealed sub-algebra (the ADR mode axis)
+    // completes through the same catalog-keyed lookup — the exhaustive
+    // Move / SharedBorrow / ExclusiveBorrow set, no Unknown arm.
+    ShapeTest::new("let m = comptime { PassingMode:: }\n")
+        .at(pos(0, 32))
+        .expect_completion("Move")
+        .expect_completion("SharedBorrow")
+        .expect_completion("ExclusiveBorrow")
+        .expect_no_completion("Unknown");
 }
 
 #[test]
@@ -270,14 +358,17 @@ fn generic_body_runtime_position_after_comptime_block_hides_reflect() {
     .expect_no_completion("reflect");
 }
 
-/// R1 (representative category): reflecting a non-enabled category surfaces
-/// the named per-category rejection through the LSP diagnostics path.
+/// R1 (representative pending payload): reflecting a family whose payload
+/// descriptor has NOT landed surfaces the named rejection through the LSP
+/// diagnostics path. After ADR-009 B7 the composite categories are enabled, so
+/// the representative top-level-reachable pending payload is the BOUNDED Erased
+/// bound set (`dyn Trait`, whose trait-reference bound elements land with B2).
 #[test]
 fn reflect_non_enabled_category_has_semantic_diagnostic() {
-    ShapeTest::new("let reflected = comptime { reflect(type_ref(Array)) }\n")
-        .expect_semantic_diagnostic_contains(
-            "reflect: the Nominal payload descriptor has not landed",
-        );
+    ShapeTest::new(
+        "trait Speak { fn speak(self) -> string; }\nlet r = comptime { reflect(type_ref(dyn Speak)) }\n",
+    )
+    .expect_semantic_diagnostic_contains("reflect: the Erased bound-set payload");
 }
 
 /// R2: the legacy string-kind form (`info.kind == "record"`) is a named
@@ -829,4 +920,135 @@ fn ordinary_call_site_offers_no_virtual_view() {
     ShapeTest::new("fn helper() -> int { 7 }\nlet h = helper()\n")
         .at(pos(1, 10))
         .expect_no_expansion_view();
+}
+
+// =====================================================================
+// ADR-009 ticket B5 (Stage 2, Dec 55-58) S4: LSP surface for the nominal
+// descriptor algebra. Every behavior below is driven by the ONE shared
+// `comptime_reflection` catalog: `reflect_repr` completes + hovers from its
+// catalog-owned builtin row (`REFLECT_REPR_BUILTIN_ROW`, spliced verbatim
+// into `builtin_metadata::CORE_BUILTINS`); the sealed `NominalShape`
+// (the `FrozenNominal<T>.shape()` result axis) + `FieldInitialization`
+// disposition complete through the SAME `reflection_enum_variant_names`
+// lookup as every other reflection vocabulary — a hand-written parallel LSP
+// row is a defect. `#name` explicit member selection stays grammar-blocked
+// (B7; documented CURRENT-vs-TARGET in `docs/defections.md`), so the hover
+// renders the descriptor's hygienic member position as the `#f` token in the
+// `FieldDescriptor<Owner, #f, T>` TYPE, never a source-name string surface.
+// =====================================================================
+
+/// Hover over `reflect_repr` renders the descriptor TYPES the complete-shape
+/// authority exposes — the owner-bound `FieldDescriptor<Owner, #f, T>` (owner
+/// nominal + hygienic member token), the sibling `VariantDescriptor` /
+/// `AssociatedConstDescriptor`, and the `FrozenNominal<T>.shape()` entry into
+/// the sealed `NominalShape` — all sourced from the catalog-owned builtin row.
+#[test]
+fn reflect_repr_hover_renders_descriptor_types_and_owner() {
+    ShapeTest::new("let reflected = comptime { reflect_repr(type_ref(int), access) }\n")
+        .at(pos(0, 30))
+        .expect_hover_contains("FieldDescriptor<Owner, #f, T>")
+        .expect_hover_contains("owner")
+        .expect_hover_contains("shape()")
+        .expect_hover_contains("VariantDescriptor")
+        .expect_hover_contains("AssociatedConstDescriptor");
+}
+
+/// The authority-gated `reflect_repr` — the entry into complete nominal-shape
+/// reflection — is offered inside a `comptime` block, from the shared catalog
+/// (metadata-driven, exactly like `reflect`), and stays hidden in runtime
+/// position.
+#[test]
+fn comptime_completion_offers_the_reflect_repr_reflection_entry() {
+    ShapeTest::new("comptime {\n    \n}\n")
+        .at(pos(1, 4))
+        .expect_completion("reflect_repr");
+    ShapeTest::new("")
+        .at(pos(0, 0))
+        .expect_no_completion("reflect_repr");
+}
+
+/// The `NominalShape` sealed axis — the exhaustive result of
+/// `FrozenNominal<T>.shape()` that a `match` discriminates (never a `.kind`
+/// string, R4) — completes through the ONE shared
+/// `reflection_enum_variant_names` lookup: exactly Struct / Enum / Newtype /
+/// Opaque, no Unknown arm, no hand-written LSP variant list.
+#[test]
+fn nominal_shape_result_axis_completes_through_the_shared_reflection_lookup() {
+    ShapeTest::new("let s = comptime { NominalShape:: }\n")
+        .at(pos(0, 33))
+        .expect_completion("Struct")
+        .expect_completion("Enum")
+        .expect_completion("Newtype")
+        .expect_completion("Opaque")
+        .expect_no_completion("Unknown");
+}
+
+// ADR-009 E3 (slice S1): navigation over a generated `extend` method
+// resolves through the D2 shared `generated_symbol_query()` surface — NOT
+// through the deleted parallel static extend collector. This test is the
+// LSP arm of the U12-deletion parity gate: it must stay green after
+// `crates/shape-ast/src/transform/comptime_extends.rs` is removed and the
+// four `type_inference.rs` callers migrate onto the executed authority.
+// =====================================================================
+
+/// Zero-based lines:
+///  1  annotation gen() {
+///  3    comptime post(target, ctx) {   <- generator definition
+///  4      extend target {
+///  5        method total() -> int ...
+/// 10  @gen()                            <- application site
+/// 11  type Pair { a: int, b: int }
+/// 14  let t = pair.total()             <- generated-method call site
+const E3_GENERATED_EXTEND_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method total() -> int { self.a + self.b }
+    }
+  }
+}
+
+@gen()
+type Pair { a: int, b: int }
+
+let pair = Pair { a: 5, b: 6 }
+let t = pair.total()
+"#;
+
+#[test]
+fn goto_definition_on_generated_extend_method_resolves_via_shared_query() {
+    // The generated `Pair.total` method has no hand-written declaration; the
+    // call site resolves only if the shared generated-symbol query answers
+    // it (application line 10 + generator-definition line 3).
+    ShapeTest::new(E3_GENERATED_EXTEND_PROGRAM)
+        .at(pos(14, 13))
+        .expect_definition_includes_lines(&[10, 3]);
+}
+
+#[test]
+fn member_completion_offers_generated_extend_method_via_shared_query() {
+    // Member-access completion on a receiver of the annotated type must offer
+    // the generated method — sourced from the executed authority, never the
+    // deleted static AST scan.
+    let source = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method total() -> int { self.a + self.b }
+    }
+  }
+}
+
+@gen()
+type Pair { a: int, b: int }
+
+let pair = Pair { a: 5, b: 6 }
+let _ = pair.t
+"#;
+    let last_line = source.lines().count() as u32 - 1;
+    ShapeTest::new(source)
+        .at(pos(last_line, 14))
+        .expect_completion("total");
 }
