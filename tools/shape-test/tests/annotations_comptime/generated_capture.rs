@@ -1,5 +1,8 @@
 use shape_test::shape_test::ShapeTest;
 
+#[path = "generated_capture/slice4.rs"]
+mod slice4;
+
 fn expect_vm_and_jit_number(source: &str, expected: f64) {
     ShapeTest::new(source).expect_number(expected);
     ShapeTest::new(source).with_jit().expect_number(expected);
