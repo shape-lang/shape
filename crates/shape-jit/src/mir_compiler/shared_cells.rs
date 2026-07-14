@@ -11,6 +11,7 @@ use std::sync::Arc;
 use cranelift::prelude::*;
 use shape_value::NativeKind;
 use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+use shape_value::v2::struct_layout::FieldKind;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::{Operand, Place, SlotId, StatementKind};
 use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
@@ -27,6 +28,50 @@ pub(crate) struct SharedLocalKindEvidence {
     layout: Option<NativeKind>,
     inferred: Option<NativeKind>,
     layout_conflict: Option<(NativeKind, NativeKind)>,
+}
+
+/// Which lowering a Shared `ClosureCapture` operand requires.
+///
+/// Both declaring-frame SharedCow locals and inherited Shared capture params
+/// store raw `*const SharedCell` carrier bits in their Cranelift variable. A
+/// normal place read projects the locked payload, so these two origins must
+/// select the raw-carrier path before `emit_heap_closure` retains the cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SharedCaptureOperandLowering {
+    RawCarrier {
+        slot: SlotId,
+        origin: SharedCellCarrierOrigin,
+    },
+    ProjectedPayload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SharedCellCarrierOrigin {
+    DeclaringFrameLocal,
+    InheritedCapture,
+}
+
+pub(crate) fn classify_shared_capture_operand(
+    operand: &Operand,
+    shared_local_slots: &HashMap<SlotId, SharedLocalKindEvidence>,
+    shared_capture_slots: &HashMap<SlotId, FieldKind>,
+) -> SharedCaptureOperandLowering {
+    let slot = match operand {
+        Operand::Move(Place::Local(slot))
+        | Operand::MoveExplicit(Place::Local(slot))
+        | Operand::Copy(Place::Local(slot)) => *slot,
+        _ => return SharedCaptureOperandLowering::ProjectedPayload,
+    };
+
+    let origin = if shared_local_slots.contains_key(&slot) {
+        SharedCellCarrierOrigin::DeclaringFrameLocal
+    } else if shared_capture_slots.contains_key(&slot) {
+        SharedCellCarrierOrigin::InheritedCapture
+    } else {
+        return SharedCaptureOperandLowering::ProjectedPayload;
+    };
+
+    SharedCaptureOperandLowering::RawCarrier { slot, origin }
 }
 
 impl SharedLocalKindEvidence {
@@ -236,5 +281,61 @@ mod tests {
         };
 
         assert_eq!(evidence.validated(SlotId(7)), Ok(NativeKind::Bool));
+    }
+
+    /// Lower-level D1 proof for the inherited-carrier branch.
+    ///
+    /// A public source proof is intentionally deferred to ADR-009 C1 slice 4:
+    /// today the VM compiler rewrites a synthetic Shared capture parameter as
+    /// OwnedMutable, so Shape source cannot honestly construct this layout.
+    /// Once `share` preserves the descriptor, the CLI matrix can cover the
+    /// same decision end to end. This unit keeps the JIT side honest meanwhile:
+    /// payload `42` is not a valid Arc carrier and must never reach retain.
+    #[test]
+    fn inherited_shared_capture_retains_raw_cell_carrier_not_projected_payload() {
+        use crate::ffi::object::{
+            jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain,
+        };
+
+        let slot = SlotId(9);
+        let operand = Operand::Copy(Place::Local(slot));
+        let shared_local_slots = HashMap::new();
+        let shared_capture_slots = HashMap::from([(slot, FieldKind::I64)]);
+
+        let lowering =
+            classify_shared_capture_operand(&operand, &shared_local_slots, &shared_capture_slots);
+        assert_eq!(
+            lowering,
+            SharedCaptureOperandLowering::RawCarrier {
+                slot,
+                origin: SharedCellCarrierOrigin::InheritedCapture,
+            },
+            "an inherited Shared parameter must bypass the lock-gated payload read"
+        );
+
+        let payload_bits = 42_u64;
+        let cell_bits = unsafe {
+            jit_alloc_shared_cell(
+                payload_bits,
+                crate::ffi::stack_kind_code::encode(NativeKind::Int64),
+            )
+        };
+        assert_ne!(cell_bits, 0);
+        assert_ne!(cell_bits, payload_bits);
+
+        let selected_bits = match lowering {
+            SharedCaptureOperandLowering::RawCarrier { .. } => cell_bits,
+            SharedCaptureOperandLowering::ProjectedPayload => payload_bits,
+        };
+        let retained_bits = unsafe { jit_arc_shared_retain(selected_bits) };
+        assert_eq!(
+            retained_bits, cell_bits,
+            "the nested closure must retain the cell identity, not payload bits"
+        );
+
+        unsafe {
+            jit_arc_shared_release(retained_bits);
+            jit_arc_shared_release(cell_bits);
+        }
     }
 }

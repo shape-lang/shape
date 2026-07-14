@@ -42,6 +42,12 @@
 //! - Capture of a MODULE-level binding: rejected by the W39 F1 module-binding
 //!   function-body SURFACE (module bindings are not MIR places). This is the
 //!   class `f1`/`f2`/`f3` in the fallback matrix already pin.
+//! - Nested recapture of an inherited Shared cell: the current source producer
+//!   registers a synthetic closure-capture parameter as `OwnedMutable`, erasing
+//!   the upstream Shared descriptor before the inner closure is built. The
+//!   lower-level JIT carrier decision is pinned in `mir_compiler::shared_cells`;
+//!   the public source/VM/JIT proof belongs to ADR-009 C1 slice 4, once `share`
+//!   preserves that descriptor through nested capture construction.
 
 use super::jit_test_support::{count_fallback_lines, run_workspace_fixture};
 
@@ -239,12 +245,4 @@ fn jit_refcounted_shared_string_capture_falls_back_cleanly() {
         "abb",
         "SURFACE (ADR-006 §2.7.8 / Q10): SharedCell for local slot _1 has a REFCOUNTED payload kind (String). The JIT shared-cell store lowering writes raw bits without retaining the new value or releasing the previous value. Whole-function JIT bail before cell allocation.",
     );
-}
-
-/// N10 — an inner closure recaptures the outer closure's inherited Shared
-/// cell. The inner environment must retain the raw cell carrier, not a locked
-/// read of its current scalar payload.
-#[test]
-fn jit_fallback_absent_for_nested_shared_recapture() {
-    assert_reaches_native_jit("n10-nested-shared-recapture.shape", "42");
 }

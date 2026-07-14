@@ -790,22 +790,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         operand: &Operand,
     ) -> Result<Value, String> {
-        if let Operand::Move(place) | Operand::MoveExplicit(place) | Operand::Copy(place) = operand
+        if let super::shared_cells::SharedCaptureOperandLowering::RawCarrier { slot, .. } =
+            super::shared_cells::classify_shared_capture_operand(
+                operand,
+                &self.shared_local_slots,
+                &self.shared_capture_slots,
+            )
         {
-            if let Place::Local(slot) = place {
-                if self.shared_local_slots.contains_key(slot)
-                    || self.shared_capture_slots.contains_key(slot)
-                {
-                    // Bypass the lock-gated read in `read_place` and
-                    // produce the raw pointer bits held in either the
-                    // declaring-frame cell slot or inherited capture slot.
-                    let var = *self
-                        .locals
-                        .get(slot)
-                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
-                    return Ok(self.builder.use_var(var));
-                }
-            }
+            // Bypass the lock-gated read in `read_place` and produce the raw
+            // pointer bits held in either carrier origin. The Shared branch in
+            // `emit_heap_closure` immediately retains this exact cell pointer.
+            let var = *self
+                .locals
+                .get(&slot)
+                .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+            return Ok(self.builder.use_var(var));
         }
         self.compile_operand(operand)
     }
