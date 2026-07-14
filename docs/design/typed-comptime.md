@@ -427,6 +427,155 @@ generated_provenance.rs, generated_rename.rs}` and
 `tests/annotations_comptime/generated_method_runtime.rs`, VM+JIT);
 book-chapter examples land in stage F1 per the program spec.
 
+**CURRENT / compiler+VM+JIT - hygienic generated locals (ticket ADR009-E3
+slice S1, legacy class U10, 2026-07-14).** The compiler no longer names its
+generated locals / parameters / handler module bindings with synthetic,
+user-guessable spellings (`argN`, `__ann_args`/`__ann_ctx`/`__ann_subject`/
+`__ann_result`/`__ann_before_result`, `__target_arg__`, `__ctx_arg__`). Each
+is a compiler-issued hygienic token `HygienicSymbol` (minted beside `SymbolId`
+in `expansion_provenance.rs`, private-field content-derived ctor over a
+`HygienicRole` descriptor + per-mint nonce — the same SHA-256 framing as the
+D1 identities, never a counter that keys a table and never rendered text). The
+role is bound by POSITION/TYPE, never a spelling: `declare_hygienic_local`
+(`compiler/helpers.rs`) keys the slot by the token's UNSPELLABLE (`\u{1}`-
+prefixed) descriptor, and the comptime mini-program renders the same
+descriptor for forwarder params + target/ctx bindings so declaration and
+reference agree. A user reference to a former spelling now resolves to nothing
+(rejection-matrix row 2), and a user local/argument spelled identically cannot
+collide with or shadow the generated slot (row 1). Delivery of target/ctx to a
+handler is unchanged (bound by position). Evidence:
+`compiler::comptime_builtins::expansion_provenance::tests::hygienic_symbol_mint_is_deterministic_distinct_and_unspellable`
+(unit) + `tools/shape-test/tests/annotations_comptime/executed_extend_authority.rs`
+(`u10_former_target_binding_spelling_does_not_leak_into_handler_body`,
+`u10_target_delivered_by_position_after_hygienic_rename`, VM+JIT) + the
+unchanged annotations_comptime (65) / comptime (263) regression suites. Scope:
+generated-LOCALS leaf only — the `ctx.original`/`ctx.target` typed
+capabilities (U11) and the handler/wrapper registry + chain names (U10
+handlers, `functions_annotations.rs` wrapper names) are later E3 slices.
+
+**CURRENT / compiler+VM+JIT - hygienic generated function/handler/wrapper
+names (ticket ADR009-E3 slice S2, legacy class U10, 2026-07-14).** The four
+synthetic FUNCTION-registry spellings the compiler minted for its generated
+wrappers/handlers — `__comptime_block__` (`comptime { }` mini-program entry),
+`__comptime_handler_fn__` (annotation-`comptime`-handler mini-program entry),
+`__ann_{name}_{before|after}_wrapper_{n}` (specialized runtime handler in the
+outer function table), and `{name}___ann_wrapper` (foreign-annotation wrapper
+slot) — are now compiler-issued hygienic tokens minted through the same
+`HygienicSymbol` surface as the S1 locals (new `HygienicRole` variants
+`ComptimeBlockWrapper` / `ComptimeHandlerWrapper` /
+`SpecializedAnnotationHandler` / `ForeignAnnotationWrapper`). The role is bound
+by the token, never a spelling; the UNSPELLABLE (`\u{1}`-prefixed) rendering is
+the registry key, so a user function of the former spelling can neither collide
+with the generated slot in the function table (row 1) nor be resolved to it
+(row 2), and a comptime block/handler body cannot reference its own wrapper.
+Distinct outer-registry wrappers are disambiguated by the compiler nonce (a
+shared name would make `find_function` return the wrong handler index); the
+program-isolated mini-program wrappers mint deterministically at a fixed nonce.
+`reserve_generated_decl`/`SymbolId` provenance is deliberately NOT used for
+these compiler temporaries — they carry no real application anchor (row-1
+`SourceAnchor` rejects their dummy spans) and are never LSP-navigation targets
+(see `docs/defections.md` 2026-07-14 S2 entry). Evidence:
+`compiler::comptime_builtins::expansion_provenance::tests::hygienic_function_roles_mint_distinct_unspellable_identities`
+(unit) +
+`compiler::functions_annotations::s3_source_anchor_tests::annotation_handler_wrapper_anchors_at_the_handler_definition`
+(asserts NO `*_wrapper` spelling survives in the function table) + the unchanged
+annotations_comptime (65) / comptime (263) / shape-lsp `--lib` (840) / lsp
+ShapeTest (494) regression suites. Scope: generated-FUNCTION/HANDLER/WRAPPER
+leaf only — the `ctx.original`/`ctx.target` typed capabilities (U11) and the
+`{name}___impl`/`{name}___{annotation}` chain names are later E3 slices.
+
+**CURRENT / compiler+VM+JIT - typed `ctx.original` capability replaces the
+`__original__` name-encoded alias (ticket ADR009-E3 slice S3, legacy class U11,
+2026-07-14).** A `replace body { … }` directive's replacement invokes the
+PRE-ANNOTATION body through the TYPED `ctx.original` capability, not the deleted
+global `__original__` spelling. The pre-annotation body is compiled into a
+compiler-issued HYGIENIC shadow function whose registry name is an unspellable
+[`HygienicSymbol`] descriptor (new `HygienicRole::OriginalBodyShadow`, nonce
+derived from the annotated function's name so the shadow re-registers
+idempotently); the deleted `__original__{fn}` shadow spelling, the
+`function_aliases["__original__"]` map, and ALL six of its consumers
+(`mod.rs` field + init, `functions.rs` alias track/cleanup, `helpers.rs`
+`find_function` alias branch, `expressions/function_calls.rs` `remote::call`
+lookup) are gone. `ctx.original` is a typed `FrozenCallable` (B6) — its callable
+identity is canonicalized through THE single semantic-freeze handle
+(`comptime_freeze_overlay`), so requesting the capability without the handle is
+the named `NO_FREEZE_HANDLE_DIAGNOSTIC` compile error (rejection-matrix row 3),
+never a string/Any/partial descriptor. `ctx.original(args)` in the replacement
+is rewritten to a direct typed `FunctionCall` to the hygienic shadow
+(`original_body_rewrite`, an exhaustive AST fold) BEFORE MIR lowering / the
+MIR-derived type-inference pass, so `ctx.original(5) + 100` types as ordinary
+`int` arithmetic in both execution modes. The role is bound by the `.original`
+capability member, never a guessable global: a user local spelled
+`__original__x` resolves to the USER binding (row 1, collision-proof), and the
+former `__original__(...)` global spelling is an ordinary undefined-function
+error (row 2, no leaked spelling). Evidence:
+`compiler::functions_annotations::s3_freeze_gate_tests::{ctx_original_capability_without_freeze_handle_is_the_named_row3_compile_error, ctx_original_capability_with_freeze_is_a_typed_frozen_callable}`
++ `compiler::original_body_rewrite::tests::*` (unit) +
+`tools/shape-test/tests/annotations_comptime/executed_extend_authority.rs::{s3_ctx_original_invokes_pre_annotation_body_typed_path, s3_user_original_spelling_does_not_collide_reaches_body_via_ctx_original, s3_former_original_spelling_does_not_resolve_the_shadow}`
+(VM+JIT) + migrated `compiler::functions::tests::test_replace_body_original_*`
++ the held annotations_comptime (68) / comptime (263) / shape-lsp `--lib` (840)
+/ lsp ShapeTest (494) regression suites. Scope: `ctx.original` leaf — the
+comptime `extend <target>` owner resolution and the
+`{name}___impl`/`{name}___{annotation}` chain-name hygiene land in the sibling
+S4 slice (block below).
+
+Book status: S3 changes the SPELLING of an already-book-documented behavior
+(the `replace body` pre-annotation invocation) from the deleted `__original__`
+global to the typed `ctx.original` capability; the behavior is gate-runnable
+green on VM and JIT in ShapeTest
+(`executed_extend_authority::s3_ctx_original_invokes_pre_annotation_body_typed_path`).
+No newly-enabled surface (no new opcode / builtin / grammar production); the
+external comptime book chapter's `__original__` example text is refreshed to
+`ctx.original` in the F1 book-refresh stage.
+
+**CURRENT / compiler+VM+JIT - typed target-OWNER resolution replaces the magic
+`"target"` string substitution + chain-name hygiene (ticket ADR009-E3 slice S4,
+legacy class U11, 2026-07-14).** A comptime annotation handler's
+`extend <target> { … }` directive now resolves its OWNER head against the
+handler's POSITION-0 target parameter and a TYPED owner descriptor
+(`shape_runtime::annotation_context::TargetOwner` = canonical nominal name +
+`NominalShape`, ADR-009 B5), NOT the deleted hardcoded literal
+`TypeName == "target"` match. `resolve_extend_owner_placeholder` rewrites the
+`extend` head at the handler-execution site — the executed declaration-discovery
+pre-pass AND the authoritative pass-2 compile call it with the SAME handler
+(hence the same position-0 binding) and the same owner, so both phases reserve
+ONE expansion identity per generated method. The role is bound by POSITION, not
+a spelling: a handler that names its target parameter `t` and writes `extend t`
+materializes on the annotated type, and a user type LITERALLY named `target`
+resolves NOMINALLY through the ordinary type-name table when the handler's first
+parameter is spelled differently (rejection-matrix row 2/3 — no `"target"`
+string ever enters a symbol table by magic). The before/after runtime-hook
+wrapper CHAIN names (`{name}___impl` / `{name}___{annotation}`) are now
+unspellable [`HygienicSymbol`] descriptors (new
+`HygienicRole::{AnnotationHookImplBody, AnnotationHookWrapper}`, stable digest
+nonce so they re-register idempotently); a user function of the former spelling
+neither collides with nor resolves to the generated chain slot (rows 1/2).
+Scope note: the SEPARATE runtime-hook `ctx.target` field (the annotated function
+as a typed callable, `§4.1.5`, load-bearing for `@remote`) is already a typed
+capability and is untouched — it is not the deleted comptime `"target"`
+placeholder. Evidence:
+`compiler::functions_annotations::s4_target_owner_tests::{extend_head_matching_position0_binding_resolves_to_owner, literal_target_type_is_nominal_when_binding_differs, extend_head_binds_by_position_not_by_the_word_target, no_binding_leaves_extend_head_untouched, target_owner_is_a_typed_nominal_descriptor}`
+(unit) +
+`tools/shape-test/tests/annotations_comptime/executed_extend_authority.rs::{s4_extend_owner_binds_by_position_not_the_word_target, s4_user_type_named_target_resolves_nominally}`
+(VM+JIT) + the migrated chain-hygiene assertions
+`compiler::statements::tests::{test_annotated_function_generates_wrapper, test_annotation_chaining_generates_chain}`
++ the held annotations_comptime (70) / comptime (263) / shape-lsp `--lib` (840)
+/ lsp ShapeTest (494) regression suites + `executed_extend_authority` 14/14
+(the D7/D8/D12/R6 parity matrix through the typed path).
+
+Book status: S4 changes the RESOLUTION MECHANISM of an already-book-documented
+behavior (`extend target { … }` inside a comptime handler) from a magic
+literal-`"target"` substitution to a position-bound typed owner resolution; the
+observable behavior for the documented `extend target` spelling is unchanged
+(the handler's first parameter is `target` in every book example), and the
+newly-reachable position-bound form is gate-runnable green on VM and JIT in
+ShapeTest
+(`executed_extend_authority::s4_extend_owner_binds_by_position_not_the_word_target`).
+No newly-enabled opcode / builtin / grammar production; the external comptime
+book chapter's note that `target` is a reserved keyword is refreshed to "the
+handler's first (target) parameter, bound by position" in the F1 book-refresh
+stage.
+
 **CURRENT / compiler+LSP+VM+JIT - declaration-discovery fixed point, shared
 expansion query, and `shape-expansion://` read-only virtual views
 (Decision 66/67, ticket ADR009-D2, 2026-07-13).** Declaration-producing

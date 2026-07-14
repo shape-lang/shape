@@ -6207,22 +6207,11 @@ impl BytecodeCompiler {
                 });
             }
         };
-        let resolved_name = self
-            .function_aliases
-            .get(&fn_name)
-            .cloned()
-            .unwrap_or_else(|| fn_name.clone());
-
         // Named-function declaration first (R1); then a retained closure-literal
         // peek for a `let`-bound closure value (R2). Both yield the same
         // `(Vec<FunctionParameter>, Option<TypeAnnotation>)` signature shape.
         let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) =
-            if let Some(func_def) = self
-                .function_defs
-                .get(&resolved_name)
-                .or_else(|| self.function_defs.get(&fn_name))
-                .cloned()
-            {
+            if let Some(func_def) = self.function_defs.get(&fn_name).cloned() {
                 (func_def.params, func_def.return_type)
             } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
                 (peek.params, peek.return_type)

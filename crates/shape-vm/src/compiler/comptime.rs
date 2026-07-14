@@ -5,6 +5,7 @@
 
 use crate::bytecode::BytecodeProgram;
 use crate::compiler::BytecodeCompiler;
+use crate::compiler::comptime_builtins::expansion_provenance::{HygienicRole, HygienicSymbol};
 use crate::executor::{VMConfig, VirtualMachine};
 use shape_ast::ast::{
     AnnotationHandlerParam, DestructurePattern, Expr, FunctionDef, FunctionParameter, Item,
@@ -15,6 +16,30 @@ use shape_value::heap_value::{HeapKind, HeapValue};
 use shape_value::{KindedSlot, NativeKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+
+// ADR-009 E3 (S1, U10): the comptime mini-program formerly named its
+// generated builtin-forwarder parameters (`arg{N}`) and its handler
+// target/ctx module bindings (`__target_arg__` / `__ctx_arg__`) with
+// user-guessable spellings, so a handler body or an annotation-argument
+// expression that referenced one of those names captured the generated
+// binding. These helpers render the hygienic identity ([`HygienicSymbol`])
+// into the mini-program's by-name namespace as an UNSPELLABLE descriptor
+// (SOH-prefixed, like the forwarder constants above): a user reference to the
+// former spelling is now a different, resolvable-to-nothing string. Each
+// mini-program is compiled and executed in isolation, so a fixed nonce
+// suffices — the unspellable prefix (not the nonce) is what defeats capture.
+fn hygienic_forwarder_param(index: usize) -> String {
+    HygienicSymbol::mint(HygienicRole::ComptimeForwarderParam(index as u32), 0)
+        .unspellable_descriptor()
+}
+
+fn hygienic_comptime_target_binding() -> String {
+    HygienicSymbol::mint(HygienicRole::ComptimeTargetBinding, 0).unspellable_descriptor()
+}
+
+fn hygienic_comptime_ctx_binding() -> String {
+    HygienicSymbol::mint(HygienicRole::ComptimeCtxBinding, 0).unspellable_descriptor()
+}
 
 const TYPE_REF_FORWARDER: &str = "\u{1}comptime:forward-type-ref";
 // ADR-009 B2 (slice S4): `trait_ref(TraitName)` lowers to this unspellable
@@ -505,7 +530,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
             let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
                 .map(|i| shape_ast::ast::FunctionParameter {
                     pattern: shape_ast::ast::DestructurePattern::Identifier(
-                        format!("arg{}", i),
+                        hygienic_forwarder_param(i),
                         Span::DUMMY,
                     ),
                     is_const: false,
@@ -520,7 +545,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                 .collect();
 
             let args: Vec<Expr> = (0..*arity)
-                .map(|i| Expr::Identifier(format!("arg{}", i), Span::DUMMY))
+                .map(|i| Expr::Identifier(hygienic_forwarder_param(i), Span::DUMMY))
                 .collect();
 
             let body_expr = Expr::QualifiedFunctionCall {
@@ -1777,7 +1802,16 @@ pub(crate) fn execute_comptime_with_context(
     }
     ensure_tail_return(&mut body);
 
-    let func_name = "__comptime_block__".to_string();
+    // ADR-009 E3 (S2, U10): the mini-program entry wrapper is a HYGIENIC
+    // generated function whose role is bound by its compiler-issued token —
+    // never the former user-guessable `__comptime_block__` spelling. The
+    // rendering is unspellable, so a `comptime { }` body (which becomes this
+    // wrapper's body) cannot reference or shadow the wrapper. Nonce 0: the
+    // mini-program holds exactly one such wrapper, so a fixed deterministic
+    // identity is sufficient (and reproducible); the decl below and the tail
+    // call reuse this one rendering.
+    let func_name =
+        HygienicSymbol::mint(HygienicRole::ComptimeBlockWrapper, 0).unspellable_descriptor();
     let func_def = FunctionDef {
         name: func_name.clone(),
         name_span: Span::DUMMY,
@@ -2315,15 +2349,25 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         })
         .collect();
 
+    // ADR-009 E3 (S1, U10): the handler target/ctx module bindings are keyed
+    // by the hygienic identity's UNSPELLABLE descriptor, so a handler body or
+    // annotation-argument expression that references the former spelling
+    // (`__target_arg__` / `__ctx_arg__`) resolves to nothing — it can no
+    // longer capture the compiler-provided target/ctx. The SAME descriptor is
+    // used for the call-arg reference, the known-binding declaration, and the
+    // binding preset below.
+    let target_binding = hygienic_comptime_target_binding();
+    let ctx_binding = hygienic_comptime_ctx_binding();
+
     let mut call_args: Vec<Expr> = Vec::with_capacity(handler_params.len());
     let mut ann_idx = 0usize;
     for (idx, param) in handler_params.iter().enumerate() {
         if idx == 0 {
-            call_args.push(Expr::Identifier("__target_arg__".to_string(), Span::DUMMY));
+            call_args.push(Expr::Identifier(target_binding.clone(), Span::DUMMY));
             continue;
         }
         if idx == 1 {
-            call_args.push(Expr::Identifier("__ctx_arg__".to_string(), Span::DUMMY));
+            call_args.push(Expr::Identifier(ctx_binding.clone(), Span::DUMMY));
             continue;
         }
         // ADR-009 B5 (Dec 56): the third positional parameter of a type-target
@@ -2431,7 +2475,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     rewrite_comptime_type_symbol_args(&mut body_statement, freeze.as_ref())?;
 
     // Wrap the handler body in a function that takes the target parameter.
-    let func_name = "__comptime_handler_fn__".to_string();
+    // ADR-009 E3 (S2, U10): HYGIENIC generated wrapper — role bound by the
+    // compiler-issued token, never the former `__comptime_handler_fn__`
+    // spelling. Unspellable rendering, one wrapper per mini-program, decl and
+    // tail call reuse the one rendering (nonce 0, program-isolated).
+    let func_name =
+        HygienicSymbol::mint(HygienicRole::ComptimeHandlerWrapper, 0).unspellable_descriptor();
     let func_def = FunctionDef {
         name: func_name.clone(),
         name_span: Span::DUMMY,
@@ -2508,13 +2557,13 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     compile_and_execute_comptime_program(
         &program,
         vec![
-            "__target_arg__".to_string(),
-            "__ctx_arg__".to_string(),
+            target_binding.clone(),
+            ctx_binding.clone(),
             "__comptime__".to_string(),
         ],
         vec![
-            ("__target_arg__".to_string(), target_value),
-            ("__ctx_arg__".to_string(), ctx_nb),
+            (target_binding, target_value),
+            (ctx_binding, ctx_nb),
         ],
         extensions,
         known_type_symbols,

@@ -10,7 +10,10 @@ use shape_ast::error::{Result, ShapeError};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
-use super::{BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope};
+use super::{
+    BuiltinNameResolution, BytecodeCompiler, DropKind, HygienicRole, HygienicSymbol, ParamPassMode,
+    ResolutionScope,
+};
 
 /// T1 sub-case (a) helper: a `ConcreteType` carries a source-level NAME (so a
 /// field read can resolve the struct/enum schema) when it is a named
@@ -3555,6 +3558,60 @@ impl BytecodeCompiler {
         Ok(idx)
     }
 
+    /// ADR-009 E3 (S1, U10): declare a HYGIENIC generated local — a compiler
+    /// temporary whose ROLE is bound by the compiler-issued token
+    /// ([`HygienicSymbol`]), never by a user-guessable spelling. The slot is
+    /// keyed in the scope name table by the token's UNSPELLABLE descriptor
+    /// (SOH-prefixed), so:
+    ///   - a user local spelled like the former synthetic name (`__ann_args`)
+    ///     cannot collide with or shadow this slot (different string), and
+    ///   - user code referencing the former spelling resolves to nothing
+    ///     (the descriptor is unspellable), never to this generated slot.
+    /// The emitted bytecode addresses the slot by INDEX; the name-table entry
+    /// exists only so the slot participates in ordinary scope lifetime
+    /// (push/pop/save/restore) exactly like any other local.
+    pub(super) fn declare_hygienic_local(&mut self, role: HygienicRole) -> Result<u16> {
+        let nonce = self.hygienic_local_nonce;
+        self.hygienic_local_nonce += 1;
+        let symbol = HygienicSymbol::mint(role, nonce);
+        self.declare_local(&symbol.unspellable_descriptor())
+    }
+
+    /// ADR-009 E3 (S2, U10): mint a HYGIENIC generated FUNCTION-registry name
+    /// for a compiler-synthesized wrapper / handler whose ROLE is bound by the
+    /// compiler-issued token ([`HygienicSymbol`]), never by a user-guessable
+    /// spelling. The returned name is UNSPELLABLE (SOH-prefixed), so a user
+    /// function of the former synthetic spelling (`__ann_..._wrapper_0`,
+    /// `{name}___ann_wrapper`) can neither collide with the generated slot in
+    /// the function table (different string) nor be resolved to it (the
+    /// descriptor is unspellable). The compiler nonce disambiguates every mint
+    /// so distinct wrappers never share a name — a collision would make
+    /// `find_function` return the wrong slot index (`register_function`
+    /// silently keeps the first arity-matching entry).
+    pub(super) fn mint_hygienic_fn_name(&mut self, role: HygienicRole) -> String {
+        let nonce = self.hygienic_local_nonce;
+        self.hygienic_local_nonce += 1;
+        HygienicSymbol::mint(role, nonce).unspellable_descriptor()
+    }
+
+    /// ADR-009 E3 (S3, U11): mint a HYGIENIC generated FUNCTION-registry name
+    /// with a DETERMINISTIC nonce (not the per-mint counter). Two mints with
+    /// the same role+nonce agree, so a generated decl keyed on a stable
+    /// application anchor (e.g. the `replace body` shadow, keyed on the
+    /// annotated function's name) re-mints the SAME unspellable name and
+    /// `register_function` dedups it idempotently instead of registering a
+    /// second orphan slot across recompiles of the same function. Like
+    /// [`Self::mint_hygienic_fn_name`] the rendering is unspellable
+    /// (SOH-prefixed), so it can neither collide with nor be resolved to a
+    /// user function of any spelling.
+    pub(super) fn mint_hygienic_fn_name_stable(
+        &self,
+        role: HygienicRole,
+        nonce: u64,
+    ) -> String {
+        HygienicSymbol::mint(role, nonce).unspellable_descriptor()
+    }
+
     /// Resolve a local variable
     pub(super) fn resolve_local(&self, name: &str) -> Option<u16> {
         for scope in self.locals.iter().rev() {
@@ -4612,18 +4669,6 @@ impl BytecodeCompiler {
 
     /// Find a function by name
     pub(super) fn find_function(&self, name: &str) -> Option<usize> {
-        // Check function aliases first (e.g., __original__ -> shadow function).
-        if let Some(actual_name) = self.function_aliases.get(name) {
-            if let Some(idx) = self
-                .program
-                .functions
-                .iter()
-                .position(|f| f.name == *actual_name)
-            {
-                return Some(idx);
-            }
-        }
-
         // Try direct/scoped resolution
         if let Some(resolved) = self.resolve_scoped_function_name(name) {
             if let Some(idx) = self

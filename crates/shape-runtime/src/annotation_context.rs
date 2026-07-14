@@ -35,8 +35,61 @@
 //! - `emit(event, data)` - Event emission for alerts, logging
 //! - `data` - Data range manipulation (extend/restore for warmup)
 
+use crate::comptime_reflection::NominalShape;
 use shape_value::KindedSlot;
 use std::collections::HashMap;
+
+// ============================================================================
+// Target-Owner Descriptor (ADR-009 E3 / S4, U11)
+// ============================================================================
+
+/// The TYPED owner a comptime annotation handler's `extend <target>` placeholder
+/// resolves against.
+///
+/// This replaces the deleted magic `TypeName == "target"` string substitution
+/// (formerly `functions_annotations.rs`, two sites). Under the old scheme the
+/// literal identifier `target` was a hardcoded keyword: a handler body's
+/// `extend target { … }` was rewritten to the annotated type's name by matching
+/// the fixed spelling `"target"`, so a user type literally named `target` could
+/// never be extended nominally, and the role was bound by a guessable spelling
+/// rather than by position.
+///
+/// A `TargetOwner` is the annotated NOMINAL type identified by POSITION — the
+/// handler's first (target) parameter — carrying its canonical nominal name and
+/// declaration shape ([`NominalShape`], ADR-009 B5). The placeholder is resolved
+/// against the handler's position-0 binding, not the literal `"target"`, so a
+/// user type literally named `target` (when the handler's first parameter is
+/// spelled differently, or at module scope outside any handler) resolves
+/// NOMINALLY through the ordinary type-name table. The owner is a typed
+/// descriptor, never a `TypeName` string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetOwner {
+    name: String,
+    shape: NominalShape,
+}
+
+impl TargetOwner {
+    /// Build the typed owner descriptor for the annotated nominal type `name`
+    /// whose declaration shape is `shape`.
+    pub fn new(name: impl Into<String>, shape: NominalShape) -> Self {
+        Self {
+            name: name.into(),
+            shape,
+        }
+    }
+
+    /// The owner's canonical nominal name (the annotated type). This is the
+    /// real type name resolved through the type system — never the guessable
+    /// `"target"` placeholder spelling.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The owner's declaration shape (ADR-009 B5).
+    pub fn shape(&self) -> NominalShape {
+        self.shape
+    }
+}
 
 // ============================================================================
 // Annotation Registry

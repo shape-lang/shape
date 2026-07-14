@@ -1089,9 +1089,6 @@ impl BytecodeCompiler {
             return Err(self.mir_borrow_error(error));
         }
 
-        // Track whether __original__ alias is active so we can clean it up.
-        let has_original_alias = self.function_aliases.contains_key("__original__");
-
         // Enable __* builtin access only for stdlib-origin functions
         // (or preserve if an enclosing stdlib compilation context already enabled it).
         let saved_allow_internal = self.allow_internal_builtins;
@@ -1239,11 +1236,6 @@ impl BytecodeCompiler {
                         borrow_analysis,
                     }));
             }
-        }
-
-        // Clean up __original__ alias after the replacement body is compiled.
-        if has_original_alias {
-            self.function_aliases.remove("__original__");
         }
 
         // Runtime lifecycle hooks (`on_define`, `metadata`) are invoked at
@@ -3406,14 +3398,15 @@ mod tests {
 
     #[test]
     fn test_replace_body_original_calls_original_function() {
-        // §4.5.5: `__original__` is a direct typed call to the shadow function
-        // (the original body). Forwarding names the real params — there is no
-        // injected `args` array.
+        // ADR-009 E3 (S3, U11): `ctx.original` is the TYPED capability that
+        // invokes the pre-annotation body — a direct typed call to the hygienic
+        // shadow function. Forwarding names the real params; there is no
+        // injected `args` array and no name-encoded `__original__` alias.
         let code = r#"
             annotation wrap() {
                 comptime post(target, ctx) {
                     replace body {
-                        return __original__(5) + 100
+                        return ctx.original(5) + 100
                     }
                 }
             }
@@ -3427,7 +3420,7 @@ mod tests {
         assert_eq!(
             result
                 .as_test_number()
-                .expect("Expected 115 from __original__ call"),
+                .expect("Expected 115 from ctx.original call"),
             115.0,
         );
     }
@@ -3436,7 +3429,7 @@ mod tests {
     fn test_replace_body_no_longer_injects_args_binding() {
         // §4.5.5 deletion: the hidden `let args = [param1, ...]` binding is
         // gone. Referencing `args` in a replacement body is now an ordinary
-        // undefined-name compile error; forwarding uses `__original__(a, b, c)`
+        // undefined-name compile error; forwarding uses `ctx.original(a, b, c)`
         // with the real parameter names (see the forwarding test above).
         let code = r#"
             annotation with_args() {
@@ -3463,12 +3456,12 @@ mod tests {
 
     #[test]
     fn test_replace_body_original_with_no_params() {
-        // __original__ works for zero-parameter functions too.
+        // ctx.original works for zero-parameter functions too.
         let code = r#"
             annotation add_one() {
                 comptime post(target, ctx) {
                     replace body {
-                        return __original__() + 1
+                        return ctx.original() + 1
                     }
                 }
             }
@@ -3482,7 +3475,7 @@ mod tests {
         assert_eq!(
             result
                 .as_test_number()
-                .expect("Expected 42 from __original__() + 1"),
+                .expect("Expected 42 from ctx.original() + 1"),
             42.0,
         );
     }
