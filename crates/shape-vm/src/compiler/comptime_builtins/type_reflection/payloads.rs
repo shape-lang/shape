@@ -19,13 +19,17 @@ use crate::compiler::comptime_builtins::semantic_freeze::FreezeOverlay;
 
 use super::{FrozenTypeCategory, FrozenTypeIdentity};
 use shape_runtime::comptime_reflection::{
-    FLOAT_WIDTH_SCHEMA_NAME, FrozenPrimitive, INTEGER_WIDTH_SCHEMA_NAME, PASSING_MODE_SCHEMA_NAME,
+    FIELD_INITIALIZATION_SCHEMA_NAME, FLOAT_WIDTH_SCHEMA_NAME, FieldInitialization, FrozenPrimitive,
+    INTEGER_WIDTH_SCHEMA_NAME, NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME,
     PassingMode,
 };
 use shape_runtime::type_schema::builtin_schemas::{
-    COMPTIME_FROZEN_CALLABLE_SCHEMA, COMPTIME_FROZEN_ERASED_SCHEMA,
-    COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
+    COMPTIME_ENUM_DESCRIPTOR_SCHEMA, COMPTIME_FIELD_DESCRIPTOR_SCHEMA,
+    COMPTIME_FROZEN_CALLABLE_SCHEMA, COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
+    COMPTIME_FROZEN_NOMINAL_SCHEMA, COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
     COMPTIME_FROZEN_PRIMITIVE_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA,
+    COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA, COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA,
+    COMPTIME_STRUCT_DESCRIPTOR_SCHEMA, COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
 };
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
@@ -77,6 +81,68 @@ pub(crate) struct CallableDescriptor {
     pub(crate) returns: FrozenTypeIdentity,
 }
 
+/// ADR-009 B5 (Stage 2, Dec 57) — one record field of a
+/// [`NominalDescriptor::Struct`]. Carries the owner-bound HYGIENIC member
+/// identity (`#f`, a stable opaque identity minted from `member:{owner}:{name}`
+/// — NEVER the source-name string, Dec 57 rejection R1/R3), the field's VALUE
+/// type frozen identity, and its [`FieldInitialization`] disposition. Field
+/// names are identity-insignificant and stay a freeze fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NominalFieldDescriptor {
+    pub(crate) member: FrozenTypeIdentity,
+    pub(crate) type_identity: FrozenTypeIdentity,
+    pub(crate) initialization: FieldInitialization,
+}
+
+/// ADR-009 B5 (Stage 2, Dec 57) — one variant of a [`NominalDescriptor::Enum`]:
+/// the owner-bound hygienic member identity + the payload arity (Unit=0,
+/// Tuple(n)/Struct(n)=n).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NominalVariantDescriptor {
+    pub(crate) member: FrozenTypeIdentity,
+    pub(crate) payload_arity: u16,
+}
+
+/// ADR-009 B5 (Stage 2, Dec 55/57/58) — the sealed nominal declaration shape of
+/// a frozen NOMINAL identity, reconstructed from the freeze's struct/enum inputs
+/// (never re-derived). The `owner` is the reflected nominal's frozen identity;
+/// generic substitution precedes issuance (Dec 55 — the applied identity's
+/// substituted field types, threaded via B4 applied identities in a later
+/// slice). Deliberately NO `Default`/partial constructor (rejection-matrix row
+/// R8) — every value is fully populated at its single construction point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NominalDescriptor {
+    /// A product type with named runtime fields.
+    Struct {
+        owner: FrozenTypeIdentity,
+        fields: Vec<NominalFieldDescriptor>,
+    },
+    /// A sum type with named variants.
+    Enum {
+        owner: FrozenTypeIdentity,
+        variants: Vec<NominalVariantDescriptor>,
+    },
+    /// A nominal wrapper over a single inner type.
+    Newtype {
+        owner: FrozenTypeIdentity,
+        inner: FrozenTypeIdentity,
+    },
+    /// A semantically non-decomposable nominal (no visible representation).
+    Opaque { owner: FrozenTypeIdentity },
+}
+
+impl NominalDescriptor {
+    /// The sealed [`NominalShape`] discriminator this descriptor projects.
+    pub(crate) fn shape(&self) -> NominalShape {
+        match self {
+            Self::Struct { .. } => NominalShape::Struct,
+            Self::Enum { .. } => NominalShape::Enum,
+            Self::Newtype { .. } => NominalShape::Newtype,
+            Self::Opaque { .. } => NominalShape::Opaque,
+        }
+    }
+}
+
 /// Compiler-internal payload descriptor — the typed result of the semantic
 /// freeze's payload query (the ONE query API, beside `identity_of` /
 /// `category_of`). Covers exactly the enabled payload categories
@@ -101,6 +167,11 @@ pub(crate) enum FrozenPayloadDescriptor {
     /// signature freezes (Dec 52: the freeze-boundary predicate rejects
     /// issuance for an unresolved signature before any hook runs).
     Callable(CallableDescriptor),
+    /// ADR-009 B5 (Dec 55): a nominal declaration-shape descriptor —
+    /// Struct / Enum / Newtype / Opaque. Issued only for a RESOLVED nominal
+    /// (an un-applied generic head or an unsubstituted applied form is a named
+    /// rejection at the query, never a descriptor here).
+    Nominal(NominalDescriptor),
 }
 
 impl FrozenPayloadDescriptor {
@@ -112,6 +183,7 @@ impl FrozenPayloadDescriptor {
             Self::Never => FrozenTypeCategory::Never,
             Self::Erased { .. } => FrozenTypeCategory::Erased,
             Self::Callable(_) => FrozenTypeCategory::Callable,
+            Self::Nominal(_) => FrozenTypeCategory::Nominal,
         }
     }
 }
@@ -136,6 +208,31 @@ pub(crate) fn pending_payload_rejection(category: FrozenTypeCategory) -> String 
 /// uninhabited until then). Reflecting a BOUNDED erased identity is
 /// therefore this named rejection — never an empty (partial) bound set.
 /// Only the base-frozen `any` leaf answers the Erased payload today.
+/// ADR-009 B5 rejection (drift note R10/R11 family): a BARE generic
+/// constructor head (`Array`, `Option`, `HashMap`, a user generic) is
+/// `TypeConstructorRef` territory (ticket B4), NOT a resolved nominal shape.
+/// Reflecting an un-applied head is this named rejection — never a
+/// `StructDescriptor` issued off the un-applied form.
+pub(crate) fn unapplied_generic_head_rejection() -> String {
+    "reflect: an un-applied generic type constructor is not a resolved nominal shape; \
+     apply its type arguments (type_constructor(Head).apply(...)) or reflect an applied \
+     form before reflecting its shape"
+        .to_string()
+}
+
+/// ADR-009 B5 rejection (Dec 55, R10): reflecting an APPLIED generic nominal
+/// (`Option<int>`, `Page<User>`) requires generic substitution before
+/// descriptor issuance — the applied identity's substituted member types
+/// (threaded through the B4 applied identities). Until that slice lands it is
+/// this named pending rejection, never a descriptor issued off the
+/// un-substituted form.
+pub(crate) fn applied_nominal_pending_rejection() -> String {
+    "reflect: reflecting an applied generic nominal requires generic substitution before \
+     descriptor issuance (pending slice); reflect the base nominal, or use type_category \
+     for the exhaustive category"
+        .to_string()
+}
+
 pub(crate) fn bounded_erased_payload_rejection() -> String {
     "reflect: the Erased bound-set payload for trait-object bounds has not \
      landed (pending ticket B2 trait-reference descriptors); use \
@@ -165,6 +262,7 @@ pub(crate) fn build_frozen_type_heap_value(
         FrozenPayloadDescriptor::Callable(descriptor) => {
             frozen_callable_descriptor_slot(&descriptor)?
         }
+        FrozenPayloadDescriptor::Nominal(descriptor) => frozen_nominal_descriptor_slot(&descriptor)?,
     };
     let variant = enum_variant_id(COMPTIME_FROZEN_TYPE_SCHEMA, category.variant_name())?;
     super::typed_slot_into_heap_value(typed_object_for_named_schema(
@@ -280,6 +378,161 @@ fn param_descriptor_slot(param: &ParamDescriptor) -> Result<KindedSlot, String> 
             ("mode", mode_slot),
         ],
     ))
+}
+
+/// ADR-009 B5: build the `FrozenNominal` descriptor object — the sealed
+/// `NominalShape` enum carrier wrapping the shape's typed row descriptor. Typed
+/// descriptor data all the way down: identities and nested typed objects, never
+/// rendered type-name strings, never a `.kind` string (Dec 55 rejection R4).
+fn frozen_nominal_descriptor_slot(descriptor: &NominalDescriptor) -> Result<KindedSlot, String> {
+    let shape_payload = match descriptor {
+        NominalDescriptor::Struct { owner, fields } => struct_descriptor_slot(*owner, fields)?,
+        NominalDescriptor::Enum { owner, variants } => enum_descriptor_slot(*owner, variants)?,
+        NominalDescriptor::Newtype { owner, inner } => newtype_descriptor_slot(*owner, *inner),
+        NominalDescriptor::Opaque { owner } => opaque_descriptor_slot(*owner),
+    };
+    let shape_slot = nominal_shape_enum_slot(descriptor.shape(), shape_payload)?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_FROZEN_NOMINAL_SCHEMA,
+        &[("shape", shape_slot)],
+    ))
+}
+
+/// The `NominalShape` enum value: variant id from the catalog-generated schema
+/// (Dec 55), `__payload_0` = the shape's typed row descriptor object.
+fn nominal_shape_enum_slot(
+    shape: NominalShape,
+    payload: KindedSlot,
+) -> Result<KindedSlot, String> {
+    let variant = enum_variant_id(NOMINAL_SHAPE_SCHEMA_NAME, shape.variant_name())?;
+    Ok(typed_object_for_named_schema(
+        NOMINAL_SHAPE_SCHEMA_NAME,
+        &[
+            ("__variant", KindedSlot::from_int(variant)),
+            ("__payload_0", payload),
+        ],
+    ))
+}
+
+/// The `StructDescriptor` object: owner identity halves, the runtime field
+/// count, and the ordered typed `FieldDescriptor` array.
+fn struct_descriptor_slot(
+    owner: FrozenTypeIdentity,
+    fields: &[NominalFieldDescriptor],
+) -> Result<KindedSlot, String> {
+    let mut field_objs = Vec::with_capacity(fields.len());
+    for field in fields {
+        field_objs.push(field_descriptor_slot(owner, field)?);
+    }
+    let fields_array = object_array_slot(field_objs)?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_STRUCT_DESCRIPTOR_SCHEMA,
+        &[
+            ("owner_identity_high", KindedSlot::from_int(owner.high)),
+            ("owner_identity_low", KindedSlot::from_int(owner.low)),
+            ("field_count", KindedSlot::from_int(fields.len() as i64)),
+            ("fields", fields_array),
+        ],
+    ))
+}
+
+/// One `FieldDescriptor` object: owner + owner-bound member identity + value
+/// type identity + the `FieldInitialization` enum carrier. No source-name
+/// string (Dec 57).
+fn field_descriptor_slot(
+    owner: FrozenTypeIdentity,
+    field: &NominalFieldDescriptor,
+) -> Result<KindedSlot, String> {
+    let init_slot = unit_enum_variant_slot(
+        FIELD_INITIALIZATION_SCHEMA_NAME,
+        field.initialization.variant_name(),
+    )?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_FIELD_DESCRIPTOR_SCHEMA,
+        &[
+            ("owner_identity_high", KindedSlot::from_int(owner.high)),
+            ("owner_identity_low", KindedSlot::from_int(owner.low)),
+            ("member_high", KindedSlot::from_int(field.member.high)),
+            ("member_low", KindedSlot::from_int(field.member.low)),
+            (
+                "type_identity_high",
+                KindedSlot::from_int(field.type_identity.high),
+            ),
+            (
+                "type_identity_low",
+                KindedSlot::from_int(field.type_identity.low),
+            ),
+            ("initialization", init_slot),
+        ],
+    ))
+}
+
+/// The `EnumDescriptor` object: owner identity halves, the variant count, and
+/// the ordered typed `VariantDescriptor` array.
+fn enum_descriptor_slot(
+    owner: FrozenTypeIdentity,
+    variants: &[NominalVariantDescriptor],
+) -> Result<KindedSlot, String> {
+    let mut variant_objs = Vec::with_capacity(variants.len());
+    for variant in variants {
+        variant_objs.push(variant_descriptor_slot(owner, variant)?);
+    }
+    let variants_array = object_array_slot(variant_objs)?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_ENUM_DESCRIPTOR_SCHEMA,
+        &[
+            ("owner_identity_high", KindedSlot::from_int(owner.high)),
+            ("owner_identity_low", KindedSlot::from_int(owner.low)),
+            ("variant_count", KindedSlot::from_int(variants.len() as i64)),
+            ("variants", variants_array),
+        ],
+    ))
+}
+
+/// One `VariantDescriptor` object: owner + owner-bound member identity + the
+/// payload arity.
+fn variant_descriptor_slot(
+    owner: FrozenTypeIdentity,
+    variant: &NominalVariantDescriptor,
+) -> Result<KindedSlot, String> {
+    Ok(typed_object_for_named_schema(
+        COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
+        &[
+            ("owner_identity_high", KindedSlot::from_int(owner.high)),
+            ("owner_identity_low", KindedSlot::from_int(owner.low)),
+            ("member_high", KindedSlot::from_int(variant.member.high)),
+            ("member_low", KindedSlot::from_int(variant.member.low)),
+            (
+                "payload_arity",
+                KindedSlot::from_int(i64::from(variant.payload_arity)),
+            ),
+        ],
+    ))
+}
+
+/// The `NewtypeDescriptor` object: owner identity halves + the single inner
+/// type's frozen identity halves.
+fn newtype_descriptor_slot(owner: FrozenTypeIdentity, inner: FrozenTypeIdentity) -> KindedSlot {
+    typed_object_for_named_schema(
+        COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA,
+        &[
+            ("owner_identity_high", KindedSlot::from_int(owner.high)),
+            ("owner_identity_low", KindedSlot::from_int(owner.low)),
+            ("inner_identity_high", KindedSlot::from_int(inner.high)),
+            ("inner_identity_low", KindedSlot::from_int(inner.low)),
+        ],
+    )
+}
+
+/// The `OpaqueTypeDescriptor` object: owner identity halves only.
+fn opaque_descriptor_slot(owner: FrozenTypeIdentity) -> KindedSlot {
+    typed_object_for_named_schema(
+        COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA,
+        &[
+            ("owner_identity_high", KindedSlot::from_int(owner.high)),
+            ("owner_identity_low", KindedSlot::from_int(owner.low)),
+        ],
+    )
 }
 
 /// Build an `Array<TypedObject>` slot carried by a stamped v2-raw

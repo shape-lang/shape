@@ -63,6 +63,7 @@ let label = comptime {{
     FrozenType::Never(n) => "never"
     FrozenType::Erased(e) => "erased"
     FrozenType::Callable(c) => "callable"
+    FrozenType::Nominal(n) => "nominal"
   }}
 }}
 
@@ -245,6 +246,7 @@ let payload = comptime {
     FrozenType::Never(n) => "never-payload"
     FrozenType::Erased(e) => "erased-payload"
     FrozenType::Callable(c) => "callable-payload"
+    FrozenType::Nominal(n) => "nominal-payload"
   }
 }
 
@@ -336,32 +338,47 @@ print(describe(1))
     .expect_run_err_contains("reflect: the Parameter payload descriptor has not landed");
 }
 
-/// R1 Nominal: user struct, user enum, and builtin container — every
-/// Nominal spelling rejects with the SAME named per-category diagnostic
-/// pointing at the exhaustive category layer.
+/// ADR-009 B5: Nominal is now an ENABLED reflect() payload — a RESOLVED user
+/// nominal yields a `FrozenType::Nominal(n)` whose `.shape()` discriminates the
+/// sealed `NominalShape` sum (the full dual-engine shape proofs live in
+/// nominal.rs). Here we prove the enum + newtype spellings discriminate through
+/// the same reflect() payload path this module owns.
 #[test]
-fn reflect_on_nominal_types_is_the_named_r1_rejection() {
-    for source in [
-        r#"
-type User { id: int }
-let reflected = comptime { reflect(type_ref(User)) }
-"#,
-        r#"
-enum Status { Ready, Done }
-let reflected = comptime { reflect(type_ref(Status)) }
-"#,
-        "let reflected = comptime { reflect(type_ref(Array)) }",
+fn reflect_on_resolved_nominal_types_discriminates_shape() {
+    for (preamble, spelling, expected) in [
+        ("enum Status { Ready, Done }", "Status", "enum"),
+        ("type UserId { value: int }", "UserId", "newtype"),
     ] {
-        ShapeTest::new(source)
-            .expect_run_err_contains("reflect: the Nominal payload descriptor has not landed");
+        let source = format!(
+            r#"
+{preamble}
+let label = comptime {{
+  match reflect(type_ref({spelling})) {{
+    FrozenType::Nominal(n) => match n.shape() {{
+      NominalShape::Struct(s) => "struct"
+      NominalShape::Enum(e) => "enum"
+      NominalShape::Newtype(w) => "newtype"
+      NominalShape::Opaque(o) => "opaque"
+    }}
+    _ => "wrong"
+  }}
+}}
+print(label)
+"#
+        );
+        ShapeTest::new(&source).expect_output(expected);
     }
 }
 
-/// The R1 diagnostic points at the exhaustive category layer by name.
+/// A BARE generic constructor head (`Array`) is `TypeConstructorRef` territory
+/// (B4), NOT a resolved nominal shape — reflecting the un-applied head is the
+/// named rejection, never a shape issued off the un-applied form.
 #[test]
-fn r1_rejection_points_at_the_exhaustive_category_layer() {
+fn reflect_on_unapplied_generic_head_is_the_named_rejection() {
     ShapeTest::new("let reflected = comptime { reflect(type_ref(Array)) }")
-        .expect_run_err_contains("use type_category for the exhaustive category");
+        .expect_run_err_contains(
+            "un-applied generic type constructor is not a resolved nominal shape",
+        );
 }
 
 /// R1 over the A2 composite type-expression forms (the A2×B1 seam):
@@ -373,13 +390,15 @@ fn r1_rejection_points_at_the_exhaustive_category_layer() {
 fn reflect_on_composite_type_expressions_is_the_named_r1_rejection() {
     // ADR-009 B6: Callable is no longer pending — reflecting a callable now
     // yields a full FrozenCallable (see the B6 payload proofs below).
+    // ADR-009 B5: Nominal is no longer pending — an APPLIED generic (Option<int>)
+    // is the named generic-substitution-pending rejection (proven in nominal.rs),
+    // not this "payload descriptor has not landed" family.
     for (preamble, spelling, category) in [
         ("", "[int, string]", "Tuple"),
         ("", "{x: int}", "Record"),
         ("type User { id: int }", "&User", "Reference"),
         ("type User { id: int }", "&mut User", "Reference"),
         ("", "int | string", "Union"),
-        ("", "Option<int>", "Nominal"),
     ] {
         let source = format!(
             "{preamble}\nlet reflected = comptime {{ reflect(type_ref({spelling})) }}"

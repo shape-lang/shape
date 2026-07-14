@@ -725,6 +725,10 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     // FrozenType descriptor-schema registration consumes
     // (`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`).
     crate::comptime_reflection::REFLECT_BUILTIN_ROW,
+    // ADR-009 B5 (Stage 2, Dec 56) — the `reflect_repr` authority-gated
+    // reflection row is catalog-owned exactly like `reflect`: spliced verbatim
+    // from the shared reflection catalog, never hand-written here.
+    crate::comptime_reflection::REFLECT_REPR_BUILTIN_ROW,
     // ADR-009 B2 S3 — the `trait_ref`/`find_impl` trait-evidence rows are
     // catalog-owned exactly like the `type_ref` pair above: spliced verbatim
     // from the shared reflection catalog, never hand-written here.

@@ -2452,6 +2452,12 @@ let x = 1
             comptime_labels.iter().any(|l| l == "reflect"),
             "comptime completions must offer reflect, got: {comptime_labels:?}"
         );
+        // ADR-009 B5 (Dec 56): the authority-gated `reflect_repr` is catalog-
+        // driven exactly like `reflect` — offered by the comptime set.
+        assert!(
+            comptime_labels.iter().any(|l| l == "reflect_repr"),
+            "comptime completions must offer reflect_repr, got: {comptime_labels:?}"
+        );
         assert!(comptime_labels.iter().any(|l| l == "type_ref"));
         assert!(comptime_labels.iter().any(|l| l == "type_category"));
 
@@ -2462,6 +2468,10 @@ let x = 1
         assert!(
             !runtime_labels.iter().any(|l| l == "reflect"),
             "runtime completions must NOT offer the comptime-only reflect"
+        );
+        assert!(
+            !runtime_labels.iter().any(|l| l == "reflect_repr"),
+            "runtime completions must NOT offer the comptime-only reflect_repr"
         );
     }
 
@@ -2568,6 +2578,35 @@ let x = 1
             enum_variant_completions("ParamDescriptor", "", None).is_empty(),
             "ParamDescriptor is a struct payload — no enum-variant completion"
         );
+    }
+
+    /// ADR-009 B5 (S4): the nominal member descriptors — `FieldDescriptor`,
+    /// `VariantDescriptor`, `AssociatedConstDescriptor`, `FrozenNominal` — are
+    /// payload STRUCTS, not enums (like `FrozenCallable` / `ParamDescriptor`).
+    /// The shared `reflection_enum_variant_names` catalog returns `None` for
+    /// them, so enum-variant completion falls through cleanly (no fabricated
+    /// variants, no `.field(0)`-style ordinal member list, no Unknown arm) —
+    /// the sealed `NominalShape` / `FieldInitialization` axes are the ONLY
+    /// variant-completing B5 vocabularies, driven from the same one catalog.
+    #[test]
+    fn test_nominal_member_descriptor_structs_have_no_enum_variant_completions() {
+        for struct_name in [
+            "FieldDescriptor",
+            "VariantDescriptor",
+            "AssociatedConstDescriptor",
+            "FrozenNominal",
+        ] {
+            assert!(
+                enum_variant_completions(struct_name, "", None).is_empty(),
+                "{struct_name} is a struct payload — no enum-variant completion"
+            );
+            // The shared catalog is the single source: a struct name has no arm.
+            assert!(
+                shape_runtime::comptime_reflection::reflection_enum_variant_names(struct_name)
+                    .is_none(),
+                "{struct_name} must have no reflection_enum_variant_names arm"
+            );
+        }
     }
 
     /// Non-catalog enum names still resolve through the program-derived

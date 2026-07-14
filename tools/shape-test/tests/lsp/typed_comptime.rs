@@ -233,19 +233,59 @@ fn reflect_hover_notes_the_enabled_payload_stage() {
         .expect_hover_contains("named compile-time rejection");
 }
 
+/// ADR-009 B5: the reflect hover enumerates the enabled payload variants from
+/// the shared reflection catalog — `Nominal` now appears (no hand-written LSP
+/// list; the row description embeds `FROZEN_TYPE_ENABLED_PAYLOADS_DOC`).
+#[test]
+fn reflect_hover_lists_nominal_as_an_enabled_payload() {
+    ShapeTest::new("let reflected = comptime { reflect(type_ref(int)) }\n")
+        .at(pos(0, 29))
+        .expect_hover_contains("Nominal");
+}
+
 #[test]
 fn frozen_type_completion_is_closed_to_enabled_payload_variants() {
-    // ADR-009 B6: `Callable` joined the enabled payload catalog, so
-    // `FrozenType::` completion now offers it — auto-derived from the shared
-    // reflection catalog (no hand-written variant list in the LSP).
+    // ADR-009 B6: `Callable` and ADR-009 B5: `Nominal` joined the enabled
+    // payload catalog, so `FrozenType::` completion now offers them —
+    // auto-derived from the shared reflection catalog (no hand-written variant
+    // list in the LSP).
     ShapeTest::new("let payload = comptime { FrozenType:: }\n")
         .at(pos(0, 37))
         .expect_completion("Primitive")
         .expect_completion("Never")
         .expect_completion("Erased")
         .expect_completion("Callable")
+        .expect_completion("Nominal")
         .expect_no_completion("Unknown")
-        .expect_no_completion("Nominal");
+        .expect_no_completion("Tuple");
+}
+
+#[test]
+fn nominal_shape_completion_is_closed_to_the_declaration_shape_axis() {
+    // ADR-009 B5: the sealed `NominalShape` declaration-shape axis completes
+    // through the same catalog-keyed lookup — the exhaustive
+    // Struct / Enum / Newtype / Opaque set, no Unknown arm.
+    ShapeTest::new("let s = comptime { NominalShape:: }\n")
+        .at(pos(0, 33))
+        .expect_completion("Struct")
+        .expect_completion("Enum")
+        .expect_completion("Newtype")
+        .expect_completion("Opaque")
+        .expect_no_completion("Unknown");
+}
+
+#[test]
+fn field_initialization_completion_is_closed_to_the_member_disposition_axis() {
+    // ADR-009 B5 (S2, Dec 59): the sealed `FieldInitialization` member
+    // disposition (a `FieldDescriptor`'s Required / Defaulted axis) completes
+    // through the SAME catalog-keyed lookup as every other reflection vocabulary
+    // — the S2 member-descriptor surface is LSP-visible via the shared query
+    // surface, no hand-written variant list.
+    ShapeTest::new("let d = comptime { FieldInitialization:: }\n")
+        .at(pos(0, 40))
+        .expect_completion("Required")
+        .expect_completion("Defaulted")
+        .expect_no_completion("Unknown");
 }
 
 #[test]
@@ -297,13 +337,15 @@ fn generic_body_runtime_position_after_comptime_block_hides_reflect() {
     .expect_no_completion("reflect");
 }
 
-/// R1 (representative category): reflecting a non-enabled category surfaces
-/// the named per-category rejection through the LSP diagnostics path.
+/// R1 (representative category): reflecting a still-pending composite category
+/// (Tuple) surfaces the named per-category rejection through the LSP
+/// diagnostics path. (ADR-009 B5: Array is now the un-applied-generic-head
+/// rejection — a resolved nominal is an enabled shape.)
 #[test]
 fn reflect_non_enabled_category_has_semantic_diagnostic() {
-    ShapeTest::new("let reflected = comptime { reflect(type_ref(Array)) }\n")
+    ShapeTest::new("let reflected = comptime { reflect(type_ref([int, string])) }\n")
         .expect_semantic_diagnostic_contains(
-            "reflect: the Nominal payload descriptor has not landed",
+            "reflect: the Tuple payload descriptor has not landed",
         );
 }
 
@@ -856,4 +898,65 @@ fn ordinary_call_site_offers_no_virtual_view() {
     ShapeTest::new("fn helper() -> int { 7 }\nlet h = helper()\n")
         .at(pos(1, 10))
         .expect_no_expansion_view();
+}
+
+// =====================================================================
+// ADR-009 ticket B5 (Stage 2, Dec 55-58) S4: LSP surface for the nominal
+// descriptor algebra. Every behavior below is driven by the ONE shared
+// `comptime_reflection` catalog: `reflect_repr` completes + hovers from its
+// catalog-owned builtin row (`REFLECT_REPR_BUILTIN_ROW`, spliced verbatim
+// into `builtin_metadata::CORE_BUILTINS`); the sealed `NominalShape`
+// (the `FrozenNominal<T>.shape()` result axis) + `FieldInitialization`
+// disposition complete through the SAME `reflection_enum_variant_names`
+// lookup as every other reflection vocabulary — a hand-written parallel LSP
+// row is a defect. `#name` explicit member selection stays grammar-blocked
+// (B7; documented CURRENT-vs-TARGET in `docs/defections.md`), so the hover
+// renders the descriptor's hygienic member position as the `#f` token in the
+// `FieldDescriptor<Owner, #f, T>` TYPE, never a source-name string surface.
+// =====================================================================
+
+/// Hover over `reflect_repr` renders the descriptor TYPES the complete-shape
+/// authority exposes — the owner-bound `FieldDescriptor<Owner, #f, T>` (owner
+/// nominal + hygienic member token), the sibling `VariantDescriptor` /
+/// `AssociatedConstDescriptor`, and the `FrozenNominal<T>.shape()` entry into
+/// the sealed `NominalShape` — all sourced from the catalog-owned builtin row.
+#[test]
+fn reflect_repr_hover_renders_descriptor_types_and_owner() {
+    ShapeTest::new("let reflected = comptime { reflect_repr(type_ref(int), access) }\n")
+        .at(pos(0, 30))
+        .expect_hover_contains("FieldDescriptor<Owner, #f, T>")
+        .expect_hover_contains("owner")
+        .expect_hover_contains("shape()")
+        .expect_hover_contains("VariantDescriptor")
+        .expect_hover_contains("AssociatedConstDescriptor");
+}
+
+/// The authority-gated `reflect_repr` — the entry into complete nominal-shape
+/// reflection — is offered inside a `comptime` block, from the shared catalog
+/// (metadata-driven, exactly like `reflect`), and stays hidden in runtime
+/// position.
+#[test]
+fn comptime_completion_offers_the_reflect_repr_reflection_entry() {
+    ShapeTest::new("comptime {\n    \n}\n")
+        .at(pos(1, 4))
+        .expect_completion("reflect_repr");
+    ShapeTest::new("")
+        .at(pos(0, 0))
+        .expect_no_completion("reflect_repr");
+}
+
+/// The `NominalShape` sealed axis — the exhaustive result of
+/// `FrozenNominal<T>.shape()` that a `match` discriminates (never a `.kind`
+/// string, R4) — completes through the ONE shared
+/// `reflection_enum_variant_names` lookup: exactly Struct / Enum / Newtype /
+/// Opaque, no Unknown arm, no hand-written LSP variant list.
+#[test]
+fn nominal_shape_result_axis_completes_through_the_shared_reflection_lookup() {
+    ShapeTest::new("let s = comptime { NominalShape:: }\n")
+        .at(pos(0, 33))
+        .expect_completion("Struct")
+        .expect_completion("Enum")
+        .expect_completion("Newtype")
+        .expect_completion("Opaque")
+        .expect_no_completion("Unknown");
 }

@@ -52,6 +52,17 @@ pub(crate) const TYPE_CATEGORY_INTRINSIC: &str = "\u{1}comptime:type-category";
 /// name reaches it only through the comptime forwarder (`comptime.rs`) —
 /// the runtime `reflect` builtin mapping (`helpers.rs`) is untouched.
 pub(crate) const REFLECT_INTRINSIC: &str = "\u{1}comptime:reflect";
+/// ADR-009 B5 (Stage 2, Dec 56): `reflect_repr(TypeRef<T>,
+/// RepresentationAccess<T>) -> FrozenType<T>` intrinsic name. Unspellable like
+/// `reflect`; reached only through the comptime forwarder (`comptime.rs`).
+pub(crate) const REFLECT_REPR_INTRINSIC: &str = "\u{1}comptime:reflect-repr";
+/// ADR-009 B5 (Stage 2, Dec 56): the compiler-only capability mint. It is
+/// SOH-prefixed AND is never registered as a spellable forwarder — the compiler
+/// injects a call to it ONLY into an annotation expand-hook scope
+/// (`functions_annotations.rs`), so user code can never obtain a
+/// `RepresentationAccess<T>`.
+pub(crate) const MINT_REPRESENTATION_ACCESS_INTRINSIC: &str =
+    "\u{1}comptime:mint-representation-access";
 
 // ADR-009 (ticket B2, slice S4): trait-identity + implementation-evidence
 // intrinsics. Registered in `trait_evidence.rs`; the SOH prefix keeps them
@@ -1205,6 +1216,105 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
         },
     );
 
+    // ADR-009 B5 (Stage 2, Dec 56) — `reflect_repr(TypeRef<T>,
+    // RepresentationAccess<T>) -> FrozenType<T>`: the authority-gated complete
+    // reflection. The FIRST argument is the same TypeRef reader as `reflect`;
+    // the SECOND is decoded through the schema-name-checked
+    // `representation_access_identity_from_ref` (a forged or non-authority slot
+    // is the named R6 rejection). The authority must be bound to the SAME frozen
+    // identity being reflected (a User authority cannot reflect Order's
+    // representation). Only then does the SAME payload builder as `reflect`
+    // answer the complete `FrozenType` sum — never a partial descriptor.
+    let freeze_for_reflect_repr = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        REFLECT_REPR_INTRINSIC,
+        "Reflect the complete nominal representation of a TypeRef under a RepresentationAccess authority",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "type_ref".to_string(),
+                type_name:
+                    shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                        .to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "access".to_string(),
+                type_name:
+                    shape_runtime::type_schema::builtin_schemas::COMPTIME_REPRESENTATION_ACCESS_SCHEMA
+                        .to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject(
+            shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME.to_string(),
+        ),
+        move |slots, _ctx| {
+            let type_ref = slots
+                .first()
+                .ok_or_else(|| "reflect_repr expects a TypeRef and a RepresentationAccess".to_string())?;
+            let access = slots
+                .get(1)
+                .ok_or_else(|| "reflect_repr expects a TypeRef and a RepresentationAccess".to_string())?;
+            let frozen =
+                type_reflection::frozen_type_from_repr_ref(type_ref, access, &freeze_for_reflect_repr)?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(frozen),
+            )))
+        },
+    );
+
+    // ADR-009 B5 (Stage 2, Dec 56) — the compiler-only RepresentationAccess
+    // mint. NOT registered as a spellable forwarder: the compiler injects a call
+    // to it ONLY into an annotation expand-hook scope
+    // (`functions_annotations.rs`), so user code can never obtain a capability.
+    // The identity halves are identity-literal transport (like
+    // `type_constructor`); the carrier is the schema-name-checked builder.
+    let freeze_for_mint_access = Arc::clone(&freeze);
+    register_typed_function(
+        module,
+        MINT_REPRESENTATION_ACCESS_INTRINSIC,
+        "Mint a compiler-issued RepresentationAccess authority bound to a frozen type identity",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_high".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "identity_low".to_string(),
+                type_name: "int".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject(
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_REPRESENTATION_ACCESS_SCHEMA
+                .to_string(),
+        ),
+        move |slots, _ctx| {
+            let identity_part = |index: usize| {
+                slots.get(index).and_then(KindedSlot::as_i64).ok_or_else(|| {
+                    "internal RepresentationAccess mint identity transport is invalid".to_string()
+                })
+            };
+            let identity = FrozenTypeIdentity {
+                high: identity_part(0)?,
+                low: identity_part(1)?,
+            };
+            let carrier = type_reflection::build_representation_access_heap_value(
+                identity,
+                &freeze_for_mint_access,
+            )?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(carrier),
+            )))
+        },
+    );
+
     // ADR-009 B4 (Stage 2, Dec 54) — uniform nominal-application intrinsics,
     // registered against the SAME per-compilation-unit freeze handle. Each
     // needing the freeze clones the `Arc`; carriers/decoders are the
@@ -1796,12 +1906,13 @@ mod freeze_handle_module_tests {
         assert_eq!(width_variant, 3, "int carries the exact W64 width domain");
     }
 
-    /// R1 (sanctioned tracer): a category whose payload ticket has not
-    /// landed rejects with the NAMED per-category diagnostic through the
-    /// intrinsic — never a partial descriptor. `Array` is frozen Nominal
-    /// in every unit.
+    /// ADR-009 B5 (drift note R10/R11): an un-applied generic constructor head
+    /// (`Array`, a builtin nominal head with declared param kinds) is
+    /// `TypeConstructorRef` territory, NOT a resolved nominal shape — reflecting
+    /// it through the intrinsic is the named rejection, never a partial or
+    /// off-the-un-applied-form descriptor.
     #[test]
-    fn reflect_intrinsic_rejects_non_enabled_categories_with_the_named_diagnostic() {
+    fn reflect_intrinsic_rejects_unapplied_generic_head_with_the_named_diagnostic() {
         let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
         let nominal_identity = overlay
             .identity_of("Array")
@@ -1814,10 +1925,10 @@ mod freeze_handle_module_tests {
             .get(REFLECT_INTRINSIC)
             .expect("reflect intrinsic registered");
         let error = (reflect.invoke)(&[type_ref_slot(nominal_identity)], &ctx)
-            .expect_err("Nominal payload has not landed");
+            .expect_err("an un-applied generic head must reject");
         assert!(
-            error.contains("reflect: the Nominal payload descriptor has not landed"),
-            "R1 rejection must be the named per-category diagnostic: {error}"
+            error.contains("un-applied generic type constructor is not a resolved nominal shape"),
+            "un-applied-head rejection must be the named diagnostic: {error}"
         );
     }
 

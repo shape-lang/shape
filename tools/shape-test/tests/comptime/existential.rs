@@ -114,19 +114,18 @@ print(out)
 
 /// Rejection-matrix row 4 (not-yet-enabled descriptor family): building the
 /// existential `some` collection from a `reflect()` of a family whose payload
-/// descriptor has NOT landed (a Nominal user struct — only Primitive / Never /
-/// Erased are enabled at B1) surfaces the SAME named per-category R1 rejection
-/// inside the iteration substrate that `reflect()` gives standalone — never a
-/// partial descriptor, never a silent skip.
+/// descriptor has NOT landed (a Tuple composite — Nominal/Callable are now
+/// enabled, but Tuple/Record/Reference/Union remain pending) surfaces the SAME
+/// named per-category R1 rejection inside the iteration substrate that
+/// `reflect()` gives standalone — never a partial descriptor, never a silent
+/// skip.
 #[test]
 fn comptime_for_some_over_not_yet_enabled_family_is_named_per_category_rejection() {
     ShapeTest::new(
         r#"
-type Widget { x: int }
-
 let out = comptime {
   let coll: Array<exists<T> FrozenType<T>> = [
-    reflect(type_ref(Widget)),
+    reflect(type_ref([int, string])),
   ]
   let mut acc = ""
   comptime for some<T> ft in coll {
@@ -137,7 +136,7 @@ let out = comptime {
 print(out)
 "#,
     )
-    .expect_run_err_contains("the Nominal payload descriptor has not landed");
+    .expect_run_err_contains("the Tuple payload descriptor has not landed");
 }
 
 // Rejection-matrix rows 1 (witness erased to compiler-internal `Any`), 3

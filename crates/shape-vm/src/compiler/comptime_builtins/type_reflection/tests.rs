@@ -28,6 +28,33 @@ fn add_struct(compiler: &mut BytecodeCompiler, name: &str) {
         .insert(name.to_string(), (Vec::new(), shape_ast::ast::Span::DUMMY));
 }
 
+/// ADR-009 B5: register a user struct WITH ordered typed fields (the exact
+/// two stores the freeze reads: `struct_types` field order +
+/// `struct_generic_info.runtime_field_types` annotations).
+fn add_struct_with_fields(
+    compiler: &mut BytecodeCompiler,
+    name: &str,
+    fields: &[(&str, TypeAnnotation)],
+) {
+    compiler.struct_types.insert(
+        name.to_string(),
+        (
+            fields.iter().map(|(f, _)| (*f).to_string()).collect(),
+            shape_ast::ast::Span::DUMMY,
+        ),
+    );
+    compiler.struct_generic_info.insert(
+        name.to_string(),
+        crate::compiler::StructGenericInfo {
+            type_params: Vec::new(),
+            runtime_field_types: fields
+                .iter()
+                .map(|(f, ty)| ((*f).to_string(), ty.clone()))
+                .collect(),
+        },
+    );
+}
+
 /// ADR-009 A2 (S5): trait names are a named semantic-freeze input — this is
 /// the exact store (`known_traits`) the production predeclare pass writes.
 fn add_trait(compiler: &mut BytecodeCompiler, name: &str) {
@@ -431,6 +458,89 @@ fn leaf_hex(overlay: &FreezeOverlay, name: &str) -> String {
             .identity_of(name)
             .unwrap_or_else(|| panic!("{name} must be frozen")),
     )
+}
+
+/// ADR-009 B5 (S2): register a GENERIC user struct WITH ordered typed fields
+/// whose annotations may reference the declared type parameters (the exact two
+/// stores the freeze reads for the applied-substitution path — `struct_types`
+/// field order + `struct_generic_info.{type_params, runtime_field_types}`).
+fn add_generic_struct_with_fields(
+    compiler: &mut BytecodeCompiler,
+    name: &str,
+    params: &[&str],
+    fields: &[(&str, TypeAnnotation)],
+) {
+    compiler.struct_types.insert(
+        name.to_string(),
+        (
+            fields.iter().map(|(f, _)| (*f).to_string()).collect(),
+            shape_ast::ast::Span::DUMMY,
+        ),
+    );
+    compiler.struct_generic_info.insert(
+        name.to_string(),
+        crate::compiler::StructGenericInfo {
+            type_params: params
+                .iter()
+                .map(|param| shape_ast::ast::TypeParam::Type {
+                    name: (*param).to_string(),
+                    span: shape_ast::ast::Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                })
+                .collect(),
+            runtime_field_types: fields
+                .iter()
+                .map(|(f, ty)| ((*f).to_string(), ty.clone()))
+                .collect(),
+        },
+    );
+}
+
+/// ADR-009 B5 (S2, Dec 55 R10): reflecting an APPLIED user struct substitutes
+/// its declared type parameters with the applied arguments BEFORE issuing the
+/// field descriptors — the substituted field VALUE-type identity is the applied
+/// type's identity, never the un-substituted parameter. `Page<User>` field
+/// `items: Array<T>` becomes `Array<User>`; `total: int` is unchanged.
+#[test]
+fn applied_user_struct_substitutes_field_types_before_issuance() {
+    use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
+    let overlay = module_overlay(|compiler| {
+        add_struct_with_fields(compiler, "User", &[("id", basic("int"))]);
+        add_generic_struct_with_fields(
+            compiler,
+            "Page",
+            &["T"],
+            &[
+                ("items", applied("Array", vec![basic("T")])),
+                ("total", basic("int")),
+            ],
+        );
+    });
+    // Applied Page<User> canonicalizes + site-interns in the overlay memo (the
+    // same interning `type_ref(Page<User>)` performs), so the overlay's payload
+    // query answers the SUBSTITUTED shape.
+    let applied_id = overlay
+        .canonicalize_type(&applied("Page", vec![basic("User")]))
+        .expect("Page<User> canonicalizes");
+    let expected_items = canon(&overlay, &applied("Array", vec![basic("User")])).identity;
+    let int_id = overlay.identity_of("int").expect("int frozen");
+
+    let payload = overlay
+        .payload_of(applied_id)
+        .expect("an applied user struct must substitute + issue its Struct shape");
+    let FrozenPayloadDescriptor::Nominal(NominalDescriptor::Struct { fields, .. }) = payload else {
+        panic!("Page<User> is a 2-field struct shape, got {payload:?}");
+    };
+    assert!(
+        fields.iter().any(|f| f.type_identity == expected_items),
+        "the items field type must be the SUBSTITUTED Array<User> identity, not Array<T>"
+    );
+    assert!(
+        fields.iter().any(|f| f.type_identity == int_id),
+        "the total:int field must remain int under substitution"
+    );
 }
 
 #[test]
@@ -1458,12 +1568,13 @@ mod payload_query {
         }
     }
 
-    /// Rejection-matrix row R1: each of the 7 non-enabled categories has ONE
+    /// Rejection-matrix row R1: each remaining non-enabled category has ONE
     /// named per-category diagnostic — naming the category, stating the
     /// payload descriptor has not landed, and pointing at `type_category` —
     /// never a partial descriptor. Parameter is asserted end-to-end through
-    /// a scoped overlay identity (`parameter:{owner}:{name}`), Nominal
-    /// end-to-end through a frozen struct.
+    /// a scoped overlay identity (`parameter:{owner}:{name}`). (ADR-009 B5:
+    /// Nominal is now ENABLED — a base user struct answers a positive
+    /// `FrozenNominal` descriptor; see `base_frozen_nominal_answers_its_shape`.)
     #[test]
     fn non_enabled_categories_reject_with_named_per_category_diagnostics() {
         for category in FrozenTypeCategory::ALL {
@@ -1489,16 +1600,72 @@ mod payload_query {
             overlay.payload_of(t),
             Err(pending_payload_rejection(FrozenTypeCategory::Parameter))
         );
+    }
 
-        // Nominal — through the base freeze.
+    /// ADR-009 B5 (Dec 55): a base-frozen user nominal answers its complete
+    /// sealed `FrozenNominal` declaration-shape descriptor — a zero-field
+    /// struct is the non-decomposable `Opaque` shape (the S1 field-count
+    /// classification), never a partial descriptor and never an R1 rejection.
+    #[test]
+    fn base_frozen_nominal_answers_its_shape() {
+        use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
         let freeze = freeze_of(|compiler| add_struct(compiler, "Alpha"));
         let alpha = freeze.identity_of("Alpha").expect("Alpha identity");
-        let error = freeze.payload_of(alpha).expect_err("Nominal must reject");
-        assert!(
-            error.contains("the Nominal payload descriptor has not landed")
-                && error.contains("use type_category"),
-            "R1 Nominal diagnostic missing: {error}"
-        );
+        match freeze.payload_of(alpha).expect("Nominal must answer a shape") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Opaque { owner }) => {
+                assert_eq!(owner, alpha, "the shape owner is the reflected identity");
+            }
+            other => panic!("a zero-field struct must be Opaque, got {other:?}"),
+        }
+    }
+
+    /// ADR-009 B5 (Dec 55/57): a multi-field struct is `Struct` with owner-bound
+    /// member identities (never source-name strings) and each field's
+    /// canonicalized VALUE-type identity — a single-field struct is `Newtype`
+    /// whose inner identity IS the wrapped field's frozen identity.
+    #[test]
+    fn nominal_shape_classification_and_member_identities() {
+        use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
+
+        // Multi-field → Struct with two field descriptors carrying int / string.
+        let freeze = freeze_of(|compiler| {
+            add_struct_with_fields(
+                compiler,
+                "Point",
+                &[("x", basic("int")), ("y", basic("string"))],
+            )
+        });
+        let point = freeze.identity_of("Point").expect("Point identity");
+        let int_id = freeze.identity_of("int").expect("int identity");
+        let string_id = freeze.identity_of("string").expect("string identity");
+        match freeze.payload_of(point).expect("Point answers a shape") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Struct { owner, fields }) => {
+                assert_eq!(owner, point);
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].type_identity, int_id);
+                assert_eq!(fields[1].type_identity, string_id);
+                // Member identities are owner-bound + distinct — NEVER equal to
+                // any type identity (Dec 57: a member token is a distinct
+                // identity kind from the field's value type).
+                assert_ne!(fields[0].member, fields[1].member);
+                assert_ne!(fields[0].member, int_id);
+            }
+            other => panic!("a two-field struct must be Struct, got {other:?}"),
+        }
+
+        // Single-field → Newtype whose inner identity is the wrapped field type.
+        let freeze = freeze_of(|compiler| {
+            add_struct_with_fields(compiler, "UserId", &[("value", basic("int"))])
+        });
+        let user_id = freeze.identity_of("UserId").expect("UserId identity");
+        let int_id = freeze.identity_of("int").expect("int identity");
+        match freeze.payload_of(user_id).expect("UserId answers a shape") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Newtype { owner, inner }) => {
+                assert_eq!(owner, user_id);
+                assert_eq!(inner, int_id, "the newtype inner is the wrapped field type");
+            }
+            other => panic!("a single-field struct must be Newtype, got {other:?}"),
+        }
     }
 
     /// The unknown-identity freeze-boundary rejection is unchanged by the
@@ -1544,10 +1711,6 @@ mod payload_query {
                 TypeAnnotation::Union(vec![basic("int"), basic("string")]),
                 FrozenTypeCategory::Union,
             ),
-            (
-                applied("Option", vec![basic("int")]),
-                FrozenTypeCategory::Nominal,
-            ),
         ];
         for (annotation, category) in forms {
             let identity = overlay
@@ -1560,6 +1723,23 @@ mod payload_query {
                 "payload_of must answer the composites layer for {category:?}"
             );
         }
+
+        // ADR-009 B5: a site-interned APPLIED nominal (`Option<int>`) is a
+        // Nominal composite not interned into the base — reflecting it needs
+        // generic substitution (a later slice), the distinct named
+        // applied-substitution-pending rejection (not the "payload descriptor
+        // has not landed" family).
+        let applied_identity = overlay
+            .canonicalize_type(&applied("Option", vec![basic("int")]))
+            .expect("applied nominal canonicalizes");
+        assert_eq!(overlay.category_of(applied_identity), Ok(FrozenTypeCategory::Nominal));
+        let error = overlay
+            .payload_of(applied_identity)
+            .expect_err("applied nominal must reject");
+        assert!(
+            error.contains("requires generic substitution"),
+            "applied-nominal pending diagnostic missing: {error}"
+        );
     }
 
     /// A2×B1 seam, Erased disposition: a site-interned `dyn` /
@@ -2628,6 +2808,85 @@ mod b4 {
 
             let error = build_type_constructor_ref_heap_value(FrozenTypeIdentity::INVALID, &overlay)
                 .expect_err("INVALID head rejects");
+            assert!(error.contains("unknown semantic type identity"), "{error}");
+        }
+
+        /// ADR-009 B5 (Dec 56): the `RepresentationAccess` authority carrier
+        /// round-trips, and `reflect_repr` over a matching (TypeRef, authority)
+        /// pair answers the complete Nominal payload. A non-authority slot in the
+        /// authority position is the named R6 rejection.
+        #[test]
+        fn representation_access_carrier_gates_reflect_repr() {
+            use super::super::payloads::FrozenPayloadDescriptor;
+            let overlay = module_overlay(|compiler| {
+                add_generic_struct_with_fields(
+                    compiler,
+                    "User",
+                    &[],
+                    &[("id", basic("int")), ("name", basic("string"))],
+                );
+            });
+            let user_id = overlay.identity_of("User").expect("User identity");
+
+            let type_ref =
+                carrier_slot(build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"));
+            let access = carrier_slot(
+                build_representation_access_heap_value(user_id, &overlay).expect("access"),
+            );
+
+            // Matching authority → complete Nominal payload.
+            let frozen = frozen_type_from_repr_ref(&type_ref, &access, &overlay)
+                .expect("authorized reflect_repr");
+            let payload = overlay
+                .payload_of(user_id)
+                .expect("nominal payload for the frozen struct");
+            assert!(matches!(payload, FrozenPayloadDescriptor::Nominal(_)));
+            drop(frozen);
+
+            // A TypeRef in the authority position is NOT a RepresentationAccess:
+            // schema-name check → named R6 rejection, never usable authority.
+            let type_ref2 =
+                carrier_slot(build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"));
+            let forged = carrier_slot(
+                build_frozen_type_ref_heap_value(user_id, &overlay).expect("forged authority"),
+            );
+            let error = frozen_type_from_repr_ref(&type_ref2, &forged, &overlay)
+                .expect_err("a TypeRef cannot authorize representation reflection");
+            assert!(
+                error.contains("requires explicit RepresentationAccess<T> authority"),
+                "{error}"
+            );
+        }
+
+        /// ADR-009 B5 (Dec 56): authority is not ambient — a capability minted
+        /// for one type cannot decompose another. `reflect_repr(type_ref(Other),
+        /// access_for_User)` is the named cross-type rejection.
+        #[test]
+        fn representation_access_is_bound_to_its_own_type() {
+            let overlay = module_overlay(|compiler| {
+                add_generic_struct_with_fields(compiler, "User", &[], &[("id", basic("int"))]);
+                add_generic_struct_with_fields(compiler, "Other", &[], &[("x", basic("int"))]);
+            });
+            let user_id = overlay.identity_of("User").expect("User identity");
+            let other_id = overlay.identity_of("Other").expect("Other identity");
+
+            let other_ref =
+                carrier_slot(build_frozen_type_ref_heap_value(other_id, &overlay).expect("type_ref"));
+            let user_access = carrier_slot(
+                build_representation_access_heap_value(user_id, &overlay).expect("access"),
+            );
+            let error = frozen_type_from_repr_ref(&other_ref, &user_access, &overlay)
+                .expect_err("a User authority cannot reflect Other");
+            assert!(error.contains("bound to a different type identity"), "{error}");
+        }
+
+        /// ADR-009 B5 (Dec 56): the mint re-validates the identity through the
+        /// freeze — an unknown/INVALID identity cannot become authority.
+        #[test]
+        fn representation_access_mint_rejects_unknown_identity() {
+            let overlay = module_overlay(|_| {});
+            let error = build_representation_access_heap_value(FrozenTypeIdentity::INVALID, &overlay)
+                .expect_err("INVALID identity mints no authority");
             assert!(error.contains("unknown semantic type identity"), "{error}");
         }
 

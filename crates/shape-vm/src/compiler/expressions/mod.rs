@@ -671,6 +671,8 @@ impl BytecodeCompiler {
                     target_value,
                     &compiled.param_names,
                     &[],
+                    // Expression target: no representation authority (Dec 56).
+                    None,
                 )?;
 
                 let removed = self

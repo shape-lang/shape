@@ -419,10 +419,12 @@ impl SemanticFreeze {
             alias_defs: HashMap::new(),
             trait_names: compiler.known_traits.clone(),
             struct_generic_param_kinds: HashMap::new(),
+            struct_generic_param_names: HashMap::new(),
             frozen_type_ids: HashMap::new(),
             frozen_type_categories: HashMap::new(),
             frozen_primitive_payloads: HashMap::new(),
             frozen_callable_descriptors: HashMap::new(),
+            frozen_nominal_descriptors: HashMap::new(),
             generic_param_kinds: HashMap::new(),
         };
 
@@ -436,6 +438,16 @@ impl SemanticFreeze {
             index.struct_generic_param_kinds.insert(
                 name.clone(),
                 info.type_params.iter().map(param_kind_of).collect(),
+            );
+            // ADR-009 B5 (S2): the NAME projection of the same freeze input,
+            // consumed by the applied-substitution path (bind param name →
+            // applied argument identity before re-canonicalizing field types).
+            index.struct_generic_param_names.insert(
+                name.clone(),
+                info.type_params
+                    .iter()
+                    .map(|param| param.name().to_string())
+                    .collect(),
             );
         }
 
@@ -504,12 +516,22 @@ impl SemanticFreeze {
             let Some(enum_info) = schema.get_enum_info() else {
                 continue;
             };
+            // ADR-009 B5 (Dec 57): the enriched enum freeze projection carries
+            // the variant NAME (hashed into the owner-bound hygienic member
+            // identity) AND its payload ARITY (`payload_fields`), the source of
+            // `VariantDescriptor`. Full per-variant payload field TYPES are a
+            // later B5 slice.
             index.enum_defs.insert(
                 type_name,
                 enum_info
                     .variants
                     .iter()
-                    .map(|variant| variant.name.clone())
+                    .map(|variant| {
+                        super::type_reflection::FrozenEnumVariantDef {
+                            name: variant.name.clone(),
+                            payload_arity: variant.payload_fields,
+                        }
+                    })
                     .collect(),
             );
         }
@@ -852,10 +874,19 @@ pub(crate) struct FreezeOverlay {
 /// (`callable`) so [`FreezeOverlay::payload_of`] can reconstruct a
 /// `FrozenCallable` without inverting the identity hash. `callable` is `Some`
 /// iff `category == Callable`.
+///
+/// ADR-009 B5 (Dec 55): an APPLIED nominal composite (`applied:h<…>`) ALSO
+/// carries its refined head + ordered argument identities (`applied_nominal`)
+/// so [`FreezeOverlay::payload_of`] can substitute the head's declared type
+/// parameters before issuing descriptors — WITHOUT re-parsing the one-way
+/// identity hash. Same widening discipline as `callable` (a widened memo value,
+/// never a parallel identity-keyed side-table). `applied_nominal` is `Some` iff
+/// the descriptor decomposes as a genuine `applied:` form.
 #[derive(Debug, Clone)]
 struct CompositeMemoEntry {
     category: FrozenTypeCategory,
     callable: Option<payloads::CallableDescriptor>,
+    applied_nominal: Option<super::type_reflection::RefinedApplication>,
 }
 
 impl FreezeOverlay {
@@ -908,6 +939,12 @@ impl FreezeOverlay {
             // `payload_of` reconstructs the `FrozenCallable` without inverting
             // the identity hash.
             callable: canonical.callable.clone(),
+            // ADR-009 B5 (Dec 55): preserve the refined head + argument
+            // identities of a genuine `applied:` form so `payload_of` can
+            // substitute the head's declared parameters before issuing
+            // descriptors. `None` for every non-applied descriptor (refine
+            // round-trips only over genuine applications).
+            applied_nominal: super::type_reflection::canonical_refine(&canonical.descriptor),
         };
         let mut composites = self
             .composites
@@ -1032,8 +1069,28 @@ impl FreezeOverlay {
                          FrozenCallable structural descriptor"
                             .to_string()
                     }),
+                // ADR-009 B5 (Dec 55, S2): a site-interned Nominal composite is
+                // an APPLIED generic form (`applied:h<…>`) not interned into the
+                // base (a base user struct/enum is answered by the base arm
+                // above). Generic substitution PRECEDES descriptor issuance: the
+                // refined head + argument identities bind the head's declared
+                // parameters, and the field annotations re-canonicalize through
+                // the ONE canonicalizer under that binding. A head with no
+                // frozen struct field annotations to substitute (a builtin/enum
+                // applied form) has nothing to substitute into and stays the
+                // named applied-substitution-pending rejection — never a
+                // descriptor off the un-substituted form.
+                FrozenTypeCategory::Nominal => entry
+                    .applied_nominal
+                    .as_ref()
+                    .and_then(|applied| {
+                        self.base
+                            .index()
+                            .substituted_applied_nominal(applied.head_identity, &applied.arg_identities)
+                    })
+                    .map(payloads::FrozenPayloadDescriptor::Nominal)
+                    .ok_or_else(payloads::applied_nominal_pending_rejection),
                 pending @ (FrozenTypeCategory::Parameter
-                | FrozenTypeCategory::Nominal
                 | FrozenTypeCategory::Tuple
                 | FrozenTypeCategory::Record
                 | FrozenTypeCategory::Reference
@@ -1577,13 +1634,15 @@ mod tests {
             "R1 Parameter diagnostic missing: {error}"
         );
 
-        // Base half: Nominal rejects with its own named diagnostic.
+        // Base half: ADR-009 B5 — a base user nominal answers a positive
+        // sealed shape descriptor (a multi-field struct is `Struct`).
         let point = freeze.identity_of("Point").expect("Point identity");
-        let error = freeze.payload_of(point).expect_err("Nominal must reject");
-        assert!(
-            error.contains("the Nominal payload descriptor has not landed"),
-            "R1 Nominal diagnostic missing: {error}"
-        );
+        match freeze.payload_of(point).expect("Nominal must answer a shape") {
+            FrozenPayloadDescriptor::Nominal(
+                super::super::type_reflection::payloads::NominalDescriptor::Struct { owner, .. },
+            ) => assert_eq!(owner, point),
+            other => panic!("multi-field Point must be Struct, got {other:?}"),
+        }
     }
 
     /// Rejection-matrix row 4 (Dec 52): freezing partial semantic state is a

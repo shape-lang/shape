@@ -197,16 +197,17 @@ show()
 }
 
 /// ADR-009 B1 S4 negative: the R1 per-category rejection fires inside
-/// annotation `comptime` hooks too — reflecting a Nominal user type (whose
-/// payload ticket has not landed) is the named compile-time rejection under
-/// both VM and JIT, never a partial descriptor.
+/// annotation `comptime` hooks too — reflecting a still-pending composite
+/// category (Tuple; ADR-009 B5 enabled Nominal, so Tuple/Record/Reference/Union
+/// remain the pending families) is the named compile-time rejection under both
+/// VM and JIT, never a partial descriptor.
 #[test]
 fn annotation_handler_reflect_r1_rejection_fires_in_hooks() {
     let source = r#"
 annotation reflect_user() {
   targets: [type]
   comptime post(target, ctx) {
-    match reflect(type_ref(User)) {
+    match reflect(type_ref([int, string])) {
       FrozenType::Primitive(p) => 1
       _ => 0
     }
@@ -220,8 +221,8 @@ fn show() -> int { 1 }
 show()
 "#;
     ShapeTest::new(source)
-        .expect_run_err_contains("reflect: the Nominal payload descriptor has not landed");
+        .expect_run_err_contains("reflect: the Tuple payload descriptor has not landed");
     ShapeTest::new(source)
         .with_jit()
-        .expect_run_err_contains("reflect: the Nominal payload descriptor has not landed");
+        .expect_run_err_contains("reflect: the Tuple payload descriptor has not landed");
 }

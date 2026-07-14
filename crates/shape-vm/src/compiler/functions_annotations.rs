@@ -302,6 +302,8 @@ impl BytecodeCompiler {
                             ctx_file,
                             trait_impls.clone(),
                             freeze,
+                            // Function-target handler: no representation authority.
+                            None,
                         );
                     super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
 
@@ -970,6 +972,8 @@ impl BytecodeCompiler {
             target_value,
             annotation_def_param_names,
             &const_bindings,
+            // Function target: no representation authority (Dec 56).
+            None,
         )?;
 
         self.process_comptime_directives_for_function(
@@ -1002,6 +1006,11 @@ impl BytecodeCompiler {
         target_value: KindedSlot,
         annotation_def_param_names: &[String],
         const_bindings: &[(String, KindedSlot)],
+        // ADR-009 B5 (Dec 56): the annotated type's frozen identity halves for
+        // declaration-attached TYPE-target handlers; `None` for function /
+        // module / expression targets (which receive no representation
+        // authority). The mint call is injected into the handler mini-VM.
+        access_identity: Option<(i64, i64)>,
     ) -> Result<super::comptime::ComptimeExecutionResult> {
         let handler_span = handler.span;
         let extensions: Vec<_> = self
@@ -1065,6 +1074,9 @@ impl BytecodeCompiler {
             &ctx_file,
             trait_impls,
             freeze,
+            // ADR-009 B5 (Dec 56): forward the caller-supplied type identity
+            // (Some for a declaration-attached type-target hook; None otherwise).
+            access_identity,
         )
         .map_err(|e| self.build_comptime_failure(&e, handler_span, &context))?;
         // §4.4: re-emit any `warning()` output anchored at this handler site.
@@ -1974,6 +1986,17 @@ impl BytecodeCompiler {
                         // is acquired before the output-suppression toggle so
                         // the error path cannot leak suppression state.
                         let freeze = self.comptime_freeze_overlay()?;
+                        // ADR-009 B5 (Dec 56): this is the declaration-attached
+                        // type-target hook — mint a `RepresentationAccess<T>`
+                        // authority bound to the annotated type's frozen identity
+                        // and deliver it as the handler's third positional
+                        // `access` parameter (author consent). A type whose
+                        // identity the freeze never issued mints no authority
+                        // (`None`); a reflection-using handler then correctly
+                        // has no representation authority in scope.
+                        let access_identity = freeze
+                            .identity_of(&struct_def.name)
+                            .map(|identity| (identity.high, identity.low));
                         let prev_suppressed =
                             super::comptime_builtins::set_comptime_output_suppressed(true);
                         let execution_result =
@@ -1991,6 +2014,7 @@ impl BytecodeCompiler {
                                 &ctx_file,
                                 trait_impls.clone(),
                                 freeze,
+                                access_identity,
                             );
                         super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
                         let execution = match execution_result {

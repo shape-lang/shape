@@ -9,7 +9,7 @@ use shape_runtime::comptime_reflection::{
 use shape_runtime::type_schema::TypeSchema;
 use shape_runtime::type_schema::builtin_schemas::{
     COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
-    COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_REF_SCHEMA, COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
 };
 use shape_runtime::type_schema::{current_registry, typed_object_for_named_schema};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr, TypedObjectStorage};
@@ -145,7 +145,12 @@ impl FrozenTypeIdentity {
 #[derive(Debug)]
 pub(crate) struct FrozenTypeIndex {
     pub(crate) struct_defs: HashMap<String, Vec<(String, TypeAnnotation)>>,
-    pub(crate) enum_defs: HashMap<String, Vec<String>>,
+    /// Named freeze input 3 (enriched, ADR-009 B5): ordered enum variants per
+    /// user enum name — the variant NAME (source of the owner-bound hygienic
+    /// member identity, Dec 57) plus the variant's payload ARITY (Unit=0,
+    /// Tuple(n)/Struct(n)=n). The single enum freeze projection; full per-variant
+    /// payload field TYPES are a later B5 slice (documented in defections.md).
+    pub(crate) enum_defs: HashMap<String, Vec<FrozenEnumVariantDef>>,
     pub(crate) alias_defs: HashMap<String, TypeAnnotation>,
     /// ADR-009 A2 (slice S5): frozen trait names (named freeze input 5,
     /// `BytecodeCompiler::known_traits`). `dyn` bounds and trait
@@ -162,6 +167,14 @@ pub(crate) struct FrozenTypeIndex {
     /// and a named surface-and-stop under the B4 `param_kinds_of` query
     /// (no guessing).
     pub(crate) struct_generic_param_kinds: HashMap<String, Vec<ParamKind>>,
+    /// ADR-009 B5 (S2, Dec 55 R10): the declared ordered generic parameter
+    /// NAMES per user STRUCT name — the NAME projection of the SAME freeze
+    /// input 1 (`struct_generic_info.type_params`) whose KIND projection is
+    /// [`Self::struct_generic_param_kinds`] (two projections of one fact, not a
+    /// second fact). Read ONLY by [`Self::substituted_applied_nominal`] to bind
+    /// each declared parameter to its applied argument identity before
+    /// re-canonicalizing the struct's field annotations.
+    pub(crate) struct_generic_param_names: HashMap<String, Vec<String>>,
     pub(crate) frozen_type_ids: HashMap<String, FrozenTypeIdentity>,
     pub(crate) frozen_type_categories: HashMap<FrozenTypeIdentity, FrozenTypeCategory>,
     /// ADR-009 B1 S2: exact width/domain payload per Primitive identity,
@@ -184,6 +197,24 @@ pub(crate) struct FrozenTypeIndex {
     /// [`Self::frozen_primitive_payloads`].
     pub(crate) frozen_callable_descriptors:
         HashMap<FrozenTypeIdentity, payloads::CallableDescriptor>,
+    /// ADR-009 B5 (Dec 55): the sealed nominal declaration-shape descriptor per
+    /// RESOLVED nominal identity (user struct / enum), reconstructed from the
+    /// enriched struct/enum freeze inputs 1+3 in the SAME rebuild that interns
+    /// the identity (one source, no second derivation). `payload_for_identity`
+    /// answers the complete `FrozenNominal` from here; an un-applied generic
+    /// head or an unsubstituted applied form has NO entry and is a named
+    /// rejection. Symmetric with [`Self::frozen_callable_descriptors`].
+    pub(crate) frozen_nominal_descriptors:
+        HashMap<FrozenTypeIdentity, payloads::NominalDescriptor>,
+}
+
+/// ADR-009 B5 (Dec 57) — one enum variant freeze projection: the source-level
+/// variant NAME (hashed into the owner-bound hygienic member identity, never
+/// exposed as a selectable string) and the variant's payload ARITY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrozenEnumVariantDef {
+    pub(crate) name: String,
+    pub(crate) payload_arity: u16,
 }
 
 impl FrozenTypeIndex {
@@ -251,8 +282,109 @@ impl FrozenTypeIndex {
                      FrozenCallable structural descriptor"
                         .to_string()
                 }),
+            // ADR-009 B5: a RESOLVED nominal (user struct/enum) answers its
+            // complete declaration-shape descriptor from the map populated in
+            // the same rebuild. A frozen NOMINAL identity WITHOUT a descriptor
+            // is either an un-applied generic constructor head (it has declared
+            // param kinds — B4 `TypeConstructorRef` territory) or an
+            // unsubstituted APPLIED form (generic substitution pending) — each a
+            // distinct named rejection, never a partial descriptor.
+            FrozenTypeCategory::Nominal => {
+                if let Some(descriptor) = self.frozen_nominal_descriptors.get(&identity) {
+                    Ok(FrozenPayloadDescriptor::Nominal(descriptor.clone()))
+                } else if self.generic_param_kinds.contains_key(&identity) {
+                    Err(payloads::unapplied_generic_head_rejection())
+                } else {
+                    Err(payloads::applied_nominal_pending_rejection())
+                }
+            }
             pending => Err(payloads::pending_payload_rejection(pending)),
         }
+    }
+
+    /// ADR-009 B5 (S2, Dec 55 R10): generic substitution PRECEDES descriptor
+    /// issuance. For an APPLIED user-struct form (`Page<User>`, decomposed by
+    /// [`canonical_refine`] into the head identity + ordered argument
+    /// identities), bind each declared struct type parameter to its applied
+    /// argument identity and re-canonicalize the struct's field annotations
+    /// through the ONE canonicalizer — so a field spelled `Array<T>` freezes as
+    /// `Array<User>`, never the un-substituted `T`. The classification is the
+    /// SAME field-count rule the base rebuild uses (0 → Opaque, 1 → Newtype,
+    /// ≥2 → Struct), so an applied form and a hypothetical monomorphized
+    /// declaration would agree.
+    ///
+    /// Returns `None` (→ the caller's named applied-substitution-pending
+    /// rejection) when the head is not a resolved user struct with frozen
+    /// parameter names, the arity does not match, or any substituted field type
+    /// fails to canonicalize — never a partial descriptor (R8).
+    pub(super) fn substituted_applied_nominal(
+        &self,
+        head: FrozenTypeIdentity,
+        args: &[FrozenTypeIdentity],
+    ) -> Option<payloads::NominalDescriptor> {
+        // Reverse the head identity to the user-struct name (the freeze keys
+        // struct definitions by name; only a user struct carries field
+        // annotations to substitute — a builtin/enum head has no `struct_defs`
+        // entry and returns `None` here, staying the pending rejection).
+        let name = self
+            .struct_defs
+            .keys()
+            .find(|name| self.frozen_type_ids.get(*name) == Some(&head))?
+            .clone();
+        let param_names = self.struct_generic_param_names.get(&name)?;
+        if param_names.len() != args.len() || args.is_empty() {
+            return None;
+        }
+        let fields = self.struct_defs.get(&name)?;
+
+        // The substitution scope: a declared parameter resolves to its applied
+        // argument identity (with the argument's frozen category); every other
+        // leaf resolves through the base freeze exactly as the un-applied
+        // rebuild does. One canonicalizer, one leaf-resolution surface.
+        let substitution: HashMap<&str, FrozenTypeIdentity> = param_names
+            .iter()
+            .map(String::as_str)
+            .zip(args.iter().copied())
+            .collect();
+        let resolve = |leaf: &str| {
+            if let Some(&arg) = substitution.get(leaf) {
+                let category = self.frozen_type_categories.get(&arg).copied()?;
+                return Some((arg, category));
+            }
+            let identity = self.frozen_type_ids.get(leaf).copied()?;
+            let category = self.frozen_type_categories.get(&identity).copied()?;
+            Some((identity, category))
+        };
+        let is_trait = |leaf: &str| self.trait_names.contains(leaf);
+        let applied_arity =
+            |identity: FrozenTypeIdentity| self.generic_param_kinds.get(&identity).map(Vec::len);
+        let scope = LeafScope {
+            resolve: &resolve,
+            is_trait: &is_trait,
+            applied_arity: &applied_arity,
+        };
+
+        let mut field_descriptors = Vec::with_capacity(fields.len());
+        for (field_name, annotation) in fields {
+            let canonical = canonicalize_with(annotation, &scope).ok()?;
+            field_descriptors.push(payloads::NominalFieldDescriptor {
+                member: member_identity(&name, field_name),
+                type_identity: canonical.identity,
+                initialization: shape_runtime::comptime_reflection::FieldInitialization::Required,
+            });
+        }
+
+        Some(match field_descriptors.as_slice() {
+            [] => payloads::NominalDescriptor::Opaque { owner: head },
+            [single] => payloads::NominalDescriptor::Newtype {
+                owner: head,
+                inner: single.type_identity,
+            },
+            _ => payloads::NominalDescriptor::Struct {
+                owner: head,
+                fields: field_descriptors,
+            },
+        })
     }
 
     pub(super) fn rebuild_frozen_type_index(&mut self) {
@@ -412,12 +544,112 @@ impl FrozenTypeIndex {
             }
         }
 
+        // ADR-009 B5 (Dec 55/57): reconstruct the sealed nominal declaration
+        // shape per RESOLVED user nominal from the enriched struct/enum freeze
+        // inputs 1+3 — the SAME rebuild that interned the identity (one source,
+        // no second derivation). Runs AFTER the alias fixpoint so struct field
+        // types resolve against the fully-interned base (leaf/applied/composite
+        // members). A struct whose field type cannot canonicalize is SKIPPED (no
+        // partial descriptor, R8) — reflecting it stays an applied/pending
+        // rejection rather than issuing a half-populated shape.
+        let mut nominal_descriptors: HashMap<FrozenTypeIdentity, payloads::NominalDescriptor> =
+            HashMap::new();
+        {
+            let resolve = |name: &str| {
+                let identity = ids.get(name).copied()?;
+                let category = categories.get(&identity).copied()?;
+                Some((identity, category))
+            };
+            let is_trait = |name: &str| self.trait_names.contains(name);
+            let applied_arity =
+                |identity: FrozenTypeIdentity| param_kinds.get(&identity).map(Vec::len);
+            let scope = LeafScope {
+                resolve: &resolve,
+                is_trait: &is_trait,
+                applied_arity: &applied_arity,
+            };
+
+            for (name, fields) in &self.struct_defs {
+                let Some(owner) = ids.get(name).copied() else {
+                    continue;
+                };
+                let mut field_descriptors = Vec::with_capacity(fields.len());
+                let mut all_resolved = true;
+                for (field_name, annotation) in fields {
+                    let Ok(canonical) = canonicalize_with(annotation, &scope) else {
+                        all_resolved = false;
+                        break;
+                    };
+                    field_descriptors.push(payloads::NominalFieldDescriptor {
+                        member: member_identity(name, field_name),
+                        type_identity: canonical.identity,
+                        // ADR-009 B5 S1: the struct freeze input does not carry
+                        // per-field default flags, so every field is `Required`
+                        // today (Dec 59 total records — a default is
+                        // construction policy only). `Defaulted` population is a
+                        // later slice (documented in defections.md).
+                        initialization:
+                            shape_runtime::comptime_reflection::FieldInitialization::Required,
+                    });
+                }
+                if !all_resolved {
+                    continue;
+                }
+                // Field-count classification (S1 CURRENT, absent dedicated
+                // newtype/opaque syntax — documented in defections.md): 0 fields
+                // is a non-decomposable Opaque, exactly 1 field is a Newtype
+                // wrapper over its inner type, ≥2 fields is a Struct.
+                let descriptor = match field_descriptors.as_slice() {
+                    [] => payloads::NominalDescriptor::Opaque { owner },
+                    [single] => payloads::NominalDescriptor::Newtype {
+                        owner,
+                        inner: single.type_identity,
+                    },
+                    _ => payloads::NominalDescriptor::Struct {
+                        owner,
+                        fields: field_descriptors,
+                    },
+                };
+                nominal_descriptors.insert(owner, descriptor);
+            }
+
+            for (name, variants) in &self.enum_defs {
+                let Some(owner) = ids.get(name).copied() else {
+                    continue;
+                };
+                let variant_descriptors = variants
+                    .iter()
+                    .map(|variant| payloads::NominalVariantDescriptor {
+                        member: member_identity(name, &variant.name),
+                        payload_arity: variant.payload_arity,
+                    })
+                    .collect();
+                nominal_descriptors.insert(
+                    owner,
+                    payloads::NominalDescriptor::Enum {
+                        owner,
+                        variants: variant_descriptors,
+                    },
+                );
+            }
+        }
+
         self.frozen_type_ids = ids;
         self.frozen_type_categories = categories;
         self.frozen_primitive_payloads = primitive_payloads;
         self.generic_param_kinds = param_kinds;
         self.frozen_callable_descriptors = callable_descriptors;
+        self.frozen_nominal_descriptors = nominal_descriptors;
     }
+}
+
+/// ADR-009 B5 (Dec 57): the owner-bound HYGIENIC member identity for a nominal
+/// member (struct field / enum variant / associated const). A stable opaque
+/// 128-bit identity minted from `member:{owner}:{member}` — NEVER the source
+/// name string (a source spelling is not a member identity, R1/R3). Distinct
+/// from the value-type identity space (the `member:` descriptor prefix).
+fn member_identity(owner_name: &str, member_name: &str) -> FrozenTypeIdentity {
+    FrozenTypeIdentity::from_canonical_descriptor(&format!("member:{owner_name}:{member_name}"))
 }
 
 fn intern_identity(
@@ -1373,6 +1605,87 @@ pub(crate) fn build_const_arg_ref_heap_value(value: i64) -> Result<HeapValue, St
             ("identity_low", KindedSlot::from_int(identity.low)),
         ],
     ))
+}
+
+/// ADR-009 B5 (Dec 56): mint a `RepresentationAccess<T>` authority carrier for
+/// a frozen type identity. The identity is re-validated through the freeze (an
+/// unknown/INVALID identity cannot mint authority) so a malformed identity never
+/// yields a usable capability. Only the two identity halves are stored — the
+/// authority IS the identity binding, no name/kind text (Dec 56). Called ONLY by
+/// the compiler-injected mint intrinsic in an annotation expand-hook scope.
+pub(crate) fn build_representation_access_heap_value(
+    identity: FrozenTypeIdentity,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    typed_slot_into_heap_value(build_representation_access_slot(identity, freeze)?)
+}
+
+/// The `KindedSlot` form of [`build_representation_access_heap_value`], for the
+/// annotation expand-hook delivery path (`functions_annotations.rs`), which
+/// binds the minted authority as a comptime module binding rather than an
+/// intrinsic return value.
+pub(crate) fn build_representation_access_slot(
+    identity: FrozenTypeIdentity,
+    freeze: &FreezeOverlay,
+) -> Result<KindedSlot, String> {
+    if identity == FrozenTypeIdentity::INVALID {
+        return Err("RepresentationAccess cannot be minted for an unknown semantic type identity"
+            .to_string());
+    }
+    // Re-validate the identity is one the freeze actually issued: `category_of`
+    // errors on an identity the freeze never minted, so a fabricated identity
+    // cannot become authority.
+    let _category = freeze.category_of(identity)?;
+    Ok(typed_object_for_named_schema(
+        COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
+        &[
+            ("identity_high", KindedSlot::from_int(identity.high)),
+            ("identity_low", KindedSlot::from_int(identity.low)),
+        ],
+    ))
+}
+
+/// Read the frozen type identity a `RepresentationAccess` carrier authorizes
+/// (schema-name-checked). A slot that is not a genuine compiler-issued
+/// `RepresentationAccess` — a bare int/bool, a `FrozenType`, an arbitrary object
+/// — is the named R6 authority rejection.
+fn representation_access_identity_from_ref(slot: &KindedSlot) -> Result<FrozenTypeIdentity, String> {
+    let (schema, storage) = reserved_storage(
+        slot,
+        COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
+        "RepresentationAccess",
+    )
+    .map_err(|_| {
+        "representation reflection requires explicit RepresentationAccess<T> authority: \
+         reflect_repr's second argument must be the compiler-issued RepresentationAccess<T> \
+         delivered to a declaration-attached annotation expand hook (author consent, Dec 56) — \
+         an ordinary value cannot authorize it"
+            .to_string()
+    })?;
+    identity_halves_of(&schema, storage, "identity_high", "identity_low")
+}
+
+/// ADR-009 B5 (Dec 56): `reflect_repr(TypeRef<T>, RepresentationAccess<T>)`. The
+/// authority must be bound to the SAME frozen identity being reflected — a
+/// capability minted for one type cannot decompose another (authority is not
+/// ambient). Only then does the SAME payload builder as `reflect` answer the
+/// complete `FrozenType` sum.
+pub(crate) fn frozen_type_from_repr_ref(
+    type_slot: &KindedSlot,
+    access_slot: &KindedSlot,
+    freeze: &FreezeOverlay,
+) -> Result<HeapValue, String> {
+    let identity = frozen_identity_from_ref(type_slot, "reflect_repr")?;
+    let authorized = representation_access_identity_from_ref(access_slot)?;
+    if authorized != identity {
+        return Err(
+            "RepresentationAccess<T> authorizes complete reflection over T only: this authority \
+             is bound to a different type identity than the one being reflected — a capability \
+             minted for one type cannot decompose another (Dec 56)"
+                .to_string(),
+        );
+    }
+    payloads::build_frozen_type_heap_value(identity, freeze)
 }
 
 /// Read one opaque argument's identity from a borrowed typed-object storage

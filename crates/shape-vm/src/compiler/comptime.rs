@@ -61,6 +61,36 @@ pub(crate) const PARAM_STRING_SELECTOR_DIAGNOSTIC: &str =
 pub(crate) const PARAM_ARITY_DIAGNOSTIC: &str =
     "callable.param expects exactly one signature-position index argument";
 
+/// ADR-009 B5 R1/R2/R3 (Dec 57): a nominal shape descriptor's members are
+/// selected ONLY by an owner-bound hygienic member identity (`#name`) — never a
+/// source-name string (`record.field("name")`, R1), a declaration ordinal
+/// (`record.field(0)` / `record.fields[0]`, R2), or a name read back off a
+/// descriptor (`field.name`, R3). Source spelling and declaration position are
+/// not member identities. The typed member rows are read by iterating the
+/// descriptor's ordered `fields` / `variants`. The explicit `record.field(#name)`
+/// selection surface is grammar-pending (no `#ident` token; see
+/// docs/defections.md) — until it lands, iteration is the only member vehicle.
+pub(crate) const DESCRIPTOR_MEMBER_SELECTION_DIAGNOSTIC: &str =
+    "nominal member selection requires an owner-bound member identity (#name): a source-name \
+     string, a declaration ordinal, or a descriptor-derived name is not a member identity — \
+     iterate the descriptor's `fields` / `variants` to read the typed member rows (the explicit \
+     `#name` selection surface is grammar-pending; see docs/defections.md)";
+
+/// ADR-009 B5 R4 (Dec 55): nominal shape selection is an exhaustive TYPED match
+/// over the sealed `NominalShape` sum (`Struct` / `Enum` / `Newtype` / `Opaque`)
+/// — never a `.kind` string compared against a literal.
+pub(crate) const NOMINAL_KIND_STRING_DIAGNOSTIC: &str =
+    "nominal shape selection is exhaustive and typed: match the NominalShape sum \
+     (Struct / Enum / Newtype / Opaque), never read a `.kind` string off the descriptor";
+
+/// ADR-009 B5 R5 (Dec 55): a runtime representation class (native layout,
+/// builtin-ness) is NOT a reflection category, and a comptime-field disposition
+/// (`is_comptime`, Dec 58) is not exposed on a shape descriptor.
+pub(crate) const RUNTIME_REPR_CLASS_DIAGNOSTIC: &str =
+    "runtime representation classes (native layout, builtin-ness) and comptime-field \
+     dispositions are not nominal reflection categories: a shape descriptor exposes semantic \
+     identity + its public member interface, never a backend representation class";
+
 /// (name, arity, target_method, return_fields, named_return_type,
 /// param_annotations)
 ///
@@ -178,6 +208,22 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
         None,
     ),
+    // ADR-009 B5 (Stage 2, Dec 56) — `reflect_repr(TypeRef<T>,
+    // RepresentationAccess<T>) -> FrozenType<T>`: the authority-gated complete
+    // reflection. Two concrete carrier-schema params so the mini-VM analyzer
+    // routes the call through the comptime-builtin arm and the R6 named
+    // authority rejection fires at check time (the `find_impl` S5 precedent).
+    (
+        "reflect_repr",
+        2,
+        super::comptime_builtins::REFLECT_REPR_INTRINSIC,
+        None,
+        Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
+        Some(&[
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
+        ]),
+    ),
     // ADR-009 B4 (Stage 2, Dec 54): uniform nominal application.
     // `type_constructor(C)` lowers to identity halves (like `type_ref`) →
     // TypeConstructorRef. `const_arg(N)` is a checked const argument. `apply` /
@@ -279,6 +325,17 @@ fn comptime_ctx_param_type() -> TypeAnnotation {
             annotations: vec![],
         },
     ])
+}
+
+/// ADR-009 B5 (Dec 56): the opaque `RepresentationAccess<T>` authority schema
+/// as a param-type annotation, so a type-target handler's third positional
+/// parameter types as the capability and `reflect_repr(type_ref(T), access)`
+/// type-checks its authority argument.
+fn comptime_representation_access_param_type() -> TypeAnnotation {
+    TypeAnnotation::Basic(
+        shape_runtime::type_schema::builtin_schemas::COMPTIME_REPRESENTATION_ACCESS_SCHEMA
+            .to_string(),
+    )
 }
 
 /// The `FieldDescriptor` row shape (comptime-excellence §4.1.1) as a concrete
@@ -587,10 +644,17 @@ fn frozen_type_category_enum_item() -> Item {
 fn frozen_type_payload_model_items() -> Vec<Item> {
     use shape_ast::ast::{EnumDef, EnumMember, EnumMemberKind, StructField, StructTypeDef};
     use shape_runtime::comptime_reflection::{
-        FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
-        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME, FloatWidth,
-        INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth, PASSING_MODE_SCHEMA_NAME, PassingMode,
+        FIELD_INITIALIZATION_SCHEMA_NAME, FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
+        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME,
+        FieldInitialization, FloatWidth, INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth,
+        NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME, PassingMode,
         frozen_type_enabled_payload_type_name,
+    };
+    use shape_runtime::comptime_reflection::{
+        ASSOCIATED_CONST_DESCRIPTOR_SCHEMA_NAME, ENUM_DESCRIPTOR_SCHEMA_NAME,
+        FIELD_DESCRIPTOR_SCHEMA_NAME, NEWTYPE_DESCRIPTOR_SCHEMA_NAME,
+        OPAQUE_TYPE_DESCRIPTOR_SCHEMA_NAME, STRUCT_DESCRIPTOR_SCHEMA_NAME,
+        VARIANT_DESCRIPTOR_SCHEMA_NAME,
     };
 
     let enum_item = |name: &str, members: Vec<EnumMember>| {
@@ -731,6 +795,115 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
                 field("returns_identity_low", int_ty()),
             ],
         ),
+        // ADR-009 B5 (Dec 55-59): the nominal-shape descriptor payload model.
+        // `NominalShape` is the sealed declaration-shape axis (each variant
+        // carries its typed row descriptor); `FieldInitialization` the Dec 59
+        // disposition. The `*Descriptor` structs carry owner + owner-bound
+        // member identities (never source-name strings, Dec 57). `FrozenNominal`
+        // wraps the sealed shape only. Generated from the shared runtime catalog
+        // (`NominalShape::ALL` + `descriptor_type_name` / `FieldInitialization::
+        // ALL`) — no hand-written variant/mapping list.
+        enum_item(
+            FIELD_INITIALIZATION_SCHEMA_NAME,
+            FieldInitialization::ALL
+                .into_iter()
+                .map(|init| unit_member(init.variant_name()))
+                .collect(),
+        ),
+        struct_item(
+            FIELD_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("owner_identity_high", int_ty()),
+                field("owner_identity_low", int_ty()),
+                field("member_high", int_ty()),
+                field("member_low", int_ty()),
+                field("type_identity_high", int_ty()),
+                field("type_identity_low", int_ty()),
+                field(
+                    "initialization",
+                    TypeAnnotation::Basic(FIELD_INITIALIZATION_SCHEMA_NAME.to_string()),
+                ),
+            ],
+        ),
+        struct_item(
+            VARIANT_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("owner_identity_high", int_ty()),
+                field("owner_identity_low", int_ty()),
+                field("member_high", int_ty()),
+                field("member_low", int_ty()),
+                field("payload_arity", int_ty()),
+            ],
+        ),
+        struct_item(
+            ASSOCIATED_CONST_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("owner_identity_high", int_ty()),
+                field("owner_identity_low", int_ty()),
+                field("member_high", int_ty()),
+                field("member_low", int_ty()),
+                field("type_identity_high", int_ty()),
+                field("type_identity_low", int_ty()),
+            ],
+        ),
+        struct_item(
+            STRUCT_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("owner_identity_high", int_ty()),
+                field("owner_identity_low", int_ty()),
+                field("field_count", int_ty()),
+                field(
+                    "fields",
+                    TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                        FIELD_DESCRIPTOR_SCHEMA_NAME.to_string(),
+                    ))),
+                ),
+            ],
+        ),
+        struct_item(
+            ENUM_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("owner_identity_high", int_ty()),
+                field("owner_identity_low", int_ty()),
+                field("variant_count", int_ty()),
+                field(
+                    "variants",
+                    TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                        VARIANT_DESCRIPTOR_SCHEMA_NAME.to_string(),
+                    ))),
+                ),
+            ],
+        ),
+        struct_item(
+            NEWTYPE_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("owner_identity_high", int_ty()),
+                field("owner_identity_low", int_ty()),
+                field("inner_identity_high", int_ty()),
+                field("inner_identity_low", int_ty()),
+            ],
+        ),
+        struct_item(
+            OPAQUE_TYPE_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("owner_identity_high", int_ty()),
+                field("owner_identity_low", int_ty()),
+            ],
+        ),
+        enum_item(
+            NOMINAL_SHAPE_SCHEMA_NAME,
+            NominalShape::ALL
+                .into_iter()
+                .map(|shape| tuple_member(shape.variant_name(), shape.descriptor_type_name()))
+                .collect(),
+        ),
+        struct_item(
+            "FrozenNominal",
+            vec![field(
+                "shape",
+                TypeAnnotation::Basic(NOMINAL_SHAPE_SCHEMA_NAME.to_string()),
+            )],
+        ),
     ]
 }
 
@@ -800,13 +973,38 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
 /// precise-surface discipline). Genuine `FrozenCallable` uses in the enabled
 /// surface always spell the receiver as the bound identifier directly
 /// (`c.param(i)`, `c.parameters`), so the guard admits every enabled form.
-type CallableScope = std::collections::HashSet<String>;
+///
+/// ADR-009 B5 (Dec 55): the same precise-surface discipline governs the
+/// `FrozenNominal.shape()` accessor — a `nominals` set tracks identifiers bound
+/// by a `FrozenType::Nominal(<ident>)` match so `.shape()` rewrites fire ONLY on
+/// a real `FrozenNominal` receiver (never a user `.shape()` method on an
+/// unrelated receiver). One scope carrier, one binding-collection walk.
+///
+/// ADR-009 B5 (Dec 55-57, slice S3): the `descriptors` set tracks identifiers
+/// bound by a `NominalShape::<Variant>(<ident>)` match — the sealed shape's
+/// typed row descriptor (`StructDescriptor` / `EnumDescriptor` / …). A
+/// descriptor exposes its members ONLY through ordered `fields` / `variants`
+/// iteration; the forbidden member-SELECTION forms (`record.field("name")` R1,
+/// `record.field(0)` R2, `record.kind` R4) are named rejections fired against a
+/// tracked descriptor receiver — never a generic "unknown method/field" decay.
+#[derive(Clone, Default)]
+struct CallableScope {
+    callables: std::collections::HashSet<String>,
+    nominals: std::collections::HashSet<String>,
+    descriptors: std::collections::HashSet<String>,
+}
 
-/// Add any identifier bound by a `FrozenType::Callable(<ident>)` match pattern
-/// to the callable scope. ONLY the reserved `FrozenType::Callable`
-/// single-binding tuple pattern qualifies — a user enum with a `Callable`
-/// variant (a different enum head) does not, nor does a struct/array
-/// destructuring shape.
+impl CallableScope {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Add any identifier bound by a reserved `FrozenType::<Variant>(<ident>)` or
+/// `NominalShape::<Variant>(<ident>)` match pattern to the matching scope set.
+/// ONLY the reserved single-binding tuple pattern under the reserved head
+/// qualifies — a user enum with a `Callable` / `Nominal` / `Struct` variant (a
+/// different enum head) does not, nor does a struct/array destructuring shape.
 fn collect_frozen_callable_bindings(pattern: &shape_ast::ast::Pattern, scope: &mut CallableScope) {
     if let shape_ast::ast::Pattern::Constructor {
         enum_name,
@@ -814,14 +1012,33 @@ fn collect_frozen_callable_bindings(pattern: &shape_ast::ast::Pattern, scope: &m
         fields,
     } = pattern
     {
-        let is_frozen_callable = variant == "Callable"
-            && enum_name
-                .as_ref()
-                .is_some_and(|path| path.name() == "FrozenType");
-        if is_frozen_callable {
-            if let shape_ast::ast::PatternConstructorFields::Tuple(pats) = fields {
-                if let [shape_ast::ast::Pattern::Identifier { name, .. }] = pats.as_slice() {
-                    scope.insert(name.clone());
+        let head = enum_name.as_ref().map(|path| path.name());
+        let is_frozen_type_head = head.as_deref() == Some("FrozenType");
+        let is_nominal_shape_head = head.as_deref() == Some("NominalShape");
+        if !is_frozen_type_head && !is_nominal_shape_head {
+            return;
+        }
+        if let shape_ast::ast::PatternConstructorFields::Tuple(pats) = fields {
+            if let [shape_ast::ast::Pattern::Identifier { name, .. }] = pats.as_slice() {
+                if is_frozen_type_head {
+                    match variant.as_str() {
+                        "Callable" => {
+                            scope.callables.insert(name.clone());
+                        }
+                        "Nominal" => {
+                            scope.nominals.insert(name.clone());
+                        }
+                        _ => {}
+                    }
+                } else if is_nominal_shape_head {
+                    // Every sealed shape's payload is a typed row descriptor —
+                    // member selection off any of them is a named rejection.
+                    match variant.as_str() {
+                        "Struct" | "Enum" | "Newtype" | "Opaque" => {
+                            scope.descriptors.insert(name.clone());
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -832,7 +1049,22 @@ fn collect_frozen_callable_bindings(pattern: &shape_ast::ast::Pattern, scope: &m
 /// current lexical scope — the precondition for the `.param(I)` / `.parameters`
 /// accessor rewrites (Dec 63).
 fn is_frozen_callable_receiver(expr: &Expr, scope: &CallableScope) -> bool {
-    matches!(expr, Expr::Identifier(name, _) if scope.contains(name))
+    matches!(expr, Expr::Identifier(name, _) if scope.callables.contains(name))
+}
+
+/// Whether `expr` is a bare identifier bound to a `FrozenNominal` in the
+/// current lexical scope — the precondition for the `.shape()` accessor rewrite
+/// (Dec 55).
+fn is_frozen_nominal_receiver(expr: &Expr, scope: &CallableScope) -> bool {
+    matches!(expr, Expr::Identifier(name, _) if scope.nominals.contains(name))
+}
+
+/// Whether `expr` is a bare identifier bound to a `NominalShape::<Variant>`
+/// payload descriptor (`StructDescriptor` / `EnumDescriptor` / …) in the current
+/// lexical scope — the precondition for the S3 member-selection rejection matrix
+/// (R1/R2/R3/R4/R5).
+fn is_descriptor_receiver(expr: &Expr, scope: &CallableScope) -> bool {
+    matches!(expr, Expr::Identifier(name, _) if scope.descriptors.contains(name))
 }
 
 fn rewrite_comptime_type_symbol_args(
@@ -1055,6 +1287,85 @@ fn rewrite_comptime_type_symbol_args_expr_scoped(
     {
         if property == "parameters" && is_frozen_callable_receiver(object.as_ref(), callables) {
             *property = "params".to_string();
+        }
+    }
+
+    // ADR-009 B5 (Stage 2, Dec 55): the `FrozenNominal.shape()` accessor.
+    // `nominal.shape()` projects the sealed `NominalShape` sum — it desugars to
+    // reading the descriptor carrier's `shape` field (the `NominalShape` enum
+    // value the payload builder pre-populated), so `match nominal.shape() { … }`
+    // resolves the sealed shapes. Guarded on a provably-`FrozenNominal` receiver
+    // (`is_frozen_nominal_receiver`): the desugaring lowers to plain `.shape`
+    // field access that does not re-check the receiver, so a receiver-blind
+    // rewrite would silently capture a user `.shape()` method on an unrelated
+    // receiver. A non-nominal receiver is left as an ordinary `MethodCall`.
+    if let Expr::MethodCall {
+        receiver,
+        method,
+        args,
+        span,
+        ..
+    } = expr
+    {
+        if method == "shape"
+            && args.is_empty()
+            && is_frozen_nominal_receiver(receiver.as_ref(), callables)
+        {
+            let span = *span;
+            let receiver = std::mem::replace(receiver.as_mut(), Expr::Unit(span));
+            *expr = Expr::PropertyAccess {
+                object: Box::new(receiver),
+                property: "shape".to_string(),
+                optional: false,
+                span,
+            };
+        }
+    }
+
+    // ADR-009 B5 (Stage 2, Dec 55-57, slice S3): the hard member-selection
+    // rejection matrix, fired against a tracked shape-descriptor receiver so a
+    // forbidden spelling names its rejection precisely instead of decaying to a
+    // generic "unknown method/field" error. A descriptor's members are read ONLY
+    // by iterating its ordered `fields` / `variants`; every SELECTION spelling is
+    // rejected.
+    if let Expr::MethodCall {
+        receiver, method, ..
+    } = expr
+    {
+        if is_descriptor_receiver(receiver.as_ref(), callables)
+            && matches!(method.as_str(), "field" | "variant" | "constant")
+        {
+            // R1 (string), R2 (ordinal), R3 (descriptor-derived name): any
+            // argument shape is a member-SELECTION attempt, all rejected.
+            return Err(ShapeError::SemanticError {
+                message: DESCRIPTOR_MEMBER_SELECTION_DIAGNOSTIC.to_string(),
+                location: None,
+            });
+        }
+    }
+    if let Expr::PropertyAccess {
+        object, property, ..
+    } = expr
+    {
+        let on_descriptor = is_descriptor_receiver(object.as_ref(), callables);
+        let on_nominal = is_frozen_nominal_receiver(object.as_ref(), callables);
+        if on_descriptor || on_nominal {
+            // R4: `.kind` string read off a nominal / descriptor.
+            if property == "kind" {
+                return Err(ShapeError::SemanticError {
+                    message: NOMINAL_KIND_STRING_DIAGNOSTIC.to_string(),
+                    location: None,
+                });
+            }
+            // R5 (runtime representation class) / R9 (comptime-field
+            // disposition): neither is a reflection category on a shape
+            // descriptor.
+            if matches!(property.as_str(), "is_builtin" | "is_comptime" | "native_layout") {
+                return Err(ShapeError::SemanticError {
+                    message: RUNTIME_REPR_CLASS_DIAGNOSTIC.to_string(),
+                    location: None,
+                });
+            }
         }
     }
 
@@ -1798,6 +2109,9 @@ pub(crate) fn execute_comptime_with_target(
         "",
         trait_impl_keys,
         freeze,
+        // No representation authority on this convenience path (used by the
+        // reflect-annotation self-test; not a type-target declaration hook).
+        None,
     )
 }
 
@@ -1852,6 +2166,18 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     ctx_file: &str,
     trait_impl_keys: std::collections::HashSet<String>,
     freeze: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
+    // ADR-009 B5 (Dec 56): the frozen identity halves of the annotated type,
+    // present ONLY for declaration-attached type-target handlers. When present,
+    // the compiler injects a call to the unspellable mint intrinsic
+    // (`__access_arg__ = mint(high, low)`) INTO the handler program so the
+    // `RepresentationAccess<T>` carrier is built inside the comptime mini-VM
+    // (whose registry the schema-name-checked decoder reads) — never minted in
+    // the outer registry and passed across, which would collide schema ids. The
+    // carrier is delivered to the handler's third positional parameter as
+    // `access` (author consent) — the ONLY route by which a `RepresentationAccess`
+    // enters scope, so user code can never obtain one. Function/module/expression
+    // targets pass `None`.
+    access_identity: Option<(i64, i64)>,
 ) -> Result<ComptimeExecutionResult> {
     if handler_params.iter().filter(|p| p.is_variadic).count() > 1 {
         return Err(ShapeError::RuntimeError {
@@ -1886,6 +2212,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
                 Some(comptime_target_param_type())
             } else if idx == 1 {
                 Some(comptime_ctx_param_type())
+            } else if idx == 2 && access_identity.is_some() {
+                // ADR-009 B5 (Dec 56): the third positional parameter of a
+                // type-target handler receives the `RepresentationAccess<T>`
+                // authority; typing it here lets `reflect_repr(type_ref(T),
+                // access)` type-check its authority argument.
+                Some(comptime_representation_access_param_type())
             } else {
                 None
             },
@@ -1903,6 +2235,31 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         if idx == 1 {
             call_args.push(Expr::Identifier("__ctx_arg__".to_string(), Span::DUMMY));
             continue;
+        }
+        // ADR-009 B5 (Dec 56): the third positional parameter of a type-target
+        // handler binds the compiler-minted `RepresentationAccess<T>` authority,
+        // NOT an annotation argument. The mint intrinsic is unspellable
+        // (SOH-prefixed) and runs INSIDE this comptime mini-VM, so the carrier's
+        // schema id is native to the registry the schema-name-checked decoder
+        // reads — never minted in the outer registry and passed across (which
+        // collides ids). It re-validates the identity through the shared freeze,
+        // so a fabricated identity mints nothing.
+        if idx == 2 {
+            if let Some((high, low)) = access_identity {
+                call_args.push(Expr::QualifiedFunctionCall {
+                    namespace: "__comptime__".to_string(),
+                    function: super::comptime_builtins::MINT_REPRESENTATION_ACCESS_INTRINSIC
+                        .to_string(),
+                    const_args: Vec::new(),
+                    args: vec![
+                        Expr::Literal(shape_ast::ast::Literal::Int(high), Span::DUMMY),
+                        Expr::Literal(shape_ast::ast::Literal::Int(low), Span::DUMMY),
+                    ],
+                    named_args: Vec::new(),
+                    span: Span::DUMMY,
+                });
+                continue;
+            }
         }
         if param.is_variadic {
             call_args.push(Expr::Array(
@@ -4771,6 +5128,7 @@ match reflect(type_ref(int)) {
   FrozenType::Never(n) => 4
   FrozenType::Erased(e) => 5
   FrozenType::Callable(c) => 6
+  FrozenType::Nominal(n) => 7
 }
 "#,
         )
@@ -4799,6 +5157,7 @@ match reflect(type_ref(bigint)) {
   FrozenType::Never(n) => 4
   FrozenType::Erased(e) => 5
   FrozenType::Callable(c) => 6
+  FrozenType::Nominal(n) => 7
 }
 "#,
         )
@@ -4820,6 +5179,7 @@ match reflect(type_ref({spelling})) {{
   FrozenType::Never(n) => 4
   FrozenType::Erased(e) => 5
   FrozenType::Callable(c) => 6
+  FrozenType::Nominal(n) => 7
 }}
 "#
             ))
@@ -4834,24 +5194,21 @@ match reflect(type_ref({spelling})) {{
         }
     }
 
-    /// R1 (sanctioned tracer): reflecting a category whose payload ticket
-    /// has not landed is the NAMED per-category compile-time rejection —
-    /// never a partial descriptor. `Array` is frozen as Nominal in every
-    /// compilation unit.
+    /// ADR-009 B5 (drift note R10/R11): reflecting an un-applied generic
+    /// constructor head (`Array`, `TypeConstructorRef` territory) is the NAMED
+    /// rejection — never a partial descriptor and never a shape off the
+    /// un-applied form. `Array` is frozen as a builtin Nominal head with
+    /// declared param kinds in every compilation unit.
     #[test]
-    fn reflect_non_enabled_category_is_the_named_r1_rejection() {
+    fn reflect_unapplied_generic_head_is_the_named_rejection() {
         let error = run_comptime_body_err(
             "reflect(type_ref(Array))",
-            "Nominal payload has not landed; reflect must reject",
+            "an un-applied generic head must reject",
         );
         let message = format!("{error:?}");
         assert!(
-            message.contains("reflect: the Nominal payload descriptor has not landed"),
-            "R1 rejection must name the category and the pending ticket family: {message}"
-        );
-        assert!(
-            message.contains("use type_category"),
-            "R1 rejection must point at the exhaustive category layer: {message}"
+            message.contains("un-applied generic type constructor is not a resolved nominal shape"),
+            "un-applied-head rejection must be the named diagnostic: {message}"
         );
     }
 
