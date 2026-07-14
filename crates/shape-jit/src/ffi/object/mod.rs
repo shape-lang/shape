@@ -19,6 +19,9 @@ pub mod object_ops;
 pub mod pattern;
 pub mod property_access;
 
+#[cfg(test)]
+mod shared_cell_tests;
+
 // Re-export all public functions for backward compatibility
 pub use object_ops::{jit_new_object, jit_object_rest, jit_set_prop};
 
@@ -50,9 +53,9 @@ pub use closure::{jit_arc_shared_retain, jit_shared_lock_contended, jit_shared_u
 
 // Session 1 Commit 3: Outer-scope Shared-cell lifecycle helpers.
 //   - `jit_alloc_shared_cell`        — allocates a fresh `Arc<SharedCell>`
-//                                       with the given `ValueWord` initial
-//                                       bits; returns the raw pointer bits
-//                                       of the sole strong share.
+//                                       with the given raw initial bits and
+//                                       NativeKind companion; returns the raw
+//                                       pointer bits of the sole strong share.
 //   - `jit_arc_shared_release`       — consumes exactly one strong share
 //                                       (outer-scope reclaim); null-safe.
 pub use closure::{jit_alloc_shared_cell, jit_arc_shared_release};

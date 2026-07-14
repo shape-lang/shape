@@ -1,0 +1,8 @@
+// N8 — Shared capture with a Float64 payload.
+fn answer() -> number {
+  var total = 0.5
+  let add_one = || { total = total + 1.0 }
+  add_one()
+  total
+}
+print(answer())

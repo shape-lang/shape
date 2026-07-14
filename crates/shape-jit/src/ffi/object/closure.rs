@@ -478,9 +478,10 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 ///
 /// The returned pointer is owned by the caller's slot; it MUST be
 /// released via `jit_arc_shared_release` exactly once when the slot
-/// exits scope. `ValueWord::from_bits(initial_bits)` seeds the cell's
-/// inner payload; subsequent reads/writes go through the lock-gated
-/// pointer-deref lowering in `mir_compiler/places.rs`.
+/// exits scope. `initial_bits` seeds the cell's raw payload and `kind_code`
+/// supplies its independently proven `NativeKind`; subsequent reads/writes
+/// go through the lock-gated pointer-deref lowering in
+/// `mir_compiler/places.rs`.
 ///
 /// # Safety
 ///
@@ -507,8 +508,9 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8)
     // (`MirToIR::initialize_shared_local_slots`), which sources it from
     // the PRODUCER at compile time — the `ClosureLayout`'s
     // `capture_types` (authoritative; the same source the closure BODY's
-    // `shared_capture_slots` uses, so both ends of the cell agree) or the
-    // slot's inferred `slot_kinds` entry. This mirrors the interpreter,
+    // `shared_capture_slots` uses, so both ends of the cell agree), checked
+    // unconditionally against the slot's inferred `slot_kinds` entry when
+    // both are present. This mirrors the interpreter,
     // which takes the kind off the §2.7.7 parallel-kind stack track in
     // `op_alloc_shared_local`
     // (`shape-vm/src/executor/variables/mod.rs`) — same producer, same
@@ -1575,145 +1577,5 @@ mod phase_h2_finalizer_tests {
         }
         assert_eq!(Arc::strong_count(&observer), 1);
         drop(observer);
-    }
-}
-
-// W11: gated out — body uses deleted `shape_value::ValueWord` /
-// `ValueWordExt` API. Kinded-FFI replacement deferred to §2.7.4 Phase 2c.
-#[cfg(any())]
-#[cfg(test)]
-mod session_1_shared_local_lifecycle_tests {
-    //! Session 1 Commit 3 unit tests for
-    //! `jit_alloc_shared_cell` / `jit_arc_shared_release`.
-    //!
-    //! These helpers are the JIT-side counterparts of the interpreter
-    //! handlers `op_alloc_shared_local` / `op_drop_shared_local`. The
-    //! tests pin:
-    //!   * alloc produces a non-null 8-byte aligned `*const SharedCell`
-    //!     with the expected initial ValueWord bits;
-    //!   * release consumes exactly one strong share and (when that was
-    //!     the last share) frees the allocation;
-    //!   * alloc + retain + release balances the refcount bookkeeping
-    //!     exactly as the outer-scope lifecycle contract requires.
-    use super::*;
-    use shape_value::v2::closure_layout::{SHARED_CELL_VALUE_OFFSET, SharedCell};
-    use shape_value::{ValueWord, ValueWordExt};
-    use std::sync::Arc;
-
-    #[test]
-    fn session1_ffi_alloc_shared_cell_roundtrip() {
-        // Allocate a fresh shared cell from a well-formed ValueWord bit
-        // pattern and verify the payload is readable at
-        // `SHARED_CELL_VALUE_OFFSET` via a plain pointer dereference
-        // (matching how the JIT's inline lock-gated path indexes the
-        // payload).
-        let initial = ValueWord::from_i64(1234).into_raw_bits();
-        let ptr = unsafe { jit_alloc_shared_cell(initial) };
-        assert_ne!(ptr, 0, "alloc must return a non-null pointer");
-        assert_eq!(ptr % 8, 0, "SharedCell is 8-byte aligned");
-
-        // Reborrow the pointer to inspect the payload (matches JIT read).
-        let cell: &SharedCell = unsafe { &*(ptr as *const SharedCell) };
-        // Initial state: unlocked (state byte = 0).
-        assert_eq!(
-            cell.state.load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "freshly-allocated cell must be unlocked"
-        );
-        // Payload at offset 8 matches initial bits.
-        let payload = unsafe {
-            std::ptr::read((ptr as *const u8).add(SHARED_CELL_VALUE_OFFSET as usize) as *const u64)
-        };
-        assert_eq!(payload, initial, "payload must equal initial_bits");
-
-        // Release the sole strong share — the allocation is freed.
-        unsafe { jit_arc_shared_release(ptr) };
-    }
-
-    #[test]
-    fn session1_ffi_alloc_shared_cell_independent_allocations() {
-        // Two allocations must produce distinct pointers, each
-        // holding their own initial payload.
-        let a = unsafe { jit_alloc_shared_cell(ValueWord::from_i64(10).into_raw_bits()) };
-        let b = unsafe { jit_alloc_shared_cell(ValueWord::from_i64(20).into_raw_bits()) };
-        assert_ne!(a, 0);
-        assert_ne!(b, 0);
-        assert_ne!(a, b, "independent allocations must yield distinct pointers");
-        unsafe {
-            jit_arc_shared_release(a);
-            jit_arc_shared_release(b);
-        }
-    }
-
-    #[test]
-    fn session1_ffi_arc_shared_release_null_is_noop() {
-        // `jit_arc_shared_release(0)` mirrors the interpreter's
-        // null-pointer guard in `op_drop_shared_local` and must be a
-        // silent no-op (defense-in-depth against codegen bugs).
-        unsafe { jit_arc_shared_release(0) };
-    }
-
-    #[test]
-    fn session1_ffi_alloc_retain_release_strong_count_balanced() {
-        // Full outer-scope + closure-capture lifecycle: alloc produces
-        // one share, retain bumps to 2, the outer release takes it
-        // back to 1, the capture release takes it to 0 and frees.
-        let initial = ValueWord::from_i64(7).into_raw_bits();
-        let ptr = unsafe { jit_alloc_shared_cell(initial) };
-        // Observer: take an extra share to probe the refcount.
-        let arc_observer: Arc<SharedCell> = unsafe {
-            Arc::increment_strong_count(ptr as *const SharedCell);
-            Arc::from_raw(ptr as *const SharedCell)
-        };
-        // observer + alloc = 2 strong shares.
-        assert_eq!(Arc::strong_count(&arc_observer), 2);
-
-        // Simulate `ClosureCapture` operand path: retain one more share.
-        let _retained = unsafe { jit_arc_shared_retain(ptr) };
-        assert_eq!(Arc::strong_count(&arc_observer), 3);
-
-        // Outer-scope release (slot's share).
-        unsafe { jit_arc_shared_release(ptr) };
-        assert_eq!(Arc::strong_count(&arc_observer), 2);
-
-        // Capture release.
-        unsafe { jit_arc_shared_release(ptr) };
-        assert_eq!(Arc::strong_count(&arc_observer), 1);
-
-        // Last share is the observer — drop it to free.
-        drop(arc_observer);
-    }
-
-    #[test]
-    fn session1_ffi_shared_cell_value_roundtrip_via_lock_helpers() {
-        // Alloc, lock-gated write via FFI helpers (mirroring the JIT's
-        // inline lock path with contended fallback), locked-gated read
-        // returns the written bits.
-        let ptr = unsafe { jit_alloc_shared_cell(ValueWord::from_i64(100).into_raw_bits()) };
-        unsafe {
-            // Take the lock via the contended helper (always safe even
-            // when uncontended).
-            jit_shared_lock_contended(ptr);
-            // Write a new value at offset 8.
-            std::ptr::write(
-                (ptr as *mut u8).add(SHARED_CELL_VALUE_OFFSET as usize) as *mut u64,
-                ValueWord::from_i64(500).into_raw_bits(),
-            );
-            jit_shared_unlock_contended(ptr);
-
-            // Read back.
-            jit_shared_lock_contended(ptr);
-            let v = std::ptr::read(
-                (ptr as *const u8).add(SHARED_CELL_VALUE_OFFSET as usize) as *const u64
-            );
-            jit_shared_unlock_contended(ptr);
-            assert_eq!(
-                v,
-                ValueWord::from_i64(500).into_raw_bits(),
-                "locked write must be visible to locked read on the same cell"
-            );
-
-            jit_arc_shared_release(ptr);
-        }
     }
 }

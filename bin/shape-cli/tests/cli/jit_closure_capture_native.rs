@@ -36,8 +36,9 @@
 //!   §2.7.8). The JIT's shared-cell store lowering writes raw bits with no
 //!   retain and no release-of-previous, so stamping a refcounted kind on the
 //!   cell would arm `SharedCell::drop` to retire a share the cell never owned.
-//!   The store path must be made refcount-correct first. Scalar `var` captures
-//!   (N6) ARE covered — their `Drop` arm is a no-op.
+//!   The store path must be made refcount-correct first. N9 pins this as a
+//!   clean, exactly-once fallback rather than the pre-fix process abort.
+//!   Scalar `var` captures (N6-N8) ARE native — their `Drop` arm is a no-op.
 //! - Capture of a MODULE-level binding: rejected by the W39 F1 module-binding
 //!   function-body SURFACE (module bindings are not MIR places). This is the
 //!   class `f1`/`f2`/`f3` in the fallback matrix already pin.
@@ -153,6 +154,61 @@ fn assert_reaches_native_jit(fixture: &str, expected_stdout_contains: &str) {
     );
 }
 
+/// Assert an intentionally unsupported Shared-cell payload surfaces at the
+/// JIT compilation boundary and executes once under the interpreter.
+///
+/// The exit-code assertion is load-bearing: before the typed allocator fix,
+/// this class reached a `todo!()` behind `extern "C"` and aborted with 134.
+fn assert_shared_payload_falls_back_cleanly(fixture: &str, expected_stdout_contains: &str) {
+    let vm = run_shape("vm", fixture);
+    let jit = run_shape("jit", fixture);
+
+    assert_eq!(
+        vm.exit_code,
+        Some(0),
+        "{fixture}: VM mode should exit 0; stderr={}",
+        vm.stderr
+    );
+    assert_eq!(
+        jit.exit_code,
+        Some(0),
+        "{fixture}: JIT mode must cleanly fall back (not abort); stderr={}",
+        jit.stderr
+    );
+    assert!(
+        vm.stdout.contains(expected_stdout_contains),
+        "{fixture}: VM stdout should contain `{expected_stdout_contains}`; stdout={}",
+        vm.stdout
+    );
+    assert_eq!(
+        jit.stdout, vm.stdout,
+        "{fixture}: JIT fall-through must preserve VM output; vm={:?} jit={:?} stderr={}",
+        vm.stdout, jit.stdout, jit.stderr
+    );
+    assert_eq!(
+        count_fallback_lines(&jit.stderr),
+        1,
+        "{fixture}: unsupported refcounted Shared payload must emit exactly one \
+         [jit-fallback] line; stderr={}",
+        jit.stderr
+    );
+    assert_eq!(
+        count_fallback_lines(&vm.stderr),
+        0,
+        "{fixture}: VM mode must not emit [jit-fallback]; stderr={}",
+        vm.stderr
+    );
+    let fallback = jit
+        .stderr
+        .lines()
+        .find(|line| line.starts_with("[jit-fallback]"))
+        .unwrap_or("");
+    assert!(
+        fallback.contains("ADR-006 §2.7.8 / Q10") && fallback.contains("SharedCell"),
+        "{fixture}: fallback must name the typed SharedCell proof boundary; got={fallback}"
+    );
+}
+
 /// N1 — immutable capture of a function-local scalar (`let value = 41`).
 /// This is the canonical reproducer for the capture double-count: the closure
 /// has `captures_count = 1`, `arity = 1`, so the old signature declared
@@ -209,4 +265,24 @@ fn jit_fallback_absent_for_multi_capture_with_user_param() {
 #[test]
 fn jit_fallback_absent_for_shared_var_capture() {
     assert_reaches_native_jit("n6-capture-shared-var.shape", "42");
+}
+
+/// N7 — Shared Bool capture exercises the I8 payload path.
+#[test]
+fn jit_fallback_absent_for_shared_bool_capture() {
+    assert_reaches_native_jit("n7-capture-shared-bool.shape", "true");
+}
+
+/// N8 — Shared Float64 capture exercises the F64 ↔ I64 bitcast path.
+#[test]
+fn jit_fallback_absent_for_shared_float_capture() {
+    assert_reaches_native_jit("n8-capture-shared-float.shape", "1.5");
+}
+
+/// N9 — a refcounted Shared payload is still unsupported, but it must refuse
+/// before emitting an allocation and fall through exactly once. This pins the
+/// nounwind-abort regression that motivated the typed allocator boundary.
+#[test]
+fn jit_refcounted_shared_string_capture_falls_back_cleanly() {
+    assert_shared_payload_falls_back_cleanly("n9-capture-shared-string.shape", "abb");
 }

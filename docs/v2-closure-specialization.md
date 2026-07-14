@@ -26,20 +26,26 @@ a relocation to it — the WHOLE PROGRAM deopted to the interpreter. Every such
 program still printed the right answer, which is why this stayed invisible: it
 was a silent performance cliff, not a wrong result.
 
-Current, **measured** native-JIT reachability per capture lowering
+Current native-JIT reachability per capture lowering
 (`tests/smokes-jit-closure/` + `bin/shape-cli/tests/cli/jit_closure_capture_native.rs`,
-each asserted on exit code + stdout equality + **zero** `[jit-fallback]` lines):
+with native cases asserted on exit code + stdout equality + **zero**
+`[jit-fallback]` lines):
 
 | Capture lowering | Native JIT? |
 |---|---|
 | Immutable capture of a local scalar (`let x = 41`) | YES (fixed 2026-07-14) |
 | Immutable capture of a local heap value (`string`, `Array<int>`) | YES (fixed 2026-07-14) |
 | OwnedMutable capture (`let mut n`, mutated in the closure) | YES (was already native) |
-| **Shared capture** (`var n`, mutated in the closure) | **NO — process ABORT.** `jit_alloc_shared_cell` (`crates/shape-jit/src/ffi/object/closure.rs`) is a `todo!()`: the FFI carries no `NativeKind` companion for the cell, and ADR-006 §2.7.8 forbids defaulting it. Because the fn is `extern "C"` (nounwind) the refusal surfaces as SIGABRT rather than a clean deopt. |
+| Shared capture with a proven scalar payload (`int`, `bool`, `number`) | **YES.** `jit_alloc_shared_cell(initial_bits, kind_code)` receives the validated `NativeKind`; the declaring frame and closure body consume the same evidence. |
+| Shared capture with a refcounted payload (`var s = "a"`) | **NO — clean whole-function fallback.** The current cell-store lowering cannot retain the new payload and release the previous payload, so codegen refuses before allocating a cell. The CLI matrix pins one fallback and no abort. |
 | **Capture of a module-level binding** | **NO — whole-program deopt.** Rejected by the W39 F1 module-binding function-body SURFACE: module bindings are not MIR places, so the JIT body lowering has no compile-time side table for that storage. This is the class pinned by `tests/smokes-fallback/f1`–`f3`. |
 
 Do not re-assert "closure specialization is 100% landed" without qualifying the
-tier. The two NO rows above are the honest remaining gaps.
+tier. Refcounted Shared payloads and module-binding access are the honest
+remaining capture-related native-tier gaps. The historical `f3` filename still
+mentions closure capture, but its current contract is the module-binding
+`AllocSharedModuleBinding` fallback; local capture nativity must never weaken
+that expectation.
 
 **V3-deferred residual** (per §14.7 and `/home/dev/.claude/plans/i-want-a-complete-foamy-eich.md` §out-of-scope):
 

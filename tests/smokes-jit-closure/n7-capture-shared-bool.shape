@@ -1,0 +1,8 @@
+// N7 — Shared capture with a Bool payload (I8 in Cranelift).
+fn answer() -> bool {
+  var enabled = false
+  let enable = || { enabled = true }
+  enable()
+  enabled
+}
+print(answer())

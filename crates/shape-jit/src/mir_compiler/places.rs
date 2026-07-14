@@ -1043,6 +1043,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // JIT'd read/write on the slot.
                 if self.shared_local_slots.contains_key(slot) {
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                    let kind = self.validated_shared_local_kind(*slot)?;
                     let cell_ptr = self.builder.use_var(*var);
                     self.emit_shared_lock(cell_ptr);
                     let value = self.builder.ins().load(
@@ -1052,11 +1053,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         SHARED_CELL_VALUE_OFFSET,
                     );
                     self.emit_shared_unlock(cell_ptr);
-                    let value = match super::types::slot_kind_for_local(&self.slot_kinds, slot.0) {
-                        Some(kind) => self.ensure_kind(value, kind),
-                        None => value,
-                    };
-                    return Ok(value);
+                    return Ok(self.ensure_kind(value, kind));
                 }
                 Ok(self.builder.use_var(*var))
             }
@@ -1331,12 +1328,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // guard.
                 if self.shared_local_slots.contains_key(slot) {
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                    let kind = self.validated_shared_local_kind(*slot)?;
                     let var = *self
                         .locals
                         .get(slot)
                         .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                     let cell_ptr = self.builder.use_var(var);
-                    let bits = self.coerce_value_to_i64_bits(val);
+                    let typed_value = self.ensure_kind(val, kind);
+                    let bits = self.coerce_value_to_i64_bits(typed_value);
                     self.emit_shared_lock(cell_ptr);
                     self.builder.ins().store(
                         MemFlags::trusted(),

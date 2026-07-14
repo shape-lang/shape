@@ -24,6 +24,7 @@ mod conversions;
 mod ownership;
 mod places;
 mod rvalues;
+mod shared_cells;
 mod statements;
 mod terminators;
 pub(crate) mod types;
@@ -489,8 +490,9 @@ pub struct MirToIR<'a, 'b> {
     /// Effects on the lowering pipeline:
     /// - `initialize_shared_local_slots` (called once at the start of
     ///   `compile`) allocates a fresh `Arc<SharedCell>` per slot via
-    ///   `jit_alloc_shared_cell(NONE_BITS)` and stores the pointer
-    ///   bits into the slot's Cranelift variable.
+    ///   `jit_alloc_shared_cell(NONE_BITS, kind_code)` and stores the pointer
+    ///   bits into the slot's Cranelift variable. The kind code comes from the
+    ///   same validated evidence consumed by declaring-frame reads/writes.
     /// - `read_place(Local(s))` emits the inline lock-gated
     ///   `load.i64 [cell_ptr + SHARED_CELL_VALUE_OFFSET]` (same lowering
     ///   as `shared_capture_slots` — see
@@ -521,11 +523,11 @@ pub struct MirToIR<'a, 'b> {
     /// same producer, statically — the `ClosureLayout`'s `capture_types`
     /// (authoritative) or the slot's inferred `slot_kinds` entry.
     ///
-    /// `None` means NO kind was derivable for the slot. It is recorded
-    /// rather than silently dropped so `initialize_shared_local_slots` can
-    /// surface-and-stop (whole-function JIT bail) instead of Bool-defaulting
-    /// the cell's companion, which §2.7.8 #4 names as forbidden.
-    pub(crate) shared_local_slots: HashMap<SlotId, Option<NativeKind>>,
+    /// Candidate producer evidence is retained until the pre-emission proof
+    /// validates one authoritative kind. Allocation and declaring-frame
+    /// reads/writes all consume that same proof; disagreement is an
+    /// unconditional codegen refusal in debug and release builds.
+    pub(crate) shared_local_slots: HashMap<SlotId, shared_cells::SharedLocalKindEvidence>,
 
     // ── JIT-side back-patch for unresolved ClosurePlaceholder ──────
     /// Per-placeholder function_id, populated at construction by scanning the
@@ -1031,204 +1033,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `jit_make_closure` FFI path (Phase H will delete that).
         let non_escaping_closure_slots = mir_data.storage_plan.non_escaping_closure_slots.clone();
 
-        // Session 1 Commit 3: scan `storage_plan` for outer-scope
-        // local slots that actually get promoted to
-        // `Arc<SharedCell>` storage at runtime. The bytecode
-        // compiler emits `AllocSharedLocal` ONLY when a slot is
-        // captured by a closure AND gets the Shared capture kind —
-        // not for every SharedCow slot. The `SHAPE_V2_VAR_SHAREDCOW`
-        // default classifies every `var` binding as SharedCow even
-        // when it never escapes, so we cannot use the storage class
-        // alone.
-        //
-        // The authoritative signal is `slot_semantics[slot]
-        // .escape_status == Captured` AND
-        // `slot_classes[slot] == SharedCow`. Captured-by-closure +
-        // SharedCow is the exact condition under which the bytecode
-        // compiler emits `AllocSharedLocal` (see
-        // `expressions/closures.rs`'s `is_shared_local_slot` arm).
-        //
-        // Param slots (captures) are further excluded because they
-        // are governed by the capture-side-tables
-        // `owned_mutable_capture_slots` / `shared_capture_slots`.
-        //
-        // cell-identity #1: the storage-plan scan alone is NOT
-        // sufficient. The MIR's storage planner classifies a slot's
-        // ownership from `binding_semantics`, and on some pipelines
-        // a `var` binding arrives at the planner as
-        // `BindingOwnershipClass::OwnedImmutable` rather than
-        // `Flexible` — so Rule 1b (`SHAPE_V2_VAR_SHAREDCOW` +
-        // Flexible → SharedCow) does not fire and the slot lands as
-        // `Direct` / `LocalMutablePtr` even though the bytecode
-        // emits the `AllocSharedLocal` lifecycle against it. The
-        // second scan below covers the gap by picking up every slot
-        // that is an operand of a `ClosureCapture` whose layout
-        // declares a `CaptureKind::Shared` capture at that position.
-        use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
-        let param_slot_set: HashSet<SlotId> = mir_data.mir.param_slots.iter().copied().collect();
-        // ADR-006 §2.7.8 / Q10: the map value is the cell's INNER NativeKind
-        // (the payload kind stamped into `SharedCell::new`), sourced from the
-        // producer at compile time — never fabricated from bits, never
-        // Bool-defaulted. `None` = kind-source gap; recorded so
-        // `initialize_shared_local_slots` can surface-and-stop.
-        let mut shared_local_slots: HashMap<SlotId, Option<NativeKind>> = HashMap::new();
-        for (slot, class) in &mir_data.storage_plan.slot_classes {
-            if !matches!(class, BindingStorageClass::SharedCow) {
-                continue;
-            }
-            if param_slot_set.contains(slot) {
-                continue;
-            }
-            // Only slots captured by a closure get the cell
-            // promotion at the bytecode level. A `var` that never
-            // escapes into a closure stays plain-valued in the
-            // interpreter — the JIT must match that semantics or
-            // diverge from the interpreter's view of the same slot.
-            let is_captured = mir_data
-                .storage_plan
-                .slot_semantics
-                .get(slot)
-                .map(|sem| matches!(sem.escape_status, EscapeStatus::Captured))
-                .unwrap_or(false);
-            if !is_captured {
-                continue;
-            }
-            // Kind source (a): the slot's own inferred kind. `slot_kinds`
-            // is the same table `read_place` consults to `ensure_kind` the
-            // value it loads back OUT of this very cell, so the cell's
-            // companion and its readers agree by construction.
-            let kind = types::slot_kind_for_local(&slot_kinds, slot.0);
-            shared_local_slots.insert(*slot, kind);
-        }
-
-        // cell-identity #1: augment `shared_local_slots` by scanning
-        // `ClosureCapture` statements whose `function_id` resolves to a
-        // `ClosureLayout` with `CaptureKind::Shared` captures. The MIR
-        // storage planner sometimes classifies `var` bindings as
-        // `LocalMutablePtr` (not `SharedCow`) when the ownership class
-        // for the slot is stored as `OwnedImmutable` in the MIR's
-        // `binding_semantics` table, so the storage-plan scan above
-        // misses them. The bytecode compiler still emits `AllocSharedLocal`
-        // / `LoadSharedLocal` / `StoreSharedLocal` / `DropSharedLocal`
-        // for those slots — and the closure body's JIT compilation
-        // treats its capture param slot as `shared_capture_slots`
-        // (it expects a `*const SharedCell` pointer). If the declaring
-        // frame's JIT doesn't allocate an `Arc<SharedCell>` and doesn't
-        // lock-gated route reads/writes through it, the closure gets a
-        // plain scalar bit pattern as its "cell pointer" — and the
-        // closure's first `jit_arc_shared_retain` on that value
-        // segfaults. Driving the side-table off the layout's
-        // `CaptureKind::Shared` mask closes the gap: any slot that is
-        // an operand of a Shared capture in a call to a layout-carrying
-        // function is promoted to the Arc<SharedCell> lowering path.
-        use shape_value::v2::closure_layout::CaptureKind;
-        use shape_vm::mir::types::{Operand as MirOperand, Place as MirPlace, StatementKind};
-        for block in &mir_data.mir.blocks {
-            for stmt in &block.statements {
-                let StatementKind::ClosureCapture {
-                    operands,
-                    function_id,
-                    ..
-                } = &stmt.kind
-                else {
-                    continue;
-                };
-                let Some(fid) = *function_id else {
-                    continue;
-                };
-                let Some(layout) = closure_function_layouts.get(&fid) else {
-                    continue;
-                };
-                for (i, op) in operands.iter().enumerate() {
-                    if i >= layout.capture_count() {
-                        break;
-                    }
-                    if !matches!(layout.capture_storage_kind(i), CaptureKind::Shared) {
-                        continue;
-                    }
-                    let root = match op {
-                        MirOperand::Copy(p) | MirOperand::Move(p) | MirOperand::MoveExplicit(p) => {
-                            match p {
-                                MirPlace::Local(s) => Some(*s),
-                                _ => None,
-                            }
-                        }
-                        MirOperand::Constant(_) => None,
-                    };
-                    if let Some(slot) = root {
-                        if param_slot_set.contains(&slot) {
-                            // Capture-side slot: handled by the
-                            // `shared_capture_slots` side-table via
-                            // `register_owned_mutable_capture_slots`.
-                            continue;
-                        }
-                        // Kind source (b), AUTHORITATIVE: the closure
-                        // layout's `capture_types[i]`. This is the same
-                        // source `register_owned_mutable_capture_slots`
-                        // uses to populate `shared_capture_slots` on the
-                        // closure-BODY end of this cell, so both ends stamp
-                        // and consume the same kind by construction
-                        // (ADR-006 §2.7.8 lockstep invariant).
-                        //
-                        // NOT `layout.capture_inner_kind(i)`: that returns a
-                        // `FieldKind`, whose `Ptr` arm carries no `HeapKind`
-                        // and therefore cannot reconstruct a full
-                        // `NativeKind` without fabricating one.
-                        let layout_kind = layout
-                            .capture_types
-                            .get(i)
-                            .and_then(types::elem_slot_kind_for_concrete);
-                        let inferred_kind = types::slot_kind_for_local(&slot_kinds, slot.0);
-                        // Cross-check the two kind sources on debug builds
-                        // (ADR-006 §2.7.8). A disagreement means one end of
-                        // the cell would stamp a different kind than the
-                        // other end consumes.
-                        //
-                        // Scoped to the kinds that actually get STAMPED:
-                        // `initialize_shared_local_slots` refuses every
-                        // refcounted kind (whole-function JIT bail) before a
-                        // cell is constructed, so a disagreement between two
-                        // heap kinds has no cell to corrupt. And there is a
-                        // live one — a captured `var s = "a"` yields
-                        // layout=StringV2 (v2-raw carrier) but
-                        // slot_kinds=String (legacy Arc carrier). Asserting
-                        // on it would turn a clean, correct codegen refusal
-                        // into a panic. It is recorded here rather than
-                        // silently tolerated: if the heap-payload cell store
-                        // path is ever made refcount-correct, that
-                        // disagreement must be resolved FIRST, because then
-                        // the kind would be stamped and the two ends of the
-                        // cell would retire the payload through different
-                        // release paths.
-                        if let (Some(l), Some(i)) = (layout_kind, inferred_kind) {
-                            debug_assert!(
-                                l == i || l.is_refcounted() || i.is_refcounted(),
-                                "ADR-006 §2.7.8: SharedCell inline-scalar kind-source \
-                                 disagreement on slot {slot} — closure layout says {l:?}, \
-                                 slot_kinds says {i:?}. The declaring frame and the closure body \
-                                 would stamp/consume different kinds for the same cell.",
-                            );
-                        }
-                        let chosen = layout_kind.or(inferred_kind);
-                        // The layout is authoritative; only upgrade a
-                        // previously-recorded `None`, never downgrade a
-                        // recorded kind to `None`.
-                        match shared_local_slots.entry(slot) {
-                            std::collections::hash_map::Entry::Occupied(mut e) => {
-                                if e.get().is_none() {
-                                    e.insert(chosen);
-                                } else if layout_kind.is_some() {
-                                    e.insert(layout_kind);
-                                }
-                            }
-                            std::collections::hash_map::Entry::Vacant(e) => {
-                                e.insert(chosen);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let shared_local_slots = shared_cells::discover_shared_local_slots(
+            mir_data,
+            &slot_kinds,
+            &closure_function_layouts,
+        );
 
         // JIT-side fallback for unresolved `ClosurePlaceholder` constants.
         // See the `closure_placeholder_fids` doc-comment on `MirToIR` for

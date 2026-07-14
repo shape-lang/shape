@@ -1121,17 +1121,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // closure drop walks `shared_capture_mask` and
                     // reclaims each share with `Arc::from_raw`.
                     //
-                    // Wave C.2 note: the SharedCell itself was
+                    // The SharedCell itself is
                     // allocated upstream by `initialize_shared_local_slots`
-                    // (in `blocks.rs`) via the legacy generic
-                    // `jit_alloc_shared_cell(NONE_BITS)` — which writes
-                    // 8 bytes of NaN-boxed null at the cell's payload
-                    // offset. Wave-B's per-kind shared writers
-                    // sign-/zero-extend to 8 bytes on each subsequent
-                    // store, so reads at the kind's native width
-                    // truncate correctly. Adding a typed
-                    // `jit_alloc_shared_cell_typed` is a small follow-up
-                    // (Wave G); the legacy entry point stays for now.
+                    // via `jit_alloc_shared_cell(NONE_BITS, kind_code)`. The
+                    // declaring frame validates the ClosureLayout and inferred
+                    // slot evidence before emitting any allocation, and every
+                    // subsequent frame-side read/write consumes that same
+                    // NativeKind. Refcounted payload kinds refuse at codegen
+                    // until the cell store path retains the new value and
+                    // releases the previous one.
                     //
                     // SAFETY: the operand produces a non-null
                     // `*const SharedCell` whose Arc strong count ≥ 1

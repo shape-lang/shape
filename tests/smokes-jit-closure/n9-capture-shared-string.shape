@@ -1,0 +1,10 @@
+// N9 — Shared capture with a refcounted payload.
+// The current JIT cell-store path cannot retain the new value and release the
+// previous value, so codegen must cleanly refuse before allocating a cell.
+fn answer() -> string {
+  var text = "a"
+  let append = || { text = text + "bb" }
+  append()
+  text
+}
+print(answer())
