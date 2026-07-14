@@ -120,10 +120,7 @@ pub(crate) fn infer_plan(facts: &CaptureBindingFacts) -> CapturePlan {
         || is_flexible_capture;
 
     if !needs_cell {
-        return CapturePlan {
-            kind: CaptureKind::Immutable,
-            access: CaptureAccess::Param,
-        };
+        return CapturePlan::new(CaptureKind::Immutable, CaptureAccess::Param);
     }
 
     let is_local = facts.is_local();
@@ -171,7 +168,7 @@ pub(crate) fn infer_plan(facts: &CaptureBindingFacts) -> CapturePlan {
         CaptureKind::Immutable => CaptureAccess::MutableCell,
     };
 
-    CapturePlan { kind, access }
+    CapturePlan::new(kind, access)
 }
 
 /// THE OTHER HALF OF THE SELECTOR — the declared path.
@@ -266,19 +263,19 @@ pub(crate) fn lower_declared(
                 // `let` / a param: snapshot by value into a leading closure
                 // param. The heap mask (if the type is a pointer) is derived
                 // from the TYPE by the layout, not from the mode.
-                Some(BindingOwnershipClass::OwnedImmutable) => Ok(CapturePlan {
-                    kind: CaptureKind::Immutable,
-                    access: CaptureAccess::Param,
-                }),
+                Some(BindingOwnershipClass::OwnedImmutable) => Ok(CapturePlan::new(
+                    CaptureKind::Immutable,
+                    CaptureAccess::Param,
+                )),
                 // `let mut`: the unique owner moves into the closure's Box cell.
                 // Reached EVEN WHEN THE BODY ONLY READS IT — the declaration,
                 // not the body, decides. The source local is then poisoned
                 // (`captured_let_mut_moved`), so a later outer read is a
                 // use-after-move error.
-                Some(BindingOwnershipClass::OwnedMutable) => Ok(CapturePlan {
-                    kind: CaptureKind::OwnedMutable,
-                    access: CaptureAccess::OwnedMutableCell,
-                }),
+                Some(BindingOwnershipClass::OwnedMutable) => Ok(CapturePlan::new(
+                    CaptureKind::OwnedMutable,
+                    CaptureAccess::OwnedMutableCell,
+                )),
                 // Flexible handled above; None = the type tracker could not
                 // classify the binding. REJECT — there is no `Immutable`
                 // fallback on the declared path (that is how a declaration
@@ -301,10 +298,10 @@ pub(crate) fn lower_declared(
             }
             // `var` (local or module), a sibling-promoted `SharedCell`, or a
             // module binding: one word, one kind.
-            Ok(CapturePlan {
-                kind: CaptureKind::Shared,
-                access: CaptureAccess::SharedCell,
-            })
+            Ok(CapturePlan::new(
+                CaptureKind::Shared,
+                CaptureAccess::SharedCell,
+            ))
         }
     }
 }

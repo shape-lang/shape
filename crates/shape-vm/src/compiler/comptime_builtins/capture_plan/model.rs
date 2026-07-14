@@ -100,6 +100,10 @@ pub(crate) struct CapturePlan {
 }
 
 impl CapturePlan {
+    pub(super) const fn new(kind: CaptureKind, access: CaptureAccess) -> Self {
+        Self { kind, access }
+    }
+
     pub(crate) fn kind(&self) -> CaptureKind {
         self.kind
     }
