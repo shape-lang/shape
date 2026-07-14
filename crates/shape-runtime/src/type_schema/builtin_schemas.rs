@@ -92,6 +92,47 @@ pub const COMPTIME_FROZEN_CALLABLE_SCHEMA: &str = "\u{1}comptime:FrozenCallable"
 /// string-typed E5 path — do NOT reuse).
 pub const COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:ParamDescriptor";
 
+/// ADR-009 B7 (Stage 2, Dec 50/94) — unspellable schema identities for the four
+/// composite `FrozenType` payloads and their element rows. Each carries only
+/// typed descriptor data: catalog-ordinal variant ids on the wrapping enum plus
+/// 128-bit child identity halves and typed nested objects — never a rendered
+/// type-name string, never a string `.kind` field (Dec 50/94 required
+/// rejection). The SOH prefix keeps every carrier unspellable so source can
+/// never forge a composite descriptor.
+///
+/// `FrozenTuple` carries the ordered `elements` array (each a
+/// [`COMPTIME_TUPLE_ELEMENT_SCHEMA`] object: positional index + element type
+/// identity halves). `FrozenRecord` carries the normalized `fields` array (each
+/// a [`COMPTIME_RECORD_FIELD_SCHEMA`] object: owner-bound hygienic member
+/// identity halves + field type identity halves + `optional`). `FrozenReference`
+/// carries the `mutable` flag + the referent type identity halves.
+/// `FrozenUnion` carries the set `members` array (each a
+/// [`COMPTIME_UNION_MEMBER_SCHEMA`] object: member type identity halves).
+pub const COMPTIME_FROZEN_TUPLE_SCHEMA: &str = "\u{1}comptime:FrozenTuple";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. One positional tuple element.
+pub const COMPTIME_TUPLE_ELEMENT_SCHEMA: &str = "\u{1}comptime:TupleElement";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. The normalized structural record.
+pub const COMPTIME_FROZEN_RECORD_SCHEMA: &str = "\u{1}comptime:FrozenRecord";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. One normalized record field —
+/// owner-bound member identity (never a source-name string, Dec 57).
+pub const COMPTIME_RECORD_FIELD_SCHEMA: &str = "\u{1}comptime:RecordField";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. A reference type (`&T` / `&mut T`).
+pub const COMPTIME_FROZEN_REFERENCE_SCHEMA: &str = "\u{1}comptime:FrozenReference";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. The normalized (deduped, byte-sorted)
+/// union.
+pub const COMPTIME_FROZEN_UNION_SCHEMA: &str = "\u{1}comptime:FrozenUnion";
+/// See [`COMPTIME_FROZEN_TUPLE_SCHEMA`]. One union member type identity.
+pub const COMPTIME_UNION_MEMBER_SCHEMA: &str = "\u{1}comptime:UnionMember";
+/// ADR-009 B7 Slice 2 (Stage 2, Dec 50/94) — the `FrozenType::Parameter`
+/// payload carrier (`TypeParamDescriptor<T>`): the type parameter's stable
+/// base-fn-scoped frozen identity halves + a bound-set array. The bounds
+/// element mirrors [`COMPTIME_FROZEN_ERASED_SCHEMA`] exactly — trait-reference
+/// bound descriptors are ticket B2 territory, so the element is uninhabited
+/// and the array is provably empty today (the honest "bounds where
+/// representable" form, never an inference hole). The SOH prefix keeps it
+/// unspellable so source can never forge a parameter descriptor.
+pub const COMPTIME_FROZEN_PARAMETER_SCHEMA: &str = "\u{1}comptime:FrozenParameter";
+
 /// ADR-009 B5 (Stage 2, Dec 55-59) — unspellable schema identities for the
 /// nominal-shape descriptor family carried by `FrozenType::Nominal`. Each is a
 /// typed descriptor carrier (owner-bound member identities, never source-name
@@ -712,6 +753,93 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
             .int_field("identity_high")
             .int_field("identity_low")
             .register(registry);
+
+    // -- ADR-009 B7 (Stage 2, Dec 50/94): composite payload descriptors -------
+    //
+    // The four composite `FrozenType` payloads and their typed element rows.
+    // Element schemas register BEFORE the array-holding wrappers that reference
+    // them. Every field is a typed identity half or a bool — no string type-name
+    // / kind field (Dec 50/94 required rejection). Each carrier is walled by its
+    // own `runtime_lift_rejection` arm registered in the SAME commit.
+
+    // `TupleElement`: one positional element — the position index + the element
+    // type's frozen identity halves.
+    let _comptime_tuple_element = TypeSchemaBuilder::new(COMPTIME_TUPLE_ELEMENT_SCHEMA)
+        .int_field("index")
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .register(registry);
+
+    // `FrozenTuple`: the ordered `elements` array (each a `TupleElement` object —
+    // a TYPED element, so no `FieldType::Any`, no post-inference whitelist).
+    let _comptime_frozen_tuple = TypeSchemaBuilder::new(COMPTIME_FROZEN_TUPLE_SCHEMA)
+        .array_field(
+            "elements",
+            FieldType::Object(COMPTIME_TUPLE_ELEMENT_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // `RecordField`: one normalized record field — owner-bound hygienic member
+    // identity halves (`#f`, Dec 57: NEVER a source-name string), the field
+    // type's frozen identity halves, and the `optional` flag.
+    let _comptime_record_field = TypeSchemaBuilder::new(COMPTIME_RECORD_FIELD_SCHEMA)
+        .int_field("member_high")
+        .int_field("member_low")
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .bool_field("optional")
+        .register(registry);
+
+    // `FrozenRecord`: the normalized structural record — the `fields` array
+    // (byte-sorted by member, each a `RecordField` object).
+    let _comptime_frozen_record = TypeSchemaBuilder::new(COMPTIME_FROZEN_RECORD_SCHEMA)
+        .array_field(
+            "fields",
+            FieldType::Object(COMPTIME_RECORD_FIELD_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // `FrozenReference`: the `mutable` flag (`&T` vs `&mut T`) + the referent
+    // type's frozen identity halves.
+    let _comptime_frozen_reference = TypeSchemaBuilder::new(COMPTIME_FROZEN_REFERENCE_SCHEMA)
+        .bool_field("mutable")
+        .int_field("referent_identity_high")
+        .int_field("referent_identity_low")
+        .register(registry);
+
+    // `UnionMember`: one union member — its frozen identity halves.
+    let _comptime_union_member = TypeSchemaBuilder::new(COMPTIME_UNION_MEMBER_SCHEMA)
+        .int_field("type_identity_high")
+        .int_field("type_identity_low")
+        .register(registry);
+
+    // `FrozenUnion`: the set `members` array (deduped, byte-sorted, each a
+    // `UnionMember` object — a singleton union coalesces to its member upstream,
+    // so a `FrozenUnion` always carries ≥2 members).
+    let _comptime_frozen_union = TypeSchemaBuilder::new(COMPTIME_FROZEN_UNION_SCHEMA)
+        .array_field(
+            "members",
+            FieldType::Object(COMPTIME_UNION_MEMBER_SCHEMA.to_string()),
+        )
+        .register(registry);
+
+    // -- ADR-009 B7 Slice 2 (Stage 2, Dec 50/94): the Parameter payload --------
+    //
+    // `FrozenParameter`: the payload of `FrozenType::Parameter` — the type
+    // parameter's stable base-fn-scoped frozen identity halves + the bound-set
+    // array. Bounds mirror `FrozenErased.bounds` exactly: trait-reference bound
+    // descriptors are ticket B2 territory (the element is uninhabited), so the
+    // array is provably empty today — the honest "bounds where representable"
+    // form, never an inference hole. The element `FieldType` is informational
+    // (heap_mask + the parallel field-kind track drive reads), matching the
+    // `FrozenErased.bounds` / `__ComptimeFieldDescriptor.annotations` precedent.
+    // Walled by its own `runtime_lift_rejection` arm registered in the SAME
+    // commit. No string type-name / kind field (Dec 50/94 required rejection).
+    let _comptime_frozen_parameter = TypeSchemaBuilder::new(COMPTIME_FROZEN_PARAMETER_SCHEMA)
+        .int_field("identity_high")
+        .int_field("identity_low")
+        .array_field("bounds", FieldType::Any)
+        .register(registry);
 
     let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")
         .string_field("kind")

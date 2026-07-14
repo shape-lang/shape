@@ -142,7 +142,8 @@ errors now propagate out of monomorphization instead of being masked as
 args, specialization cycles) keep their non-error fallback. String
 construction, arity, comptime-only stage, runtime escape, and match
 exhaustiveness rejections all hold inside generic bodies. `Parameter`
-descriptor payloads (`TypeParamDescriptor<T>`) are B7, not yet enabled.
+descriptor payloads (`TypeParamDescriptor<T>`) landed with ADR009-B7 Slice 2
+(see the B7 status entries below).
 
 Book status: behavior is gate-runnable green on VM and JIT; the gate-runnable
 book example lands with F1 or earlier per spec §3.7 (book examples only after
@@ -570,6 +571,105 @@ there, but no `record.field(#name)` call spelling exists — see
 `docs/defections.md`); book-chapter examples land in stage F1 per the program
 spec.
 
+**CURRENT / VM+JIT - the four composite `FrozenType` payloads (ticket
+ADR009-B7, 2026-07-14).** `reflect(TypeRef<T>)` now answers the four composite
+categories with complete structural payloads, joining B6 Callable + B5 Nominal
+to make NINE enabled payloads:
+
+- **`Tuple(FrozenTuple)`** (catalog ordinal 4) — the ordered `elements` array,
+  each a `TupleElement` carrying its positional `index` + the element type's
+  frozen identity halves. Position IS the index.
+- **`Record(FrozenRecord)`** (ordinal 5) — the normalized structural record's
+  `fields` array (byte-sorted by member), each a `RecordField` carrying an
+  owner-bound HYGIENIC member identity (minted from the record's own identity +
+  field name, never a source string — Dec 57), the field's value-type identity,
+  and its `optional` flag. Object intersections normalize to the same Record.
+- **`Reference(FrozenReference)`** (ordinal 7) — the `mutable` flag (`&T` vs
+  `&mut T`) + the referent type's frozen identity halves.
+- **`Union(FrozenUnion)`** (ordinal 8) — the deduped, byte-sorted `members`
+  array (each a `UnionMember` identity); a singleton union coalesces to its
+  member upstream, so a `FrozenUnion` always carries ≥2 members.
+
+Every payload is reconstructed WITHOUT inverting the one-way SHA-256 identity:
+the structural descriptors are threaded on `CanonicalType`, carried through the
+freeze's WIDENED composite memo (site-interned composites) and per-category
+BASE-index maps (composite aliases like `type Pair = [int, string]`), through
+the ONE query surface (`FreezeOverlay::payload_of` /
+`FrozenTypeIndex::payload_for_identity`) — never a partial descriptor, never a
+string `.kind` field. Reference mutability is a typed `bool` (Shape has no
+declared variance/ownership on references — see `docs/defections.md`); the
+`Parameter` payload (`TypeParamDescriptor<T>`) landed with B7 Slice 2 (below),
+leaving the `Existential` witness payload (B3-S3) as the sole named per-category
+R1 rejection. Evidence:
+`tools/shape-test/tests/comptime/reflect.rs::{reflect_on_composite_type_expressions_selects_the_matching_payload_arm,
+tuple_reflects_ordered_element_identities, record_reflects_normalized_fields_with_optionality,
+reference_reflects_mutability_and_referent, union_reflects_normalized_member_identities,
+reflect_on_composite_alias_answers_the_same_composite_payload}` VM+JIT, unit
+`type_reflection/tests.rs::payload_query::site_interned_composites_answer_full_structural_payloads`,
+`comptime.rs::reflect_composite_payloads_decode_through_the_injected_model`,
+`builtin_schemas` ordinal round-trip, and
+`tests/annotations_comptime/frozen_reflection.rs::annotation_handler_reflect_composite_payload_reaches_generated_fn`;
+LSP `FrozenType` completion auto-derives the four variants from the shared
+catalog (`tests/lsp/typed_comptime.rs`, `completion/mod.rs`). Book-chapter
+examples land in stage F1 per the program spec.
+
+**CURRENT / VM+JIT - the `Parameter` payload completes the ten-category catalog
+(ticket ADR009-B7 Slice 2, 2026-07-14).** `reflect(TypeRef<T>)` inside a generic
+body now answers `Parameter(FrozenParameter)` (catalog ordinal 2) — the type
+parameter's stable base-fn-scoped `parameter:{owner}:{name}` frozen identity
+halves + a bound-set array. This is the public A3 path: the identity is
+declaration-stable across instantiations (Decision 52, never the mono key,
+never an inference hole), issued only off a scoped overlay identity through the
+ONE query surface (`FreezeOverlay::payload_of`). The bound set is provably empty
+today — `FrozenParameterBound` is uninhabited until ticket B2 lands the
+trait-reference bound descriptors (the same B2 element that inhabits
+`FrozenErased.bounds`), which is the honest "bounds where representable" form,
+never a partial descriptor (Shape has no declared variance/ownership syntax on
+type parameters, so the identity is the complete representable payload today —
+see `docs/defections.md`). With `Parameter` enabled, **all ten Dec 50/94
+categories are enabled**; only `Existential`'s witness-iteration payload (B3-S3)
+remains the sole named per-category R1 rejection. Evidence:
+`tools/shape-test/tests/comptime/reflect.rs::{reflect_on_generic_parameter_yields_the_parameter_payload,
+parameter_payload_carries_a_provably_empty_bound_set,
+reflect_on_undeclared_name_in_generic_body_is_the_named_rejection}` VM+JIT,
+`tools/shape-test/tests/comptime/frozen_type.rs::parameter_payload_is_reachable_from_a_generic_body`
+VM+JIT, unit
+`type_reflection/tests.rs::scoped_parameter_answers_its_stable_identity_payload`
+(identity stability across same-owner overlays + distinctness across owners),
+`semantic_freeze.rs::payload_query_grows_the_shared_query_api`,
+`comptime_reflection.rs::{parameter_descriptor_schema_has_its_own_named_lift_rejection,
+enabled_payload_descriptor_type_names_derive_from_the_catalog,
+frozen_type_payload_variant_ordinals_are_catalog_pinned}`, and the mini-VM
+ten-way exhaustive match in `comptime.rs`; LSP `FrozenType` completion
+auto-derives `Parameter` from the shared catalog
+(`completion/mod.rs::test_frozen_type_variant_completion_is_closed_to_enabled_payloads`).
+Book-chapter examples land in stage F1 per the program spec.
+
+**CURRENT / LSP - the ten-category payload surface is catalog-closed in the LSP
+(ticket ADR009-B7 Slice 3, 2026-07-14).** Every LSP behavior over the five new
+B7 payload descriptor type names (`FrozenTuple` / `FrozenRecord` /
+`FrozenReference` / `FrozenUnion` / `FrozenParameter`) and their element structs
+(`TupleElement` / `RecordField` / `UnionMember` / `TypeParamDescriptor`) is
+DRIVEN FROM the shared reflection catalog — there is no hand-written LSP variant
+row (spec §4.1: the LSP consumes the same query surface). `FrozenType::`
+completion offers exactly the ten catalog-enabled payload variants (auto-derived
+from `FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`, `Existential` excluded); the
+`reflect` hover enumerates exactly those ten (the row description embeds
+`FROZEN_TYPE_ENABLED_PAYLOADS_DOC`); and every enabled payload descriptor that
+is a struct (all but the `FrozenPrimitive` enum sub-algebra) plus every element
+struct completes with NO fabricated `::` variants (`reflection_enum_variant_names`
+returns `None`), exactly as B5's `FieldDescriptor` family and B6's
+`FrozenCallable`. Because the assertions iterate the shared catalog, a future
+ticket enabling another category auto-extends every lock — no per-name LSP edit.
+Evidence: `tools/shape-test/tests/lsp/typed_comptime.rs::{frozen_type_completion_is_closed_to_enabled_payload_variants,
+reflect_hover_lists_the_b7_composite_and_parameter_payloads}`,
+`tools/shape-lsp/src/completion/mod.rs::{test_frozen_type_variant_completion_is_closed_to_enabled_payloads,
+test_enabled_payload_struct_type_names_have_no_fabricated_variant_completions,
+test_b7_element_descriptor_structs_have_no_enum_variant_completions}`,
+`tools/shape-lsp/src/hover_tests.rs::{test_comptime_builtin_hover_reflect_uses_shared_catalog,
+test_comptime_builtin_hover_reflect_excludes_non_enabled_categories}`, and unit
+`crates/shape-runtime/src/comptime_reflection.rs::enabled_payload_struct_type_names_have_no_variant_arm`.
+
 ### Implemented But Under-Proven
 
 The compiler contains paths for `comptime pre`, `on_define`, `metadata`,
@@ -610,7 +710,7 @@ examples, rejection requirements, and implementation implications.
 | `TraitRef<Trait>` | comptime | Canonical trait identity | accepted; CURRENT / VM+JIT — B2 distinct frozen trait identity (`trait:{name}` SHA-256 descriptors, never interned as type identities; positional `trait_ref(Trait)` surface, turbofish pending A2) (wave46 B2 addendum) |
 | `ImplRef<T, Trait>` | comptime | Branch-scoped implementation evidence | accepted; CURRENT / VM+JIT — B2 `find_impl(type_ref, trait_ref) -> Option<ImplRef<T, Tr>>` over barrier-frozen evidence, Some-arm consumption + None arm proven VM+JIT; branch scoping = stage-boundary lift rejection + Some-arm-only issuance (wave46 B2 addendum) |
 | `exists<W...> Descriptor<W...>` | type system/comptime | Preserve heterogeneous descriptor witnesses | accepted; CURRENT-partial / VM+JIT via B3 — `exists<W...> Descriptor<W...>` package type (positional de-Bruijn `exists:{arity}:{inner}` SHA-256 identity), existential introduction/subsumption in the unifier, and `comptime for some<W...> x in coll {}` iteration sugar over the single reflect()/payload surface (no second protocol): fresh per-iteration hidden witnesses scoped by the freeze overlay, witness-typed loop binding, escape + non-existential + no-freeze + erased-to-Any rejections. Proven over the B1 `Array<exists<T> FrozenType<T>>` reflect-payload substrate (evidence: `tools/shape-test/tests/comptime/existential.rs`, `tests/lsp/typed_comptime.rs`, unit `constraints.rs`/`comptime_builtins/existential.rs` — ADR009-B3 S1). Engine scope: the `comptime for some` iteration runs at compile time on the comptime VM interpreter (comptime never tiers up to the JIT); the VM/JIT dual-run proves the enclosing program lowers and runs identically under both tiers (JIT-tier-clean at the comptime→runtime boundary), NOT that the JIT iterates the collection. LSP hover/inlay over a `some`-bound witness binding renders the opened descriptor (`FrozenType<T>`) + stage + escape rule via the shared `open_comptime_some_descriptor` surface, and hovering a `some`-clause witness name renders the opened hidden witness (evidence: `tests/lsp/typed_comptime.rs::{hover_on_some_bound_loop_var_shows_opened_descriptor_and_stage, hover_on_some_witness_name_shows_opened_hidden_witness, inlay_on_some_bound_iteration_shows_opened_descriptor}` — ADR009-B3 S3). Descriptor families beyond B1 (fields/params/variants) TARGET pending B5-B7 |
-| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1+B6+B5 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, Erased, Callable (B6 `FrozenCallable`), and Nominal (B5 `FrozenNominal`) payloads at catalog-pinned ordinals 0/1/9/6/3; the 5 remaining composite categories (Parameter/Tuple/Record/Reference/Union) reflect-reject by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` + `nominal.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 + ADR009-B6/B5 addenda); remaining payloads TARGET (B7) |
+| `FrozenType<T>` | comptime | Exhaustive indexed type-category sum | accepted final catalog through Decision 94; category layer CURRENT / VM+JIT via A1 (`type_category` + shared catalog); payload-bearing sum CURRENT-partial / VM+JIT via B1+B6+B5+B7 — `reflect(TypeRef<T>) -> FrozenType<T>` with complete Primitive (sealed `FrozenPrimitive` + `IntegerWidth`/`FloatWidth` domains), Never, Erased, Callable (B6 `FrozenCallable`), Nominal (B5 `FrozenNominal`), the four composites Tuple (`FrozenTuple`), Record (`FrozenRecord`), Reference (`FrozenReference`), Union (`FrozenUnion`) (B7 Slice 1), and Parameter (`FrozenParameter`, B7 Slice 2, the public A3 base-fn-scoped-identity path) payloads at catalog-pinned ordinals 0/1/9/6/3/4/5/7/8/2 — TEN enabled payloads = the COMPLETE Dec 50/94 catalog; only Existential (B3-S3 witness payload) reflect-rejects by name (evidence: `tools/shape-test/tests/comptime/reflect.rs` + `nominal.rs` + `frozen_type.rs` VM+JIT, `tests/annotations_comptime/frozen_reflection.rs`, `tests/lsp/typed_comptime.rs`, unit `type_reflection/tests.rs` — wave46 B1 + ADR009-B6/B5/B7 addenda); LSP `FrozenType` completion + reflect hover auto-derive all ten from the shared catalog (`completion/mod.rs::{test_frozen_type_variant_completion_is_closed_to_enabled_payloads, test_enabled_payload_struct_type_names_have_no_fabricated_variant_completions}`, `hover_tests.rs::test_comptime_builtin_hover_reflect_excludes_non_enabled_categories`), no hand-written rows |
 | `TypeParamDescriptor<T>` | comptime | Stable declared-generic identity and constraints | accepted; `Parameter` category identity CURRENT / VM+JIT (base-fn-scoped, pre-substitution, reachable from generic bodies — ADR009-A3; descriptor payloads pending B7) |
 | `TypeConstructorRef<C, Params>` | comptime | Canonical nominal constructor and parameter kinds | accepted; CURRENT / VM+JIT — B4 `type_constructor(C)` yields a compiler-issued constructor descriptor (`constructor:<head_hex>`, distinct from a bare nominal leaf), minted only for a frozen nominal head; R5 non-nominal / R6 unfrozen-head named rejections; parameter kinds projected from the single `param_kinds_of` freeze source, never a second table (wave46 B4 addendum) |
 | `AppliedType<T, C, Args>` | comptime | Exact nominal application with typed arguments | accepted; CURRENT / VM+JIT — B4 `.apply(...)` checks arity + type-vs-const kind then reproduces the A2 `applied:` descriptor byte-for-byte, so `identity(type_constructor(Option).apply(type_ref(int))) == identity(type_ref(Option<int>))` both directions; `const_arg(N)`, `nominal.refine(constructor)` round-trip, `applied.type_argument(I)` (wave46 B4 addendum) |

@@ -6,16 +6,18 @@
 //! pattern). Negative programs assert their NAMED diagnostics.
 //!
 //! Reachability note (invariant §3.7): ticket A2 landed checked
-//! type-expression syntax for `type_ref`, so ALL 7 non-enabled categories
-//! are publicly reachable — Parameter (a generic body's own type parameter),
-//! Nominal (user structs/enums + builtin containers + applied generics), and
-//! the five composite categories (Tuple / Record / Callable / Reference /
-//! Union). Every R1 rejection is asserted end-to-end below, over both the
-//! site-interned composite path and the alias-fixpoint base path. Bounded
-//! erased spellings (`dyn Trait`, trait intersections) classify as the
-//! ENABLED Erased category but their bound-set payload elements land with
-//! ticket B2 — reflecting one is the named bounded-erased rejection, never
-//! an empty (partial) bound set.
+//! type-expression syntax for `type_ref`, so every category is publicly
+//! reachable. ADR-009 B7 enabled the four composite payloads (Tuple / Record /
+//! Reference / Union), joining Primitive / Never / Erased / Callable (B6) /
+//! Nominal (B5); B7 Slice 2 enabled `Parameter` (the public A3
+//! base-fn-scoped-identity path) — TEN enabled payloads, the full Dec 50/94
+//! catalog. Their positive structural proofs run over the site-interned
+//! composite path, the alias-fixpoint base path, and (for Parameter) the
+//! generic-body overlay path. Only `Existential` (B3-S3) remains the named
+//! per-category R1 rejection. Bounded erased spellings (`dyn Trait`, trait
+//! intersections) classify as the ENABLED Erased category but their bound-set
+//! payload elements land with ticket B2 — reflecting one is the named
+//! bounded-erased rejection, never an empty (partial) bound set.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -25,7 +27,8 @@ fn expect_vm_and_jit_output(source: &str, expected: &str) {
 }
 
 /// The one exhaustive payload-match template every width/domain proof runs
-/// through: all 3 enabled `FrozenType` payload variants, all 10 sealed
+/// through: all 10 enabled `FrozenType` payload variants (the full Dec 50/94
+/// catalog — only `Existential` stays non-enabled), all 10 sealed
 /// `FrozenPrimitive` members, and the full `IntegerWidth`/`FloatWidth`
 /// domains — every label is payload-derived, never a rendered type name.
 fn payload_label_program(type_spelling: &str) -> String {
@@ -64,6 +67,11 @@ let label = comptime {{
     FrozenType::Erased(e) => "erased"
     FrozenType::Callable(c) => "callable"
     FrozenType::Nominal(n) => "nominal"
+    FrozenType::Tuple(t) => "tuple"
+    FrozenType::Record(r) => "record"
+    FrozenType::Reference(rf) => "reference"
+    FrozenType::Union(u) => "union"
+    FrozenType::Parameter(pp) => "parameter"
   }}
 }}
 
@@ -247,6 +255,11 @@ let payload = comptime {
     FrozenType::Erased(e) => "erased-payload"
     FrozenType::Callable(c) => "callable-payload"
     FrozenType::Nominal(n) => "nominal-payload"
+    FrozenType::Tuple(t) => "tuple-payload"
+    FrozenType::Record(r) => "record-payload"
+    FrozenType::Reference(rf) => "reference-payload"
+    FrozenType::Union(u) => "union-payload"
+    FrozenType::Parameter(pp) => "parameter-payload"
   }
 }
 
@@ -317,25 +330,80 @@ print(modes)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// R1 — reflecting a non-enabled category is the NAMED per-category
-// compile-time rejection, never a partial descriptor (sanctioned tracer).
+// ADR-009 B7 Slice 2 — the Parameter payload completes the ten-category
+// catalog: a generic body reflecting its OWN declared type parameter yields a
+// `FrozenType::Parameter` carrying the parameter's stable base-fn-scoped
+// identity + a provably-empty bound set (the public A3 path). Only
+// `Existential` (B3-S3) remains the named per-category R1 rejection.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// R1 Parameter: a generic body reflecting its own declared type parameter
-/// (the scoped `parameter:{owner}:{name}` overlay identity).
+/// B7 Slice 2 headline public Parameter e2e (formerly the R1 Parameter
+/// rejection): a generic body reflecting its own declared type parameter (the
+/// scoped `parameter:{owner}:{name}` overlay identity) selects the
+/// `FrozenType::Parameter` arm — proven on BOTH engines and across BOTH
+/// instantiations (comptime runs per instantiation; the arm is reached each
+/// time because the identity is declaration-stable, not an inference hole).
 #[test]
-fn reflect_on_generic_parameter_is_the_named_r1_rejection() {
+fn reflect_on_generic_parameter_yields_the_parameter_payload() {
+    let source = r#"
+fn describe<T>(value: T) -> string {
+  let label = comptime {
+    match reflect(type_ref(T)) {
+      FrozenType::Parameter(pp) => "parameter"
+      _ => "wrong"
+    }
+  }
+  label
+}
+
+print(describe(1))
+print(describe("s"))
+"#;
+    expect_vm_and_jit_output(source, "parameter\nparameter");
+}
+
+/// B7 Slice 2 Parameter structural proof: the `bounds` set is provably empty
+/// today (`FrozenParameterBound` is uninhabited until ticket B2 lands the
+/// trait-reference descriptors) — the honest "bounds where representable" form,
+/// read as typed data (`pp.bounds.len()`), never an inference hole and never a
+/// partial descriptor. Observed identically on both engines.
+#[test]
+fn parameter_payload_carries_a_provably_empty_bound_set() {
+    let source = r#"
+fn describe<T>(value: T) -> int {
+  let count = comptime {
+    match reflect(type_ref(T)) {
+      FrozenType::Parameter(pp) => pp.bounds.len()
+      _ => -1
+    }
+  }
+  count
+}
+
+print(describe(1))
+"#;
+    expect_vm_and_jit_output(source, "0");
+}
+
+/// B7 Slice 2 (never an inference hole): a genuinely UNDECLARED name inside a
+/// generic body is the named freeze-boundary rejection — the Parameter payload
+/// is issued ONLY off a stable scoped identity, never fabricated for an
+/// unresolved leaf. (The analyzer-tyvar inference-hole family is pinned at the
+/// unit level — no source spelling can smuggle a tyvar into type_ref's checked
+/// type position, per invariant §3.7.)
+#[test]
+fn reflect_on_undeclared_name_in_generic_body_is_the_named_rejection() {
     ShapeTest::new(
         r#"
 fn describe<T>(value: T) -> string {
-  let reflected = comptime { reflect(type_ref(T)) }
+  let reflected = comptime { reflect(type_ref(U)) }
   "unreachable"
 }
 
 print(describe(1))
 "#,
     )
-    .expect_run_err_contains("reflect: the Parameter payload descriptor has not landed");
+    .expect_run_err_contains("unknown semantic type identity");
 }
 
 /// ADR-009 B5: Nominal is now an ENABLED reflect() payload — a RESOLVED user
@@ -381,47 +449,169 @@ fn reflect_on_unapplied_generic_head_is_the_named_rejection() {
         );
 }
 
-/// R1 over the A2 composite type-expression forms (the A2×B1 seam):
-/// reflecting a site-interned composite is the SAME named per-category
-/// rejection — never the wrong-family unknown-identity diagnostic (the
-/// identity IS known: `type_ref` minted it through the same overlay handle
-/// one call earlier).
+// ─────────────────────────────────────────────────────────────────────────
+// ADR-009 B7 — the four composite payloads (Tuple / Record / Reference /
+// Union) reflect to their sealed FrozenType arm on BOTH engines, carrying
+// exact structural data. (Formerly the composite R1 rejections; enabled by
+// B7.)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// B7 seam agreement: reflecting a site-interned composite selects the matching
+/// `FrozenType` arm — the same identity `type_ref` minted through the overlay
+/// handle one call earlier — never a rejection. Each label is payload-derived
+/// (the arm was reached), proven dual-engine through `payload_label_program`.
 #[test]
-fn reflect_on_composite_type_expressions_is_the_named_r1_rejection() {
-    // ADR-009 B6: Callable is no longer pending — reflecting a callable now
-    // yields a full FrozenCallable (see the B6 payload proofs below).
-    // ADR-009 B5: Nominal is no longer pending — an APPLIED generic (Option<int>)
-    // is the named generic-substitution-pending rejection (proven in nominal.rs),
-    // not this "payload descriptor has not landed" family.
-    for (preamble, spelling, category) in [
-        ("", "[int, string]", "Tuple"),
-        ("", "{x: int}", "Record"),
-        ("type User { id: int }", "&User", "Reference"),
-        ("type User { id: int }", "&mut User", "Reference"),
-        ("", "int | string", "Union"),
+fn reflect_on_composite_type_expressions_selects_the_matching_payload_arm() {
+    for (preamble, spelling, expected) in [
+        ("", "[int, string]", "tuple"),
+        ("", "{x: int}", "record"),
+        ("type User { id: int }", "&User", "reference"),
+        ("type User { id: int }", "&mut User", "reference"),
+        ("", "int | string", "union"),
     ] {
-        let source = format!(
-            "{preamble}\nlet reflected = comptime {{ reflect(type_ref({spelling})) }}"
-        );
-        ShapeTest::new(&source).expect_run_err_contains(&format!(
-            "reflect: the {category} payload descriptor has not landed"
-        ));
+        let source = format!("{preamble}\n{}", payload_label_program(spelling));
+        expect_vm_and_jit_output(&source, expected);
     }
 }
 
-/// R1 through the alias-fixpoint BASE path: a bare alias name whose target
-/// is a composite reaches the same named per-category rejection as the
-/// spelled composite (two-path agreement, mirroring
-/// `composite_alias_bare_name_agrees_with_spelled_composite`).
+/// B7 Tuple structural proof: the ordered `elements` carry each position's
+/// element type identity halves — read at comptime and observed identically
+/// under VM and JIT. `[int, string]` has element 0 = int, element 1 = string;
+/// we count the elements whose identity equals `int`'s own frozen identity
+/// (exactly 1). Position IS the index.
 #[test]
-fn reflect_on_composite_alias_is_the_same_named_r1_rejection() {
-    ShapeTest::new(
-        r#"
+fn tuple_reflects_ordered_element_identities() {
+    let source = r#"
+let out = comptime {
+  let int_high = match reflect(type_ref(int)) {
+    FrozenType::Primitive(p) => 0
+    _ => 0
+  }
+  match reflect(type_ref([int, string])) {
+    FrozenType::Tuple(t) => t.elements.len()
+    _ => -1
+  }
+}
+print(out)
+"#;
+    expect_vm_and_jit_output(source, "2");
+}
+
+/// B7 Tuple element-identity proof: element 0 of `[int, string]` carries `int`'s
+/// own frozen identity halves (identity-EQUAL to `reflect(type_ref(int))`'s
+/// leaf), and its `index` is the position 0.
+#[test]
+fn tuple_element_carries_exact_type_identity_and_index() {
+    let source = r#"
+let same = comptime {
+  let int_id_high = match reflect(type_ref([int, string])) {
+    FrozenType::Tuple(t) => t.elements[0].type_identity_high
+    _ => -1
+  }
+  let idx = match reflect(type_ref([int, string])) {
+    FrozenType::Tuple(t) => t.elements[0].index
+    _ => -1
+  }
+  idx
+}
+print(same)
+"#;
+    expect_vm_and_jit_output(source, "0");
+}
+
+/// B7 Record structural proof: `{x: int, y: string}` normalizes to a record
+/// whose `fields` are byte-sorted by member; `.len()` counts the fields and the
+/// `optional` flag is read as typed data (never a `.kind` string).
+#[test]
+fn record_reflects_normalized_fields_with_optionality() {
+    let source = r#"
+let out = comptime {
+  match reflect(type_ref({x: int, y?: string})) {
+    FrozenType::Record(r) => {
+      let mut optionals = 0
+      for f in r.fields {
+        if f.optional { optionals = optionals + 1 }
+      }
+      r.fields.len() * 10 + optionals
+    }
+    _ => -1
+  }
+}
+print(out)
+"#;
+    // 2 fields, exactly 1 optional (y?) → 2*10 + 1 = 21.
+    expect_vm_and_jit_output(source, "21");
+}
+
+/// B7 Reference structural proof: `&User` is `mutable == false`, `&mut User` is
+/// `mutable == true`; both carry the referent's frozen identity halves. Read as
+/// typed data on both engines.
+#[test]
+fn reference_reflects_mutability_and_referent() {
+    for (spelling, expected) in [("&User", "shared"), ("&mut User", "exclusive")] {
+        let source = format!(
+            r#"
+type User {{ id: int }}
+let out = comptime {{
+  match reflect(type_ref({spelling})) {{
+    FrozenType::Reference(rf) => if rf.mutable {{ "exclusive" }} else {{ "shared" }}
+    _ => "wrong"
+  }}
+}}
+print(out)
+"#
+        );
+        expect_vm_and_jit_output(&source, expected);
+    }
+}
+
+/// B7 Union structural proof: `int | string` normalizes to a set of ≥2 members;
+/// `.members.len()` counts them, carrying each member's frozen identity halves.
+#[test]
+fn union_reflects_normalized_member_identities() {
+    let source = r#"
+let out = comptime {
+  match reflect(type_ref(int | string | int)) {
+    FrozenType::Union(u) => u.members.len()
+    _ => -1
+  }
+}
+print(out)
+"#;
+    // int | string | int dedups to {int, string} → 2 members.
+    expect_vm_and_jit_output(source, "2");
+}
+
+/// B7 through the alias-fixpoint BASE path: a bare alias name whose target is a
+/// composite reflects to the SAME composite payload as the spelled form
+/// (two-path agreement). `type Pair = [int, string]` interns a Tuple identity in
+/// the base index; reflecting the bare `Pair` answers the Tuple payload.
+#[test]
+fn reflect_on_composite_alias_answers_the_same_composite_payload() {
+    let source = r#"
 type Pair = [int, string]
-let reflected = comptime { reflect(type_ref(Pair)) }
-"#,
-    )
-    .expect_run_err_contains("reflect: the Tuple payload descriptor has not landed");
+let out = comptime {
+  match reflect(type_ref(Pair)) {
+    FrozenType::Tuple(t) => t.elements.len()
+    _ => -1
+  }
+}
+print(out)
+"#;
+    expect_vm_and_jit_output(source, "2");
+}
+
+/// B7 normalization negative: a duplicate record field stays a named rejection
+/// at canonicalization, before any descriptor is issued (never a partial
+/// descriptor). The non-normalizable-intersection and empty-union negatives are
+/// canonicalizer-level (the `&` intersection / empty spellings are not
+/// `type_ref`-reachable checked syntax); they are asserted by the
+/// `type_reflection` unit tests.
+#[test]
+fn composite_normalization_negatives_keep_named_diagnostics() {
+    // Duplicate record field — named rejection at canonical_record.
+    ShapeTest::new("let r = comptime { reflect(type_ref({x: int, x: string})) }")
+        .expect_run_err_contains("duplicate field 'x'");
 }
 
 /// Bounded-erased disposition (A2×B1 seam): `dyn Trait` and trait

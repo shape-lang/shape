@@ -1593,12 +1593,56 @@ mod payload_query {
             );
         }
 
-        // Parameter — through a scoped overlay identity.
-        let overlay = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
-        let t = overlay.identity_of("T").expect("T identity");
+        // ADR-009 B7 Slice 2: Parameter is now ENABLED — Existential is the
+        // SOLE remaining R1 rejection. A scoped overlay Parameter identity
+        // answers a complete `TypeParamDescriptor` (see
+        // `scoped_parameter_answers_its_stable_identity_payload`), never an R1
+        // rejection.
+        assert!(
+            !FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&FrozenTypeCategory::Existential),
+            "Existential must stay the sole non-enabled category"
+        );
+        assert!(
+            FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES.contains(&FrozenTypeCategory::Parameter),
+            "Parameter must now be enabled (B7 Slice 2)"
+        );
+    }
+
+    /// ADR-009 B7 Slice 2 (Dec 50/94): a scoped generic-parameter overlay
+    /// identity answers a COMPLETE `TypeParamDescriptor` off the SAME stable
+    /// `parameter:{owner}:{name}` identity it interns — with a provably-empty
+    /// bound set (`FrozenParameterBound` is uninhabited until B2), never an
+    /// inference hole and never a partial descriptor. Identity STABILITY across
+    /// two same-owner overlays and DISTINCTNESS across owners are proven at the
+    /// payload level (mirroring `parameter_identity_is_scoped_by_owning_function`
+    /// at the identity level).
+    #[test]
+    fn scoped_parameter_answers_its_stable_identity_payload() {
+        use super::payloads::{FrozenPayloadDescriptor, TypeParamDescriptor};
+
+        let map_a = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
+        let map_b = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
+        let filter = FreezeOverlay::new(freeze_of(|_| {}), "filter", &["T".to_string()]);
+
+        let map_t = map_a.identity_of("T").expect("map T identity");
+        let expected = Ok(FrozenPayloadDescriptor::Parameter(TypeParamDescriptor {
+            identity: map_t,
+            bounds: Vec::new(),
+        }));
+        assert_eq!(map_a.payload_of(map_t), expected);
+        // Same owner ⇒ same payload identity (stable across overlays, the unit
+        // mirror of the per-instantiation e2e in frozen_type.rs).
+        assert_eq!(map_b.payload_of(map_t), expected);
+
+        // Distinct owner ⇒ distinct identity ⇒ distinct payload.
+        let filter_t = filter.identity_of("T").expect("filter T identity");
+        assert_ne!(filter_t, map_t, "distinct owners mint distinct identities");
         assert_eq!(
-            overlay.payload_of(t),
-            Err(pending_payload_rejection(FrozenTypeCategory::Parameter))
+            filter.payload_of(filter_t),
+            Ok(FrozenPayloadDescriptor::Parameter(TypeParamDescriptor {
+                identity: filter_t,
+                bounds: Vec::new(),
+            }))
         );
     }
 
@@ -1681,47 +1725,80 @@ mod payload_query {
 
     // ── A2×B1 seam: payload query over the site-interned composites layer ─
 
-    /// A2×B1 seam: `payload_of` resolves the site-interned composites layer
-    /// symmetrically with `category_of` (one query, three layers — spec
-    /// §4.1). Every pending composite category answers its NAMED R1
-    /// per-category rejection — never the wrong-family unknown-identity
-    /// diagnostic (the identity IS known: the same overlay minted it).
+    /// ADR-009 B7 (Dec 50/94): `payload_of` answers the site-interned composites
+    /// layer with COMPLETE structural descriptors — the same identity the
+    /// overlay minted one call earlier, reconstructed from the widened memo
+    /// without inverting the one-way hash. Tuple carries ordered element
+    /// identities; Record carries hygienic member + value-type identities +
+    /// optionality; Reference carries mutability + referent; Union carries the
+    /// deduped member identities. (Formerly the composite R1 rejections.)
     #[test]
-    fn site_interned_pending_composites_reject_with_named_per_category_diagnostics() {
+    fn site_interned_composites_answer_full_structural_payloads() {
+        use super::payloads::{
+            FrozenPayloadDescriptor, ReferenceDescriptor, RecordDescriptor, TupleDescriptor,
+            UnionDescriptor,
+        };
         let overlay = module_overlay(|compiler| add_struct(compiler, "User"));
-        let forms: Vec<(TypeAnnotation, FrozenTypeCategory)> = vec![
-            (
-                TypeAnnotation::Tuple(vec![basic("int"), basic("string")]),
-                FrozenTypeCategory::Tuple,
-            ),
-            (
-                TypeAnnotation::Object(vec![record_field("x", false, basic("int"))]),
-                FrozenTypeCategory::Record,
-            ),
-            // ADR-009 B6: Callable is no longer pending — it has a positive
-            // payload test below (`site_interned_callable_answers_full_payload`).
-            (
-                TypeAnnotation::Borrow {
-                    mutable: false,
-                    inner: Box::new(basic("User")),
-                },
-                FrozenTypeCategory::Reference,
-            ),
-            (
-                TypeAnnotation::Union(vec![basic("int"), basic("string")]),
-                FrozenTypeCategory::Union,
-            ),
-        ];
-        for (annotation, category) in forms {
-            let identity = overlay
-                .canonicalize_type(&annotation)
-                .expect("composite type expression canonicalizes");
-            assert_eq!(overlay.category_of(identity), Ok(category));
-            assert_eq!(
-                overlay.payload_of(identity),
-                Err(pending_payload_rejection(category)),
-                "payload_of must answer the composites layer for {category:?}"
-            );
+        let int_id = overlay.identity_of("int").expect("int identity");
+        let string_id = overlay.identity_of("string").expect("string identity");
+        let user_id = overlay.identity_of("User").expect("User identity");
+
+        // Tuple: ordered element identities (position IS the index).
+        let tuple_id = overlay
+            .canonicalize_type(&TypeAnnotation::Tuple(vec![basic("int"), basic("string")]))
+            .expect("tuple canonicalizes");
+        assert_eq!(
+            overlay.payload_of(tuple_id),
+            Ok(FrozenPayloadDescriptor::Tuple(TupleDescriptor {
+                elements: vec![int_id, string_id],
+            }))
+        );
+
+        // Record: one field carrying int; the hygienic member identity is
+        // owner-bound + distinct from the value-type identity (Dec 57).
+        let record_id = overlay
+            .canonicalize_type(&TypeAnnotation::Object(vec![record_field(
+                "x",
+                false,
+                basic("int"),
+            )]))
+            .expect("record canonicalizes");
+        match overlay.payload_of(record_id) {
+            Ok(FrozenPayloadDescriptor::Record(RecordDescriptor { fields })) => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].type_identity, int_id);
+                assert!(!fields[0].optional);
+                assert_ne!(fields[0].member, int_id, "member is not the value type");
+            }
+            other => panic!("record must answer a Record payload, got {other:?}"),
+        }
+
+        // Reference: shared borrow of a user nominal.
+        let reference_id = overlay
+            .canonicalize_type(&TypeAnnotation::Borrow {
+                mutable: false,
+                inner: Box::new(basic("User")),
+            })
+            .expect("reference canonicalizes");
+        assert_eq!(
+            overlay.payload_of(reference_id),
+            Ok(FrozenPayloadDescriptor::Reference(ReferenceDescriptor {
+                mutable: false,
+                referent: user_id,
+            }))
+        );
+
+        // Union: two deduped members (byte-sorted by identity hex).
+        let union_id = overlay
+            .canonicalize_type(&TypeAnnotation::Union(vec![basic("int"), basic("string")]))
+            .expect("union canonicalizes");
+        match overlay.payload_of(union_id) {
+            Ok(FrozenPayloadDescriptor::Union(UnionDescriptor { members })) => {
+                assert_eq!(members.len(), 2);
+                assert!(members.contains(&int_id));
+                assert!(members.contains(&string_id));
+            }
+            other => panic!("union must answer a Union payload, got {other:?}"),
         }
 
         // ADR-009 B5: a site-interned APPLIED nominal (`Option<int>`) is a
@@ -2273,19 +2350,46 @@ mod payload_query {
         );
     }
 
-    /// The builder inherits the R1 rejection: a scoped Parameter identity
-    /// (and every other non-enabled category) is a named compile-time
-    /// rejection at the builder too — never a partial descriptor.
+    /// ADR-009 B7 Slice 2: the builder lowers a scoped Parameter identity to a
+    /// complete `FrozenParameter` heap value — catalog ordinal 2, carrying the
+    /// parameter's identity halves + a provably-empty (typed-array) bound set,
+    /// never a partial descriptor and never an R1 rejection.
     #[test]
-    fn builder_rejects_non_enabled_categories_with_the_named_diagnostic() {
+    fn builder_lowers_scoped_parameter_to_the_frozen_parameter_payload() {
+        use shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_PARAMETER_SCHEMA;
+
         let overlay = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
         let t = overlay.identity_of("T").expect("T identity");
-        let error = payloads::build_frozen_type_heap_value(t, &overlay)
-            .map(|_| ())
-            .expect_err("Parameter must reject at the builder");
+        let frozen = payloads::build_frozen_type_heap_value(t, &overlay)
+            .expect("Parameter payload builds");
+        let frozen_storage = storage_of(&frozen);
+        let (variant, payload) = variant_and_payload(frozen_storage);
+        assert_eq!(variant, 2, "Parameter is catalog ordinal 2");
+        let parameter_storage = payload
+            .as_typed_object_storage()
+            .expect("payload must be a typed object");
         assert_eq!(
-            error,
-            pending_payload_rejection(FrozenTypeCategory::Parameter)
+            schema_name_of(parameter_storage),
+            COMPTIME_FROZEN_PARAMETER_SCHEMA
+        );
+        // identity_high/low carry the queried parameter identity; the bound set
+        // is the empty typed array (the only reachable form until B2).
+        assert_eq!(
+            parameter_storage.clone_field_kinded(0).map(|s| s.as_i64()),
+            Some(Some(t.high)),
+            "identity_high must be the parameter's own frozen identity high half"
+        );
+        assert_eq!(
+            parameter_storage.clone_field_kinded(1).map(|s| s.as_i64()),
+            Some(Some(t.low)),
+            "identity_low must be the parameter's own frozen identity low half"
+        );
+        let bounds = parameter_storage
+            .clone_field_kinded(2)
+            .expect("bounds must be readable");
+        assert_eq!(
+            bounds.kind(),
+            NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)
         );
     }
 }

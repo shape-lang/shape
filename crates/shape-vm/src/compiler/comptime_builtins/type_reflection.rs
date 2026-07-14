@@ -206,6 +206,22 @@ pub(crate) struct FrozenTypeIndex {
     /// rejection. Symmetric with [`Self::frozen_callable_descriptors`].
     pub(crate) frozen_nominal_descriptors:
         HashMap<FrozenTypeIdentity, payloads::NominalDescriptor>,
+    /// ADR-009 B7 (Dec 50/94): the composite structural descriptors per
+    /// BASE-interned composite identity — an alias whose target is a composite
+    /// (`type Pair = [int, string]`, `type Ref = &User`, `type Id = int |
+    /// string`, `type Row = {x: int}`). Populated by the alias fixpoint in the
+    /// SAME rebuild that interns the identity (one source, no second
+    /// derivation), so `payload_for_identity` answers the complete composite
+    /// payload — never a partial descriptor. Symmetric with
+    /// [`Self::frozen_callable_descriptors`].
+    pub(crate) frozen_tuple_descriptors: HashMap<FrozenTypeIdentity, payloads::TupleDescriptor>,
+    /// See [`Self::frozen_tuple_descriptors`].
+    pub(crate) frozen_record_descriptors: HashMap<FrozenTypeIdentity, payloads::RecordDescriptor>,
+    /// See [`Self::frozen_tuple_descriptors`].
+    pub(crate) frozen_reference_descriptors:
+        HashMap<FrozenTypeIdentity, payloads::ReferenceDescriptor>,
+    /// See [`Self::frozen_tuple_descriptors`].
+    pub(crate) frozen_union_descriptors: HashMap<FrozenTypeIdentity, payloads::UnionDescriptor>,
 }
 
 /// ADR-009 B5 (Dec 57) — one enum variant freeze projection: the source-level
@@ -298,6 +314,37 @@ impl FrozenTypeIndex {
                     Err(payloads::applied_nominal_pending_rejection())
                 }
             }
+            // ADR-009 B7: a base-interned composite alias answers its complete
+            // structural descriptor from the per-category map populated in the
+            // same rebuild — never a partial descriptor. Interning a composite
+            // identity without its descriptor is an internal-invariant violation.
+            FrozenTypeCategory::Tuple => self
+                .frozen_tuple_descriptors
+                .get(&identity)
+                .cloned()
+                .map(FrozenPayloadDescriptor::Tuple)
+                .ok_or_else(|| composite_without_descriptor_invariant("Tuple")),
+            FrozenTypeCategory::Record => self
+                .frozen_record_descriptors
+                .get(&identity)
+                .cloned()
+                .map(FrozenPayloadDescriptor::Record)
+                .ok_or_else(|| composite_without_descriptor_invariant("Record")),
+            FrozenTypeCategory::Reference => self
+                .frozen_reference_descriptors
+                .get(&identity)
+                .copied()
+                .map(FrozenPayloadDescriptor::Reference)
+                .ok_or_else(|| composite_without_descriptor_invariant("Reference")),
+            FrozenTypeCategory::Union => self
+                .frozen_union_descriptors
+                .get(&identity)
+                .cloned()
+                .map(FrozenPayloadDescriptor::Union)
+                .ok_or_else(|| composite_without_descriptor_invariant("Union")),
+            // Only `Parameter` (a scoped overlay identity — never base-interned)
+            // and `Existential` (its witness payload lands with B3-S3) remain
+            // the named per-category rejections at the base index.
             pending => Err(payloads::pending_payload_rejection(pending)),
         }
     }
@@ -393,6 +440,17 @@ impl FrozenTypeIndex {
         let mut primitive_payloads = HashMap::new();
         let mut param_kinds: HashMap<FrozenTypeIdentity, Vec<ParamKind>> = HashMap::new();
         let mut callable_descriptors: HashMap<FrozenTypeIdentity, payloads::CallableDescriptor> =
+            HashMap::new();
+        // ADR-009 B7: per-category descriptor maps for BASE-interned composite
+        // aliases, threaded in the alias fixpoint below (write-once, same round
+        // as the identity intern).
+        let mut tuple_descriptors: HashMap<FrozenTypeIdentity, payloads::TupleDescriptor> =
+            HashMap::new();
+        let mut record_descriptors: HashMap<FrozenTypeIdentity, payloads::RecordDescriptor> =
+            HashMap::new();
+        let mut reference_descriptors: HashMap<FrozenTypeIdentity, payloads::ReferenceDescriptor> =
+            HashMap::new();
+        let mut union_descriptors: HashMap<FrozenTypeIdentity, payloads::UnionDescriptor> =
             HashMap::new();
 
         for (names, primitive) in PRIMITIVE_SYNONYM_FAMILIES {
@@ -536,6 +594,29 @@ impl FrozenTypeIndex {
                         .entry(canonical.identity)
                         .or_insert(descriptor);
                 }
+                // ADR-009 B7: same write-once discipline for the four composite
+                // structural descriptors, so a base-interned composite alias
+                // answers its complete payload from `payload_for_identity`.
+                if let Some(descriptor) = canonical.tuple.clone() {
+                    tuple_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
+                if let Some(descriptor) = canonical.record.clone() {
+                    record_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
+                if let Some(descriptor) = canonical.reference {
+                    reference_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
+                if let Some(descriptor) = canonical.union.clone() {
+                    union_descriptors
+                        .entry(canonical.identity)
+                        .or_insert(descriptor);
+                }
                 changed |=
                     ids.insert((*alias).clone(), canonical.identity) != Some(canonical.identity);
             }
@@ -640,6 +721,10 @@ impl FrozenTypeIndex {
         self.generic_param_kinds = param_kinds;
         self.frozen_callable_descriptors = callable_descriptors;
         self.frozen_nominal_descriptors = nominal_descriptors;
+        self.frozen_tuple_descriptors = tuple_descriptors;
+        self.frozen_record_descriptors = record_descriptors;
+        self.frozen_reference_descriptors = reference_descriptors;
+        self.frozen_union_descriptors = union_descriptors;
     }
 }
 
@@ -650,6 +735,18 @@ impl FrozenTypeIndex {
 /// from the value-type identity space (the `member:` descriptor prefix).
 fn member_identity(owner_name: &str, member_name: &str) -> FrozenTypeIdentity {
     FrozenTypeIdentity::from_canonical_descriptor(&format!("member:{owner_name}:{member_name}"))
+}
+
+/// ADR-009 B7: the internal-invariant message when a base-interned composite
+/// identity carries its category but not its structural descriptor. The alias
+/// fixpoint threads the descriptor in the SAME round it interns the identity
+/// (write-once), so this is unreachable in practice — a named invariant, never a
+/// partial descriptor.
+fn composite_without_descriptor_invariant(category: &str) -> String {
+    format!(
+        "internal invariant: a {category} identity was frozen without its structural \
+         composite descriptor"
+    )
 }
 
 fn intern_identity(
@@ -714,6 +811,25 @@ pub(super) struct CanonicalType {
     /// canonical descriptor share one identity regardless of their AST param
     /// names.
     pub(super) callable: Option<payloads::CallableDescriptor>,
+    /// ADR-009 B7 (Dec 50/94): the ordered element identities for a `Tuple`
+    /// form. `None` for every non-tuple category. Threaded through the freeze's
+    /// widened composite memo (and the base per-category map) exactly like
+    /// `callable`, so `payload_of` reconstructs a `FrozenTuple` WITHOUT
+    /// inverting the one-way identity hash.
+    pub(super) tuple: Option<payloads::TupleDescriptor>,
+    /// ADR-009 B7: the normalized structural fields for a `Record` form
+    /// (owner-bound member identity + value-type identity + optionality). `None`
+    /// for every non-record category. The hygienic member identity is minted
+    /// from the record's own identity, so it is stable and source-name-free
+    /// (Dec 57).
+    pub(super) record: Option<payloads::RecordDescriptor>,
+    /// ADR-009 B7: the mutability + referent identity for a `Reference` form.
+    /// `None` for every non-reference category.
+    pub(super) reference: Option<payloads::ReferenceDescriptor>,
+    /// ADR-009 B7: the deduped byte-sorted member identities for a `Union`
+    /// form. `None` for every non-union category (and for a singleton union,
+    /// which coalesces to its member — no `Union` descriptor exists).
+    pub(super) union: Option<payloads::UnionDescriptor>,
 }
 
 /// The 32-lowercase-hex embedding form of a frozen identity. Every composite
@@ -864,14 +980,23 @@ fn canonicalize_resolved(
         }
         TypeAnnotation::Generic { name, args } => canonical_applied(name.as_str(), args, scope),
         TypeAnnotation::Tuple(items) => {
+            // ADR-009 B7: the ordered element identities are threaded on the
+            // canonical (mirroring `callable`) so `payload_of` reconstructs the
+            // `FrozenTuple` without inverting the one-way identity hash. Position
+            // IS the tuple index — no separate index fact.
             let mut embedded = Vec::with_capacity(items.len());
+            let mut elements = Vec::with_capacity(items.len());
             for item in items {
-                embedded.push(identity_hex(canonicalize_resolved(item, scope)?.identity));
+                let member = canonicalize_resolved(item, scope)?;
+                embedded.push(identity_hex(member.identity));
+                elements.push(member.identity);
             }
-            Ok(composite(
+            let mut canonical = composite(
                 format!("tuple:[{}]", embedded.join(",")),
                 FrozenTypeCategory::Tuple,
-            ))
+            );
+            canonical.tuple = Some(payloads::TupleDescriptor { elements });
+            Ok(canonical)
         }
         TypeAnnotation::Object(fields) => canonical_record(fields, scope),
         TypeAnnotation::Function { params, returns } => {
@@ -944,14 +1069,21 @@ fn canonicalize_resolved(
         }
         TypeAnnotation::Borrow { mutable, inner } => {
             let member = canonicalize_resolved(inner, scope)?;
-            Ok(composite(
+            let mut canonical = composite(
                 format!(
                     "reference:&{}{}",
                     if *mutable { "mut " } else { "" },
                     identity_hex(member.identity)
                 ),
                 FrozenTypeCategory::Reference,
-            ))
+            );
+            // ADR-009 B7: mutability + referent identity threaded on the
+            // canonical so `payload_of` reconstructs the `FrozenReference`.
+            canonical.reference = Some(payloads::ReferenceDescriptor {
+                mutable: *mutable,
+                referent: member.identity,
+            });
+            Ok(canonical)
         }
         TypeAnnotation::Union(items) => {
             // Union membership is an associative set (descriptor grammar
@@ -982,10 +1114,26 @@ fn canonicalize_resolved(
                 // member (int | i64 == int); no singleton union descriptor.
                 return Ok(members.into_iter().next().expect("non-empty union"));
             }
-            Ok(composite(
+            // ADR-009 B7: the deduped, byte-sorted member identities threaded on
+            // the canonical (in the SAME order the descriptor fixes) so
+            // `payload_of` reconstructs the `FrozenUnion` without inverting the
+            // one-way identity hash. Reconstructed from the sorted+deduped hex
+            // embeddings, not the raw member list, so the payload member order
+            // matches the identity's descriptor exactly.
+            let union_members = embedded
+                .iter()
+                .map(|hex| {
+                    identity_from_hex(hex).expect("union member hex is a well-formed identity")
+                })
+                .collect();
+            let mut canonical = composite(
                 format!("union:({})", embedded.join("|")),
                 FrozenTypeCategory::Union,
-            ))
+            );
+            canonical.union = Some(payloads::UnionDescriptor {
+                members: union_members,
+            });
+            Ok(canonical)
         }
         TypeAnnotation::Intersection(items) => {
             // Dec 50/94 rule 3, one classification rule (S5 R8): an
@@ -1139,6 +1287,10 @@ fn composite(descriptor: String, category: FrozenTypeCategory) -> CanonicalType 
         category,
         identity,
         callable: None,
+        tuple: None,
+        record: None,
+        reference: None,
+        union: None,
     }
 }
 
@@ -1154,6 +1306,10 @@ fn canonical_leaf(name: &str, scope: &LeafScope<'_>) -> Result<CanonicalType, St
         category,
         identity,
         callable: None,
+        tuple: None,
+        record: None,
+        reference: None,
+        union: None,
     })
 }
 
@@ -1161,14 +1317,15 @@ fn canonical_record(
     fields: &[ObjectTypeField],
     scope: &LeafScope<'_>,
 ) -> Result<CanonicalType, String> {
-    let mut entries = Vec::with_capacity(fields.len());
+    // ADR-009 B7: retain each field's name/optionality/VALUE-type identity so
+    // the normalized `FrozenRecord` reconstructs without inverting the identity
+    // hash. `entry.0` is the field NAME — identity-insignificant, hashed into a
+    // hygienic member identity below, never surfaced as a runtime string
+    // (Dec 57).
+    let mut entries: Vec<(&str, bool, FrozenTypeIdentity)> = Vec::with_capacity(fields.len());
     for field in fields {
         let member = canonicalize_resolved(&field.type_annotation, scope)?;
-        entries.push((
-            field.name.as_str(),
-            field.optional,
-            identity_hex(member.identity),
-        ));
+        entries.push((field.name.as_str(), field.optional, member.identity));
     }
     // Field-name byte sort: record identity is declaration-order independent.
     entries.sort_by(|left, right| left.0.cmp(right.0));
@@ -1182,11 +1339,48 @@ fn canonical_record(
     }
     let rendered: Vec<String> = entries
         .iter()
-        .map(|(name, optional, hex)| format!("{name}{}:{hex}", if *optional { "?" } else { "" }))
+        .map(|(name, optional, identity)| {
+            format!(
+                "{name}{}:{}",
+                if *optional { "?" } else { "" },
+                identity_hex(*identity)
+            )
+        })
         .collect();
-    Ok(composite(
+    let mut canonical = composite(
         format!("record:{{{}}}", rendered.join(",")),
         FrozenTypeCategory::Record,
+    );
+    // The hygienic member identity is minted from the record's OWN frozen
+    // identity + the field name (`member:record:{record_hex}:{name}`) — a stable
+    // opaque identity, never the source-name string (Dec 57). Two records with
+    // the same normalized shape mint the same identity AND the same member
+    // identities, so the payload is a pure function of the frozen identity.
+    let record_identity = canonical.identity;
+    let record_fields = entries
+        .iter()
+        .map(|(name, optional, type_identity)| payloads::RecordFieldDescriptor {
+            member: record_member_identity(record_identity, name),
+            type_identity: *type_identity,
+            optional: *optional,
+        })
+        .collect();
+    canonical.record = Some(payloads::RecordDescriptor {
+        fields: record_fields,
+    });
+    Ok(canonical)
+}
+
+/// ADR-009 B7 (Dec 57): the owner-bound HYGIENIC member identity for one
+/// structural-record field. A stable opaque 128-bit identity minted from
+/// `member:record:{record_hex}:{name}` — the record's own frozen identity is the
+/// owner (a structural record has no nominal owner name), NEVER the source-name
+/// string. Distinct from the value-type identity space (the `member:` prefix
+/// family, sibling of [`member_identity`]).
+fn record_member_identity(record: FrozenTypeIdentity, field_name: &str) -> FrozenTypeIdentity {
+    FrozenTypeIdentity::from_canonical_descriptor(&format!(
+        "member:record:{}:{field_name}",
+        identity_hex(record)
     ))
 }
 
@@ -1407,6 +1601,10 @@ pub(super) fn canonical_apply(
             category: FrozenTypeCategory::Nominal,
             identity: constructor.head_identity,
             callable: None,
+            tuple: None,
+            record: None,
+            reference: None,
+            union: None,
         });
     }
     let embedded: Vec<String> = args

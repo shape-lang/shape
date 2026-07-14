@@ -656,6 +656,10 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
         OPAQUE_TYPE_DESCRIPTOR_SCHEMA_NAME, STRUCT_DESCRIPTOR_SCHEMA_NAME,
         VARIANT_DESCRIPTOR_SCHEMA_NAME,
     };
+    // ADR-009 B7: the composite payloads' typed element-row model names.
+    use shape_runtime::comptime_reflection::{
+        RECORD_FIELD_SCHEMA_NAME, TUPLE_ELEMENT_SCHEMA_NAME, UNION_MEMBER_SCHEMA_NAME,
+    };
 
     let enum_item = |name: &str, members: Vec<EnumMember>| {
         Item::Enum(
@@ -903,6 +907,90 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
                 "shape",
                 TypeAnnotation::Basic(NOMINAL_SHAPE_SCHEMA_NAME.to_string()),
             )],
+        ),
+        // ADR-009 B7 (Dec 50/94): the four composite payload models. Each
+        // wrapping `Frozen{Tuple,Record,Union}` carries its ordered/normalized
+        // element array (a TYPED element struct); `FrozenReference` is a flat
+        // mutable/referent descriptor. Field names + order match the unspellable
+        // value carriers registered in `builtin_schemas.rs` exactly (the
+        // FrozenCallable/ParamDescriptor precedent), so a bound match payload
+        // reads its typed fields. No `.kind` string, no rendered type name.
+        struct_item(
+            TUPLE_ELEMENT_SCHEMA_NAME,
+            vec![
+                field("index", int_ty()),
+                field("type_identity_high", int_ty()),
+                field("type_identity_low", int_ty()),
+            ],
+        ),
+        struct_item(
+            "FrozenTuple",
+            vec![field(
+                "elements",
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    TUPLE_ELEMENT_SCHEMA_NAME.to_string(),
+                ))),
+            )],
+        ),
+        struct_item(
+            RECORD_FIELD_SCHEMA_NAME,
+            vec![
+                field("member_high", int_ty()),
+                field("member_low", int_ty()),
+                field("type_identity_high", int_ty()),
+                field("type_identity_low", int_ty()),
+                field("optional", TypeAnnotation::Basic("bool".to_string())),
+            ],
+        ),
+        struct_item(
+            "FrozenRecord",
+            vec![field(
+                "fields",
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    RECORD_FIELD_SCHEMA_NAME.to_string(),
+                ))),
+            )],
+        ),
+        struct_item(
+            "FrozenReference",
+            vec![
+                field("mutable", TypeAnnotation::Basic("bool".to_string())),
+                field("referent_identity_high", int_ty()),
+                field("referent_identity_low", int_ty()),
+            ],
+        ),
+        struct_item(
+            UNION_MEMBER_SCHEMA_NAME,
+            vec![
+                field("type_identity_high", int_ty()),
+                field("type_identity_low", int_ty()),
+            ],
+        ),
+        struct_item(
+            "FrozenUnion",
+            vec![field(
+                "members",
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    UNION_MEMBER_SCHEMA_NAME.to_string(),
+                ))),
+            )],
+        ),
+        // ADR-009 B7 Slice 2 (Dec 50/94): the Parameter payload model. Field
+        // names + order match the unspellable `FrozenParameter` value carrier
+        // registered in `builtin_schemas.rs` exactly (the FrozenErased
+        // precedent): the type parameter's stable identity halves + the
+        // provably-empty (uninhabited-element) bound-set array. No `.kind`
+        // string, no rendered type name.
+        struct_item(
+            "FrozenParameter",
+            vec![
+                field("identity_high", int_ty()),
+                field("identity_low", int_ty()),
+                field(
+                    "bounds",
+                    TypeAnnotation::Array(Box::new(TypeAnnotation::Never)),
+                ),
+            ],
         ),
     ]
 }
@@ -5129,6 +5217,11 @@ match reflect(type_ref(int)) {
   FrozenType::Erased(e) => 5
   FrozenType::Callable(c) => 6
   FrozenType::Nominal(n) => 7
+  FrozenType::Tuple(t) => 8
+  FrozenType::Record(r) => 9
+  FrozenType::Reference(rf) => 10
+  FrozenType::Union(u) => 11
+  FrozenType::Parameter(pp) => 12
 }
 "#,
         )
@@ -5158,6 +5251,11 @@ match reflect(type_ref(bigint)) {
   FrozenType::Erased(e) => 5
   FrozenType::Callable(c) => 6
   FrozenType::Nominal(n) => 7
+  FrozenType::Tuple(t) => 8
+  FrozenType::Record(r) => 9
+  FrozenType::Reference(rf) => 10
+  FrozenType::Union(u) => 11
+  FrozenType::Parameter(pp) => 12
 }
 "#,
         )
@@ -5180,6 +5278,11 @@ match reflect(type_ref({spelling})) {{
   FrozenType::Erased(e) => 5
   FrozenType::Callable(c) => 6
   FrozenType::Nominal(n) => 7
+  FrozenType::Tuple(t) => 8
+  FrozenType::Record(r) => 9
+  FrozenType::Reference(rf) => 10
+  FrozenType::Union(u) => 11
+  FrozenType::Parameter(pp) => 12
 }}
 "#
             ))
@@ -5191,6 +5294,56 @@ match reflect(type_ref({spelling})) {{
                 Some(expected),
                 "reflect(type_ref({spelling})) must select the {expected} arm"
             );
+        }
+    }
+
+    /// ADR-009 B7 (Dec 50/94): the four composite payload arms select through
+    /// the ordinal-pinned variant ids (Tuple=4, Record=5, Reference=7, Union=8)
+    /// and destructure their typed structural fields through the injected model —
+    /// the load-bearing proof that the injected model enum and the unspellable
+    /// value carrier agree on the composite catalog ORDINALS, and that the
+    /// element arrays / flat fields carry real typed data (never a `.kind`
+    /// string).
+    #[test]
+    fn reflect_composite_payloads_decode_through_the_injected_model() {
+        for (spelling, expected) in [
+            // tuple: 2 ordered elements
+            ("[int, string]", 2),
+            // record: 2 normalized fields
+            ("{x: int, y: string}", 2),
+            // union: int | string | int dedups to 2 members
+            ("int | string | int", 2),
+        ] {
+            let result = run_comptime_body(&format!(
+                r#"
+match reflect(type_ref({spelling})) {{
+  FrozenType::Tuple(t) => t.elements.len()
+  FrozenType::Record(r) => r.fields.len()
+  FrozenType::Union(u) => u.members.len()
+  _ => -1
+}}
+"#
+            ))
+            .unwrap_or_else(|error| panic!("reflect(type_ref({spelling})) must succeed: {error:?}"));
+            assert_eq!(
+                result.value.as_i64(),
+                Some(expected),
+                "composite payload for {spelling} must decode its element count"
+            );
+        }
+
+        // Reference: `&mut int` is mutable, `&int` is not — read as typed bool.
+        for (spelling, expected) in [("&mut int", 1), ("&int", 0)] {
+            let result = run_comptime_body(&format!(
+                r#"
+match reflect(type_ref({spelling})) {{
+  FrozenType::Reference(rf) => if rf.mutable {{ 1 }} else {{ 0 }}
+  _ => -1
+}}
+"#
+            ))
+            .unwrap_or_else(|error| panic!("reflect(type_ref({spelling})) must succeed: {error:?}"));
+            assert_eq!(result.value.as_i64(), Some(expected));
         }
     }
 

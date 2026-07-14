@@ -125,13 +125,24 @@ fn frozen_type_schema_has_exactly_the_ordinal_pinned_enabled_variants() {
             ("Never", 1, 1),
             ("Erased", 9, 1),
             ("Callable", 6, 1),
-            ("Nominal", 3, 1)
+            ("Nominal", 3, 1),
+            // ADR-009 B7: the four composite payloads at their catalog ordinals
+            // (Tuple=4, Record=5, Reference=7, Union=8) — declaration order
+            // follows the enabled-catalog append order, ids stay ordinal-pinned.
+            ("Tuple", 4, 1),
+            ("Record", 5, 1),
+            ("Reference", 7, 1),
+            ("Union", 8, 1),
+            // ADR-009 B7 Slice 2: Parameter at catalog ordinal 2, completing the
+            // ten-category catalog.
+            ("Parameter", 2, 1),
         ]
     );
     assert_eq!(info.variant_id("Unknown"), None);
     assert_eq!(info.variant_id("Any"), None);
-    // Non-enabled categories are NOT declared as stub variants.
-    for pending in ["Parameter", "Tuple", "Record", "Reference", "Union"] {
+    // ADR-009 B7 Slice 2: Parameter is now enabled; only Existential (B3-S3)
+    // stays non-enabled and must NOT be declared as a stub variant.
+    for pending in ["Existential"] {
         assert_eq!(
             info.variant_id(pending),
             None,

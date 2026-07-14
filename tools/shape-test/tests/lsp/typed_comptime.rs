@@ -243,12 +243,28 @@ fn reflect_hover_lists_nominal_as_an_enabled_payload() {
         .expect_hover_contains("Nominal");
 }
 
+/// ADR-009 B7 (Slice 3): the reflect hover enumerates the four composite
+/// payloads AND `Parameter` from the SAME shared reflection catalog — the row
+/// description embeds `FROZEN_TYPE_ENABLED_PAYLOADS_DOC`, so completing the
+/// ten-category catalog (Dec 50/94) auto-surfaces every enabled payload in the
+/// hover with no hand-written LSP list. `Existential` (the sole non-enabled
+/// witness payload) is NOT listed.
+#[test]
+fn reflect_hover_lists_the_b7_composite_and_parameter_payloads() {
+    for payload in ["Tuple", "Record", "Reference", "Union", "Parameter"] {
+        ShapeTest::new("let reflected = comptime { reflect(type_ref(int)) }\n")
+            .at(pos(0, 29))
+            .expect_hover_contains(payload);
+    }
+}
+
 #[test]
 fn frozen_type_completion_is_closed_to_enabled_payload_variants() {
-    // ADR-009 B6: `Callable` and ADR-009 B5: `Nominal` joined the enabled
-    // payload catalog, so `FrozenType::` completion now offers them —
-    // auto-derived from the shared reflection catalog (no hand-written variant
-    // list in the LSP).
+    // ADR-009 B6/B5/B7: `Callable`, `Nominal`, the four composites, and (B7
+    // Slice 2) `Parameter` joined the enabled payload catalog, so `FrozenType::`
+    // completion now offers them — auto-derived from the shared reflection
+    // catalog (no hand-written variant list in the LSP). Only `Existential`
+    // stays non-enabled, and `Unknown` is not a catalog category.
     ShapeTest::new("let payload = comptime { FrozenType:: }\n")
         .at(pos(0, 37))
         .expect_completion("Primitive")
@@ -256,8 +272,13 @@ fn frozen_type_completion_is_closed_to_enabled_payload_variants() {
         .expect_completion("Erased")
         .expect_completion("Callable")
         .expect_completion("Nominal")
+        .expect_completion("Tuple")
+        .expect_completion("Record")
+        .expect_completion("Reference")
+        .expect_completion("Union")
+        .expect_completion("Parameter")
         .expect_no_completion("Unknown")
-        .expect_no_completion("Tuple");
+        .expect_no_completion("Existential");
 }
 
 #[test]
@@ -337,16 +358,17 @@ fn generic_body_runtime_position_after_comptime_block_hides_reflect() {
     .expect_no_completion("reflect");
 }
 
-/// R1 (representative category): reflecting a still-pending composite category
-/// (Tuple) surfaces the named per-category rejection through the LSP
-/// diagnostics path. (ADR-009 B5: Array is now the un-applied-generic-head
-/// rejection — a resolved nominal is an enabled shape.)
+/// R1 (representative pending payload): reflecting a family whose payload
+/// descriptor has NOT landed surfaces the named rejection through the LSP
+/// diagnostics path. After ADR-009 B7 the composite categories are enabled, so
+/// the representative top-level-reachable pending payload is the BOUNDED Erased
+/// bound set (`dyn Trait`, whose trait-reference bound elements land with B2).
 #[test]
 fn reflect_non_enabled_category_has_semantic_diagnostic() {
-    ShapeTest::new("let reflected = comptime { reflect(type_ref([int, string])) }\n")
-        .expect_semantic_diagnostic_contains(
-            "reflect: the Tuple payload descriptor has not landed",
-        );
+    ShapeTest::new(
+        "trait Speak { fn speak(self) -> string; }\nlet r = comptime { reflect(type_ref(dyn Speak)) }\n",
+    )
+    .expect_semantic_diagnostic_contains("reflect: the Erased bound-set payload");
 }
 
 /// R2: the legacy string-kind form (`info.kind == "record"`) is a named

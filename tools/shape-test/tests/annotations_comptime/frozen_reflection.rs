@@ -196,33 +196,53 @@ show()
     expect_vm_and_jit_number(source, 1.0);
 }
 
-/// ADR-009 B1 S4 negative: the R1 per-category rejection fires inside
-/// annotation `comptime` hooks too — reflecting a still-pending composite
-/// category (Tuple; ADR-009 B5 enabled Nominal, so Tuple/Record/Reference/Union
-/// remain the pending families) is the named compile-time rejection under both
-/// VM and JIT, never a partial descriptor.
+/// ADR-009 B7: a composite payload reaches an annotation `comptime` hook — the
+/// handler destructures a `FrozenType::Tuple` down to its ordered `elements` and
+/// bakes the element count into a generated function consumed by a user `fn`
+/// body (VM + JIT value proof). (Formerly the Tuple R1 rejection, which B7
+/// enabled to a full payload.)
 #[test]
-fn annotation_handler_reflect_r1_rejection_fires_in_hooks() {
+fn annotation_handler_reflect_composite_payload_reaches_generated_fn() {
     let source = r#"
-annotation reflect_user() {
+annotation reflect_arity() {
   targets: [type]
   comptime post(target, ctx) {
-    match reflect(type_ref([int, string])) {
-      FrozenType::Primitive(p) => 1
+    let n = match reflect(type_ref([int, string])) {
+      FrozenType::Tuple(t) => t.elements.len()
       _ => 0
     }
+    extend (f"fn tuple_arity() -> int \{ {n} \}")
   }
 }
 
-@reflect_user()
+@reflect_arity()
 type User { id: int }
 
-fn show() -> int { 1 }
+fn show() -> int { tuple_arity() }
 show()
 "#;
-    ShapeTest::new(source)
-        .expect_run_err_contains("reflect: the Tuple payload descriptor has not landed");
+    expect_vm_and_jit_number(source, 2.0);
+}
+
+/// ADR-009 B1 S4 negative: a per-category rejection still fires inside
+/// annotation/comptime `comptime` hooks for a STILL-pending payload. After B7
+/// Slice 2 enabled `Parameter` (completing the ten-category catalog), the sole
+/// remaining reflect() rejection reachable through a bare `type_ref` spelling is
+/// a BOUNDED erased type (`dyn Trait`): the Erased category is enabled but its
+/// bound-set payload elements land with ticket B2 — reflecting one is the named
+/// bounded-erased rejection, never a partial (empty) bound set. Proves the
+/// rejection path is identical inside comptime evaluation.
+#[test]
+fn annotation_handler_reflect_r1_rejection_fires_in_hooks() {
+    // Reflecting a bounded erased type is the bounded-erased rejection, fired
+    // during comptime evaluation — never a partial descriptor.
+    let source = r#"
+trait Speak { fn speak(self) -> string; }
+let reflected = comptime { reflect(type_ref(dyn Speak)) }
+print("unreachable")
+"#;
+    ShapeTest::new(source).expect_run_err_contains("reflect: the Erased bound-set payload");
     ShapeTest::new(source)
         .with_jit()
-        .expect_run_err_contains("reflect: the Tuple payload descriptor has not landed");
+        .expect_run_err_contains("reflect: the Erased bound-set payload");
 }

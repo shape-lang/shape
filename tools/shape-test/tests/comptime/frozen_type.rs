@@ -188,8 +188,9 @@ print(identity("s"))
 // observe Parameter for their own declared type parameter. The per-owner
 // identity DISTINCTNESS (first's T != second's U as frozen identities) is
 // pinned at the unit level (type_reflection/tests.rs) — categories alone
-// cannot distinguish identities publicly, and TypeParamDescriptor payloads
-// are ticket B7 scope.
+// cannot distinguish identities publicly. The `TypeParamDescriptor` payload
+// landed with ADR-009 B7 Slice 2 (see the public reflect() Parameter e2e in
+// reflect.rs + `parameter_payload_is_reachable_from_a_generic_body` below).
 #[test]
 fn distinct_generic_fns_each_observe_parameter_for_their_own_type_param() {
     let source = r#"
@@ -217,6 +218,31 @@ print(first(1))
 print(second(true))
 "#;
     expect_vm_and_jit_output(source, "first:parameter\nsecond:parameter");
+}
+
+// ADR-009 B7 Slice 2 (Dec 50/94): the PARAMETER PAYLOAD (`TypeParamDescriptor`)
+// is publicly reachable from a generic body via reflect() — completing the
+// ten-category catalog. The `FrozenType::Parameter` arm is reached (the payload
+// exists, not an inference hole) and its bound set is provably empty (B2
+// territory), read as typed data on both engines. Companion to the category-
+// level proofs above and the reflect.rs reflect() Parameter e2e.
+#[test]
+fn parameter_payload_is_reachable_from_a_generic_body() {
+    let source = r#"
+fn describe<T>(value: T) -> string {
+  let label = comptime {
+    match reflect(type_ref(T)) {
+      FrozenType::Parameter(pp) => if pp.bounds.len() == 0 { "parameter:empty-bounds" } else { "parameter:bounded" }
+      _ => "wrong"
+    }
+  }
+  label
+}
+
+print(describe(1))
+print(describe("s"))
+"#;
+    expect_vm_and_jit_output(source, "parameter:empty-bounds\nparameter:empty-bounds");
 }
 
 // ADR-009 A3 (review round 1, finding 2): a generic extend method resolves

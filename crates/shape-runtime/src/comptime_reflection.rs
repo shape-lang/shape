@@ -3,12 +3,16 @@ use crate::type_schema::builtin_schemas::{
     COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_ASSOCIATED_CONST_DESCRIPTOR_SCHEMA,
     COMPTIME_ENUM_DESCRIPTOR_SCHEMA, COMPTIME_FIELD_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_CALLABLE_SCHEMA,
     COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_IMPL_REF_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
-    COMPTIME_FROZEN_NOMINAL_SCHEMA, COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
-    COMPTIME_FROZEN_PRIMITIVE_SCHEMA, COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
-    COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA, COMPTIME_FROZEN_TYPE_REF_SCHEMA,
-    COMPTIME_FROZEN_TYPE_SCHEMA, COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA,
-    COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA, COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
-    COMPTIME_STRUCT_DESCRIPTOR_SCHEMA, COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
+    COMPTIME_FROZEN_NOMINAL_SCHEMA, COMPTIME_FROZEN_PARAMETER_SCHEMA,
+    COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
+    COMPTIME_FROZEN_RECORD_SCHEMA,
+    COMPTIME_FROZEN_REFERENCE_SCHEMA, COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
+    COMPTIME_FROZEN_TUPLE_SCHEMA, COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_REF_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA, COMPTIME_FROZEN_UNION_SCHEMA,
+    COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA, COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA,
+    COMPTIME_RECORD_FIELD_SCHEMA, COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
+    COMPTIME_STRUCT_DESCRIPTOR_SCHEMA, COMPTIME_TUPLE_ELEMENT_SCHEMA,
+    COMPTIME_UNION_MEMBER_SCHEMA, COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
 };
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind};
@@ -338,6 +342,21 @@ impl NominalShape {
 /// (ADR-009 B5). Same discipline as [`PASSING_MODE_SCHEMA_NAME`].
 pub const NOMINAL_SHAPE_SCHEMA_NAME: &str = "NominalShape";
 
+/// ADR-009 B7 (Stage 2, Dec 50/94) — spellable model names for the composite
+/// payloads' typed ELEMENT rows the mini-VM injects (the `FieldDescriptor` /
+/// `ParamDescriptor` precedent). The wrapping `Frozen{Tuple,Record,Reference,
+/// Union}` payload names are catalog-derived by
+/// [`frozen_type_enabled_payload_type_name`]; these element structs are not
+/// catalog categories, so their spellable names live here (one const per
+/// element, referenced by the model injection, the value-carrier builders, and
+/// the lift wall — no drift). Each is walled by its own
+/// [`runtime_lift_rejection`] arm registered in the same commit as its schema.
+pub const TUPLE_ELEMENT_SCHEMA_NAME: &str = "TupleElement";
+/// See [`TUPLE_ELEMENT_SCHEMA_NAME`].
+pub const RECORD_FIELD_SCHEMA_NAME: &str = "RecordField";
+/// See [`TUPLE_ELEMENT_SCHEMA_NAME`].
+pub const UNION_MEMBER_SCHEMA_NAME: &str = "UnionMember";
+
 /// ADR-009 B5 (Stage 2, Dec 59) — the sealed field-initialization axis of a
 /// [`FieldDescriptor`](struct)-family record field: `Required` (no declared
 /// default) or `Defaulted` (a default affects construction policy only —
@@ -540,7 +559,21 @@ macro_rules! frozen_type_enabled_payload_catalog {
 // auto-derives the `FrozenCallable` / `FrozenNominal` payload type name, the
 // `FrozenType` enum variant, the schema registration ordinal pin, and the LSP
 // variant list.
-frozen_type_enabled_payload_catalog!(Primitive, Never, Erased, Callable, Nominal);
+// ADR-009 B7 appends the four composite payloads `Tuple` / `Record` /
+// `Reference` / `Union`. Each is already a catalog ordinal (Tuple=4, Record=5,
+// Reference=7, Union=8; see `frozen_type_category_catalog!` above), so appending
+// here is NOT an ordinal renumber (ABI stability §3.3) — it auto-derives each
+// `Frozen<Category>` payload type name, the `FrozenType` enum variant, the
+// schema-registration ordinal pin, and the LSP variant list.
+// ADR-009 B7 Slice 2 appends `Parameter` (catalog ordinal 2; see
+// `frozen_type_category_catalog!` above), completing the ten-category catalog
+// (Dec 50/94). Its public payload is reachable from generic bodies via the A3
+// base-fn-scoped-identity path (`FreezeOverlay::payload_of`). `Existential`
+// stays the SOLE non-enabled catalog appendix (its witness-iteration payload
+// lands with B3-S3).
+frozen_type_enabled_payload_catalog!(
+    Primitive, Never, Erased, Callable, Nominal, Tuple, Record, Reference, Union, Parameter,
+);
 
 /// ADR-009 B1 S3: the SPELLABLE name of the payload-model enum the comptime
 /// mini-VM injects for `reflect()` results (`match FrozenType::Primitive(p)
@@ -972,6 +1005,39 @@ pub fn runtime_lift_rejection(value: &KindedSlot) -> Option<&'static str> {
             "RepresentationAccess is a comptime-only compiler capability and cannot enter runtime \
              code",
         ),
+        // ADR-009 B7 (Stage 2, Dec 50/94): the four composite payload carriers
+        // and their typed element rows are comptime-only reflection data; arms
+        // registered in the SAME commit as their schemas (B1 discipline). The
+        // spellable payload-model names the mini-VM injects (`FrozenTuple` /
+        // `TupleElement` / …) share each arm.
+        COMPTIME_FROZEN_TUPLE_SCHEMA | "FrozenTuple" => {
+            Some("FrozenTuple is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_TUPLE_ELEMENT_SCHEMA | TUPLE_ELEMENT_SCHEMA_NAME => {
+            Some("TupleElement is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_FROZEN_RECORD_SCHEMA | "FrozenRecord" => {
+            Some("FrozenRecord is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_RECORD_FIELD_SCHEMA | RECORD_FIELD_SCHEMA_NAME => {
+            Some("RecordField is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_FROZEN_REFERENCE_SCHEMA | "FrozenReference" => {
+            Some("FrozenReference is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_FROZEN_UNION_SCHEMA | "FrozenUnion" => {
+            Some("FrozenUnion is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_UNION_MEMBER_SCHEMA | UNION_MEMBER_SCHEMA_NAME => {
+            Some("UnionMember is comptime-only reflection data and cannot enter runtime code")
+        }
+        // ADR-009 B7 Slice 2 (Stage 2, Dec 50/94): the Parameter payload carrier
+        // is comptime-only reflection data; arm registered in the SAME commit as
+        // its schema (B1 discipline). The spellable payload-model name the
+        // mini-VM injects (`FrozenParameter`) shares this arm.
+        COMPTIME_FROZEN_PARAMETER_SCHEMA | "FrozenParameter" => {
+            Some("FrozenParameter is comptime-only reflection data and cannot enter runtime code")
+        }
         _ => None,
     }
 }
@@ -1464,6 +1530,15 @@ mod tests {
                 ("Erased", 9),
                 ("Callable", 6),
                 ("Nominal", 3),
+                // ADR-009 B7: the four composite payloads at their catalog
+                // ordinals (Tuple=4, Record=5, Reference=7, Union=8).
+                ("Tuple", 4),
+                ("Record", 5),
+                ("Reference", 7),
+                ("Union", 8),
+                // ADR-009 B7 Slice 2: Parameter at catalog ordinal 2, completing
+                // the ten-category catalog.
+                ("Parameter", 2),
             ]
         );
 
@@ -1747,6 +1822,21 @@ mod tests {
             }
         }
 
+        /// ADR-009 B7 Slice 2: the Parameter payload carrier is comptime-only
+        /// reflection data — its named lift-rejection arm is registered in the
+        /// SAME commit as its schema (B1 discipline).
+        #[test]
+        fn parameter_descriptor_schema_has_its_own_named_lift_rejection() {
+            with_fabricated_descriptor_slot(COMPTIME_FROZEN_PARAMETER_SCHEMA, |slot| {
+                assert_eq!(
+                    runtime_lift_rejection(slot),
+                    Some(
+                        "FrozenParameter is comptime-only reflection data and cannot enter runtime code"
+                    )
+                );
+            });
+        }
+
         /// The pre-existing A1 arms keep firing after the B1 extension.
         #[test]
         fn lift_rejection_still_fires_for_type_ref_and_frozen_type_category() {
@@ -1863,6 +1953,13 @@ mod tests {
                 "FrozenErased",
                 "FrozenCallable",
                 "FrozenNominal",
+                // ADR-009 B7: the four composite payload descriptor types.
+                "FrozenTuple",
+                "FrozenRecord",
+                "FrozenReference",
+                "FrozenUnion",
+                // ADR-009 B7 Slice 2: the Parameter payload descriptor type.
+                "FrozenParameter",
             ]
         );
         for category in FrozenTypeCategory::ALL {
@@ -1892,15 +1989,18 @@ mod tests {
         assert_eq!(frozen_type_payload_variant_ordinal("Callable"), Some(6));
         // ADR-009 B5: Nominal is now enabled and pinned to its catalog ordinal.
         assert_eq!(frozen_type_payload_variant_ordinal("Nominal"), Some(3));
-        for pending in [
-            "Parameter",
-            "Tuple",
-            "Record",
-            "Reference",
-            "Union",
-            "Unknown",
-            "Any",
-        ] {
+        // ADR-009 B7: the four composite payloads pinned to their catalog
+        // ordinals (Tuple=4, Record=5, Reference=7, Union=8).
+        assert_eq!(frozen_type_payload_variant_ordinal("Tuple"), Some(4));
+        assert_eq!(frozen_type_payload_variant_ordinal("Record"), Some(5));
+        assert_eq!(frozen_type_payload_variant_ordinal("Reference"), Some(7));
+        assert_eq!(frozen_type_payload_variant_ordinal("Union"), Some(8));
+        // ADR-009 B7 Slice 2: Parameter is now enabled and pinned to its catalog
+        // ordinal (2), completing the ten-category catalog.
+        assert_eq!(frozen_type_payload_variant_ordinal("Parameter"), Some(2));
+        // Only `Existential` remains non-enabled (unpinnable);
+        // `Unknown` / `Any` are not catalog categories at all.
+        for pending in ["Existential", "Unknown", "Any"] {
             assert_eq!(
                 frozen_type_payload_variant_ordinal(pending),
                 None,
@@ -1937,7 +2037,20 @@ mod tests {
         );
         assert_eq!(
             reflection_enum_variant_names(FROZEN_TYPE_PAYLOAD_ENUM_NAME),
-            Some(vec!["Primitive", "Never", "Erased", "Callable", "Nominal"]),
+            Some(vec![
+                "Primitive",
+                "Never",
+                "Erased",
+                "Callable",
+                "Nominal",
+                // ADR-009 B7: the four composite payload variants.
+                "Tuple",
+                "Record",
+                "Reference",
+                "Union",
+                // ADR-009 B7 Slice 2: the Parameter payload variant.
+                "Parameter",
+            ]),
             "the FrozenType payload sum completes only enabled payload variants"
         );
         // ADR-009 B5: the NominalShape declaration-shape axis + the
@@ -2026,6 +2139,42 @@ mod tests {
         assert_eq!(reflection_enum_variant_names("FrozenErased"), None);
         assert_eq!(reflection_enum_variant_names("Color"), None);
         assert_eq!(reflection_enum_variant_names(""), None);
+    }
+
+    /// ADR-009 B7 (Slice 3, catalog-completeness): every enabled payload
+    /// descriptor TYPE name that is NOT the one enum sub-algebra
+    /// (`FrozenPrimitive`) is a struct — `reflection_enum_variant_names`
+    /// returns `None` for it, so the LSP completes no fabricated variants. The
+    /// iteration is DERIVED from the shared catalog, so a later ticket that
+    /// enables another category auto-extends this lock. Together with the B7
+    /// composite/parameter ELEMENT structs (`TupleElement`/`RecordField`/
+    /// `UnionMember`/`TypeParamDescriptor`), this is the single-source proof
+    /// that the payload struct type names surface through the ONE catalog.
+    #[test]
+    fn enabled_payload_struct_type_names_have_no_variant_arm() {
+        let primitive_type_name =
+            frozen_type_enabled_payload_type_name(FrozenTypeCategory::Primitive);
+        for category in FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES {
+            let type_name = frozen_type_enabled_payload_type_name(category)
+                .expect("an enabled category names a payload descriptor type");
+            if Some(type_name) == primitive_type_name {
+                // The sealed width/domain sub-algebra IS an enum.
+                assert!(reflection_enum_variant_names(type_name).is_some());
+                continue;
+            }
+            assert_eq!(
+                reflection_enum_variant_names(type_name),
+                None,
+                "enabled payload struct {type_name} must have no variant arm"
+            );
+        }
+        for element_struct in ["TupleElement", "RecordField", "UnionMember", "TypeParamDescriptor"] {
+            assert_eq!(
+                reflection_enum_variant_names(element_struct),
+                None,
+                "element struct {element_struct} must have no variant arm"
+            );
+        }
     }
 
     /// The `FrozenPrimitive` descriptor table carries the typed
