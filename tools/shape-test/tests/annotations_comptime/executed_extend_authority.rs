@@ -180,6 +180,38 @@ print(p.real())
     );
 }
 
+/// ADR-009 E3 (S1 parity gap, #19) — a FUNCTION-target annotation
+/// (`targets: [function]`) whose comptime handler `extend`s an EXPLICIT type
+/// materializes the generated method through the SAME executed discovery
+/// pre-pass as a type-target extend. The call site precedes the annotated
+/// function in source, so the method is only callable if the executed
+/// discovery pass (not a source-order pass-2) registered it. Callable in BOTH
+/// execution modes. The type-target sibling is `d7` above.
+#[test]
+fn function_target_extend_explicit_type_materializes_via_executed_prepass() {
+    expect_vm_and_jit_output(
+        r#"
+type Widget { id: int }
+
+annotation add_label() {
+  targets: [function]
+  comptime post(target, ctx) {
+    extend Widget {
+      method label() -> string { f"widget-{self.id}" }
+    }
+  }
+}
+
+let w = Widget { id: 7 }
+print(w.label())
+
+@add_label()
+fn register() -> int { 0 }
+"#,
+        "widget-7",
+    );
+}
+
 /// Twin of the row above: the `false`-guarded phantom method must not be
 /// callable — the executed authority never materialized it, so the call is
 /// an error (the deleted static scan would have made the analyzer believe
