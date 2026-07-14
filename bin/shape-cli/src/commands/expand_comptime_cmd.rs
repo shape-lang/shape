@@ -69,7 +69,20 @@ pub async fn run_expand_comptime(
             script.display()
         )
     })?;
-    let generated_extends = shape_ast::transform::collect_generated_annotation_extends(&program);
+    // ADR-009 E3 (slice S1): source the generated extends from the executed
+    // declaration-discovery authority (which runs the annotation handlers)
+    // rather than the deleted non-evaluating static AST scan. Only the
+    // generated `Item::Extend`s are reported here (matching the former
+    // collector's output — user-written extends already appear as ordinary
+    // program items).
+    let generated_extends: Vec<ExtendStatement> =
+        shape_vm::compiler::executed_generated_items(&program)
+            .into_iter()
+            .filter_map(|item| match item {
+                Item::Extend(extend, _) => Some(extend),
+                _ => None,
+            })
+            .collect();
     let user_function_names = collect_program_function_names(&program);
     let generated_method_names = collect_generated_method_names(&generated_extends);
 

@@ -1554,6 +1554,16 @@ impl BytecodeCompiler {
         &self.generated_symbols
     }
 
+    /// ADR-009 E3 (slice S1): the generated analysis items (`Item::Extend` /
+    /// `Item::Function`) materialized by the executed declaration-discovery
+    /// pre-pass for this compilation unit. Empty until `compile_in_place`
+    /// runs. This is the executed authority that replaced the deleted
+    /// non-evaluating static AST scan; static consumers augment their program
+    /// view from this slice.
+    pub fn generated_analysis_items(&self) -> &[shape_ast::ast::Item] {
+        &self.generated_analysis_items
+    }
+
     /// ADR-009 D1 (S2): build the [`ExpansionSite`] for one comptime
     /// annotation-handler application. Called by BOTH phases of the existing
     /// extend/materialization path — the speculative pre-pass
@@ -2044,10 +2054,46 @@ impl BytecodeCompiler {
                         };
 
                         for directive in execution.directives {
-                            let super::comptime_builtins::ComptimeDirective::ExtendItems { items } =
-                                directive
-                            else {
-                                continue;
+                            // ADR-009 E3 (slice S1): the executed pre-pass is
+                            // now the SINGLE authority for BOTH generated
+                            // directive shapes — the computed
+                            // `extend (expr)` snippet (`ExtendItems`) AND the
+                            // direct `extend target { method }` handler form
+                            // (`Extend`). The deleted non-evaluating static AST
+                            // scan formerly carried the direct form into the
+                            // analysis program; here the direct extend is
+                            // target-substituted and normalized to the same
+                            // `Item::Extend` the `ExtendItems` path emits, so a
+                            // single item-processing loop reserves method
+                            // signatures and returns the block for the
+                            // analyzer. Pass-2's `apply_comptime_extend`
+                            // re-issues the identical reservation (same
+                            // `annotation_expansion_site`) and compiles the
+                            // bodies.
+                            let items: Vec<Item> = match directive {
+                                super::comptime_builtins::ComptimeDirective::ExtendItems {
+                                    items,
+                                } => items,
+                                super::comptime_builtins::ComptimeDirective::Extend(mut extend) => {
+                                    match &mut extend.type_name {
+                                        shape_ast::ast::TypeName::Simple(name)
+                                            if name == "target" =>
+                                        {
+                                            *name = struct_def.name.clone().into();
+                                        }
+                                        shape_ast::ast::TypeName::Generic { name, .. }
+                                            if name == "target" =>
+                                        {
+                                            *name = struct_def.name.clone().into();
+                                        }
+                                        _ => {}
+                                    }
+                                    vec![Item::Extend(
+                                        extend,
+                                        expansion_site.application_span(),
+                                    )]
+                                }
+                                _ => continue,
                             };
                             // ADR-009 D1 (S2), rejection row 1: generated decls
                             // must anchor at the real application span; the

@@ -982,3 +982,73 @@ fn nominal_shape_result_axis_completes_through_the_shared_reflection_lookup() {
         .expect_completion("Opaque")
         .expect_no_completion("Unknown");
 }
+
+// ADR-009 E3 (slice S1): navigation over a generated `extend` method
+// resolves through the D2 shared `generated_symbol_query()` surface — NOT
+// through the deleted parallel static extend collector. This test is the
+// LSP arm of the U12-deletion parity gate: it must stay green after
+// `crates/shape-ast/src/transform/comptime_extends.rs` is removed and the
+// four `type_inference.rs` callers migrate onto the executed authority.
+// =====================================================================
+
+/// Zero-based lines:
+///  1  annotation gen() {
+///  3    comptime post(target, ctx) {   <- generator definition
+///  4      extend target {
+///  5        method total() -> int ...
+/// 10  @gen()                            <- application site
+/// 11  type Pair { a: int, b: int }
+/// 14  let t = pair.total()             <- generated-method call site
+const E3_GENERATED_EXTEND_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method total() -> int { self.a + self.b }
+    }
+  }
+}
+
+@gen()
+type Pair { a: int, b: int }
+
+let pair = Pair { a: 5, b: 6 }
+let t = pair.total()
+"#;
+
+#[test]
+fn goto_definition_on_generated_extend_method_resolves_via_shared_query() {
+    // The generated `Pair.total` method has no hand-written declaration; the
+    // call site resolves only if the shared generated-symbol query answers
+    // it (application line 10 + generator-definition line 3).
+    ShapeTest::new(E3_GENERATED_EXTEND_PROGRAM)
+        .at(pos(14, 13))
+        .expect_definition_includes_lines(&[10, 3]);
+}
+
+#[test]
+fn member_completion_offers_generated_extend_method_via_shared_query() {
+    // Member-access completion on a receiver of the annotated type must offer
+    // the generated method — sourced from the executed authority, never the
+    // deleted static AST scan.
+    let source = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method total() -> int { self.a + self.b }
+    }
+  }
+}
+
+@gen()
+type Pair { a: int, b: int }
+
+let pair = Pair { a: 5, b: 6 }
+let _ = pair.t
+"#;
+    let last_line = source.lines().count() as u32 - 1;
+    ShapeTest::new(source)
+        .at(pos(last_line, 14))
+        .expect_completion("total");
+}
