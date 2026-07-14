@@ -1845,6 +1845,10 @@ fn infer_rvalue_kind_with_projections(
         // rejects it); the destination slot's kind is still well-defined
         // per ADR-006 §2.7.5 producer-side classification. W15.2-LANG-1.
         Rvalue::EnumDiscriminantTest { .. } => Some(NativeKind::Bool),
+        // Every formatted-string expression part is materialized before
+        // accumulation. The producer is therefore a canonical String even
+        // when its input is an inline scalar.
+        Rvalue::FormatValue { .. } => Some(NativeKind::String),
         // PrimitiveCast (`expr as int/number/string/bool/decimal/char`) —
         // the destination slot kind is the cast TARGET kind per ADR-006
         // §2.7.5 producer-side classification (the target type name is

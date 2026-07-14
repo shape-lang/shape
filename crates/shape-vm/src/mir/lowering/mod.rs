@@ -14,6 +14,8 @@
 //!   collection, place projection, type inference from expressions.
 
 mod expr;
+#[cfg(test)]
+mod formatted_string_tests;
 mod helpers;
 mod stmt;
 

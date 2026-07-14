@@ -16,6 +16,7 @@ pub mod async_ops;
 pub mod call_method;
 pub mod control;
 pub mod conversion;
+pub mod formatting;
 pub mod gc;
 pub mod generic_builtin;
 pub mod iterator;

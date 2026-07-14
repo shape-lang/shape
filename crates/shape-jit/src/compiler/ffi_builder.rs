@@ -270,6 +270,7 @@ impl JITCompiler {
             // F5.a/F5.b: string `+` FFI (used by MIR BinaryOp::Add on
             // NativeKind::String operands, incl. f-string desugared chains).
             string_concat: r!("jit_string_concat"),
+            format_value: r!("jit_format_value"),
 
             // W11-fup-A (Phase 3d, 2026-05-18): typed-pow FFI entry points
             // for the MIR `BinOp::Pow` JIT codegen path. Native f64 and

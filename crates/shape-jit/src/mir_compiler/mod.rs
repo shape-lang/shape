@@ -21,6 +21,7 @@
 mod blocks;
 pub mod bounds_elision;
 mod conversions;
+mod formatting;
 mod ownership;
 mod places;
 mod rvalues;
@@ -753,8 +754,13 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                                  routes to the bytecode interpreter (which \
                                  restamps the cast result kind). Tracked v0.4 \
                                  JIT-lowering followup. at {:?}",
-                                 target, stmt.span
+                                target, stmt.span
                             ));
+                        }
+                        Rvalue::FormatValue { spec, .. } => {
+                            if let Some(blocker) = formatting::preflight_blocker(*spec, stmt.span) {
+                                blockers.push(blocker);
+                            }
                         }
                         Rvalue::EnumPayload { variant, .. } => {
                             blockers.push(format!(
@@ -774,7 +780,7 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                             ));
                         }
                         // BinaryOp, UnaryOp, Use, Clone, Borrow, Aggregate,
-                        // EnumTest are supported
+                        // EnumTest, and Default/Fixed FormatValue are supported.
                         _ => {}
                     }
                 }
@@ -1462,7 +1468,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 | Rvalue::EnumPayload { operand, .. }
                 | Rvalue::TypePatternTest { operand, .. }
                 | Rvalue::EnumDiscriminantTest { operand, .. }
-                | Rvalue::PrimitiveCast { operand, .. } => collect_operand_schema_stamps(
+                | Rvalue::PrimitiveCast { operand, .. }
+                | Rvalue::FormatValue { operand, .. } => collect_operand_schema_stamps(
                     operand,
                     field_name_table,
                     concrete_types,

@@ -273,7 +273,8 @@ fn rvalue_uses_slot(rvalue: &Rvalue, slot: SlotId) -> bool {
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
         | Rvalue::EnumDiscriminantTest { operand, .. }
-        | Rvalue::PrimitiveCast { operand, .. } => operand_uses_slot(operand, slot),
+        | Rvalue::PrimitiveCast { operand, .. }
+        | Rvalue::FormatValue { operand, .. } => operand_uses_slot(operand, slot),
     }
 }
 
@@ -881,7 +882,8 @@ fn rvalue_uses_any_slot(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
         | Rvalue::EnumDiscriminantTest { operand, .. }
-        | Rvalue::PrimitiveCast { operand, .. } => operand_uses_any_slot(operand, slots),
+        | Rvalue::PrimitiveCast { operand, .. }
+        | Rvalue::FormatValue { operand, .. } => operand_uses_any_slot(operand, slots),
     }
 }
 

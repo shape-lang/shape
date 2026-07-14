@@ -335,6 +335,11 @@ pub struct FFIFuncRefs {
     //   `f"..."` formatted strings as well.
     pub(crate) string_concat: FuncRef,
 
+    // Typed interpolation producer. Source kind and format spec are stamped
+    // by MIR codegen; the result is always a fresh canonical Arc<String> raw
+    // carrier consumed by subsequent String concat/print operations.
+    pub(crate) format_value: FuncRef,
+
     // W11-fup-A (Phase 3d, 2026-05-18): typed-pow entry points for the
     // MIR `BinOp::Pow` JIT codegen. `pow_f64` takes/returns native f64;
     // `pow_i64` takes/returns native i64. Bodies live at

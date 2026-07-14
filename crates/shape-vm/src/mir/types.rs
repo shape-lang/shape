@@ -321,6 +321,27 @@ impl VariantTag {
     }
 }
 
+/// Compile-time formatting policy carried by [`Rvalue::FormatValue`].
+///
+/// The MIR keeps this policy typed so native consumers never infer formatting
+/// from value bits or obtain string conversion accidentally through a later
+/// concatenation. `Table` and `ContentStyle` remain explicit even where a
+/// backend cannot yet execute them, allowing that backend to refuse the MIR
+/// before running it instead of dropping the specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MirFormatSpec {
+    /// Ordinary interpolation formatting (`f"{value}"`).
+    Default,
+    /// Fixed-point numeric rendering (`f"{value:fixed(N)}"`).
+    Fixed { precision: u8 },
+    /// Typed table formatting. The payload remains AST-owned until native
+    /// table rendering is implemented; MIR still preserves the format class.
+    Table,
+    /// Styled content formatting. This belongs to the content-producing
+    /// f-string path rather than the string-producing native path.
+    ContentStyle,
+}
+
 /// Right-hand side of an assignment.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Rvalue {
@@ -350,6 +371,18 @@ pub enum Rvalue {
     },
     /// Unary operation.
     UnaryOp(UnOp, Operand),
+    /// Convert one formatted-string expression part into an owned String.
+    ///
+    /// This is a producing operation: consumers must return the canonical
+    /// `NativeKind::String` carrier (`Arc::into_raw(Arc<String>)`), regardless
+    /// of the source operand's scalar carrier. The typed format policy is
+    /// preserved here so unsupported classes can be rejected before native
+    /// execution. In particular, a single-part `f"{value}"` must not copy the
+    /// source operand bits directly into a String-labelled destination.
+    FormatValue {
+        operand: Operand,
+        spec: MirFormatSpec,
+    },
     /// Function call result (arguments passed via terminator).
     /// This is a placeholder — actual calls use Call terminators.
     Aggregate(Vec<Operand>),

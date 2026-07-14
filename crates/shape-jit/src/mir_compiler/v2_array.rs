@@ -263,7 +263,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 | Rvalue::EnumPayload { operand, .. }
                 | Rvalue::TypePatternTest { operand, .. }
                 | Rvalue::EnumDiscriminantTest { operand, .. }
-                | Rvalue::PrimitiveCast { operand, .. } => matches_slot(operand),
+                | Rvalue::PrimitiveCast { operand, .. }
+                | Rvalue::FormatValue { operand, .. } => matches_slot(operand),
             }
         };
         for block in &self.mir.blocks {
@@ -443,7 +444,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     | Rvalue::EnumPayload { operand, .. }
                     | Rvalue::TypePatternTest { operand, .. }
                     | Rvalue::EnumDiscriminantTest { operand, .. }
-                    | Rvalue::PrimitiveCast { operand, .. } => {
+                    | Rvalue::PrimitiveCast { operand, .. }
+                    | Rvalue::FormatValue { operand, .. } => {
                         record_operand(operand, point, bi, si, moves, reads);
                     }
                 }

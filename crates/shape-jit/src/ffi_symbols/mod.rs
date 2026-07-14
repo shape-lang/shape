@@ -18,6 +18,7 @@ use std::collections::HashMap;
 mod arc_symbols;
 mod array_symbols;
 mod control_symbols;
+mod formatting_symbols;
 mod math_symbols;
 mod object_symbols;
 mod v2_symbols;
@@ -36,6 +37,7 @@ mod vector;
 pub use arc_symbols::{declare_arc_functions, register_arc_symbols};
 pub use array_symbols::{declare_array_functions, register_array_symbols};
 pub use control_symbols::{declare_control_functions, register_control_symbols};
+pub use formatting_symbols::{declare_formatting_functions, register_formatting_symbols};
 pub use math_symbols::{declare_math_functions, register_math_symbols};
 pub use object_symbols::{declare_object_functions, register_object_symbols};
 pub use v2_symbols::{declare_v2_functions, register_v2_symbols};
@@ -45,6 +47,7 @@ pub fn register_ffi_symbols(builder: &mut JITBuilder) {
     // Register symbols from each live module
     register_array_symbols(builder);
     register_object_symbols(builder);
+    register_formatting_symbols(builder);
     register_math_symbols(builder);
     register_control_symbols(builder);
     register_arc_symbols(builder);
@@ -58,6 +61,7 @@ pub fn declare_ffi_functions(module: &mut JITModule) -> HashMap<String, FuncId> 
     // Declare functions from each live module
     declare_array_functions(module, &mut ffi_funcs);
     declare_object_functions(module, &mut ffi_funcs);
+    declare_formatting_functions(module, &mut ffi_funcs);
     declare_math_functions(module, &mut ffi_funcs);
     declare_control_functions(module, &mut ffi_funcs);
     declare_arc_functions(module, &mut ffi_funcs);

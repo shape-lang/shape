@@ -308,7 +308,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             | Rvalue::EnumPayload { operand, .. }
             | Rvalue::TypePatternTest { operand, .. }
             | Rvalue::EnumDiscriminantTest { operand, .. }
-            | Rvalue::PrimitiveCast { operand, .. } => self.apply_move_read_operand_effect(
+            | Rvalue::PrimitiveCast { operand, .. }
+            | Rvalue::FormatValue { operand, .. } => self.apply_move_read_operand_effect(
                 block,
                 stmt_idx,
                 point,

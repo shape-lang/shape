@@ -11,7 +11,9 @@ use super::immutable_binding_metadata;
 use super::stmt::{StatementSpan, lower_statement, lower_statements, lower_var_decl};
 use crate::mir::types::*;
 use shape_ast::ast::{self, Expr, Literal, Span, Spanned, Statement};
-use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
+use shape_ast::interpolation::{
+    InterpolationFormatSpec, InterpolationPart, parse_interpolation_with_mode,
+};
 use shape_runtime::closure::EnvironmentAnalyzer;
 
 // ---------------------------------------------------------------------------
@@ -1000,9 +1002,9 @@ fn lower_formatted_string(
                 );
                 s
             }
-            InterpolationPart::Expression { expr, .. } => {
+            InterpolationPart::Expression { expr, format_spec } => {
                 // Parse and lower the expression
-                match shape_ast::parser::parse_expression_str(&expr) {
+                let value_slot = match shape_ast::parser::parse_expression_str(&expr) {
                     Ok(parsed_expr) => lower_expr_to_temp(builder, &parsed_expr),
                     Err(_) => {
                         // Fallback: emit empty string on parse error
@@ -1016,7 +1018,31 @@ fn lower_formatted_string(
                         );
                         s
                     }
-                }
+                };
+
+                let spec = match format_spec {
+                    None => MirFormatSpec::Default,
+                    Some(InterpolationFormatSpec::Fixed { precision }) => {
+                        MirFormatSpec::Fixed { precision }
+                    }
+                    Some(InterpolationFormatSpec::Table(_)) => MirFormatSpec::Table,
+                    Some(InterpolationFormatSpec::ContentStyle(_)) => MirFormatSpec::ContentStyle,
+                };
+                let formatted_slot = builder.alloc_temp(LocalTypeInfo::NonCopy);
+                builder.push_stmt(
+                    StatementKind::Assign(
+                        Place::Local(formatted_slot),
+                        Rvalue::FormatValue {
+                            // `value_slot` is a one-use temporary. Moving it
+                            // transfers any owned String share into the
+                            // formatter; scalar carriers remain plain values.
+                            operand: Operand::Move(Place::Local(value_slot)),
+                            spec,
+                        },
+                    ),
+                    span,
+                );
+                formatted_slot
             }
         };
 

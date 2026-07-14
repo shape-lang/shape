@@ -188,7 +188,8 @@ fn collect_rvalue_field_reads(rvalue: &Rvalue, reads: &mut HashSet<FieldKey>) {
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
         | Rvalue::EnumDiscriminantTest { operand, .. }
-        | Rvalue::PrimitiveCast { operand, .. } => {
+        | Rvalue::PrimitiveCast { operand, .. }
+        | Rvalue::FormatValue { operand, .. } => {
             collect_operand_field_reads(operand, reads);
         }
     }

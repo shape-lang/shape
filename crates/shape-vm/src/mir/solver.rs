@@ -663,7 +663,8 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
             | Rvalue::EnumPayload { operand, .. }
             | Rvalue::TypePatternTest { operand, .. }
             | Rvalue::EnumDiscriminantTest { operand, .. }
-            | Rvalue::PrimitiveCast { operand, .. } => {
+            | Rvalue::PrimitiveCast { operand, .. }
+            | Rvalue::FormatValue { operand, .. } => {
                 operand_read_places(operand, &mut reads);
             }
         },
@@ -1680,7 +1681,8 @@ fn rvalue_uses_any(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
         | Rvalue::EnumDiscriminantTest { operand, .. }
-        | Rvalue::PrimitiveCast { operand, .. } => operand_uses_any(operand, slots),
+        | Rvalue::PrimitiveCast { operand, .. }
+        | Rvalue::FormatValue { operand, .. } => operand_uses_any(operand, slots),
     }
 }
 
@@ -1723,7 +1725,8 @@ fn rvalue_uses_param(rvalue: &Rvalue, param_slot: SlotId) -> bool {
         | Rvalue::EnumPayload { operand, .. }
         | Rvalue::TypePatternTest { operand, .. }
         | Rvalue::EnumDiscriminantTest { operand, .. }
-        | Rvalue::PrimitiveCast { operand, .. } => operand_uses_param(operand, param_slot),
+        | Rvalue::PrimitiveCast { operand, .. }
+        | Rvalue::FormatValue { operand, .. } => operand_uses_param(operand, param_slot),
     }
 }
 

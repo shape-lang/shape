@@ -159,7 +159,8 @@ fn classify_rvalue(
         | Rvalue::EnumPayload { .. }
         | Rvalue::TypePatternTest { .. }
         | Rvalue::EnumDiscriminantTest { .. }
-        | Rvalue::PrimitiveCast { .. } => ReturnOwnershipMode::NewlyOwned,
+        | Rvalue::PrimitiveCast { .. }
+        | Rvalue::FormatValue { .. } => ReturnOwnershipMode::NewlyOwned,
     }
 }
 
@@ -328,7 +329,8 @@ fn classify_defining_rvalue(
         | Rvalue::EnumPayload { .. }
         | Rvalue::TypePatternTest { .. }
         | Rvalue::EnumDiscriminantTest { .. }
-        | Rvalue::PrimitiveCast { .. } => ReturnOwnershipMode::NewlyOwned,
+        | Rvalue::PrimitiveCast { .. }
+        | Rvalue::FormatValue { .. } => ReturnOwnershipMode::NewlyOwned,
         Rvalue::Borrow(kind, p) => classify_borrow_rvalue(*kind, p, mir),
         Rvalue::Use(op) => match op {
             Operand::Constant(c) => classify_constant(c),

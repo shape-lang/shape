@@ -317,6 +317,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.ins().stack_addr(types::I64, slot, 0))
             }
 
+            Rvalue::FormatValue { operand, spec } => self.compile_format_value(operand, *spec),
+
             Rvalue::Aggregate(_operands) => {
                 // Route A (ADR-006 §2.7.14 / W11-jit-new-array close):
                 // typed-array allocation is kind-monomorphized on the
@@ -1926,7 +1928,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///   `compile_binop` compare against the literal `1i64` ⇔ `TAG_BOOL_TRUE`
     ///   encoding, so widening to I64 preserves truth semantics.
     /// - `I64` → passed through unchanged.
-    fn to_i64_bits(&mut self, v: Value) -> Value {
+    pub(super) fn to_i64_bits(&mut self, v: Value) -> Value {
         let ty = self.builder.func.dfg.value_type(v);
         if ty == types::I64 {
             v

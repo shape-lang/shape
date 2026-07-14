@@ -4,6 +4,11 @@
 
 use shape_test::shape_test::ShapeTest;
 
+fn expect_vm_and_jit_string(source: &str, expected: &str) {
+    ShapeTest::new(source).expect_string(expected);
+    ShapeTest::new(source).with_jit().expect_string(expected);
+}
+
 #[test]
 fn fstring_basic_variable() {
     ShapeTest::new(
@@ -233,4 +238,80 @@ fn fstring_int_as_number_cast() {
     ShapeTest::new(r#"print(f"{5 as number}")"#)
         .expect_run_ok()
         .expect_output("5.0");
+}
+
+// =====================================================================
+// Typed MIR FormatValue producer — ordinary source VM/JIT parity
+// =====================================================================
+
+#[test]
+fn pure_expression_fstrings_materialize_canonical_strings() {
+    let cases = [
+        (
+            r#"fn tag(value: int) -> string { f"{value}" }
+tag(7)"#,
+            "7",
+        ),
+        (
+            r#"fn tag(value: bool) -> string { f"{value}" }
+tag(true)"#,
+            "true",
+        ),
+        (
+            r#"fn tag(value: number) -> string { f"{value}" }
+tag(1.0)"#,
+            "1.0",
+        ),
+        (
+            r#"fn tag(value: string) -> string { f"{value}" }
+tag("shape")"#,
+            "shape",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        expect_vm_and_jit_string(source, expected);
+    }
+}
+
+#[test]
+fn adjacent_and_literal_expression_parts_match_in_vm_and_jit() {
+    expect_vm_and_jit_string(
+        r#"
+        let left = 7
+        let right = true
+        f"{left}{right}"
+        "#,
+        "7true",
+    );
+    expect_vm_and_jit_string(
+        r#"
+        let value = 7
+        f"value={value}"
+        "#,
+        "value=7",
+    );
+}
+
+#[test]
+fn fixed_spec_matches_in_vm_and_native_jit() {
+    expect_vm_and_jit_string(
+        r#"
+        let value = 1.5
+        f"{value:fixed(2)}"
+        "#,
+        "1.50",
+    );
+}
+
+#[test]
+fn table_spec_remains_an_explicit_vm_and_jit_rejection() {
+    let source = r#"
+        let value = 1
+        f"{value:table()}"
+    "#;
+    ShapeTest::new(source).expect_run_err_contains("FORMAT_SPEC_TABLE rendering deferred");
+    ShapeTest::new(source)
+        .with_jit()
+        .expect_run_err_contains("FORMAT_SPEC_TABLE rendering deferred");
 }
