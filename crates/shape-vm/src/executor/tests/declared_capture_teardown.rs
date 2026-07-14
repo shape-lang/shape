@@ -481,3 +481,6 @@ fn declared_capture_modes_run_through_actual_vm_install_and_teardown() {
     assert_eq!(eval(MOVE_LET_MUT_ARRAY).as_i64(), Some(2));
     assert_eq!(eval(SHARE_VAR).as_i64(), Some(7));
 }
+
+#[path = "declared_capture_teardown/slice4.rs"]
+mod slice4;

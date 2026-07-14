@@ -1823,6 +1823,14 @@ impl BytecodeCompiler {
         // scope (parallel to the ownership/boxed restoration above).
         let saved_shared_locals = std::mem::take(&mut self.shared_locals);
         let saved_shared_drop_locals = std::mem::take(&mut self.shared_drop_locals);
+        // ADR-009 C1 slice 4: inherited Shared capture parameters are
+        // function-local slot evidence. Isolate them exactly like the other
+        // per-function slot maps, then consume the one-shot descriptor vector
+        // supplied by `compile_expr_closure` for this closure body.
+        let saved_inherited_shared_capture_locals =
+            std::mem::take(&mut self.inherited_shared_capture_locals);
+        let incoming_closure_capture_parameter_evidence =
+            self.pending_closure_capture_parameter_evidence.take();
         // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture arm): the
         // escaping-closure capture skip-set is keyed by frame-local slot
         // index, so it must be isolated per function — a capture skip for a
@@ -2236,6 +2244,15 @@ impl BytecodeCompiler {
             }
         }
 
+        // ADR-009 C1 slice 4 / #53: preserve outer-pack Shared storage on the
+        // synthetic capture parameters through the one capture-plan authority.
+        self.install_inherited_capture_parameter_evidence(
+            &func_def.name,
+            &func_def.params,
+            self.program.functions[func_idx].captures_count as usize,
+            incoming_closure_capture_parameter_evidence,
+        )?;
+
         // Mark reference parameters in ref_locals so identifier/assignment compilation
         // emits DerefLoad/DerefStore/SetIndexRef instead of LoadLocal/StoreLocal/SetLocalIndex.
         // Also track which ref_locals were INFERRED (not explicitly declared) so that
@@ -2443,6 +2460,8 @@ impl BytecodeCompiler {
                         self.boxed_locals = saved_boxed_locals;
                         self.shared_locals = saved_shared_locals;
                         self.shared_drop_locals = saved_shared_drop_locals;
+                        self.inherited_shared_capture_locals =
+                            saved_inherited_shared_capture_locals;
                         self.closure_escape_drop_skip_locals =
                             saved_closure_escape_drop_skip_locals;
                         self.closure_binding_capture_drop_locals =
@@ -2583,6 +2602,7 @@ impl BytecodeCompiler {
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;
+        self.inherited_shared_capture_locals = saved_inherited_shared_capture_locals;
         self.closure_escape_drop_skip_locals = saved_closure_escape_drop_skip_locals;
         self.closure_binding_capture_drop_locals = saved_closure_binding_capture_drop_locals;
         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;

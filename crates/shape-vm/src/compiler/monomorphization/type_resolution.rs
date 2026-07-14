@@ -930,7 +930,10 @@ pub fn resolve_call_site_type_args_from_expected_return(
 /// Returns `None` for the same reasons as the type-only path, with one extra:
 /// if a closure arg exists but the type-arg resolver fails to bind its generic
 /// params, this helper also bails (the call site simply doesn't specialize —
-/// the caller then falls back to the generic dispatch path).
+/// the caller then falls back to the generic dispatch path). It also declines
+/// specialization when an explicit capture clause fails validation; only the
+/// ordinary emission path may diagnose that clause, and no inferred closure
+/// layout is minted as a stand-in.
 pub fn resolve_call_site_type_args_with_closures(
     compiler: &mut BytecodeCompiler,
     fn_name: &str,
@@ -1025,7 +1028,7 @@ pub fn resolve_call_site_type_args_with_closures(
         // Mint a ClosureTypeId for the literal. Uses the captures-only
         // signature (Phase A semantics) so two structurally identical closure
         // literals with identical captures share one id.
-        let closure_type_id = compiler.mint_closure_type_id_peek(cparams, cbody, cdeclared);
+        let closure_type_id = compiler.mint_closure_type_id_peek(cparams, cbody, cdeclared)?;
         // Phase C §3.4 — structural CSE. The body hash distinguishes two
         // closures with identical capture signatures (and hence identical
         // ClosureTypeIds) but different bodies. Without this, `|x| x + 1`

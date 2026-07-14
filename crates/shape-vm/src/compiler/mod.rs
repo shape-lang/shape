@@ -64,6 +64,14 @@ pub(crate) mod comptime_builtins;
 // provenance ({SymbolId, checked-decl, application, generator locations})
 // and to list them for workspace symbols. Consumed via
 // `BytecodeCompiler::generated_symbol_query()`.
+pub use comptime_builtins::capture_plan::{
+    CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
+    GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCaptureBindingIdentity,
+    GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCaptureQuery,
+    GeneratedCaptureQueryIssue, GeneratedCaptureSite, GeneratedCaptureSlot,
+    GeneratedCaptureSourceMap, GeneratedCaptureSpecialization,
+    GeneratedCaptureSpecializationIdentity, GeneratedCaptureStage,
+};
 pub use comptime_builtins::expansion_provenance::{
     GeneratedNodePath, GeneratedSymbolProvenance, GeneratedSymbolTable, HygienicRole,
     HygienicSymbol, SourceAnchor, SymbolId,
@@ -1619,6 +1627,23 @@ pub struct BytecodeCompiler {
     /// Saved/restored across nested closure-body compilations.
     pub(crate) shared_capture_inner_kinds:
         HashMap<String, shape_value::v2::struct_layout::FieldKind>,
+
+    /// ADR-009 C1 slice 4: one-shot structural capture evidence for the next
+    /// recursively compiled closure body. The vector is in capture-parameter
+    /// order and comes directly from that closure's [`CapturePack`].
+    /// `compile_function` consumes it before compiling the body; it is never
+    /// reconstructed from a parameter name or runtime bits.
+    ///
+    /// [`CapturePack`]: crate::compiler::comptime_builtins::capture_plan::CapturePack
+    pub(crate) pending_closure_capture_parameter_evidence:
+        Option<Vec<crate::compiler::comptime_builtins::capture_plan::CaptureParameterEvidence>>,
+
+    /// Local slots in the current closure body whose synthetic capture
+    /// parameter carries a canonical raw `*const SharedCell`. The body itself
+    /// still reads/writes the capture through `shared_closure_captures` and the
+    /// frame upvalue table; this slot is the structurally proven carrier used
+    /// when a nested closure recaptures the same cell.
+    pub(crate) inherited_shared_capture_locals: HashSet<u16>,
 
     /// Variables in the current scope that have been boxed into SharedCells
     /// by a mutable closure capture. When a subsequent closure captures one

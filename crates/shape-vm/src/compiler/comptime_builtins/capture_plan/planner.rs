@@ -2,6 +2,69 @@ use super::*;
 use crate::compiler::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    /// Install structural capture-pack evidence on the synthetic leading
+    /// parameters of one recursively compiled closure body.
+    ///
+    /// Only Shared cells need a separately addressable parameter carrier for
+    /// nested recapture. Every descriptor can also carry its original binding
+    /// span for query presentation. The vector is produced from this closure's
+    /// [`CapturePack`] and aligned by parameter ordinal, so no source-name,
+    /// span, or runtime-tag lookup participates.
+    pub(crate) fn install_inherited_capture_parameter_evidence(
+        &mut self,
+        closure_name: &str,
+        params: &[shape_ast::ast::FunctionParameter],
+        expected_capture_count: usize,
+        evidence: Option<Vec<CaptureParameterEvidence>>,
+    ) -> Result<()> {
+        let Some(evidence) = evidence else {
+            return Ok(());
+        };
+        if evidence.len() != expected_capture_count {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "internal compiler error: closure {closure_name} has {} capture descriptors \
+                     but function metadata declares {expected_capture_count} captures",
+                    evidence.len(),
+                ),
+                location: None,
+            });
+        }
+
+        for (param_index, evidence) in evidence.into_iter().enumerate() {
+            let expected_slot =
+                u16::try_from(param_index).map_err(|_| ShapeError::RuntimeError {
+                    message: format!(
+                        "internal compiler error: capture parameter {param_index} of \
+                     {closure_name} exceeds the local-slot range"
+                    ),
+                    location: None,
+                })?;
+            let Some(_param_name) = params
+                .get(param_index)
+                .and_then(|param| param.pattern.as_identifier())
+            else {
+                return Err(ShapeError::RuntimeError {
+                    message: format!(
+                        "internal compiler error: capture parameter {param_index} of \
+                         {closure_name} is not a simple binding"
+                    ),
+                    location: None,
+                });
+            };
+            if let Some(binding_span) = evidence.binding_span {
+                self.local_binding_spans.insert(expected_slot, binding_span);
+            }
+            // The descriptor ordinal is the authority: synthetic capture
+            // parameters are the compiler-issued leading locals, so ordinal
+            // is their slot without a spelling-based re-resolution.
+            if evidence.access == CaptureAccess::SharedCell {
+                self.inherited_shared_capture_locals.insert(expected_slot);
+            }
+        }
+        Ok(())
+    }
+
     /// Gather [`CaptureBindingFacts`] for one captured name, in the enclosing
     /// function's scope.
     fn capture_binding_facts(&self, name: &str, mutated: bool) -> CaptureBindingFacts {
@@ -11,13 +74,30 @@ impl BytecodeCompiler {
         let target = self.resolve_capture_target(name);
 
         let storage = match target {
+            Some(CaptureTarget::Local(idx))
+                if self.inherited_shared_capture_locals.contains(&idx) =>
+            {
+                Some(BindingStorageClass::SharedCow)
+            }
             Some(CaptureTarget::Local(idx)) => self.mir_storage_class_for_slot(idx),
             _ => None,
+        };
+
+        let inherited_shared_cell = matches!(
+            target,
+            Some(CaptureTarget::Local(idx))
+                if self.inherited_shared_capture_locals.contains(&idx)
+        );
+        let binding_span = match target {
+            Some(CaptureTarget::Local(idx)) => self.local_binding_spans.get(&idx).copied(),
+            Some(CaptureTarget::ModuleBinding(idx)) => self.module_binding_spans.get(&idx).copied(),
+            None => None,
         };
 
         CaptureBindingFacts {
             name: name.to_string(),
             target,
+            binding_span,
             ownership: self
                 .binding_semantics_for_name(name)
                 .map(|(_, _, sem)| sem.ownership_class),
@@ -27,6 +107,7 @@ impl BytecodeCompiler {
             witness_shared_local: self.shared_locals.contains(name),
             witness_shared_module_binding: self.shared_module_binding_contains(name),
             witness_owned_mutable_local: self.owned_mutable_locals.contains(name),
+            inherited_shared_cell,
         }
     }
 
@@ -52,6 +133,7 @@ impl BytecodeCompiler {
         &self,
         captured_vars: &[String],
         mutated_captures: &std::collections::HashSet<String>,
+        analysis: Option<&shape_runtime::closure::CaptureAnalysis>,
         declared: Option<&CaptureClause>,
         origin: Option<&GeneratedNodeOrigin>,
         closure_span: Span,
@@ -66,10 +148,15 @@ impl BytecodeCompiler {
                 .into_iter()
                 .map(|facts| {
                     let plan = infer_plan(&facts);
+                    let use_spans = analysis.map_or_else(Vec::new, |analysis| {
+                        analysis.use_spans(&facts.name).to_vec()
+                    });
                     PlannedCapture {
                         facts,
                         plan,
                         declared: None,
+                        declaration_span: None,
+                        use_spans,
                     }
                 })
                 .collect());
@@ -77,7 +164,8 @@ impl BytecodeCompiler {
 
         // Validate first — a clause that does not describe the discovered
         // capture set is an error BEFORE any lowering runs.
-        let entry_for_target = self.validate_declared_clause(clause, &facts, origin, closure_span)?;
+        let entry_for_target =
+            self.validate_declared_clause(clause, &facts, origin, closure_span)?;
 
         facts
             .into_iter()
@@ -86,24 +174,27 @@ impl BytecodeCompiler {
                 // resolves and has a matching entry; both unwraps are its
                 // post-conditions.
                 let target = facts.target.expect("validated: every capture resolves");
-                let mode = *entry_for_target
+                let &(mode, declaration_span) = entry_for_target
                     .get(&target)
                     .expect("validated: every capture is declared");
-                let plan = lower_declared(mode, &facts).map_err(|message| {
-                    ShapeError::SemanticError {
+                let plan =
+                    lower_declared(mode, &facts).map_err(|message| ShapeError::SemanticError {
                         message,
                         location: Some(self.span_to_source_location(closure_span)),
-                    }
-                })?;
+                    })?;
                 debug_assert_ne!(
                     plan.access(),
                     CaptureAccess::MutableCell,
                     "the inference residual is unreachable on the declared path"
                 );
                 Ok(PlannedCapture {
+                    use_spans: analysis.map_or_else(Vec::new, |analysis| {
+                        analysis.use_spans(&facts.name).to_vec()
+                    }),
                     facts,
                     plan,
                     declared: Some(mode),
+                    declaration_span: Some(declaration_span),
                 })
             })
             .collect()
@@ -123,7 +214,7 @@ impl BytecodeCompiler {
         facts: &[CaptureBindingFacts],
         origin: Option<&GeneratedNodeOrigin>,
         closure_span: Span,
-    ) -> Result<std::collections::HashMap<CaptureTarget, CaptureMode>> {
+    ) -> Result<std::collections::HashMap<CaptureTarget, (CaptureMode, Span)>> {
         let reject = |message: String| ShapeError::SemanticError {
             message,
             location: Some(self.span_to_source_location(closure_span)),
@@ -131,7 +222,7 @@ impl BytecodeCompiler {
 
         // (i) every DECLARED entry resolves to a slot — [C0905].
         // (ii) no two entries name the same slot — [C0907].
-        let mut entry_for_target: std::collections::HashMap<CaptureTarget, CaptureMode> =
+        let mut entry_for_target: std::collections::HashMap<CaptureTarget, (CaptureMode, Span)> =
             std::collections::HashMap::new();
         let mut declared_names: std::collections::HashMap<CaptureTarget, String> =
             std::collections::HashMap::new();
@@ -156,7 +247,7 @@ impl BytecodeCompiler {
                     },
                 )));
             }
-            entry_for_target.insert(target, entry.mode);
+            entry_for_target.insert(target, (entry.mode, entry.span));
         }
 
         // (iii) every DISCOVERED capture resolves to a slot — [C0905]. Slice 1
@@ -292,12 +383,16 @@ impl BytecodeCompiler {
                 CaptureDescriptor {
                     index: i as u16,
                     target: planned.facts.target,
+                    binding_span: planned.facts.binding_span,
                     capture_type,
                     declared: planned.declared,
+                    declaration_span: planned.declaration_span,
+                    use_spans: planned.use_spans.clone(),
                     lowered: planned.plan.kind(),
                     access: planned.plan.access(),
                     ownership: planned.facts.ownership,
                     storage: planned.facts.storage,
+                    inherited_shared_cell: planned.facts.inherited_shared_cell,
                     name: planned.facts.name.clone(),
                 }
             })

@@ -66,6 +66,7 @@
         CaptureBindingFacts {
             name: "x".to_string(),
             target,
+            binding_span: None,
             ownership,
             storage: None,
             mutated,
@@ -73,6 +74,7 @@
             witness_shared_local,
             witness_shared_module_binding,
             witness_owned_mutable_local,
+            inherited_shared_cell: false,
         }
     }
 
@@ -172,6 +174,24 @@
              reachable on the inferred path — if it is not, the fusion silently dropped a \
              live emission arm"
         );
+    }
+
+    #[test]
+    fn inherited_shared_parameter_evidence_precedes_by_value_param_semantics() {
+        let mut facts = facts_for(
+            Some(CaptureTarget::Local(0)),
+            Some(BindingOwnershipClass::OwnedMutable),
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        facts.inherited_shared_cell = true;
+
+        let plan = infer_plan(&facts);
+        assert_eq!(plan.kind(), CaptureKind::Shared);
+        assert_eq!(plan.access(), CaptureAccess::SharedCell);
     }
 
     /// The residual arm, pinned by name so a future edit that "cleans it up"
@@ -435,6 +455,42 @@ run()
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(keys.len(), sorted.len(), "func_idx keys must be distinct");
+    }
+
+    #[test]
+    fn rejected_closure_body_clears_pending_capture_evidence() {
+        let bad = shape_ast::parse_program(
+            "let broken = || { let x = 1\n x = 2\n x }\nbroken()",
+        )
+        .expect("bad fixture parses");
+        let good = shape_ast::parse_program("let ok = || 42\nok()")
+            .expect("follow-up fixture parses");
+        let mut compiler = BytecodeCompiler::new();
+
+        let error = compiler
+            .compile_in_place(&bad)
+            .expect_err("immutable assignment must be a named compile error, not a panic");
+        assert!(
+            error.to_string().contains("cannot assign to immutable binding 'x'"),
+            "unexpected diagnostic: {error}"
+        );
+        assert!(
+            compiler
+                .pending_closure_capture_parameter_evidence
+                .is_none()
+        );
+        assert!(compiler.mutable_closure_captures.is_empty());
+        assert!(compiler.shared_closure_captures.is_empty());
+        assert!(compiler.owned_mutable_closure_captures.is_empty());
+
+        compiler
+            .compile_in_place(&good)
+            .expect("the same compiler remains clean after the rejected closure");
+        assert!(
+            compiler
+                .pending_closure_capture_parameter_evidence
+                .is_none()
+        );
     }
 
     #[path = "inferred_tests/invariants.rs"]

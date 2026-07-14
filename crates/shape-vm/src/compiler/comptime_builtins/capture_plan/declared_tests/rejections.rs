@@ -13,6 +13,7 @@ use super::*;
         CaptureBindingFacts {
             name: "x".to_string(),
             target,
+            binding_span: None,
             ownership,
             storage: None,
             mutated: false,
@@ -20,6 +21,7 @@ use super::*;
             witness_shared_local,
             witness_shared_module_binding: false,
             witness_owned_mutable_local: false,
+            inherited_shared_cell: false,
         }
     }
 

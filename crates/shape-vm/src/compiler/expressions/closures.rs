@@ -3,7 +3,9 @@
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
 // ADR-009 C1 — THE one capture selector. `compile_expr_closure` reads its plan
 // and nothing else; it does not classify captures itself.
-use crate::compiler::comptime_builtins::capture_plan::{CaptureAccess, CaptureTarget};
+use crate::compiler::comptime_builtins::capture_plan::{
+    CaptureAccess, CaptureParameterEvidence, CaptureTarget,
+};
 use crate::compiler::monomorphization::type_resolution::concrete_type_for_expr;
 use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 use shape_ast::ast::type_path::TypePath;
@@ -3120,8 +3122,9 @@ impl BytecodeCompiler {
         };
 
         let outer_vars = self.collect_outer_scope_vars();
-        let (mut captured_vars, mut mutated_captures) =
-            EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
+        let analysis = EnvironmentAnalyzer::analyze_function_captures(&proto_def, &outer_vars);
+        let mut captured_vars = analysis.captured_vars().to_vec();
+        let mut mutated_captures = analysis.mutated_captures().clone();
         captured_vars.sort();
         let param_names: BTreeSet<String> =
             params.iter().flat_map(|p| p.get_identifiers()).collect();
@@ -3320,13 +3323,18 @@ impl BytecodeCompiler {
         let capture_plan = self.plan_captures(
             &captured_vars,
             &mutated_captures,
+            Some(&analysis),
             declared,
             generated_origin,
             closure_span,
         )?;
 
-        // Build closure parameters: only immutable captures become leading params.
-        // Mutable captures are accessed via LoadClosure/StoreClosure opcodes.
+        // Build one leading synthetic parameter slot per capture so descriptor
+        // ordinal, function metadata, and frame layout stay aligned. Immutable
+        // captures read their value from that local. Shared captures read/write
+        // through the upvalue table but retain the raw cell carrier in the
+        // corresponding local for nested recapture. OwnedMutable captures use
+        // only their uniquely owned upvalue cell; their local stays a sentinel.
         //
         // Strict-typing-sweep (Cluster 1): synthesize a `type_annotation` for each
         // capture from its resolved upstream `ConcreteType`. Without this the
@@ -3660,40 +3668,44 @@ impl BytecodeCompiler {
         // The heap-promotion signal is `emit_make_closure_heap_next`.
         let closure_is_escaping = self.emit_make_closure_heap_next;
         for descriptor in &pack.descriptors {
-            // ADR-009 C1: the veto reads the SAME pack emission reads (was
-            // `mutable_flags[i]` + a re-derived storage class).
-            if !descriptor.access.needs_cell() {
+            // ADR-009 C1 / #53: the veto reads the SAME structural access
+            // discipline emission reads. Re-resolving `descriptor.name`
+            // here is a second authority and misclassifies an inherited
+            // Shared synthetic parameter as an ordinary OwnedMutable
+            // by-value parameter. Only a proven OwnedMutable cell in an
+            // escaping closure violates the unique-owner rule. The literal
+            // signal covers direct escape sites; the retained storage plan
+            // also covers bind-then-return/collection escape vectors that the
+            // single-shot literal flag cannot see. Both are compiler-issued
+            // facts already frozen into this pack. Shared captures bypass the
+            // veto by their proven access discipline before storage is read.
+            let storage_proves_escape = !matches!(
+                descriptor.storage,
+                Some(BindingStorageClass::LocalMutablePtr)
+                    | Some(BindingStorageClass::Reference)
+                    | Some(BindingStorageClass::Direct)
+                    | Some(BindingStorageClass::Deferred)
+                    | None,
+            );
+            if descriptor.access != CaptureAccess::OwnedMutableCell
+                || (!closure_is_escaping && !storage_proves_escape)
+            {
                 continue;
             }
-            let ownership = self
-                .binding_semantics_for_name(&descriptor.name)
-                .map(|(_, _, sem)| sem.ownership_class);
-
-            if matches!(ownership, Some(BindingOwnershipClass::OwnedMutable))
-                && !matches!(
-                    descriptor.storage,
-                    Some(BindingStorageClass::LocalMutablePtr)
-                        | Some(BindingStorageClass::Reference)
-                        | Some(BindingStorageClass::Direct)
-                        | Some(BindingStorageClass::Deferred)
-                        | None,
-                )
-            {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "[B0003] mutable binding '{}' cannot be captured by an escaping closure; \
-                         promote the source to `var` or restructure to keep the closure local{}",
-                        descriptor.name,
-                        // ADR-009 C1 (slice 2): empty for ordinary source (the
-                        // message is byte-identical); inside generated code the
-                        // error names the owning expansion + node path, because
-                        // the closure's span points at handler-emitted snippet
-                        // offsets that resolve nowhere in the user's file.
-                        pack.generated_note()
-                    ),
-                    location: None,
-                });
-            }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "[B0003] mutable binding '{}' cannot be captured by an escaping closure; \
+                     promote the source to `var` or restructure to keep the closure local{}",
+                    descriptor.name,
+                    // ADR-009 C1 (slice 2): empty for ordinary source (the
+                    // message is byte-identical); inside generated code the
+                    // error names the owning expansion + node path, because
+                    // the closure's span points at handler-emitted snippet
+                    // offsets that resolve nowhere in the user's file.
+                    pack.generated_note()
+                ),
+                location: None,
+            });
         }
 
         // Set up the per-kind closure-body emission maps. During body
@@ -3716,7 +3728,6 @@ impl BytecodeCompiler {
         let saved_owned_mutable_capture_inner_kinds =
             std::mem::take(&mut self.owned_mutable_capture_inner_kinds);
         let saved_shared_capture_inner_kinds = std::mem::take(&mut self.shared_capture_inner_kinds);
-        let _ = closure_is_escaping;
         for descriptor in &pack.descriptors {
             // ADR-009 C1: the body-emission maps are a VIEW on the pack's
             // access discipline. `CaptureAccess::Param` captures are leading
@@ -3798,7 +3809,46 @@ impl BytecodeCompiler {
             closure_destructure_facts,
         )
         .map(|facts| std::mem::replace(&mut self.inference_facts, facts));
+        // ADR-009 C1 slice 4 / #53: hand the recursive function compile the
+        // outer pack's structural descriptor evidence in capture-parameter
+        // order. The function compiler consumes this one-shot vector, records
+        // Shared synthetic parameters by compiler-issued local slot, and
+        // retains authored binding spans for nested query presentation.
+        // Without it, ordinary parameter binding semantics erase Shared to
+        // OwnedMutable before a nested closure plans its recapture.
+        let capture_parameter_evidence = pack
+            .descriptors
+            .iter()
+            .map(|descriptor| {
+                debug_assert!(
+                    !descriptor.inherited_shared_cell
+                        || descriptor.access == CaptureAccess::SharedCell,
+                    "inherited SharedCell evidence reached a non-Shared capture descriptor"
+                );
+                CaptureParameterEvidence {
+                    access: descriptor.access,
+                    binding_span: descriptor.binding_span,
+                }
+            })
+            .collect();
+        let saved_pending_capture_parameter_evidence = self
+            .pending_closure_capture_parameter_evidence
+            .replace(capture_parameter_evidence);
         let compile_result = self.compile_function(&closure_def);
+        // `compile_function_inner` can reject during MIR/borrow/mutability
+        // analysis before `compile_function_body` consumes this one-shot
+        // carrier. Clear an unconsumed value on every error path and restore
+        // the enclosing pending state before propagating the named error.
+        // Successful compilation must still consume it exactly once.
+        let unconsumed_capture_parameter_evidence =
+            self.pending_closure_capture_parameter_evidence.take();
+        if compile_result.is_ok() {
+            debug_assert!(
+                unconsumed_capture_parameter_evidence.is_none(),
+                "compile_function did not consume closure capture parameter evidence"
+            );
+        }
+        self.pending_closure_capture_parameter_evidence = saved_pending_capture_parameter_evidence;
         if let Some(saved) = saved_inference_facts {
             self.inference_facts = saved;
         }
@@ -3807,14 +3857,15 @@ impl BytecodeCompiler {
         }
         self.pending_callable_hint_name = saved_pending_callable_hint_name;
         self.closure_function_ids = saved_closure_ids;
-        compile_result?;
-
-        // Restore mutable_closure_captures
+        // The body-emission maps are scoped to the recursive closure compile
+        // and must be restored before either success or error is observed by
+        // the enclosing compilation.
         self.mutable_closure_captures = saved_mutable_captures;
         self.shared_closure_captures = saved_shared_captures;
         self.owned_mutable_closure_captures = saved_owned_mutable_captures;
         self.owned_mutable_capture_inner_kinds = saved_owned_mutable_capture_inner_kinds;
         self.shared_capture_inner_kinds = saved_shared_capture_inner_kinds;
+        compile_result?;
 
         // Capture boxing decisions
         // ────────────────────────
@@ -3945,7 +3996,15 @@ impl BytecodeCompiler {
                         _ => None,
                     };
                     if let Some(local_idx) = shared_local_slot {
-                        if !self.shared_locals.contains(captured) {
+                        // An inherited Shared synthetic parameter already
+                        // contains the canonical raw `*const SharedCell`
+                        // carrier installed by the closure call convention.
+                        // It must never be projected to the payload or wrapped
+                        // in a second cell. Ordinary declaring-frame locals
+                        // still allocate on first promotion.
+                        let inherited_shared =
+                            self.inherited_shared_capture_locals.contains(&local_idx);
+                        if !inherited_shared && !self.shared_locals.contains(captured) {
                             // First promotion: push current value, alloc
                             // the Arc cell, then push the pointer bits.
                             self.emit(Instruction::new(
@@ -4369,7 +4428,10 @@ impl BytecodeCompiler {
     ///     push `(func_id, type_id)` into `closure_type_ids`.
     ///
     /// This keeps `closure_type_ids` free of duplicates while letting the
-    /// resolver see the id early.
+    /// resolver see the id early. An invalid declared capture plan returns
+    /// `None`: the resolver must decline specialization and let ordinary
+    /// emission report the real diagnostic. It must never mint an inferred
+    /// stand-in layout for a declaration that failed validation.
     pub(crate) fn mint_closure_type_id_peek(
         &mut self,
         params: &[shape_ast::ast::FunctionParameter],
@@ -4380,7 +4442,7 @@ impl BytecodeCompiler {
         // flagship case — a `move` over a read-only `let mut` inside a generic
         // generated method.
         declared: Option<&shape_ast::ast::CaptureClause>,
-    ) -> ClosureTypeId {
+    ) -> Option<ClosureTypeId> {
         // Run the same capture analysis as `compile_expr_closure`, but only
         // for the purpose of reading capture names off of the AST.
         let proto_def = FunctionDef {
@@ -4399,8 +4461,9 @@ impl BytecodeCompiler {
         };
 
         let outer_vars = self.collect_outer_scope_vars();
-        let (mut captured_vars, mutated_captures) =
-            EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
+        let analysis = EnvironmentAnalyzer::analyze_function_captures(&proto_def, &outer_vars);
+        let mut captured_vars = analysis.captured_vars().to_vec();
+        let mutated_captures = analysis.mutated_captures().clone();
         captured_vars.sort();
         let param_names: BTreeSet<String> =
             params.iter().flat_map(|p| p.get_identifiers()).collect();
@@ -4414,32 +4477,31 @@ impl BytecodeCompiler {
             Self::collect_callee_identifier_names(body),
         );
         // ADR-009 C1 (slice 3): the SAME selector, then the SAME id producer
-        // emission uses — `peeked_id == emitted_id` by construction.
-        //
-        // The peek runs during monomorphization RESOLUTION, before any
-        // diagnostic is raised. A clause that does not validate is not a
-        // decision to make here: emission will raise the rejection with a real
-        // location. The peek only needs a stable cache key until then, so an
-        // invalid clause falls back to the inferred plan — which is never
-        // observed, because that compile is about to fail.
-        let plan = self
-            .plan_captures(
-                &captured_vars,
-                &mutated_captures,
-                declared,
-                None,
-                Span::DUMMY,
-            )
-            .or_else(|_| {
-                self.plan_captures(&captured_vars, &mutated_captures, None, None, Span::DUMMY)
-            })
-            .unwrap_or_default();
+        // emission uses — `peeked_id == emitted_id` by construction. A failed
+        // declared plan is not replaced with inference: that would create a
+        // contradictory cache artifact before emission rejects the source.
+        // Instead this non-authoritative peek declines specialization, after
+        // restoring the temporary callable-capture classification.
+        let plan = match self.plan_captures(
+            &captured_vars,
+            &mutated_captures,
+            Some(&analysis),
+            declared,
+            None,
+            Span::DUMMY,
+        ) {
+            Ok(plan) => plan,
+            Err(_) => {
+                self.current_closure_callee_captures = saved_callee_captures;
+                return None;
+            }
+        };
         // `func_idx` is irrelevant to the id (the registry interns on types +
         // kinds), and this pack is never pushed — the peek does not emit.
         let pack = self.build_capture_pack(u16::MAX, &plan, None);
         let id = self.intern_closure_type_id_for_pack(&pack);
         self.current_closure_callee_captures = saved_callee_captures;
-        id
+        Some(id)
     }
 
     /// Strict-typing-sweep (Cluster 2 extension): same body scan as the

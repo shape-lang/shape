@@ -30,6 +30,10 @@ pub(crate) struct CaptureBindingFacts {
     /// behaviour-preserving fusion, so the arm is reproduced rather than
     /// panicked on. The declared path (slice 3) rejects `None` by name.
     pub(crate) target: Option<CaptureTarget>,
+    /// Exact declaration span for the compiler-issued target, when the target
+    /// originates in authored source. Presentation evidence only: capture
+    /// identity and lowering remain slot-keyed through `target`.
+    pub(crate) binding_span: Option<Span>,
     /// `binding_semantics_for_name(..).ownership_class`.
     pub(crate) ownership: Option<BindingOwnershipClass>,
     /// `mir_storage_class_for_slot` for local targets (ADR-006 §4.2).
@@ -47,6 +51,11 @@ pub(crate) struct CaptureBindingFacts {
     /// `owned_mutable_locals` witness (a sibling closure already classified
     /// this local `OwnedMutable`).
     pub(crate) witness_owned_mutable_local: bool,
+    /// Structural evidence from the enclosing closure's capture pack: this
+    /// synthetic parameter slot carries the raw `Arc<SharedCell>` pointer.
+    /// Unlike the legacy witness sets, this is slot-keyed and survives nested
+    /// closure compilation without reclassifying the parameter by name.
+    pub(crate) inherited_shared_cell: bool,
 }
 
 impl CaptureBindingFacts {
@@ -82,6 +91,18 @@ pub(crate) enum CaptureAccess {
     /// so the fusion is behaviour-preserving. The declared path (slice 3) must
     /// never produce it; it is a hard rejection there, never a fallback arm.
     MutableCell,
+}
+
+/// One descriptor's structural evidence threaded into the synthetic leading
+/// parameter of its recursively compiled closure body.
+///
+/// Descriptor ordinal selects the local slot. `binding_span` is presentation
+/// evidence copied from the outer pack; it never participates in capture
+/// selection or storage classification.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CaptureParameterEvidence {
+    pub(crate) access: CaptureAccess,
+    pub(crate) binding_span: Option<Span>,
 }
 
 impl CaptureAccess {
@@ -146,6 +167,20 @@ pub(crate) struct CaptureDescriptor {
     /// from the emitted layout.
     pub(crate) ownership: Option<BindingOwnershipClass>,
     pub(crate) storage: Option<BindingStorageClass>,
+    /// Whether the source slot is a synthetic parameter carrying an inherited
+    /// raw SharedCell carrier. Retained so artifact/unit proofs can distinguish
+    /// true nested sharing from a coincidental local `var` classification.
+    pub(crate) inherited_shared_cell: bool,
+    /// Exact authored declaration span for the captured binding, when one is
+    /// available. This never participates in capture identity.
+    pub(crate) binding_span: Option<Span>,
+    /// Exact capture-clause entry span. Generated strings whose offsets do not
+    /// round-trip to authored syntax deliberately retain an unavailable source
+    /// map rather than acquiring a guessed location.
+    pub(crate) declaration_span: Option<Span>,
+    /// Lexically resolved body-use spans from the canonical environment walk.
+    /// Presentation evidence only; names and spans never select the target.
+    pub(crate) use_spans: Vec<Span>,
     /// Source spelling — diagnostics only.
     pub(crate) name: String,
 }

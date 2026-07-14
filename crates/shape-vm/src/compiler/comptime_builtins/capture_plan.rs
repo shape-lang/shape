@@ -56,9 +56,18 @@ use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 mod artifact;
 mod model;
 mod planner;
+mod query;
 mod validation;
 
 pub(crate) use model::*;
+pub use query::{
+    CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
+    GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCaptureBindingIdentity,
+    GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCaptureQuery,
+    GeneratedCaptureQueryIssue, GeneratedCaptureSite, GeneratedCaptureSlot,
+    GeneratedCaptureSourceMap, GeneratedCaptureSpecialization,
+    GeneratedCaptureSpecializationIdentity, GeneratedCaptureStage,
+};
 
 impl CapturePack {
     /// The emitted layout's `capture_kinds` vector.
@@ -106,6 +115,15 @@ impl CapturePack {
 /// [`tests::fused_plan_matches_legacy_pair_across_cross_product`] pins the
 /// equivalence over the full fact cross-product.
 pub(crate) fn infer_plan(facts: &CaptureBindingFacts) -> CapturePlan {
+    // A synthetic capture parameter whose enclosing descriptor is Shared
+    // carries the raw cell identity, not an ordinary by-value parameter. This
+    // structural evidence wins before the parameter's mechanically applied
+    // `OwnedMutable` binding semantics; reclassifying it by those semantics is
+    // the #53 descriptor-erasure bug.
+    if facts.inherited_shared_cell {
+        return CapturePlan::new(CaptureKind::Shared, CaptureAccess::SharedCell);
+    }
+
     // Pre-fusion `mutable_flags[i]` (closures.rs, 5-way OR). A capture needs
     // cell access if the closure mutates it, if the source slot is already
     // boxed, if a sibling closure already promoted it to a shared cell, or if
@@ -226,7 +244,9 @@ pub(crate) fn lower_declared(
     // `SharedCell` (the witness sets) — the aliasing invariant (C-3/C-4): a
     // declaration may not un-share what is already shared.
     let is_flexible = matches!(facts.ownership, Some(BindingOwnershipClass::Flexible));
-    let sibling_shared = facts.witness_shared_local || facts.witness_shared_module_binding;
+    let sibling_shared = facts.witness_shared_local
+        || facts.witness_shared_module_binding
+        || facts.inherited_shared_cell;
     let is_shared_ownership = is_flexible || sibling_shared || is_module_binding;
 
     match mode {
@@ -337,6 +357,18 @@ pub(super) fn exact_declared_kind(
     Ok(Some(kind))
 }
 
+/// Stable diagnostic spelling for an already-selected capture kind.
+///
+/// Kept in the selector module so read-only query/rendering code never needs
+/// to name the variants and accidentally defeat the mechanical K1 sentinel.
+pub(crate) const fn capture_kind_spelling(kind: CaptureKind) -> &'static str {
+    match kind {
+        CaptureKind::Immutable => "immutable",
+        CaptureKind::OwnedMutable => "owned-mutable",
+        CaptureKind::Shared => "shared",
+    }
+}
+
 /// One capture's planned outcome: the facts the selector saw, the plan it
 /// produced, and — when a clause drove it — the declared mode.
 #[derive(Debug, Clone)]
@@ -344,6 +376,8 @@ pub(crate) struct PlannedCapture {
     pub(crate) facts: CaptureBindingFacts,
     pub(crate) plan: CapturePlan,
     pub(crate) declared: Option<CaptureMode>,
+    pub(crate) declaration_span: Option<Span>,
+    pub(crate) use_spans: Vec<Span>,
 }
 
 /// The Wave-46 implicit-capture rejection — ONE producer, so the message the

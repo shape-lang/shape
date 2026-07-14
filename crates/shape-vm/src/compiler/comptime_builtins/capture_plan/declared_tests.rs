@@ -239,6 +239,162 @@ job.read(2)
         );
     }
 
+    /// #53 / slice 4: a Shared capture that is recaptured by a nested
+    /// generated closure stays the SAME SharedCell. The outer closure's
+    /// synthetic parameter is mechanically a by-value local, so checking only
+    /// its ordinary binding semantics would reclassify it as OwnedMutable.
+    /// The inner descriptor must instead carry the structural inherited-cell
+    /// evidence from the outer pack, emit Shared again, and construct the
+    /// nested closure without allocating a second cell.
+    #[test]
+    fn nested_declared_share_preserves_the_outer_cell_descriptor() {
+        let c = compile(
+            r#"
+annotation add_reader() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("extend Job { method read() -> int { var total = 40
+      let outer = |; share total| { let inner = |; share total| {
+        total = total + 2
+        total }
+        inner()
+        total }
+      outer() } }")
+  }
+}
+
+@add_reader()
+type Job { id: int }
+
+let job = Job { id: 1 }
+job.read()
+"#,
+        );
+        let mut packs = c
+            .closure_capture_packs
+            .iter()
+            .filter(|pack| pack.descriptors.len() == 1 && pack.descriptors[0].name == "total");
+        let outer = packs.next().expect("outer total-capturing closure");
+        let inner = packs.next().expect("inner total-capturing closure");
+        assert!(packs.next().is_none(), "exactly two total capture packs");
+
+        assert!(!outer.descriptors[0].inherited_shared_cell);
+        assert!(
+            inner.descriptors[0].inherited_shared_cell,
+            "the inner plan must retain structural SharedCell evidence from the outer pack"
+        );
+        assert!(
+            outer.descriptors[0].binding_span.is_some(),
+            "the declaring binding must have authored span evidence"
+        );
+        assert_eq!(
+            inner.descriptors[0].binding_span, outer.descriptors[0].binding_span,
+            "the synthetic capture parameter must preserve the outer binding span by ordinal"
+        );
+        for pack in [outer, inner] {
+            assert_eq!(pack.descriptors[0].declared, Some(CaptureMode::Share));
+            assert_eq!(pack.descriptors[0].access, CaptureAccess::SharedCell);
+            assert_eq!(
+                emitted(&c, pack).capture_storage_kind(0),
+                CaptureKind::Shared
+            );
+        }
+
+        let outer_body = closure_body_opcodes(&c, outer.closure);
+        assert!(
+            !outer_body.contains(&crate::bytecode::OpCode::AllocSharedLocal),
+            "recapturing an inherited Shared parameter must not allocate a second cell: \
+             {outer_body:?}"
+        );
+        let inner_body = closure_body_opcodes(&c, inner.closure);
+        assert!(
+            inner_body
+                .iter()
+                .any(|opcode| format!("{opcode:?}").contains("SharedCapture")),
+            "the nested body must access the inherited cell through Shared capture opcodes: \
+             {inner_body:?}"
+        );
+    }
+
+    /// A monomorphization peek is non-authoritative. If a declared plan is
+    /// invalid it must decline specialization without minting the inferred
+    /// stand-in that the old fallback produced. Ordinary emission will later
+    /// raise the real diagnostic at the source location.
+    #[test]
+    fn invalid_declared_peek_declines_without_minting_artifacts() {
+        fn closure_parts(
+            source: &str,
+        ) -> (
+            Vec<shape_ast::ast::FunctionParameter>,
+            Vec<shape_ast::ast::Statement>,
+            shape_ast::ast::CaptureClause,
+        ) {
+            let program = shape_ast::parse_program(source).expect("peek fixture parses");
+            let shape_ast::ast::Item::VariableDecl(decl, _) =
+                program.items.into_iter().next().expect("one declaration")
+            else {
+                panic!("fixture must be a variable declaration");
+            };
+            let Some(shape_ast::ast::Expr::FunctionExpr {
+                params,
+                body,
+                captures: Some(captures),
+                ..
+            }) = decl.value
+            else {
+                panic!("fixture initializer must be a closure with a capture clause");
+            };
+            (params, body, captures)
+        }
+
+        let mut compiler = compile("var total = 40\ntotal");
+        let baseline = (
+            compiler.closure_registry().len(),
+            compiler.closure_capture_packs.len(),
+            compiler.closure_type_ids().len(),
+            compiler.program.closure_function_layouts.len(),
+        );
+
+        let (invalid_params, invalid_body, invalid_clause) =
+            closure_parts("let worker = |; move total| total");
+        assert!(
+            compiler
+                .mint_closure_type_id_peek(
+                    &invalid_params,
+                    &invalid_body,
+                    Some(&invalid_clause),
+                )
+                .is_none(),
+            "invalid module-binding move must decline specialization"
+        );
+        assert_eq!(
+            (
+                compiler.closure_registry().len(),
+                compiler.closure_capture_packs.len(),
+                compiler.closure_type_ids().len(),
+                compiler.program.closure_function_layouts.len(),
+            ),
+            baseline,
+            "an invalid peek must not mint any closure artifact"
+        );
+
+        let (valid_params, valid_body, valid_clause) =
+            closure_parts("let worker = |; share total| total");
+        assert!(
+            compiler
+                .mint_closure_type_id_peek(&valid_params, &valid_body, Some(&valid_clause))
+                .is_some(),
+            "a valid declared plan must still supply a specialization key"
+        );
+        assert_eq!(compiler.closure_registry().len(), baseline.0 + 1);
+        assert_eq!(compiler.closure_capture_packs.len(), baseline.1);
+        assert_eq!(compiler.closure_type_ids().len(), baseline.2);
+        assert_eq!(
+            compiler.program.closure_function_layouts.len(),
+            baseline.3
+        );
+    }
+
     /// `move` over a `let` — `Immutable`, and when the value is a heap type the
     /// `heap_capture_mask` bit follows the TYPE, not the mode.
     #[test]
