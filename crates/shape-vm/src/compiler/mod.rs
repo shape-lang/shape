@@ -707,19 +707,23 @@ pub struct BytecodeCompiler {
     /// lowered. Phase C reads this to key monomorphization on the closure type.
     pub(crate) closure_type_ids: Vec<(u16, shape_value::v2::concrete_type::ClosureTypeId)>,
 
-    /// Track A.1C — per-closure `CaptureKind` vector, one entry per capture
-    /// in declaration order. Populated alongside `closure_type_ids` so that
-    /// `compiler_impl_reference_model::build_closure_function_layouts` can
-    /// construct the per-function `ClosureLayout` with the correct
-    /// `CaptureKind` per capture (rather than defaulting to the
-    /// `ClosureRegistry::intern`'d all-`Immutable` shape). A missing entry
-    /// (closure registered via the legacy path, e.g. test helpers) falls
-    /// back to all-`Immutable`, matching the pre-A.1C layout.
-    pub(crate) closure_capture_kinds: Vec<(u16, Vec<shape_value::v2::closure_layout::CaptureKind>)>,
+    /// ADR-009 C1 — per-closure [`CapturePack`], one entry per closure literal,
+    /// keyed by the closure's `func_idx` (`CapturePack::closure`). Produced by
+    /// the ONE selector (`comptime_builtins::capture_plan`) and consumed by
+    /// `compiler_impl_reference_model` to build the per-function
+    /// `ClosureLayout`. Replaces the former `closure_capture_kinds` vector:
+    /// the pack carries the emitted capture kind AND the body's access
+    /// discipline together, so the two can no longer disagree. A closure with
+    /// no pack (registered via a legacy/test path) falls back to the
+    /// registry's all-immutable layout, matching the pre-fusion behaviour.
+    ///
+    /// [`CapturePack`]: crate::compiler::comptime_builtins::capture_plan::CapturePack
+    pub(crate) closure_capture_packs:
+        Vec<crate::compiler::comptime_builtins::capture_plan::CapturePack>,
 
     /// Distributed §4.4 — per-closure captured *variable names*, in declaration
     /// order, keyed by closure function index. Populated alongside
-    /// `closure_capture_kinds` (same `captured_vars` source). Stamped into the
+    /// `closure_capture_packs` (same `captured_vars` source). Stamped into the
     /// non-hash `FunctionBlob.capture_names` so the remote-capture-refusal path
     /// can name the offending variable. A missing entry yields empty names (the
     /// refusal message falls back to `capture #i`).
@@ -1571,7 +1575,7 @@ pub struct BytecodeCompiler {
     pub(crate) mutable_closure_captures: HashMap<String, u16>,
 
     /// Track A.1C.2: subset of `mutable_closure_captures` whose source
-    /// binding classifies as `CaptureKind::Shared` (a `var` binding
+    /// binding classifies as `CaptureAccess::SharedCell` (a `var` binding
     /// mutably captured through a closure). Maps captured variable name
     /// → capture index. When the identifier lookup finds a name in this
     /// map, the closure body emits `LoadSharedCapture` /
@@ -1580,7 +1584,7 @@ pub struct BytecodeCompiler {
     pub(crate) shared_closure_captures: HashMap<String, u16>,
 
     /// Track A.1C.2b: subset of `mutable_closure_captures` whose source
-    /// binding classifies as `CaptureKind::OwnedMutable` (a `let mut`
+    /// binding classifies as `CaptureAccess::OwnedMutableCell` (a `let mut`
     /// binding captured by move into a single closure). Maps captured
     /// variable name → capture index. When the identifier lookup finds
     /// a name in this map, the closure body emits
@@ -1634,11 +1638,11 @@ pub struct BytecodeCompiler {
     ///
     /// Keyed by the binding *name* (mirroring `boxed_locals`). Populated
     /// by `compile_expr_closure` when a `var` capture escapes into a
-    /// closure and gets classified as `CaptureKind::Shared`.
+    /// closure and gets classified as `CaptureAccess::SharedCell`.
     pub(crate) shared_locals: HashSet<String>,
 
     /// Track A.1C.3: local names that have been classified as
-    /// `CaptureKind::OwnedMutable` by at least one closure in the
+    /// `CaptureAccess::OwnedMutableCell` by at least one closure in the
     /// current function scope. Needed because `binding_semantics_for_name`
     /// can return `None` after an inner closure's `compile_function`
     /// wipes the type-tracker local semantics, and we need the
@@ -1650,7 +1654,7 @@ pub struct BytecodeCompiler {
 
     /// Session 1 (Rust-move semantics for `let mut`): names of `let mut`
     /// local bindings that have been **moved by value into a closure
-    /// capture** (i.e. classified as `CaptureKind::OwnedMutable` and
+    /// capture** (i.e. classified as `CaptureAccess::OwnedMutableCell` and
     /// emitted at `op_make_closure` time as `Box::into_raw(Box::new(bits))`).
     /// After the move, the outer slot holds only a stale snapshot of the
     /// initial value — every subsequent outer-scope read or write of the

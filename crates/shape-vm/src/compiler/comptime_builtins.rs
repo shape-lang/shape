@@ -25,6 +25,11 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+// ADR-009 (ticket C1, slice 1): THE one closure-capture selector. The two
+// coupled vectors that used to drive capture emission (`mutable_flags` +
+// `capture_kinds`) are fused here into a single `CapturePlan` producer, so the
+// declared capture mode (slice 3) has exactly one place to enter.
+pub(crate) mod capture_plan;
 pub(crate) mod existential;
 pub(crate) mod expansion_provenance;
 pub(crate) mod semantic_freeze;

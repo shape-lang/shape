@@ -120,8 +120,8 @@ impl BytecodeCompiler {
             return self.compile_expr(&init_expr);
         }
         // Mutable closure captures: dispatch by CaptureKind.
-        //   * `CaptureKind::Shared`        → A.1B `LoadSharedCapture`.
-        //   * `CaptureKind::OwnedMutable`  → A.1B `LoadOwnedMutableCapture`.
+        //   * `CaptureAccess::SharedCell`        → A.1B `LoadSharedCapture`.
+        //   * `CaptureAccess::OwnedMutableCell`  → A.1B `LoadOwnedMutableCapture`.
         //   * legacy SharedCell fallback   → `LoadClosure` (module-
         //     binding `var` captures that A.1C.1's outer-scope opcodes
         //     don't yet cover; retired in A.1C.3).
@@ -196,7 +196,7 @@ impl BytecodeCompiler {
         if let Some(local_idx) = self.resolve_local(name) {
             // Session 1 — Rust-move for `let mut` captures. A `let mut`
             // local that has been captured by a closure (and therefore
-            // routed through `CaptureKind::OwnedMutable` / moved by
+            // routed through `CaptureAccess::OwnedMutableCell` / moved by
             // value into the closure's `Box<ValueWord>`) cannot be read
             // from the outer scope afterwards: the outer slot holds a
             // stale snapshot. Reject at compile time.

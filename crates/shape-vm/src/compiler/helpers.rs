@@ -4875,8 +4875,8 @@ impl BytecodeCompiler {
     /// Emit store instruction for an identifier
     pub(super) fn emit_store_identifier(&mut self, name: &str) -> Result<()> {
         // Mutable closure captures: dispatch by CaptureKind.
-        //   * `CaptureKind::Shared`       → A.1B StoreSharedCapture.
-        //   * `CaptureKind::OwnedMutable` → A.1B StoreOwnedMutableCapture.
+        //   * `CaptureAccess::SharedCell`       → A.1B StoreSharedCapture.
+        //   * `CaptureAccess::OwnedMutableCell` → A.1B StoreOwnedMutableCapture.
         //   * legacy SharedCell fallback  → StoreClosure.
         if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name) {
             if let Some(&shared_idx) = self.shared_closure_captures.get(name) {

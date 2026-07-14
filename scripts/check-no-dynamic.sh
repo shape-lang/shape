@@ -47,6 +47,31 @@ while IFS=$'\t' read -r limit pattern note; do
   fi
 done < "$baseline"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ADR-009 ticket C1 — K1: ONE CAPTURE SELECTOR.
+#
+# `CaptureKind::{Immutable,OwnedMutable,Shared}` may be named in EXACTLY ONE
+# bytecode-compiler file: comptime_builtins/capture_plan.rs. Every other site
+# reads the plan (`CapturePlan::kind()` / `CapturePlan::access()`) or the pack.
+#
+# Why this is a build failure and not a review norm: closure-capture emission
+# used to be driven by two coupled vectors (`mutable_flags` + `capture_kinds`).
+# A second producer is exactly how a DECLARED capture mode gets validated and
+# then discarded while inference stays authoritative — the defect that got C1
+# rejected once already, and the same shape as the ValueWord walk-back this
+# script exists to prevent. One selector, or the build stops.
+capture_kind_offenders=$(
+  rg --no-heading -l -P 'CaptureKind::(Immutable|OwnedMutable|Shared)\b' \
+    crates/shape-vm/src/compiler 2>/dev/null | grep -v 'capture_plan\.rs' || true
+)
+if [[ -n "$capture_kind_offenders" ]]; then
+  echo "FAIL  ADR-009 C1 K1: a SECOND CaptureKind producer exists."
+  echo "      Only crates/shape-vm/src/compiler/comptime_builtins/capture_plan.rs may"
+  echo "      name a CaptureKind variant. Offending files:"
+  while IFS= read -r f; do echo "        $f"; done <<< "$capture_kind_offenders"
+  fail=1
+fi
+
 if (( fail )); then
   echo
   echo "Forbidden symbols regressed. See CLAUDE.md 'Forbidden Patterns' and the strict-typing plan."

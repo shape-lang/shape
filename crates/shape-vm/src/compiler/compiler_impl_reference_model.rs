@@ -2980,23 +2980,23 @@ impl BytecodeCompiler {
         // through the `ContentAddressedProgram` → `LinkedProgram` →
         // `BytecodeProgram` path into the VM's producer.
         //
-        // Track A.1C.2: the compiler derives per-capture `CaptureKind`s
-        // from the source binding form (see `compile_expr_closure`) and
-        // stores them in `closure_capture_kinds`. For each closure literal
-        // we rebuild the layout so the `capture_kinds` vector reflects
-        // those kinds AND the `owned_mutable_capture_mask` /
-        // `shared_capture_mask` bits are flipped for the corresponding
-        // capture indices. `op_make_closure` reads those masks to pick
-        // the per-capture allocation discipline:
-        //   * `CaptureKind::Immutable`   — write the capture bits as-is
+        // ADR-009 C1: the ONE capture selector
+        // (`comptime_builtins::capture_plan`) produced a `CapturePack` per
+        // closure literal; this is its sole consumer. For each closure we
+        // rebuild the layout so the `capture_kinds` vector reflects the pack
+        // AND the `owned_mutable_capture_mask` / `shared_capture_mask` bits
+        // are flipped for the corresponding capture indices.
+        // `op_make_closure` reads those masks to pick the per-capture
+        // allocation discipline:
+        //   * a snapshot (`Immutable`) capture — write the capture bits as-is
         //     at the typed offset.
-        //   * `CaptureKind::OwnedMutable` — `Box::into_raw` a fresh
+        //   * an owned-mutable capture — `Box::into_raw` a fresh
         //     `Box<ValueWord>` around the stack value, write the pointer.
-        //   * `CaptureKind::Shared`       — the stack value carries the
-        //     raw `*const SharedCell` pointer bits of a previously-
-        //     promoted outer slot. `op_make_closure` does
-        //     `Arc::increment_strong_count` to give the closure its own
-        //     refcount share, then writes the same pointer.
+        //   * a shared capture — the stack value carries the raw
+        //     `*const SharedCell` pointer bits of a previously-promoted outer
+        //     slot. `op_make_closure` does `Arc::increment_strong_count` to
+        //     give the closure its own refcount share, then writes the same
+        //     pointer.
         //
         // This was gated to "masks stay zero" during A.1C partial so the
         // legacy `HeapValue::Closure + SharedCell` fallback could keep
@@ -3009,43 +3009,42 @@ impl BytecodeCompiler {
         // any SharedCell-wrapped ValueWord sitting on the stack at
         // closure-creation time.
         {
-            use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+            use crate::compiler::comptime_builtins::capture_plan::CapturePack;
+            use shape_value::v2::closure_layout::ClosureLayout;
             let total_fns = self.program.functions.len();
             let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; total_fns];
-            // Map function index → per-capture CaptureKind vector.
-            let kinds_by_fn: std::collections::HashMap<u16, &Vec<CaptureKind>> = self
-                .closure_capture_kinds
+            // Function index → the closure's capture pack (R3: keyed by
+            // `func_idx`, never a `Span`).
+            let packs_by_fn: std::collections::HashMap<u16, &CapturePack> = self
+                .closure_capture_packs
                 .iter()
-                .map(|(fid, kinds)| (*fid, kinds))
+                .map(|pack| (pack.closure, pack))
                 .collect();
             for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
                 if let Some(registry_layout) = self.closure_registry.get(type_id) {
                     if (fn_idx as usize) < total_fns {
-                        // Track A.1C.3: authoritative per-function kinds.
-                        // Both `Shared` AND `OwnedMutable` captures flip
-                        // their corresponding mask bits; `op_make_closure`
-                        // allocates `Box::into_raw(Box::new(initial))` for
-                        // OwnedMutable slots and `Arc::into_raw(Arc::new(
-                        // parking_lot::Mutex<ValueWord>))` / `Arc::increment_
-                        // strong_count` for Shared slots. Module-binding
-                        // `var` captures (migrated in A.1C.3) are also
-                        // Shared and follow the same closure-side
-                        // allocation discipline; the outer-scope promotion
-                        // emits `AllocSharedModuleBinding` (vs.
-                        // `AllocSharedLocal` for locals).
-                        let per_fn_kinds = kinds_by_fn.get(&fn_idx);
-                        let layout_arc = if let Some(kinds) = per_fn_kinds
-                            && kinds.len() == registry_layout.capture_types.len()
+                        // Authoritative per-function kinds. Both shared AND
+                        // owned-mutable captures flip their corresponding mask
+                        // bits; `op_make_closure` allocates
+                        // `Box::into_raw(Box::new(initial))` for owned-mutable
+                        // slots and `Arc::into_raw(Arc::new(
+                        // parking_lot::Mutex<ValueWord>))` /
+                        // `Arc::increment_strong_count` for shared slots.
+                        // Module-binding `var` captures are shared too and
+                        // follow the same closure-side allocation discipline;
+                        // only the outer-scope promotion opcode differs
+                        // (`AllocSharedModuleBinding` vs `AllocSharedLocal`).
+                        let layout_arc = if let Some(pack) = packs_by_fn.get(&fn_idx)
+                            && pack.len() == registry_layout.capture_types.len()
                         {
-                            let rebuilt = ClosureLayout::from_capture_types(
+                            let kinds = pack.kinds();
+                            let mut rebuilt = ClosureLayout::from_capture_types(
                                 &registry_layout.capture_types,
-                                kinds,
+                                &kinds,
                             );
-                            // Preserve the authoritative per-capture
-                            // `capture_kinds` for diagnostics and
-                            // A.1D/E JIT lowering.
-                            let mut rebuilt = rebuilt;
-                            rebuilt.capture_kinds = (*kinds).clone();
+                            // Preserve the authoritative per-capture kinds for
+                            // diagnostics and A.1D/E JIT lowering.
+                            rebuilt.capture_kinds = kinds;
                             std::sync::Arc::new(rebuilt)
                         } else {
                             std::sync::Arc::new(registry_layout.clone())
